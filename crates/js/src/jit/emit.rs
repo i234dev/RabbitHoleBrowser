@@ -42,6 +42,21 @@ const IC_MID_SHAPE: i32 = std::mem::offset_of!(crate::bytecode::PropIc, mid_shap
 const CANON_NAN: u64 = 0x7FF8_0000_0000_0000;
 const ONE: u64 = 0x3FF0_0000_0000_0000;
 const SIGN: u64 = 0x8000_0000_0000_0000;
+
+/// Exactly one pure arithmetic bytecode; no generic operators or helpers.
+#[derive(Clone, Copy)]
+struct NumericStep { sse: u8, d: u16, a: u16, b: Result<u16, u32> }
+
+fn numeric_step(op: Op) -> Option<NumericStep> {
+    let (sse,d,a,b) = match op {
+        Op::AddRR(d,a,b) => (SSE_ADD,d,a,Ok(b)), Op::AddRK(d,a,k) => (SSE_ADD,d,a,Err(k as u32)),
+        Op::SubRR(d,a,b) => (SSE_SUB,d,a,Ok(b)), Op::SubRK(d,a,k) => (SSE_SUB,d,a,Err(k as u32)),
+        Op::MulRR(d,a,b) => (SSE_MUL,d,a,Ok(b)), Op::MulRK(d,a,k) => (SSE_MUL,d,a,Err(k as u32)),
+        Op::DivRR(d,a,b) => (SSE_DIV,d,a,Ok(b)), Op::DivRK(d,a,k) => (SSE_DIV,d,a,Err(k as u32)),
+        _ => return None,
+    };
+    Some(NumericStep { sse,d,a,b })
+}
 /// Offsets from `TAG_MIN` of the special values.
 const NULL: i32 = 1;
 const EMPTY: i32 = 2;
@@ -270,6 +285,66 @@ struct Gen<'a> {
 impl Gen<'_> {
     fn lbl(&self, pc: usize) -> Label {
         self.labels[pc]
+    }
+
+    /// A standalone guarded pair before the ordinary first template. All
+    /// failures reach that template without changing a slot. Both public
+    /// bytecode entries remain independently usable by dispatch and OSR.
+    fn numeric_pair(&mut self, pc: usize) {
+        if pc + 2 >= self.code.ops.len() { return; }
+        let (Some(first),Some(second)) = (numeric_step(self.code.ops[pc]),numeric_step(self.code.ops[pc+1])) else { return };
+        if second.a != first.d && second.b != Ok(first.d) { return; }
+        for step in [first,second] {
+            if let Err(k) = step.b {
+                if !self.code.constants[k as usize].is_number() { return; }
+            }
+        }
+        let mut inputs = vec![first.a];
+        if let Ok(b) = first.b { inputs.push(b); }
+        if second.a != first.d { inputs.push(second.a); }
+        if let Ok(b) = second.b { if b != first.d { inputs.push(b); } }
+        inputs.sort_unstable();
+        inputs.dedup();
+        let ordinary = self.a.label();
+        for &input in &inputs { self.load_num(RAX,input,ordinary); }
+        // A counted old destination requires the original store/release path.
+        // Objects and other uncounted values can be overwritten: no callback
+        // or collection occurs before both final slot values are materialized.
+        for (i,d) in [first.d,second.d].into_iter().enumerate() {
+            if inputs.contains(&d) || (i==1 && d==first.d) { continue; }
+            self.a.load64(RAX,slot(d));
+            self.a.cmp_rr64(RAX,RCMIN);
+            self.a.jcc(CC_AE,ordinary);
+        }
+        #[cfg(test)]
+        {
+            // The test witness is a direct TLS increment, after every guard
+            // and before loading operands. RDX is scratch; no ABI call occurs.
+            let counter = super::NUMERIC_PAIR_HITS.with(|hits| hits.as_ptr());
+            self.a.mov_imm64(RDX,counter as usize as u64);
+            self.a.alu_mi64(Alu::Add,Mem::base(RDX,0),1);
+        }
+        self.a.movsd_load(XMM0,slot(first.a));
+        self.a.movsd_load(XMM1,match first.b { Ok(b)=>slot(b),Err(k)=>konst(k) });
+        self.a.sse_rr(first.sse,XMM0,XMM1);
+        self.a.movq_r_x(RAX,XMM0);
+        self.canon();
+        if first.d != second.d { self.a.store64(slot(first.d),RAX); }
+        // A consumer reading d1 must see the canonical NEW result, not the
+        // pre-pair slot. RAX survives the other operand's memory load.
+        if second.a == first.d { self.a.movq_x_r(XMM0,RAX); }
+        else { self.a.movsd_load(XMM0,slot(second.a)); }
+        match second.b {
+            Ok(b) if b==first.d => self.a.movq_x_r(XMM1,RAX),
+            Ok(b) => self.a.movsd_load(XMM1,slot(b)),
+            Err(k) => self.a.movsd_load(XMM1,konst(k)),
+        }
+        self.a.sse_rr(second.sse,XMM0,XMM1);
+        self.a.movq_r_x(RAX,XMM0);
+        self.canon();
+        self.a.store64(slot(second.d),RAX);
+        self.a.jmp(self.lbl(pc+2));
+        self.a.bind(ordinary);
     }
 
     /// Call `helper(ctx, arg)` inline; on a non-zero status leave through
@@ -506,16 +581,7 @@ impl Gen<'_> {
             Some(op) => self.a.sse_rr(op, XMM0, XMM1),
             None => self.a.call_abs(h_mod as *const () as usize, "h_mod"),
         }
-        if sse.is_some() && (d == a || b == Ok(d)) {
-            // The aliased slot passed load_num, and this SSE path has no
-            // intervening helper or slot write. Its old value needs no Rc
-            // release. Keep the result canonical and materialized as usual.
-            self.a.movq_r_x(RAX, XMM0);
-            self.canon();
-            self.a.store64(slot(d), RAX);
-        } else {
-            self.store_xmm0(d, slow);
-        }
+        self.store_xmm0(d, slow);
     }
 
     fn bitop(&mut self, pc: usize, kd: u8, d: u16, a: u16, b: Result<u16, u32>) {
@@ -1440,6 +1506,7 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
         if g.a.listing_enabled() {
             g.a.comment(|| format!("{pc}: {op:?}"));
         }
+        g.numeric_pair(pc);
         g.emit(pc, *op);
     }
     // Defensive: execution never reaches here (validated).

@@ -29,6 +29,11 @@ use crate::bytecode::FunctionCode;
 use crate::realm::Realm;
 use std::cell::{Cell, OnceCell};
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static NUMERIC_PAIR_HITS: Cell<u64> = const { Cell::new(0) };
+}
+
 #[cfg(target_arch = "x86_64")]
 mod emit;
 #[cfg(all(test, target_arch = "x86_64"))]
