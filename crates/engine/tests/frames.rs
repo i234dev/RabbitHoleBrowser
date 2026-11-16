@@ -123,6 +123,58 @@ fn srcdoc_frame_is_laid_out_and_painted_into_the_parent() {
 }
 
 #[test]
+fn same_size_frame_updates_preserve_damage_from_the_earliest_cached_parent() {
+    let mut e = engine();
+    let inner = r#"<!doctype html><html style="background:white"><body style="margin:0"><script>
+        function paint(color) { document.documentElement.style.backgroundColor = color; return color; }
+    </script></body></html>"#;
+    let mut page = load(
+        &mut e,
+        &format!(r#"<!doctype html><body style="margin:0"><script>
+            function paintFrame(id, color) {{ return document.getElementById(id).contentWindow.paint(color); }}
+        </script><iframe id="a" style="display:block;border:0;width:120px;height:80px" srcdoc="{0}"></iframe><iframe id="b" style="display:block;border:0;width:120px;height:80px" srcdoc="{0}"></iframe></body>"#, escape_attr(inner)),
+    );
+    assert_eq!(page.frames.children.len(), 2);
+    assert!(!page.layout.has_sticky_or_fixed(), "exercise the worker's cached-paint path");
+    let rects: Vec<_> = ["a", "b"].iter().map(|id| page.rect_of(page.doc.element_by_id(id).unwrap()).unwrap()).collect();
+    for r in &rects {
+        assert_eq!((r.w, r.h), (120.0, 80.0));
+    }
+    let centers: Vec<_> = rects.iter().map(|r| ((r.x + r.w / 2.0) as u32, (r.y + r.h / 2.0) as u32)).collect();
+    let pixel = |canvas: &rabbithole_engine::gfx::Canvas, (x, y): (u32, u32)| canvas.data[(y * canvas.width + x) as usize];
+    let mut cached = rabbithole_engine::gfx::Canvas::new(800, 600);
+    e.render_damage(&mut page, &mut cached);
+    for &point in &centers {
+        assert_eq!(pixel(&cached, point), 0xffffff, "cache must begin with white frame pixels");
+    }
+
+    // Both calls run real child scripts and repaint their same-size rasters.
+    // No parent canvas is painted between them. Saving the second intermediate
+    // display list would lose the first frame's outstanding damage.
+    for (id, color) in [("a", "red"), ("b", "lime")] {
+        let (result, outcome) = e.eval_with_outcome(&mut page, &format!("paintFrame('{id}', '{color}')"));
+        assert_eq!(result.trim_matches(|c| c == '\'' || c == '"'), color);
+        assert!(outcome.relayout, "the child repaint must reach its parent");
+    }
+    // Like the GUI worker, flush after the in-place image updates, then ask
+    // what changed relative to the canvas. Do not invalidate the parent here.
+    let pending = e.paint_damage_since(&mut page, (0.0, 0.0)).expect("translation-only frame updates have bounded damage");
+    let mut fresh = rabbithole_engine::gfx::Canvas::new(800, 600);
+    e.render(&page, &mut fresh, 0.0, 0.0);
+    for (&point, expected) in centers.iter().zip([0xff0000, 0x00ff00]) {
+        assert_eq!(pixel(&fresh, point), expected, "the full paint must show the actual child mutation");
+    }
+    let damage = e.render_damage(&mut page, &mut cached);
+    for (&point, expected) in centers.iter().zip([0xff0000, 0x00ff00]) {
+        assert_eq!(pixel(&cached, point), expected, "cached frame pixels stayed stale: pending={pending:?}, damage={damage:?}");
+        assert!(pending.iter().any(|r| r.contains(point.0 as f32, point.1 as f32)), "missing damage at {point:?}: {pending:?}");
+    }
+    assert_eq!(cached.data, fresh.data, "the cached repaint must equal a fresh full paint");
+    let area: f32 = damage.iter().map(|r| r.w * r.h).sum();
+    assert!(area > 0.0 && area < (cached.width * cached.height) as f32 / 2.0, "frame updates must not force a full repaint: {damage:?}");
+}
+
+#[test]
 fn frames_see_their_parent_and_exchange_messages() {
     let mut e = engine();
     let inner = r#"<script>
