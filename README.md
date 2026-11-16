@@ -20,7 +20,7 @@ _Both images were produced by RabbitHole's renderer: every pixel comes from its 
 ## Status (v0.1.20)
 
 RabbitHole is young but already runs real, heavy sites: Google search,
-YouTube (playback with sound and AV1/VP9 video), Wikipedia, GitHub,
+YouTube (playback with sound and AV1/VP9 video), Wikipedia,
 Reddit (infinite scroll), BBC, Hacker News, the Svelte playground (WebAssembly
 bundler in a Worker) and Speedometer 3.1 end to end. Everything below is our own
 code unless noted in [Dependencies](#dependencies).
@@ -29,6 +29,12 @@ Windows x64 now supports explicitly enabling the JavaScript JIT with
 `rabbithole.exe --jit=on`. Native mappings register unwind metadata and remain
 alive through nested callbacks. The JIT stays off by default while its global
 performance gate remains open; see the [JIT design and status](docs/jit-design.md).
+
+Version 0.1.20 adds mouse interaction with the page scrollbar and **Copy all**
+in DevTools Elements, exporting the current main document as HTML. It also
+preserves incremental paint damage when iframe images change at the same size.
+Open desktop reports include a blank view after Gmail sign-in and GitHub pages
+becoming unresponsive; these flows still need verification.
 
 Version 0.1.19 fixes React-compatible assignments to replaceable Window
 attributes, keeps fragment navigation within the same document in the MCP,
