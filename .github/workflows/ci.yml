@@ -12,7 +12,9 @@ permissions:
 jobs:
   test:
     name: Build & test (${{ matrix.os }})
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
+    # Pin the supported ARM image after hosted macos-latest acquisition failures.
+    # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os == 'macos-latest' && 'macos-15' || matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
