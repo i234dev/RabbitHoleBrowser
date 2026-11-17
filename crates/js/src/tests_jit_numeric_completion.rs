@@ -127,7 +127,11 @@ fn numeric_completion_counted_values_gc_and_abrupt_finally_keep_helper_semantics
         ] {
             let mut r = realm(mode);
             let source = format!("let n=0;for(let i=0;i<32;i++)n+=i;{suffix}");
-            assert_eq!(evaluate(&mut r, &source, mode), expected);
+            let actual = evaluate(&mut r, &source, mode);
+            match (actual.v(), expected.v()) {
+                (V::String(actual), V::String(expected)) => assert_eq!(actual.to_rust_string(), expected.to_rust_string()),
+                _ => assert_eq!(actual, expected),
+            }
         }
     }
 }
@@ -222,8 +226,12 @@ fn numeric_completion_refreshes_after_box_removal_reentry_replacement_and_panic(
         if mode == Some(3) { r.tick = 2; }
         let error = r.eval("let p=0;for(let i=0;i<17;i++)p+=i;replaceAndPanic();", "completion-panic.js")
             .expect_err("the host panic becomes a JS error");
-        assert_eq!(r.get_str(error.clone(), "name").unwrap(), Value::str("Error"));
-        assert_eq!(r.get_str(error, "message").unwrap(), Value::str("internal error: numeric completion panic canary"));
+        let name = r.get_str(error.clone(), "name").unwrap();
+        let message = r.get_str(error, "message").unwrap();
+        let V::String(name) = name.v() else { panic!("error name must be a string") };
+        let V::String(message) = message.v() else { panic!("error message must be a string") };
+        assert_eq!(name.to_rust_string(), "Error");
+        assert_eq!(message.to_rust_string(), "internal error: numeric completion panic canary");
         assert!(r.frames.is_empty() && r.vstack.is_empty() && r.new_target_stack.is_empty());
         assert_eq!(r.jit.live_entries, 0, "the converted host panic leaves no generated activation");
         RETIRED.with(|retired| assert_eq!(retired.borrow()[0].completion, Value::Number(136.0)));
