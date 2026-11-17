@@ -17,7 +17,7 @@ It can be used three ways:
 
 _Both images were produced by RabbitHole's renderer: every pixel comes from its own rasterizer._
 
-## Status (v0.1.21)
+## Status (v0.1.22)
 
 RabbitHole is young but already runs real, heavy sites: Google search,
 YouTube (playback with sound and AV1/VP9 video), Wikipedia,
@@ -32,6 +32,14 @@ x86-64 (`--jit=off` or `RABBITHOLE_JIT=off` selects the interpreter): in a
 paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
 median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
 See the [JIT design and status](docs/jit-design.md).
+
+Version 0.1.22 lowers the agent interface's token cost found by the
+RH-AGENT-002 battery: `find` shows the card or table row around a short match
+and its link, `snapshot` cuts page chrome before main-content lists, prints a
+repeated URL once and table rows as single lines, and expand refs return only
+the omitted items. Tool definitions and instructions are 13 % shorter.
+Scripted scrolling (`scrollTo`, `scrollBy`, `scrollTop`) now fires `scroll`
+events, so pages that load more content on scroll work when scrolled by script.
 
 Version 0.1.20 adds mouse interaction with the page scrollbar and **Copy all**
 in DevTools Elements, exporting the current main document as HTML. It also
