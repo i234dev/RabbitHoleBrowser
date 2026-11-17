@@ -313,8 +313,8 @@ impl Gen<'_> {
     /// Decrement the safe-point tick; at zero, `h_tick(ctx, fpc)` and
     /// continue at `resume`.
     fn tick(&mut self, fpc: usize, resume: Label) {
-        self.a.load64(RAX, Mem::base(CTX, CTX_TICK));
-        self.a.alu_mi32(Alu::Sub, Mem::base(RAX, 0), 1);
+        self.a.load64(RAX, Mem::base(CTX, CTX_REALM));
+        self.a.alu_mi32(Alu::Sub, Mem::base(RAX, REALM_TICK), 1);
         let s = self.slow(h_tick as *const () as usize, "h_tick", fpc, resume);
         self.a.jcc(CC_E, s);
     }

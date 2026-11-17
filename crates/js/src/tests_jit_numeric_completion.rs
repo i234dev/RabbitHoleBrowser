@@ -1,6 +1,6 @@
 //! Exercise the generated completion store, including the helper boundary.
 use crate::bigint::BigInt;
-use crate::bytecode::Op;
+use crate::bytecode::{FunctionCode, Op};
 use crate::realm::Realm;
 use crate::vm::FrameExtra;
 use crate::{JsResult, Value, V};
@@ -273,5 +273,98 @@ fn numeric_completion_refreshes_after_box_removal_reentry_replacement_and_panic(
         RETIRED.with(|retired| assert_eq!(retired.borrow()[0].completion, Value::Number(136.0)));
         RETIRED.with(|retired| retired.borrow_mut().clear());
         assert_eq!(evaluate(&mut r, "let recovered=0;for(let i=0;i<32;i++)recovered+=i;", mode, false), Value::Number(496.0));
+    }
+}
+
+
+// No calls, allocations from JS, coercions, or explicit GC. run_script also
+// has no entry_tick (unlike Realm::call), so only the loop's jumps poll.
+const TICK_PROBE: &str = "for(let i=0,total=0;i<80;i++)total+=i;";
+const TICK_POLLS: u32 = 80;
+
+fn tick_probe_code(realm: &mut Realm) -> Rc<FunctionCode> {
+    let code = realm.compile(TICK_PROBE, "completion-tick.js", false).unwrap();
+    assert!(code.functions.is_empty() && code.handlers.is_empty());
+    assert!(!code.ops.iter().any(|op| matches!(op, Op::CallR(..) | Op::NewR(..))));
+    let latch = code.ops.iter().enumerate().filter_map(|(pc, op)| match *op {
+        Op::IncJumpIfLtRK(register, constant, target) => Some((pc, register, constant, target)),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let entry = code.ops.iter().enumerate().filter_map(|(pc, op)| match *op {
+        Op::JumpIfLtRK(register, constant, target) => Some((pc, register, constant, target)),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(latch.len(), 1);
+    assert_eq!(entry.len(), 1);
+    assert_eq!(entry[0].0, latch[0].0 + 1, "the false latch skips the entry test");
+    assert_eq!((entry[0].1, entry[0].2, entry[0].3), (latch[0].1, latch[0].2, latch[0].3));
+    assert_eq!(code.constants[entry[0].2 as usize].as_number(), Some(TICK_POLLS as f64));
+    assert_eq!(code.ops.iter().enumerate().filter(|(pc, op)|
+        op.jump_target().is_some_and(|target| (target as usize) <= *pc)).count(), 2);
+    // VM jump! and Gen::jump both poll the initially taken backward entry
+    // test once, then 79 taken fused latches. The final false latch skips the
+    // entry test in BOTH paths: 80 polls, not an assumed VM/JIT equality.
+    code
+}
+
+fn run_tick_probe(realm: &mut Realm, code: Rc<FunctionCode>, mode: Option<u32>) {
+    let before = realm.jit_entries();
+    assert_eq!(realm.run_script(code.clone()).unwrap(), Value::Number(3160.0));
+    if mode.is_some() && rabbithole_jit::supported() {
+        assert!(realm.jit_entries() > before);
+        assert_ne!(code.jit.s.entry.get(), 0, "the actual loop ran natively");
+    } else { assert_eq!(realm.jit_entries(), before); }
+    assert!(realm.frames.is_empty() && realm.vstack.is_empty());
+    assert_eq!(realm.jit.live_entries, 0);
+}
+
+#[test]
+fn numeric_completion_tick_updates_the_real_countdown_without_resetting_it() {
+    for mode in [None, Some(0)] {
+        let mut realm = realm(mode);
+        let code = tick_probe_code(&mut realm);
+        realm.gcx.stress = 0;
+        realm.tick = 10_000;
+        let collections = realm.heap.collections;
+        let slices = realm.gcx.stress_n;
+        run_tick_probe(&mut realm, code, mode);
+        assert_eq!(realm.tick, 10_000 - TICK_POLLS, "mode {mode:?}: decrement Realm.tick itself");
+        assert_eq!(realm.heap.collections, collections, "the high countdown never reached a safe point");
+        assert_eq!(realm.gcx.stress_n, slices);
+        eprintln!("numeric-completion tick mode={mode:?} entries={} remaining={}", realm.jit_entries(), realm.tick);
+    }
+}
+
+#[test]
+fn numeric_completion_tick_drives_automatic_full_and_incremental_gc() {
+    for mode in [None, Some(0)] {
+        for stress in [crate::realm::GC_STRESS_FULL, crate::realm::GC_STRESS_INCREMENTAL] {
+            let mut realm = realm(mode);
+            let code = tick_probe_code(&mut realm);
+            realm.gc_enabled = true;
+            realm.gcx.no_gc = false;
+            realm.gcx.stress = stress;
+            realm.gcx.incremental = stress == crate::realm::GC_STRESS_INCREMENTAL;
+            realm.gcx.stress_n = 0;
+            realm.tick = 1;
+            let collections = realm.heap.collections;
+            // Realm bootstrap can leave an incremental cycle pending under
+            // ambient stress. The first full gc finishes that existing cycle
+            // before starting its own; account for it without manual GC.
+            let prior_cycle = u32::from(realm.gc_in_progress());
+            run_tick_probe(&mut realm, code, mode);
+            assert_eq!(realm.tick, 1, "every poll resets the stress countdown");
+            if stress == crate::realm::GC_STRESS_FULL {
+                // One new synchronous full collection per poll, plus the
+                // single prior cycle if gc() first had to finish it.
+                assert_eq!(realm.heap.collections - collections, TICK_POLLS + prior_cycle);
+                assert_eq!(realm.gcx.stress_n, 0);
+            } else {
+                // maybe_gc performs one budgeted slice per poll. Do not
+                // claim a completed cycle from this bounded number of slices.
+                assert_eq!(realm.gcx.stress_n, TICK_POLLS);
+            }
+            eprintln!("numeric-completion automatic-gc mode={mode:?} stress={stress} entries={} prior_cycle={prior_cycle} collections={} slices={}", realm.jit_entries(), realm.heap.collections - collections, realm.gcx.stress_n);
+        }
     }
 }

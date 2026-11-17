@@ -23,24 +23,40 @@ pub(crate) struct Ctx {
     pub slots: *mut Value,
     pub consts: *const Value,
     pub realm: *mut Realm,
-    pub tick: *mut u32,
-    pub code: *const FunctionCode,
-    /// Instruction to continue at after [`ST_JUMP`].
-    pub pc: u32,
     /// Lazily cached current frame completion slot. Null means uncached,
     /// including a missing extra; the next StoreCompletionR uses its helper.
     /// Derived through Rust references, never by assuming Vec/Option/Box layout.
     /// Generated helper boundaries invalidate it before entering Rust;
     /// only h_store_completion publishes a fresh destination after writing.
     pub completion: *mut Value,
+    pub code: *const FunctionCode,
+    /// Instruction to continue at after [`ST_JUMP`].
+    pub pc: u32,
 }
 
 pub(crate) const CTX_SLOTS: i32 = 0;
 pub(crate) const CTX_CONSTS: i32 = 8;
 pub(crate) const CTX_REALM: i32 = 16;
-pub(crate) const CTX_TICK: i32 = 24;
 pub(crate) const CTX_PC: i32 = 40;
 pub(crate) const CTX_COMPLETION: i32 = std::mem::offset_of!(Ctx, completion) as i32;
+
+// The emitter derives the same address previously stored as &Realm.tick.
+// Neither repr(Rust) field order nor the width of tick is guessed here.
+pub(crate) const REALM_TICK: i32 = {
+    let offset = std::mem::offset_of!(Realm, tick);
+    assert!(offset <= i32::MAX as usize);
+    offset as i32
+};
+const _: fn(&mut Realm) -> &mut u32 = |realm| &mut realm.tick;
+const _: () = {
+    assert!(std::mem::size_of::<Ctx>() == 48);
+    assert!(std::mem::offset_of!(Ctx, slots) == 0);
+    assert!(std::mem::offset_of!(Ctx, consts) == 8);
+    assert!(std::mem::offset_of!(Ctx, realm) == 16);
+    assert!(std::mem::offset_of!(Ctx, completion) == 24);
+    assert!(std::mem::offset_of!(Ctx, code) == 32);
+    assert!(std::mem::offset_of!(Ctx, pc) == 40);
+};
 
 /// Continue with the instruction's continuation in native code.
 pub(crate) const ST_NEXT: usize = 0;
@@ -142,12 +158,9 @@ impl Realm {
                 // SAFETY: `code` is the last frame's code.
                 consts: unsafe { (*code).constants.as_ptr() },
                 realm,
-                // SAFETY: `realm` is valid; the field is only accessed
-                // through this pointer while native code runs.
-                tick: unsafe { std::ptr::addr_of_mut!((*realm).tick) },
+                completion: std::ptr::null_mut(),
                 code,
                 pc: 0,
-                completion: std::ptr::null_mut(),
             };
             // SAFETY: `entry` is the native code of `code` (kept alive by
             // the frame's code), entered at an instruction of it; until it
