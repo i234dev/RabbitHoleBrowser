@@ -1157,6 +1157,20 @@ fn is_root_scroller(n: NodeRef) -> bool {
     n.doc == 0 && with_doc(0, |doc| doc.is_element(n.node, "html") || doc.is_element(n.node, "body"))
 }
 
+/// The element whose `scrollTop`/`scrollLeft` are the document's scroll
+/// position (CSSOM View `scrollingElement`): `<html>` in standards mode,
+/// `<body>` in quirks mode.
+fn is_document_scroller(n: NodeRef) -> bool {
+    n.doc == 0
+        && with_doc(0, |doc| {
+            if doc.quirks_mode == rabbithole_dom::QuirksMode::Quirks {
+                doc.is_element(n.node, "body")
+            } else {
+                doc.is_element(n.node, "html")
+            }
+        })
+}
+
 fn e_client_width(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "clientWidth")?;
     if is_root_scroller(n) {
@@ -1237,7 +1251,7 @@ fn e_scroll_height(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
 
 fn e_scroll_top_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollTop")?;
-    if is_root_scroller(n) {
+    if is_document_scroller(n) {
         return Ok(Value::Number(with_env(|env| env.scroll().1) as f64));
     }
     if let Some((_, y)) = element_scroll_offset(n) {
@@ -1251,7 +1265,7 @@ fn e_scroll_top_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
 fn e_scroll_top_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollTop")?;
     let v = realm.to_number(arg(args, 0))?;
-    if is_root_scroller(n) {
+    if is_document_scroller(n) {
         with_env(|env| {
             let (x, _) = env.scroll();
             env.set_scroll(x, v.max(0.0) as f32);
@@ -1264,7 +1278,7 @@ fn e_scroll_top_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 
 fn e_scroll_left_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollLeft")?;
-    if is_root_scroller(n) {
+    if is_document_scroller(n) {
         return Ok(Value::Number(with_env(|env| env.scroll().0) as f64));
     }
     if let Some((x, _)) = element_scroll_offset(n) {
@@ -1278,7 +1292,7 @@ fn e_scroll_left_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
 fn e_scroll_left_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollLeft")?;
     let v = realm.to_number(arg(args, 0))?;
-    if is_root_scroller(n) {
+    if is_document_scroller(n) {
         with_env(|env| {
             let (_, y) = env.scroll();
             env.set_scroll(v.max(0.0) as f32, y);

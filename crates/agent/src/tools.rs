@@ -1,7 +1,7 @@
 //! The agent tools (shared by the MCP server and the CLI): definitions,
 //! argument handling and dispatch.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,9 @@ pub fn definitions() -> Vec<Value> {
     let r = json!({ "type": "string", "description": "@eN or @fN" });
     let selector = json!({ "type": "string", "description": "Unique CSS, instead of ref" });
     let dialog = json!({ "type": "string", "description": "accept|dismiss|text" });
-    let until = json!({ "type": ["string", "object"], "properties": { "text": { "type": "string" }, "selector": { "type": "string" } }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false });
+    // The descriptions say the shape (text or {selector:CSS}); the server
+    // validates it, so the schema stays short in every tool that takes it.
+    let until = json!({ "type": ["string", "object"] });
     let timeout = json!({ "type": "integer", "minimum": 0, "maximum": 30000 });
     vec![
         json!({ "name": "open", "description": "Load URL/history; default summary. find returns passages; summary=true adds overview; snapshot/full returns tree.",
@@ -375,6 +377,9 @@ fn dispatch(agent: &mut Agent, name: &str, a: &Value) -> Result<Out, String> {
             let ti = agent.tab_index()?;
             agent.ensure_loaded(ti)?;
             let r = action_ref(agent, ti, a)?.ok_or("click needs ref or selector")?;
+            if truncated_list(agent, ti, &r).is_some() {
+                return Err(format!("{r} is a truncated list, not a control; use snapshot ref={r} to see its remaining items"));
+            }
             Ok(Out::text(agent.click_with_options(ti, &r, b(a, "hover").unwrap_or(false), b(a, "force").unwrap_or(false), b(a, "double").unwrap_or(false))?))
         }
         "type" => type_(agent, a),
@@ -490,6 +495,14 @@ pub(crate) fn selector_nodes(agent: &Agent, ti: usize, selector: &str) -> Result
         }
     }
     Ok(nodes)
+}
+
+/// Items already shown of a list cut by `snapshot` (its "expand" ref).
+pub(crate) fn truncated_list(agent: &Agent, ti: usize, r: &str) -> Option<usize> {
+    let id: u32 = r.trim().strip_prefix("@e")?.parse().ok()?;
+    let e = agent.tabs[ti].refs.get(id)?;
+    if e.role != "list" { return None; }
+    e.name.strip_prefix(crate::snapshot::TRUNCATED)?.parse().ok()
 }
 
 fn action_ref(agent: &mut Agent, ti: usize, a: &Value) -> Result<Option<String>, String> {
@@ -800,6 +813,82 @@ fn search_order(tab: &crate::browser::Tab) -> HashMap<(usize, NodeId), usize> {
     order
 }
 
+/// Visible text of an element as block-level segments: inline runs are
+/// joined, blocks, cells, links and image alternatives start a new
+/// segment. A segment repeated by another (a linked image's `alt` and the
+/// link's clipped `title…` text) is kept once, in its longest form.
+fn context_segments(page: &rabbithole_engine::Page, n: NodeId) -> Vec<String> {
+    fn walk(page: &rabbithole_engine::Page, n: NodeId, cur: &mut String, out: &mut Vec<String>, depth: usize) {
+        let doc = &page.doc;
+        if depth > 40 { return; }
+        for c in doc.flat_children(n) {
+            if let Some(t) = doc.text(c) { cur.push_str(t); continue; }
+            let Some(el) = doc.element(c) else { continue };
+            if matches!(el.tag.as_str(), "script" | "style" | "template" | "noscript") { continue; }
+            if !crate::ax::displayed(page, c) || el.attr("aria-hidden") == Some("true") { continue; }
+            let inline = matches!(el.tag.as_str(), "span" | "b" | "i" | "em" | "strong" | "small" | "code" | "abbr" | "sub" | "sup" | "mark" | "u" | "s" | "label" | "time" | "data" | "q" | "cite" | "bdi");
+            if el.tag == "img" {
+                flush(cur, out);
+                if let Some(alt) = el.attr("alt") { cur.push_str(alt); }
+                flush(cur, out);
+                continue;
+            }
+            if !inline { flush(cur, out); }
+            walk(page, c, cur, out, depth + 1);
+            if !inline { flush(cur, out); }
+        }
+    }
+    fn flush(cur: &mut String, out: &mut Vec<String>) {
+        let t = cur.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !t.is_empty() { out.push(t); }
+        cur.clear();
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    walk(page, n, &mut cur, &mut out, 0);
+    flush(&mut cur, &mut out);
+    let stem = |s: &str| s.trim_end_matches(['…', '.']).trim_end().to_lowercase();
+    let mut kept: Vec<String> = Vec::new();
+    for seg in out {
+        let st = stem(&seg);
+        if st.is_empty() { continue; }
+        if let Some(i) = kept.iter().position(|k| { let ks = stem(k); ks.starts_with(&st) || st.starts_with(&ks) }) {
+            if seg.chars().count() > kept[i].chars().count() && !seg.ends_with(['…', '.']) { kept[i] = seg; }
+            continue;
+        }
+        kept.push(seg);
+    }
+    kept
+}
+
+/// The smallest useful container of a short match: climb the ancestors of
+/// `node` while their text fits `window` and they hold no other matching
+/// element (stopping at the card or row, not the list). Returns its joined
+/// text and the first link inside it, when it is larger than the match.
+fn match_container(page: &rabbithole_engine::Page, node: NodeId, own_len: usize, window: usize, matched: &HashSet<NodeId>) -> Option<(String, Option<NodeId>)> {
+    let doc = &page.doc;
+    let mut ancestors = Vec::new();
+    let mut up = doc.parent(node);
+    while let Some(p) = up { ancestors.push(p); up = doc.parent(p); }
+    let mut best = None;
+    let mut cur = node;
+    while let Some(parent) = doc.parent(cur) {
+        if doc.element(parent).is_none() || doc.is_element(parent, "body") || doc.is_element(parent, "html") { break; }
+        let others = doc.descendants(parent).any(|d| d != node && matched.contains(&d) && !ancestors.contains(&d));
+        if others { break; }
+        let segments = context_segments(page, parent);
+        let text = segments.join(" · ");
+        let len = text.chars().count();
+        if len > window { break; }
+        if len > own_len { best = Some((text, parent)); }
+        cur = parent;
+    }
+    let (text, container) = best?;
+    let link = std::iter::once(container).chain(doc.descendants(container)).find(|&d| doc.is_element(d, "a") && doc.element(d).and_then(|e| e.attr("href")).is_some())
+        .or_else(|| ancestors.iter().copied().find(|&d| doc.is_element(d, "a") && doc.element(d).and_then(|e| e.attr("href")).is_some()));
+    Some((text, link))
+}
+
 fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Option<&[String]>, role: Option<&str>, name: Option<&str>, limit: usize, context: usize) -> String {
     let tab = &mut agent.tabs[ti];
     let order = search_order(tab);
@@ -848,6 +937,16 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
         }
     }
     let normalized_terms: Vec<_> = terms.unwrap_or_default().iter().map(|t| normalized_name(t)).collect();
+    // Elements holding a match, per frame: a match's context container
+    // must not swallow another one.
+    let mut matched: HashMap<usize, HashSet<NodeId>> = HashMap::new();
+    if let Some(terms) = terms {
+        for (frame, node, _, passages, _) in &candidates {
+            if passages.iter().any(|p| text_matches(p, terms).iter().any(|h| !h.is_empty())) {
+                matched.entry(*frame).or_default().insert(*node);
+            }
+        }
+    }
     let mut lines = Vec::new();
     let mut total = 0;
     let mut omitted_links = 0;
@@ -892,6 +991,21 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
             line.push_str(&format!(" [text: {}]", labels.join(", ")));
         }
         if count > shown { line.push_str(&format!(" (+{} more in this element)", count - shown)); }
+        // A short match (a price, a table label) says little alone: add the
+        // card or row that holds it, and its link.
+        let own_len = passages.iter().map(|p| p.chars().count()).sum::<usize>();
+        if terms.is_some() && context > 0 && own_len < context {
+            let empty = HashSet::new();
+            let page = &tab.frames[frame];
+            if let Some((text, link)) = match_container(page, node, own_len, context, matched.get(&frame).unwrap_or(&empty)) {
+                line.push_str(&format!("  in: \"{}\"", esc(&text)));
+                if let Some(l) = link.filter(|&l| l != node) {
+                    let label = clip_text(&crate::ax::content_text(page, l), 60);
+                    let r = tab.refs.assign(frame, l, "link", &label);
+                    line.push_str(&format!("  link @e{r}"));
+                }
+            }
+        }
         lines.push(line);
     }
     let mut body = if lines.is_empty() { "No matches.".to_string() } else { lines.join("\n") };
@@ -940,6 +1054,8 @@ fn find_now(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let context = find_context(a)?;
     let terms = search_terms(a, "text")?;
     if let Some(sel) = s(a, "selector") {
+        // Element text is clipped to 100 chars unless a window is asked for.
+        let clip = if a.get("window").is_some() || a.get("context").is_some() { context.max(1) } else { 100 };
         let toks = Tokenizer::tokenize(sel);
         let list = SelectorParser::new(&toks).parse_list().ok_or_else(|| format!("invalid selector: {sel}"))?;
         let tab = &mut agent.tabs[ti];
@@ -952,10 +1068,10 @@ fn find_now(agent: &mut Agent, a: &Value) -> Result<Out, String> {
                 total += 1;
                 if lines.len() >= limit { continue; }
                 let role = doc.tag(nd).unwrap_or("").to_string();
-                let text = crate::ax::content_text(&f.page, nd);
+                let text = context_segments(&f.page, nd).join(" · ");
                 let r = tab.refs.assign(fi, nd, &role, &clip_text(&text, 60));
                 let vis = if !crate::ax::displayed(&f.page, nd) { " (hidden)" } else { "" };
-                lines.push(format!("@e{r} <{role}> \"{}\"{vis}", esc(&clip_text(&text, 100))));
+                lines.push(format!("@e{r} <{role}> \"{}\"{vis}", esc(&clip_text(&text, clip))));
             }
         }
         let mut text = if lines.is_empty() { "No matches.".to_string() } else { fence(&lines.join("\n")) };

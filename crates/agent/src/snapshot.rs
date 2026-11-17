@@ -19,6 +19,9 @@ pub fn tokens(s: &str) -> usize {
 pub struct Detail {
     /// Items shown per list before "+N more".
     pub list_keep: usize,
+    /// The same inside header, nav, aside and footer landmarks: page chrome
+    /// is cut before the main content.
+    pub secondary_keep: usize,
     /// Characters per text item.
     pub text_max: usize,
     /// Landmark roles rendered as a one-line summary.
@@ -38,7 +41,7 @@ impl Detail {
             5 => (3, 70, &["contentinfo", "complementary", "navigation", "banner", "search", "region", "form"]),
             _ => (2, 50, &["contentinfo", "complementary", "navigation", "banner", "search", "region", "form"]),
         };
-        Detail { list_keep: keep, text_max: text, collapse: collapse.iter().copied().collect(), urls }
+        Detail { list_keep: keep, secondary_keep: keep, text_max: text, collapse: collapse.iter().copied().collect(), urls }
     }
 }
 
@@ -166,6 +169,11 @@ struct Renderer<'a, 'b> {
     out: Vec<Piece>,
     /// Depth of `main` landmarks/dialogs we are inside (never collapsed).
     in_main: usize,
+    /// Depth of header/nav/aside/footer landmarks we are inside.
+    in_secondary: usize,
+    /// Target of the last link printed with its URL: a following link or
+    /// heading to the same place says `(same)` instead of repeating it.
+    last_href: Option<String>,
 }
 
 impl Renderer<'_, '_> {
@@ -225,7 +233,15 @@ impl Renderer<'_, '_> {
             }
             Kind::Heading => {
                 self.brk();
-                let t = leaf_text(a, self.detail.text_max, self.detail.urls);
+                let link_href = (a.children.len() == 1 && a.children[0].role == "link").then(|| a.children[0].href.clone()).flatten();
+                let same = self.detail.urls && link_href.is_some() && link_href == self.last_href;
+                let mut t = leaf_text(a, self.detail.text_max, self.detail.urls && !same);
+                if same && a.children[0].reference.is_some() {
+                    t.push_str(" (same)");
+                }
+                if link_href.is_some() {
+                    self.last_href = link_href;
+                }
                 self.push(depth, t, a.rect, false);
                 // Controls inside the heading other than the title link.
                 if !(a.children.len() == 1 && a.children[0].role == "link") {
@@ -237,7 +253,14 @@ impl Renderer<'_, '_> {
                 self.brk();
             }
             Kind::Control => {
-                let t = leaf_text(a, self.detail.text_max, self.detail.urls);
+                let same = self.detail.urls && a.href.is_some() && a.href == self.last_href;
+                let mut t = leaf_text(a, self.detail.text_max, self.detail.urls && !same);
+                if same {
+                    t.push_str(" → (same)");
+                }
+                if a.href.is_some() {
+                    self.last_href = a.href.clone();
+                }
                 self.push_control(depth, t, a.rect, a.children.is_empty());
                 if !a.children.is_empty() {
                     self.brk();
@@ -270,19 +293,26 @@ impl Renderer<'_, '_> {
                 }
                 self.container_header(a, depth);
                 let main = a.role == "main" || a.kind == Kind::Dialog;
+                let secondary = a.kind == Kind::Landmark && matches!(a.role.as_str(), "banner" | "navigation" | "complementary" | "contentinfo");
                 if main {
                     self.in_main += 1;
+                }
+                if secondary {
+                    self.in_secondary += 1;
                 }
                 self.children(&a.children, depth + 1);
                 if main {
                     self.in_main -= 1;
+                }
+                if secondary {
+                    self.in_secondary -= 1;
                 }
                 self.brk();
             }
             Kind::List => {
                 self.brk();
                 let items: Vec<&Ax> = a.children.iter().filter(|c| c.kind != Kind::Break).collect();
-                let keep = self.detail.list_keep;
+                let keep = if self.in_secondary > 0 { self.detail.secondary_keep } else { self.detail.list_keep };
                 if items.len() > keep.saturating_add(1) {
                     for it in items.iter().take(keep) {
                         self.node(it, depth);
@@ -293,7 +323,9 @@ impl Renderer<'_, '_> {
                         .iter()
                         .filter(|it| it.frame == 0 && it.rect.map(|r| r.y >= self.ctx.viewport.bottom()).unwrap_or(false))
                         .count();
-                    let r = self.ctx.refs.assign(a.frame, a.node, "list", "");
+                    // The label remembers how many items were shown, so
+                    // `snapshot ref=` returns only the rest.
+                    let r = self.ctx.refs.assign(a.frame, a.node, "list", &format!("{TRUNCATED}{keep}"));
                     let mut s = format!("… +{} more items", rest.len());
                     if below > 0 {
                         s.push_str(&format!(" ({below} below the viewport)"));
@@ -307,6 +339,13 @@ impl Renderer<'_, '_> {
                         self.soft();
                     }
                 }
+            }
+            Kind::Item if a.role == "row" && row_cells(a).is_some() => {
+                let cells = row_cells(a).unwrap_or_default();
+                self.brk();
+                let t = format!("row {}", cells.iter().map(|c| format!("\"{}\"", esc(&clip_text(c, self.detail.text_max)))).collect::<Vec<_>>().join(" | "));
+                self.push(depth, t, a.rect, false);
+                self.brk();
             }
             Kind::Item => {
                 self.soft();
@@ -335,6 +374,36 @@ impl Renderer<'_, '_> {
             }
         }
     }
+}
+
+/// Ref label of a list cut by the renderer: `truncated:<items shown>`.
+pub const TRUNCATED: &str = "truncated:";
+
+/// Cell texts of a table row made only of text (no controls, headings or
+/// images): rendered as one `row "a" | "b"` line.
+fn row_cells(a: &Ax) -> Option<Vec<String>> {
+    let mut plain = true;
+    a.visit(&mut |x, _| {
+        if matches!(x.kind, Kind::Control | Kind::Heading | Kind::Image | Kind::List | Kind::Landmark | Kind::Form | Kind::Dialog | Kind::Frame) {
+            plain = false;
+        }
+    });
+    if !plain {
+        return None;
+    }
+    let mut cells = Vec::new();
+    for c in &a.children {
+        let mut t = Vec::new();
+        c.visit(&mut |x, _| {
+            if x.kind == Kind::Text && !x.name.is_empty() {
+                t.push(x.name.clone());
+            }
+        });
+        if !t.is_empty() {
+            cells.push(t.join(" "));
+        }
+    }
+    (cells.len() >= 2).then_some(cells)
 }
 
 /// Join pieces into lines: items on the same visual row share a line.
@@ -401,7 +470,7 @@ fn top_sections(root: &Ax) -> Vec<&Ax> {
 
 /// Render `root` (or the subtree) at a detail level.
 pub fn render(root: &Ax, ctx: &mut RenderCtx, detail: &Detail, reorder: bool) -> Vec<String> {
-    let mut r = Renderer { ctx, detail, out: Vec::new(), in_main: 0 };
+    let mut r = Renderer { ctx, detail, out: Vec::new(), in_main: 0, in_secondary: 0, last_href: None };
     if reorder && root.kind == Kind::Group && root.role == "document" {
         let secs = top_sections(root);
         // Outline indentation only applies within a section; top level
@@ -421,11 +490,30 @@ pub fn render_budget(root: &Ax, ctx: &mut RenderCtx, max_tokens: usize, urls: bo
     let max_chars = max_tokens.saturating_mul(4);
     let mut last = Vec::new();
     let start = if full { 0 } else { 1 };
+    let size = |lines: &[String]| lines.iter().map(|l| l.chars().count() + 1).sum::<usize>();
     for level in start..=6 {
-        let detail = Detail::level(level, urls);
-        let lines = render(root, ctx, &detail, true);
-        let len: usize = lines.iter().map(|l| l.chars().count() + 1).sum();
-        if len <= max_chars || full && level == 0 && max_tokens >= 1_000_000 {
+        // At each level, page chrome (header, nav, aside, footer) is cut to
+        // a few items before the main content loses any.
+        let mut detail = Detail::level(level, urls);
+        let mut lines = render(root, ctx, &detail, true);
+        if size(&lines) > max_chars && level > 0 && detail.secondary_keep > 3 {
+            detail.secondary_keep = 3;
+            lines = render(root, ctx, &detail, true);
+        }
+        if size(&lines) <= max_chars || full && level == 0 && max_tokens >= 1_000_000 {
+            // Spend what is left on complete main-content lists.
+            if detail.list_keep != usize::MAX {
+                let mut more = Detail::level(level, urls);
+                more.secondary_keep = detail.secondary_keep;
+                more.list_keep = usize::MAX;
+                let all = render(root, ctx, &more, true);
+                if size(&all) <= max_chars {
+                    return (all, false);
+                }
+                // Re-render the chosen level: refs of the trial stay valid
+                // and the expand labels must match what is shown.
+                lines = render(root, ctx, &detail, true);
+            }
             return (lines, false);
         }
         last = lines;

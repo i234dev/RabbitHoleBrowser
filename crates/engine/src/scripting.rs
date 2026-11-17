@@ -77,6 +77,10 @@ pub struct ScriptState {
     /// The initial about:blank load, before initial insertion or a task
     /// delivers it. Kept separate from a script-created parser's load.
     pub frame_initial_load_pending: bool,
+    /// A script moved the document's scroll position: `scroll` fires at
+    /// the document (bubbling to the window) on the next task turn, once
+    /// per turn however many times the position changed.
+    pub scroll_event_pending: bool,
 }
 
 impl ScriptState {
@@ -314,6 +318,9 @@ impl HostEnv for EngineEnv<'_> {
         let max_y = (self.page.content_height() - vp.height).max(0.0);
         let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
         let (x, y) = (finite(x).clamp(0.0, max_x), finite(y).clamp(0.0, max_y));
+        if (x, y) != self.page.page_scroll {
+            self.page.script.scroll_event_pending = true;
+        }
         self.engine.set_page_scroll(self.page, x, y);
         self.page.requested_scroll = Some((x, y));
     }
@@ -853,6 +860,11 @@ impl Engine {
         }
         let anim_out = self.dispatch_animation_events(page);
         let link_out = self.fire_link_events(page);
+        let scroll_out = if std::mem::take(&mut page.script.scroll_event_pending) {
+            self.dispatch_window_event(page, "scroll")
+        } else {
+            ScriptOutcome::default()
+        };
         let (result, mut out) = if let Some(deadline) = console_deadline {
             let now = self.start.elapsed().as_secs_f64() * 1000.0;
             let result = if page.script.host.is_some() {
@@ -861,6 +873,7 @@ impl Engine {
             (result, self.settle(page, false))
         } else { (Ok(()), self.tick_scripts(page)) };
         out.merge(link_out);
+        out.merge(scroll_out);
         out.merge(anim_out);
         if console_deadline.is_none_or(|deadline| std::time::Instant::now() < deadline) {
             let frames_out = self.tick_frames(page);
@@ -1206,7 +1219,7 @@ impl Page {
         if let Some(a) = self.anim.next_due() {
             due = Some(due.map(|d| d.min(a)).unwrap_or(a));
         }
-        if !self.script.link_events.is_empty() {
+        if !self.script.link_events.is_empty() || self.script.scroll_event_pending {
             due = Some(0.0);
         }
         let frames = if crate::frames::mail_pending() { Some(0.0) } else { self.frames_next_due() };

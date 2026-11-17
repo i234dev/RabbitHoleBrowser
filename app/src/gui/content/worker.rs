@@ -1332,7 +1332,10 @@ impl Worker {
             self.send(FromContent::Dialog(note));
         }
         if let Some((x, y)) = out.scroll_to {
+            // Script scrolls: the engine queues their `scroll` event itself.
+            let pending = self.scroll_event_pending;
             self.set_scroll(x, y);
+            self.scroll_event_pending = pending;
         }
         if let Some(nav) = out.navigation {
             self.end_edit();

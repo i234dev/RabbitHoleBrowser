@@ -843,14 +843,16 @@ fn geometry_match_media_and_scroll() {
         console.log(window.innerWidth, innerHeight, scrollY, matchMedia('(max-width: 1200px)').matches, matchMedia('(min-width: 1200px)').matches);
         d.scrollIntoView();
         console.log(window.scrollY);
-        window.scrollTo(0, 42); console.log(scrollY, document.documentElement.scrollTop, document.documentElement.clientWidth);
+        window.scrollTo(0, 42); console.log(scrollY, document.compatMode, document.documentElement.scrollTop, document.body.scrollTop, document.documentElement.clientWidth);
         window.scrollBy({ top: 8 }); console.log(pageYOffset);
     "#,
     );
     assert_eq!(out[0], "10 400 100 450 100 50 true");
     assert_eq!(out[1], "1000 800 100 true false");
     assert_eq!(out[2], "500");
-    assert_eq!(out[3], "42 42 1000");
+    // No doctype: quirks mode, where <body> (not <html>) reflects the
+    // document's scroll position (CSSOM View scrollingElement).
+    assert_eq!(out[3], "42 BackCompat 0 42 1000");
     assert_eq!(out[4], "50");
 }
 

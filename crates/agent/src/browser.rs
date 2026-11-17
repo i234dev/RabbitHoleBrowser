@@ -663,12 +663,25 @@ impl Agent {
             Some(r) => Some(resolve_in(&self.tabs[ti].refs, r, &self.tabs[ti].frames)?),
             None => None,
         };
+        // The "expand" ref of a cut list: only the items not shown yet.
+        let shown = focus.and_then(|r| crate::tools::truncated_list(self, ti, r));
         let tab = &mut self.tabs[ti];
         let mut ctx = RenderCtx { refs: &mut tab.refs, viewport, overlay_notes: &notes };
         let (lines, cut) = match (focus, focus_node) {
             (Some(r), Some((frame, node))) => {
                 let sub = find_ax(&root, frame, node).ok_or_else(|| format!("{r} is not part of the visible page (hidden or removed)"))?;
-                snapshot::render_budget(sub, &mut ctx, max_tokens, urls, true)
+                match shown {
+                    Some(k) if sub.kind == crate::ax::Kind::List => {
+                        let mut rest = sub.clone();
+                        let items: Vec<_> = sub.children.iter().filter(|c| c.kind != crate::ax::Kind::Break).cloned().collect();
+                        let total = items.len();
+                        rest.children = items.into_iter().skip(k).collect();
+                        let (mut lines, cut) = snapshot::render_budget(&rest, &mut ctx, max_tokens, urls, true);
+                        lines.insert(0, format!("items {}–{total} of {total}", (k + 1).min(total)));
+                        (lines, cut)
+                    }
+                    _ => snapshot::render_budget(sub, &mut ctx, max_tokens, urls, true),
+                }
             }
             _ => snapshot::render_budget(&root, &mut ctx, max_tokens, urls, false),
         };

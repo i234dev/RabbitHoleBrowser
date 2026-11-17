@@ -155,11 +155,14 @@ fn snapshot_shape_names_refs_truncation() {
     assert!(snap.contains("button \"Enviar\""), "submit value: {snap}");
     assert!(snap.contains("radio \"Opción sí\" @e"), "label[for] wrapping, no value, no duplicate: {snap}");
     assert!(snap.contains("type=email"), "{snap}");
-    // Truncated list with an expand ref.
-    assert!(snap.contains("more items"), "{snap}");
-    let list_ref = ref_of(&snap, "more items");
+    // The main list fits the default budget whole; a small one cuts it
+    // and its expand ref returns the remaining items only.
+    assert!(snap.contains("Elemento número 40"), "{snap}");
+    let cut = ok(&mut a, "snapshot", json!({ "max_tokens": 300 }));
+    assert!(cut.contains("more items"), "{cut}");
+    let list_ref = ref_of(&cut, "more items");
     let expanded = ok(&mut a, "snapshot", json!({ "ref": list_ref }));
-    assert!(expanded.contains("Elemento número 40"), "{expanded}");
+    assert!(expanded.contains("Elemento número 40") && !expanded.contains("\"Elemento número 1\""), "{expanded}");
     // Stable refs across snapshots.
     let vote = ref_of(&snap, "button \"votar\"");
     let again = ok(&mut a, "snapshot", json!({}));
@@ -980,3 +983,134 @@ mod batch_actions;
 mod fragment_navigation;
 #[path = "support/double_click.rs"]
 mod double_click;
+
+// ---------------------------------------------------------------- RH-AGENT-002
+
+/// A catalogue listing like a bookshop category: a side menu with many
+/// categories and eleven product cards (image link + clipped title link,
+/// price, stock, button).
+fn catalogue_page() -> &'static str {
+    let cats: String = (1..=50).map(|i| format!("<li><a href=\"/cat/{i}\">Category number {i} with a longer name</a></li>")).collect();
+    let books: String = (1..=11)
+        .map(|i| {
+            let title = format!("Book {i}: An Unusually Long Title About Travelling Across the Islands, Volume {i}");
+            let price = if i == 9 { "£23.21".to_string() } else { format!("£{}.{:02}", 30 + i, i) };
+            format!(
+                "<li><article class=\"product_pod\"><div class=\"image_container\"><a href=\"/book/{i}\"><img src=\"/i.png\" alt=\"{title}\"></a></div>\
+                 <h3><a href=\"/book/{i}\" title=\"{title}\">{short}...</a></h3>\
+                 <div class=\"product_price\"><p class=\"price_color\">{price}</p><p class=\"instock\">In stock</p><button>Add to basket</button></div></article></li>",
+                short = &title[..20]
+            )
+        })
+        .collect();
+    let page = format!(
+        "<!doctype html><html><head><title>Travel</title></head><body><header><a href=\"/\">Books to Scrape</a></header>\
+         <div class=\"page\"><aside><ul><li><a href=\"/cats\">Books</a><ul>{cats}</ul></li></ul></aside>\
+         <main><h1>Travel</h1><ol class=\"row\">{books}</ol></main></div></body></html>"
+    );
+    Box::leak(page.into_boxed_str())
+}
+
+const PRODUCT_TABLE: &str = r##"<!doctype html><html><head><title>Book</title></head><body><main>
+<h1>The Road</h1><h2>Product Information</h2>
+<table class="table table-striped">
+<tr><th>UPC</th><td>366a236aa1ea6f07</td></tr><tr><th>Product Type</th><td>Books</td></tr>
+<tr><th>Price (excl. tax)</th><td>£23.21</td></tr><tr><th>Price (incl. tax)</th><td>£23.21</td></tr>
+<tr><th>Tax</th><td>£0.00</td></tr><tr><th>Availability</th><td>In stock (3 available)</td></tr>
+<tr><th>Number of reviews</th><td>0</td></tr></table>
+<p>Lorem ipsum dolor sit amet, a long description paragraph that goes on for a while and mentions nothing useful.</p>
+</main></body></html>"##;
+
+/// `find text` on a short match (a price, a table label) also shows the
+/// card or row holding it and its link; a match in long prose does not.
+#[test]
+fn find_text_shows_the_container_of_short_matches() {
+    let page = catalogue_page();
+    let srv = serve(Box::new(move |p| match p { "/" => html(page), "/p" => html(PRODUCT_TABLE), _ => None }));
+    let mut a = agent();
+    let out = ok(&mut a, "open", json!({ "url": srv.url("/"), "find": "£", "limit": 20 }));
+    let lines: Vec<&str> = out.lines().filter(|l| l.contains("[text: \"£\"]")).collect();
+    assert_eq!(lines.len(), 11, "{out}");
+    for (i, l) in lines.iter().enumerate() {
+        let title = format!("Book {}: An Unusually Long Title About Travelling Across the Islands, Volume {}", i + 1, i + 1);
+        assert!(l.contains(&title) && l.contains("In stock") && l.contains("link @e"), "line {i}: {l}");
+        assert_eq!(l.matches(&title).count(), 1, "title once: {l}");
+    }
+    let cheapest = lines.iter().find(|l| l.contains("£23.21")).unwrap();
+    assert!(cheapest.contains("Volume 9"), "{cheapest}");
+
+    let out = ok(&mut a, "open", json!({ "url": srv.url("/p") }));
+    assert!(!out.is_empty());
+    let out = ok(&mut a, "find", json!({ "text": ["UPC", "Availability"] }));
+    assert!(out.contains("366a236aa1ea6f07") && out.contains("In stock (3 available)"), "{out}");
+    // A long paragraph keeps its own passage.
+    let out = ok(&mut a, "find", json!({ "text": "Lorem" }));
+    assert!(!out.contains("in: \""), "{out}");
+    // window=0 keeps the plain result.
+    let out = ok(&mut a, "find", json!({ "text": "UPC", "window": 0 }));
+    assert!(!out.contains("366a236aa1ea6f07"), "{out}");
+}
+
+/// `find selector` honours `window` and prints a linked image's text and
+/// its clipped link text once.
+#[test]
+fn find_selector_window_and_repeated_text() {
+    let page = catalogue_page();
+    let srv = serve(Box::new(move |p| if p == "/" { html(page) } else { None }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let out = ok(&mut a, "find", json!({ "selector": ".product_pod", "limit": 11, "window": 400 }));
+    let lines: Vec<&str> = out.lines().filter(|l| l.contains("<article>")).collect();
+    assert_eq!(lines.len(), 11, "{out}");
+    for (i, l) in lines.iter().enumerate() {
+        let title = format!("Volume {}", i + 1);
+        assert_eq!(l.matches(&title).count(), 1, "{l}");
+        assert!(l.contains('£'), "price shown: {l}");
+    }
+    // Without window: still clipped at 100 characters.
+    let out = ok(&mut a, "find", json!({ "selector": ".product_pod", "limit": 1 }));
+    let line = out.lines().find(|l| l.contains("<article>")).unwrap();
+    assert!(line.contains('…'), "{line}");
+}
+
+/// Under a budget, the side menu is cut before the product list; each
+/// destination URL is printed once; table rows are one line each.
+#[test]
+fn snapshot_cuts_chrome_first_dedupes_urls_and_rows() {
+    let page = catalogue_page();
+    let srv = serve(Box::new(move |p| match p { "/" => html(page), "/p" => html(PRODUCT_TABLE), _ => None }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "snapshot", json!({ "urls": true, "max_tokens": 1500 }));
+    for i in 1..=11 {
+        assert!(snap.contains(&format!("Volume {i}")), "book {i} missing:\n{snap}");
+        assert_eq!(snap.matches(&format!("/book/{i}\n")).count() + snap.matches(&format!("/book/{i} ")).count(), 1, "URL of book {i} once:\n{snap}");
+    }
+    assert!(snap.contains("more items"), "the side menu is cut:\n{snap}");
+    ok(&mut a, "open", json!({ "url": srv.url("/p") }));
+    let snap = ok(&mut a, "snapshot", json!({}));
+    assert_eq!(snap.lines().filter(|l| l.trim_start().starts_with("row ")).count(), 7, "{snap}");
+    assert!(snap.contains("row \"UPC\" | \"366a236aa1ea6f07\""), "{snap}");
+}
+
+/// The "expand" ref of a cut list returns only the items not shown, and a
+/// click on it explains what to do instead of clicking the list.
+#[test]
+fn expand_ref_returns_remaining_items_only() {
+    let page = catalogue_page();
+    let srv = serve(Box::new(move |p| if p == "/" { html(page) } else { None }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "snapshot", json!({ "max_tokens": 400 }));
+    let line = snap.lines().find(|l| l.contains("more items") && l.contains("expand")).unwrap_or_else(|| panic!("{snap}"));
+    let r = ref_of(line, "expand");
+    let shown = (1..=11).filter(|i| snap.contains(&format!("Volume {i}"))).count();
+    let rest = ok(&mut a, "snapshot", json!({ "ref": r }));
+    if rest.contains("of 11") {
+        assert!(rest.contains(&format!("items {}–11 of 11", shown + 1)), "{rest}");
+        assert!(!rest.contains("Volume 1,") && !rest.contains("Volume 1\""), "{rest}");
+        assert!(rest.contains("Volume 11"), "{rest}");
+    }
+    let e = err(&mut a, "click", json!({ "ref": r }));
+    assert!(e.contains("truncated list"), "{e}");
+}

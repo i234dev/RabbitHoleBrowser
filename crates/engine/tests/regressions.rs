@@ -263,6 +263,31 @@ fn page_scroll_event_reaches_document_and_window_listeners() {
     assert_eq!(e.eval_in_page(&mut page, "log.join(',')"), "'d:true:true:700,w:true:700,on'");
 }
 
+/// Script scrolling (`scrollTo`, `scrollBy`, `scrollTop =`) fires one
+/// `scroll` event at the document on the next task turn, as the viewport
+/// does; infinite lists that load on `scroll` depend on it. Several moves
+/// in one turn are coalesced and a call that does not move fires nothing.
+#[test]
+fn script_scrolling_queues_one_scroll_event_per_turn() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        "<div style='height:3000px'></div><script>var n = 0, w = 0;\
+         document.addEventListener('scroll', function () { n++; });\
+         window.addEventListener('scroll', function () { w++; });</script>",
+    );
+    assert_eq!(e.eval_in_page(&mut page, "scrollTo(0, 800); scrollBy(0, 100); document.documentElement.scrollTop = 500; [n, w, scrollY].join()"), "'0,0,500'");
+    assert!(page.next_script_due().is_some(), "a pending scroll event asks for a turn");
+    let _ = e.tick(&mut page);
+    assert_eq!(e.eval_in_page(&mut page, "[n, w].join()"), "'1,1'");
+    // No movement, no event.
+    assert_eq!(e.eval_in_page(&mut page, "scrollTo(0, 500); 0"), "0");
+    let _ = e.tick(&mut page);
+    assert_eq!(e.eval_in_page(&mut page, "[n, w].join()"), "'1,1'");
+    // Standards mode: the document scrolls through <html>, not <body>.
+    assert_eq!(e.eval_in_page(&mut page, "[document.compatMode, document.documentElement.scrollTop, document.body.scrollTop].join()"), "'CSS1Compat,500,0'");
+}
+
 /// Scrolling an inner scroll container re-runs IntersectionObservers
 /// rooted in it (the `scroll` event invalidates the rendering).
 #[test]
