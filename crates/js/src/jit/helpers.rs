@@ -42,13 +42,6 @@ pub(crate) const CTX_TICK: i32 = 24;
 pub(crate) const CTX_PC: i32 = 40;
 pub(crate) const CTX_COMPLETION: i32 = std::mem::offset_of!(Ctx, completion) as i32;
 
-/// Borrow only long enough to derive the address. No reference is retained
-/// across helpers, callbacks, collection or frame-stack changes.
-fn completion_ptr(realm: &mut Realm) -> *mut Value {
-    realm.frames.last_mut().and_then(|frame| frame.extra.as_mut())
-        .map_or(std::ptr::null_mut(), |extra| &mut extra.completion as *mut Value)
-}
-
 /// Continue with the instruction's continuation in native code.
 pub(crate) const ST_NEXT: usize = 0;
 /// Frames were pushed or popped: back to the run loop (exit native code).
@@ -614,12 +607,14 @@ pub(crate) unsafe extern "sysv64" fn h_store_completion(ctx: *mut Ctx, pc: u32) 
         #[cfg(test)]
         { r.jit.completion_fallbacks += 1; }
         let v = (*slots.add(s as usize)).clone();
-        // SAFETY: native code runs the last frame.
-        r.frames.last_mut().unwrap_unchecked().extra_mut().completion = v;
-        // The emitted call boundary cleared the cache. Publish only after
-        // materializing extra and completing the store/drop; no JS follows.
-        // This is the only activation point, including after frame switches.
-        (*ctx).completion = completion_ptr(r);
+        // SAFETY: native code runs the last frame. Borrow the destination
+        // once; Value::drop only releases String/BigInt storage, without JS,
+        // collection or frame/extra mutation while this reference is live.
+        let completion = &mut r.frames.last_mut().unwrap_unchecked().extra_mut().completion;
+        *completion = v;
+        // Publish that same slot only after the assignment and old-value
+        // drop. The emitted call boundary cleared the cache before entry.
+        (*ctx).completion = completion as *mut Value;
         true
     })
 }
