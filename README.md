@@ -37,7 +37,7 @@ Version 0.1.22 lowers the agent interface's token cost found by the
 RH-AGENT-002 battery: `find` shows the card or table row around a short match
 and its link, `snapshot` cuts page chrome before main-content lists, prints a
 repeated URL once and table rows as single lines, and expand refs return only
-the omitted items. Tool definitions and instructions are 13 % shorter.
+the omitted items. Tool definitions and instructions are 11 % shorter.
 Scripted scrolling (`scrollTo`, `scrollBy`, `scrollTop`) now fires `scroll`
 events, so pages that load more content on scroll work when scrolled by script.
 
