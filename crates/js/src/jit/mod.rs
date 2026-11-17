@@ -11,7 +11,8 @@
 //! Runtime switches (environment; the browser maps `--jit=on|off` and
 //! `--jit-threshold=N` to them):
 //!
-//! * `RABBITHOLE_JIT=on|off` (default off)
+//! * `RABBITHOLE_JIT=on|off` (default on where native code is supported;
+//!   `off`, `0`, `false` or `no` select the interpreter)
 //! * `RABBITHOLE_JIT_THRESHOLD=N`: hotness needed to compile (calls, plus
 //!   loop iterations weighted through the safe-point tick); 0 compiles
 //!   every function the first time it runs
@@ -87,7 +88,7 @@ pub fn options() -> &'static Options {
     O.get_or_init(|| {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let list = |k: &str| var(k).map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
-        let on = matches!(var("RABBITHOLE_JIT").as_deref(), Some("on" | "1" | "true" | "yes"));
+        let on = !matches!(var("RABBITHOLE_JIT").map(|v| v.to_ascii_lowercase()).as_deref(), Some("off" | "0" | "false" | "no"));
         Options {
             // Windows mappings register unwind metadata before publication and
             // remain alive through nested generated entries. The CLI canary

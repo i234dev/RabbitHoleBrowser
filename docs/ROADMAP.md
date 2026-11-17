@@ -32,8 +32,8 @@ only after a measured run. See [the measurement records](../tools/metrics/README
 ## 2. Make the JavaScript JIT a measured improvement
 
 The baseline x86-64 JIT, loop OSR, runtime helpers and incremental-GC barriers
-are implemented. Native compilation is available with `--jit=on`, but stays
-off by default. See [the design and implementation record](jit-design.md),
+are implemented. Native compilation is on by default on x86-64 since 0.1.21
+([measurement](benchmarks/speedometer-2026-11-17-jit-default.md)). See [the design and implementation record](jit-design.md),
 especially the Stage 2 sections; the initial feasibility study is historical.
 
 Next steps, in order:

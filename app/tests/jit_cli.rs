@@ -37,13 +37,17 @@ impl Drop for Running {
     }
 }
 
+/// `selector`: `on`/`off` pass `--jit=<selector>` against an opposing ambient
+/// variable; `default` passes neither (the product default).
 fn run_cli(root: &Path, selector: &str) -> Output {
     let stdout = root.join(format!("{selector}.stdout"));
     let stderr = root.join(format!("{selector}.stderr"));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rabbithole"));
-    cmd.args(["js", "about:blank", SOURCE, "--wait", "0"])
-        .arg(format!("--jit={selector}"))
-        .arg("--jit-threshold=0");
+    cmd.args(["js", "about:blank", SOURCE, "--wait", "0"]);
+    if selector != "default" {
+        cmd.arg(format!("--jit={selector}"));
+    }
+    cmd.arg("--jit-threshold=0");
     // Filters, caps, dumps and entry thresholds from the caller must not change
     // this probe. The opposing ambient selector/threshold prove CLI precedence.
     for (key, _) in std::env::vars_os() {
@@ -51,8 +55,10 @@ fn run_cli(root: &Path, selector: &str) -> Output {
             cmd.env_remove(key);
         }
     }
+    if selector != "default" {
+        cmd.env("RABBITHOLE_JIT", if selector == "on" { "off" } else { "on" });
+    }
     cmd.env("RABBITHOLE_PROFILE", root.join(format!("profile-{selector}")))
-        .env("RABBITHOLE_JIT", if selector == "on" { "off" } else { "on" })
         .env("RABBITHOLE_JIT_THRESHOLD", u32::MAX.to_string())
         .env("RABBITHOLE_JIT_TRACE", "1")
         .env("RABBITHOLE_JIT_STATS", "1")
@@ -85,7 +91,7 @@ fn cli_jit_switch_controls_real_native_execution() {
     let profile = PrivateProfile::new();
     let compiled = format!("[jit] compiled {PROBE}@");
     let mut results = Vec::new();
-    for selector in ["off", "on"] {
+    for selector in ["off", "on", "default"] {
         let output = run_cli(&profile.0, selector);
         let stdout = String::from_utf8(output.stdout).expect("CLI output is UTF-8");
         let stderr = String::from_utf8(output.stderr).expect("CLI diagnostics are UTF-8");
@@ -94,7 +100,7 @@ fn cli_jit_switch_controls_real_native_execution() {
         let counts = entries(&stderr);
         assert!(!counts.is_empty(), "--jit={selector} emitted no stats witness:\n{stderr}");
         let named_compile = stderr.lines().any(|line| line.starts_with(&compiled));
-        if selector == "on" {
+        if selector != "off" {
             assert!(named_compile, "CLI selector did not compile the named probe:\n{stderr}");
             assert!(counts.iter().any(|&n| n > 0), "compiled probe never entered native code:\n{stderr}");
         } else {
@@ -105,5 +111,6 @@ fn cli_jit_switch_controls_real_native_execution() {
         results.push(stdout);
     }
     assert_eq!(results[0], results[1], "VM and native CLI results differ");
+    assert_eq!(results[1], results[2], "default and --jit=on CLI results differ");
     fs::remove_dir_all(&profile.0).expect("remove private CLI profiles and capture files");
 }

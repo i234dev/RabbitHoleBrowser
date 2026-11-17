@@ -24,7 +24,10 @@ por el emisor. Las fases 6–8 y la GC se implementan en otras políticas y
 caminos del motor; ese número no describe el avance global.
 
 La funcionalidad de una fase y sus criterios de cierre son cosas distintas.
-El JIT sigue apagado por defecto: quedan objetivos medidos sin cumplir.
+Desde 0.1.21 el JIT está **activado por defecto** en x86-64: Speedometer 3.1 completo,
+10 pares off/on alternos el 17-nov-2026, 10/10 más rápidos con JIT, mediana
+1,020× ([registro](benchmarks/speedometer-2026-11-17-jit-default.md)). Las
+secciones siguientes que dicen «apagado por defecto» son históricas.
 La selección explícita `--jit=on` / `RABBITHOLE_JIT=on` admite también Windows
 x64 con las tablas de unwind registradas y la retirada diferida descritas al
 final de este documento. No activa el backend ARM64 ni registra código Wasm.

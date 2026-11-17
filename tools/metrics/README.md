@@ -27,8 +27,10 @@ not the complete baseline files. It requires no Python or network requests.
 The latest accepted performance comparison is the [0.1.18 record](../../docs/benchmarks/performance-2026-11-15-v0.1.18.md)
 on source `dae023e`, measured on 2026-11-15. It reports the eight-run mean
 Speedometer score in each JIT mode separately from the median of eight paired
-ratios. Five pairs improved; the consistency criterion required six, so phase 8
-remains open and the JIT stays off by default. All 27 microbenchmark cases are
+ratios. Five pairs improved; the consistency criterion required six, so the JIT
+stayed off by default in 0.1.18–0.1.20. The default changed in 0.1.21 after a
+ten-pair run on source `17d662a` on 2026-11-17 (10/10 faster, median 1.020×;
+[record](../../docs/benchmarks/speedometer-2026-11-17-jit-default.md)). All 27 microbenchmark cases are
 reported individually, including `array_map` at 0.990x; no overall micro speedup
 is aggregated. The directed CSS row is only 33 selected controls, run on bootstrap
 source `37cb93d` with CSS code identical to final 0.1.18; it is not a new global

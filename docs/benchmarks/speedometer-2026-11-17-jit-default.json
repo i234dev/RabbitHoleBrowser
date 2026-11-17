@@ -1,0 +1,141 @@
+{
+  "date": "2026-11-17",
+  "source": "17d662a66dbb1a7a870c8334139ed3b5f2f2b9b3",
+  "version": "0.1.20",
+  "purpose": "Decision to enable the baseline JIT by default (x86-64).",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fef2f6b6bbdbe1828872471c5d802a), all 20 default suites, iterationCount=3, served locally",
+  "binary": {
+    "example": "shot",
+    "profile": "release, strip=false, -Cforce-frame-pointers=yes",
+    "features": "rabbithole-engine/jit",
+    "sha256": "0a5e2cb01b8c409f56620b5687a715e57d2498a59f08fe9bb0b6071fc41509b7",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2 (WSL2)",
+    "affinity": "CPU 0, one run at a time",
+    "modes": "RABBITHOLE_JIT=off vs on, threshold 1000 (default), normal GC",
+    "order": "10 blocks, off/on order alternated per block",
+    "utc_interval": "2026-11-17 17:53-18:17"
+  },
+  "pairs": [
+    {
+      "block": 1,
+      "off_geomean_ms": 479.78,
+      "on_geomean_ms": 465.57,
+      "off_score": 2.08,
+      "on_score": 2.15,
+      "ratio_off_over_on": 1.030521726056232
+    },
+    {
+      "block": 2,
+      "off_geomean_ms": 441.4,
+      "on_geomean_ms": 428.96,
+      "off_score": 2.27,
+      "on_score": 2.33,
+      "ratio_off_over_on": 1.0290003729951511
+    },
+    {
+      "block": 3,
+      "off_geomean_ms": 438.32,
+      "on_geomean_ms": 429.47,
+      "off_score": 2.28,
+      "on_score": 2.33,
+      "ratio_off_over_on": 1.0206067944210304
+    },
+    {
+      "block": 4,
+      "off_geomean_ms": 436.72,
+      "on_geomean_ms": 430.3,
+      "off_score": 2.29,
+      "on_score": 2.32,
+      "ratio_off_over_on": 1.014919823379038
+    },
+    {
+      "block": 5,
+      "off_geomean_ms": 436.29,
+      "on_geomean_ms": 435.07,
+      "off_score": 2.29,
+      "on_score": 2.3,
+      "ratio_off_over_on": 1.0028041464591906
+    },
+    {
+      "block": 6,
+      "off_geomean_ms": 437.22,
+      "on_geomean_ms": 431.77,
+      "off_score": 2.29,
+      "on_score": 2.32,
+      "ratio_off_over_on": 1.0126224610324943
+    },
+    {
+      "block": 7,
+      "off_geomean_ms": 439.74,
+      "on_geomean_ms": 425.75,
+      "off_score": 2.27,
+      "on_score": 2.35,
+      "ratio_off_over_on": 1.032859659424545
+    },
+    {
+      "block": 8,
+      "off_geomean_ms": 433.73,
+      "on_geomean_ms": 427.97,
+      "off_score": 2.31,
+      "on_score": 2.34,
+      "ratio_off_over_on": 1.0134588873051849
+    },
+    {
+      "block": 9,
+      "off_geomean_ms": 439.6,
+      "on_geomean_ms": 430.92,
+      "off_score": 2.28,
+      "on_score": 2.32,
+      "ratio_off_over_on": 1.0201429499675114
+    },
+    {
+      "block": 10,
+      "off_geomean_ms": 448.9,
+      "on_geomean_ms": 433.6,
+      "off_score": 2.23,
+      "on_score": 2.31,
+      "ratio_off_over_on": 1.0352859778597785
+    }
+  ],
+  "summary": {
+    "median_ratio_off_over_on": 1.020374872194271,
+    "min": 1.0028041464591906,
+    "max": 1.0352859778597785,
+    "blocks_faster_with_jit": 10,
+    "blocks": 10,
+    "mean_geomean_ms_off": 443.17,
+    "mean_geomean_ms_on": 433.938,
+    "mean_score_off": 2.259,
+    "mean_score_on": 2.307
+  },
+  "per_suite_median_ratio_off_over_on": {
+    "Charts-chartjs": 1.0386740738321318,
+    "Charts-observable-plot": 1.0661277953381822,
+    "Editor-CodeMirror": 1.065042626621587,
+    "Editor-TipTap": 1.0000885789306866,
+    "NewsSite-Next": 1.0060855139528189,
+    "NewsSite-Nuxt": 0.9977508239134637,
+    "Perf-Dashboard": 1.081541584659571,
+    "React-Stockcharts-SVG": 1.02573180630635,
+    "TodoMVC-Angular-Complex-DOM": 1.0394076130962588,
+    "TodoMVC-Backbone": 0.978086389125487,
+    "TodoMVC-JavaScript-ES5": 0.9946567905290837,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 0.9964230595043019,
+    "TodoMVC-Lit-Complex-DOM": 1.0125529441184205,
+    "TodoMVC-Preact-Complex-DOM": 1.0140190449585096,
+    "TodoMVC-React-Complex-DOM": 1.0350353150704859,
+    "TodoMVC-React-Redux": 1.0587641835795787,
+    "TodoMVC-Svelte-Complex-DOM": 1.0001916332520222,
+    "TodoMVC-Vue": 0.9946377655916551,
+    "TodoMVC-WebComponents": 1.002997741218556,
+    "TodoMVC-jQuery": 1.0046585407260005
+  },
+  "limitations": [
+    "Single host; scores are from this harness (headless shot) and are not comparable to other browsers.",
+    "Not run on Windows or macOS; macOS ARM has no native JIT backend and uses the interpreter.",
+    "A ratio above 1 means the JIT-on run was faster; per-suite medians of 10 pairs, not confidence intervals."
+  ]
+}

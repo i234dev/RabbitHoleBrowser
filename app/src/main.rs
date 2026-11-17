@@ -69,8 +69,8 @@ COMMON OPTIONS (screenshot, text, links, dump, js):
     --verbose             Print the page's console output to stderr
 
 JAVASCRIPT ENGINE (any mode):
-    --jit=on|off          Baseline native-code compiler for hot functions (default off;
-                          also RABBITHOLE_JIT=on)
+    --jit=on|off          Baseline native-code compiler for hot functions (default on
+                          on x86-64; also RABBITHOLE_JIT=off)
     --jit-threshold=N     Hotness needed to compile (default 1000; 0 compiles everything)
 
 The profile (cookies, history, bookmarks, session) lives in the platform

@@ -17,7 +17,7 @@ It can be used three ways:
 
 _Both images were produced by RabbitHole's renderer: every pixel comes from its own rasterizer._
 
-## Status (v0.1.20)
+## Status (v0.1.21)
 
 RabbitHole is young but already runs real, heavy sites: Google search,
 YouTube (playback with sound and AV1/VP9 video), Wikipedia,
@@ -27,8 +27,11 @@ code unless noted in [Dependencies](#dependencies).
 
 Windows x64 now supports explicitly enabling the JavaScript JIT with
 `rabbithole.exe --jit=on`. Native mappings register unwind metadata and remain
-alive through nested callbacks. The JIT stays off by default while its global
-performance gate remains open; see the [JIT design and status](docs/jit-design.md).
+alive through nested callbacks. From 0.1.21 the JIT is **on by default** on
+x86-64 (`--jit=off` or `RABBITHOLE_JIT=off` selects the interpreter): in a
+paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
+median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
+See the [JIT design and status](docs/jit-design.md).
 
 Version 0.1.20 adds mouse interaction with the page scrollbar and **Copy all**
 in DevTools Elements, exporting the current main document as HTML. It also
@@ -111,7 +114,7 @@ reports agent-task results supplied by the project owner for v0.1.15 on
   interpreter with hidden classes and inline caches, 8-byte NaN-boxed values,
   size-class allocator, mark-and-sweep GC, ES2023 standard library,
   ES modules, own regular expression engine, and a baseline x86-64 JIT with
-  loop OSR (`--jit=on`, off by default while it is tuned).
+  loop OSR (on by default on x86-64; `--jit=off` disables it).
 - Own WebAssembly engine (`crates/wasm`): validator, interpreter and a
   baseline x86-64 compiler; the `WebAssembly` JS API in pages and workers.
 - Web platform (`crates/script`): the full WebIDL surface of DOM, HTML, CSSOM,
@@ -180,9 +183,9 @@ reports agent-task results supplied by the project owner for v0.1.15 on
 - Complex sign-in screens, including Google Account pages, still have layout
   and interaction gaps; a complete authenticated sign-in has not been validated.
 - No Temporal API; Intl is partial.
-- The JIT is off by default while global performance acceptance remains open.
-  The 0.1.18 paired Speedometer run improved in 5/8 pairs; its consistency
-  criterion required 6/8. This is not an established global gain or slowdown.
+- The JIT gains about 2 % on Speedometer as a whole: most of its time is in
+  style, layout, memory management and painting, not in the JS interpreter.
+  macOS on Apple silicon has no native JIT backend.
 - A same-machine Speedometer comparison with Chrome has not been measured.
   The recorded scores cover the documented headless, eight-pair setup with
   three iterations per run.
