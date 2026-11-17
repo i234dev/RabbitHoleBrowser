@@ -714,3 +714,6 @@ mod disable_cached_execution {
         assert_drained(&realm);
     }
 }
+
+#[path = "tests_jit_numeric_completion.rs"]
+mod numeric_completion;

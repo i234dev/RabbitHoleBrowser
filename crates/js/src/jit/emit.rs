@@ -85,7 +85,7 @@ fn classify(op: &Op) -> Class {
         Op::JumpIfStrictEqRR(..) | Op::JumpIfStrictNotEqRR(..) | Op::JumpIfStrictEqRK(..) | Op::JumpIfStrictNotEqRK(..) => 4,
         Op::JumpIfNullishR(..) | Op::JumpIfNotNullishR(..) | Op::JumpIfUndefinedR(..) | Op::JumpIfNotUndefinedR(..) => 4,
         Op::NotR(..) => 4,
-        Op::GetGlobalR(..) | Op::SetGlobalR(..) => 4,
+        Op::GetGlobalR(..) | Op::SetGlobalR(..) | Op::StoreCompletionR(..) => 4,
         Op::CallR(..) | Op::NewR(..) => 5,
         Op::ReturnR(..) => 2,
         _ => match c {
@@ -135,7 +135,7 @@ fn classify_all(op: &Op) -> Class {
         Op::LoadThis(..) => Native,
         Op::GetLocalR(..) | Op::SetLocalR(..) | Op::GetLocalChecked(..) => Native,
         Op::DefinePropR(..) => Helper(h_define_prop as *const () as usize, "h_define_prop"),
-        Op::StoreCompletionR(..) => Helper(h_store_completion as *const () as usize, "h_store_completion"),
+        Op::StoreCompletionR(..) => Native,
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
         Op::DeleteGlobal(..) | Op::CheckCoercibleUnder => exec,
@@ -1327,6 +1327,21 @@ impl Gen<'_> {
             Op::SetPropR(o, v, ic) => self.set_prop(pc, o, v, ic),
             Op::GetGlobalR(d, ic) => self.global(pc, ic, Ok(d)),
             Op::SetGlobalR(s, ic) => self.global(pc, ic, Err(s)),
+            Op::StoreCompletionR(source) => {
+                let next = self.lbl(pc + 1);
+                let slow = self.slow(h_store_completion as *const () as usize, "h_store_completion", pc, next);
+                // Both guards are unsigned NaN-box tag comparisons. Preserve
+                // the exact bits (including NaN and -0), with no RC/GC/calls
+                // between loading the source and writing the completion.
+                self.load_num(RAX, source, slow);
+                self.a.load64(RCX, Mem::base(CTX, CTX_COMPLETION));
+                self.a.test_rr64(RCX, RCX);
+                self.a.jcc(CC_E, slow);
+                self.a.load64(RDX, Mem::base(RCX, 0));
+                self.a.cmp_rr64(RDX, TAGMIN);
+                self.a.jcc(CC_AE, slow);
+                self.a.store64(Mem::base(RCX, 0), RAX);
+            }
             Op::Nop | Op::Debugger => {}
             Op::ReturnR(slot) => {
                 // h_return never yields ST_NEXT: the frame was popped, the
