@@ -1714,7 +1714,7 @@ y `try_catch/on` +14,90 %. Se descartó para integración y no se ejecutó
 Speedometer. Se conservan datos y criterios, sin repetir ni excluir muestras.
 Estos resultados no identifican por sí solos la causa de las regresiones.
 
-### Compleción numérica: invalidación en el emisor (2026-11-17)
+### Compleción numérica: invalidación en el emisor, descartada (2026-11-17)
 
 La revisión `b36cb26` cambia la política de caché del candidato descartado.
 El emisor examina una vez los opcodes reales de cada `FunctionCode`. Sólo
@@ -1741,9 +1741,41 @@ reentrada, movimiento de slots, GC/RC, finally, error JS por pánico y slot inv�
 
 La revisión pasó cuatro pruebas dirigidas y la biblioteca JS completa en
 Linux/TheOtherSide: 221 PASS y un ignorado existente por modo, off/on con
-GC incremental y resultados nominales idénticos. Su CI final y rendimiento
-siguen pendientes; estos resultados no se atribuyen a otro binario o fuente.
+GC incremental y resultados nominales idénticos. La fuente final `0f99069`
+pasó las tres CI y 22.144 comparaciones sin diferencias, pero su bloque de
+864 observaciones presentó nueve señales de regresión y un caso inconcluso
+(`push_objects`). `let_loop/on` tardó un 35,42 % menos, pero `calls/on` un
+9,12 % más y `switch/on` un 26,24 % más. Se descartó para integración,
+sin ejecutar Speedometer, repetir el bloque ni excluir muestras.
+
+La inspección posterior de los ELF exactos encontró en `h_store_completion`
+una ruta Number→Number de 39 instrucciones en referencia y 54 en candidato,
+excluyendo su callee directo y bajo las condiciones del recibo. El candidato
+conservaba datos/longitud del vector de frames en registros, pero recargaba
+`extra` después de asignar para publicar el destino. `h_call` sólo añadía una
+escritura de cero al caché y eliminaba un NOP al alinear sus instrucciones y
+saltos internos. No se equivalieron todos los callees externos ni la VM,
+y estos hechos no identifican por sí solos la causa del rendimiento.
 La imagen de portada conservada procede del candidato anterior de la misma
 versión y se identifica como histórica; la CI captura la portada del binario
 release de cada fuente que prueba. Los datos de compatibilidad mantienen sus
 fechas originales. La fase 8 sigue abierta y el JIT está apagado por defecto.
+
+### Compleción numérica: una referencia al slot (2026-11-17)
+
+La candidata `1e448a1` cambia únicamente el helper de escritura. Clona el
+origen, obtiene una referencia Rust exclusiva al slot de compleción tras
+materializar `extra`, realiza la asignación y suelta el valor anterior; al
+final publica la dirección de esa misma referencia. Elimina la función que
+volvía a buscar el último frame y su extra. El Drop de Value libera
+almacenamiento Rc de String/BigInt sin ejecutar JS, GC ni mutar Frame/extra,
+por lo que no invalida ese préstamo. Se conservan emisor, contextos, ABI,
+layout, VM, umbrales, selector y pruebas de la revisión anterior.
+
+La revisión estática independiente no encontró bloqueantes. Pasaron cuatro
+pruebas dirigidas y la biblioteca JS completa, 221 PASS y un ignorado por modo
+off/on con GC incremental y resultados nominales idénticos. La reducción de
+búsquedas en el código máquina todavía debe comprobarse en el ELF exacto
+antes de nuevas mediciones. No se atribuye un beneficio de rendimiento a la
+fuente ni a las pruebas funcionales; CI final, rendimiento y publicación están
+pendientes. La versión publicada sigue siendo 0.1.20 y la fase 8 permanece abierta.
