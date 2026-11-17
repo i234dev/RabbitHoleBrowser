@@ -48,10 +48,17 @@ fn numeric_completion_loop_last_statement_writes_numbers_and_preserves_bits() {
         for (source, expected) in [
             ("let sum=0;for(let i=0;i<80;i++)sum+=i;", 3160.0),
             ("let v=0;for(let i=0;i<80;i++){v=i===79?-0:i;v;}", -0.0),
-            ("let v=0;for(let i=0;i<80;i++){v=i===79?0/0:i;v;}", f64::NAN),
+            ("let v=0;for(let i=0;i<80;i++){v=i===79?nanPayload:i;v;}", f64::from_bits(0xFFF8_0000_0000_0042)),
         ] {
             let mut r = realm(mode);
+            if expected.is_nan() {
+                // Explicit negative quiet-NaN payload: arithmetic such as
+                // 0/0 has no portable sign/payload oracle. This tests copying
+                // these exact Number bits through the completion fast store.
+                r.define_global("nanPayload", Value::Number(expected));
+            }
             let value = evaluate(&mut r, source, mode);
+            if expected.is_nan() { assert!(value.as_number().unwrap().is_nan()); }
             // No final expression overwrites the loop completion. This also
             // compares -0/NaN bits, without a JS coercion masking a wrong store.
             assert_eq!(value.bits(), Value::Number(expected).bits(), "{source}");
