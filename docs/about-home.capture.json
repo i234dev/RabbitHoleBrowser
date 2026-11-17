@@ -11,6 +11,7 @@
   "binary_sha256": "cafbc9d281ca7576f712ad8bfd41932e1e84cf063c81574133bb21999a2a16eb",
   "png_sha256": "c46dd2c594acf4dc321698ba70439f0da89d80c9980ee7a2b8e92b498e3cf1d2",
   "performance_measurement": false,
-  "scope": "Internal about:home screenshot from the browser CLI. Compatibility/performance rows retain their own measurement source and date; this capture is not a fresh benchmark.",
-  "root_visual_review": "Actual0.1.21 badge and source-dated metrics visible; header/table at1100CSSpx reviewed."
+  "scope": "Historical0.1.21 candidate screenshot from source5b2350e before f23 docs/capture commit. It is not evidence for a later JIT revision. Exact-source release home captures are retained by CI; measurement rows retain original sources/dates, no fresh benchmark.",
+  "root_visual_review": "Actual0.1.21 badge and source-dated metrics visible; header/table at1100CSSpx reviewed.",
+  "historical_capture": true
 }

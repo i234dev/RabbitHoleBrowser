@@ -1677,7 +1677,7 @@ puerta de rendimiento global sigue abierta; quitar una instrucción no basta
 para afirmar una mejora del motor.
 
 
-### Compleción numérica: candidato sin medición (2026-11-17)
+### Compleción numérica: primer candidato descartado (2026-11-17)
 
 Sobre la versión publicada 0.1.20, `StoreCompletionR` conserva cada escritura
 pero evita el helper cuando el origen y la compleción anterior son Number.
@@ -1705,7 +1705,45 @@ se descartó: 22.144 comparaciones sin diferencias funcionales, pero seis señal
 de regresión entre 864 observaciones de microbenchmarks. No se ejecutó
 Speedometer ni se integró ese atajo. Sus cambios no están en este candidato.
 
-La compleción numérica todavía no tiene medición de rendimiento. Su alcance
-principal son scripts que capturan un resultado, como eval y consola; no
-justifica atribuir una mejora global al navegador. La fase 8 continúa abierta,
-el JIT permanece apagado por defecto y la 0.1.21 sigue sin publicarse.
+El primer candidato final `f23bc2b` pasó la CI completa de los tres SO y
+22.144 comparaciones diferenciales sin diferencias. Las 864 observaciones
+válidas mostraron menos tiempo en `let_loop/on` (−34,46 %) y
+`global_loop/on` (−8,92 %), pero trece señales de regresión y cuatro casos
+inconclusos. Entre las regresiones: `calls/on` +7,21 %, `switch/on` +20,10 %
+y `try_catch/on` +14,90 %. Se descartó para integración y no se ejecutó
+Speedometer. Se conservan datos y criterios, sin repetir ni excluir muestras.
+Estos resultados no identifican por sí solos la causa de las regresiones.
+
+### Compleción numérica: invalidación en el emisor (2026-11-17)
+
+La revisión `b36cb26` cambia la política de caché del candidato descartado.
+El emisor examina una vez los opcodes reales de cada `FunctionCode`. Sólo
+cuando contienen `StoreCompletionR` emite la invalidación antes de una
+llamada real a helpers de contexto, incluido el retorno directo `h_return`.
+Crear una etiqueta lenta o fallar un guard numérico no invalida nada. Las
+llamadas directas puras de truthiness/igualdad y mod/pow/drop no cambian
+frames ni extra; la igualdad laxa que requiere JS pasa al helper completo.
+
+`Ctx` empieza sin caché y cualquier cambio de frame la invalida antes de sus
+salidas anticipadas. Sólo `h_store_completion`, tras escribir y materializar
+el extra, publica un destino nuevo. Los cuerpos Rust de `guard` y
+`fast_access` vuelven a ser idénticos a la versión publicada 0.1.20; el primero
+conserva su recarga de slots. No se cambian la VM, `Value`, el bytecode, el
+selector por defecto, los umbrales ni las escrituras de compleción.
+
+El control de ejecución usa dos stores numéricos dentro de un bucle y comprueba
+que sólo hay operaciones de números/registros entre ellos. Observa al menos
+64 iteraciones nativas y exige entre N y N+1 fallbacks: enviar ambos stores al
+helper costaría 2N y falla. La ejecución dirigida con GC incremental registró
+79 iteraciones nativas y 79 fallbacks para 158 stores, incluidos menos cero y
+el payload NaN explícito. Se conservan los canarios de extra ausente/reemplazado,
+reentrada, movimiento de slots, GC/RC, finally, error JS por pánico y slot inválido.
+
+La revisión pasó cuatro pruebas dirigidas y la biblioteca JS completa en
+Linux/TheOtherSide: 221 PASS y un ignorado existente por modo, off/on con
+GC incremental y resultados nominales idénticos. Su CI final y rendimiento
+siguen pendientes; estos resultados no se atribuyen a otro binario o fuente.
+La imagen de portada conservada procede del candidato anterior de la misma
+versión y se identifica como histórica; la CI captura la portada del binario
+release de cada fuente que prueba. Los datos de compatibilidad mantienen sus
+fechas originales. La fase 8 sigue abierta y el JIT está apagado por defecto.
