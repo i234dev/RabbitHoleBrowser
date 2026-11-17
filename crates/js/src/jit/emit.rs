@@ -1586,6 +1586,7 @@ fn _value_layout_checks() {
 #[cfg(test)]
 mod completion_operand_tests {
     use super::*;
+    use crate::Realm;
 
     #[test]
     fn numeric_completion_rejects_out_of_range_native_slot() {
