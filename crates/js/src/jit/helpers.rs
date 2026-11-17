@@ -30,7 +30,8 @@ pub(crate) struct Ctx {
     /// Lazily cached current frame completion slot. Null means uncached,
     /// including a missing extra; the next StoreCompletionR uses its helper.
     /// Derived through Rust references, never by assuming Vec/Option/Box layout.
-    /// Helpers refresh an active cache with `slots` before native continuation.
+    /// Generated helper boundaries invalidate it before entering Rust;
+    /// only h_store_completion publishes a fresh destination after writing.
     pub completion: *mut Value,
 }
 
@@ -46,19 +47,6 @@ pub(crate) const CTX_COMPLETION: i32 = std::mem::offset_of!(Ctx, completion) as 
 fn completion_ptr(realm: &mut Realm) -> *mut Value {
     realm.frames.last_mut().and_then(|frame| frame.extra.as_mut())
         .map_or(std::ptr::null_mut(), |extra| &mut extra.completion as *mut Value)
-}
-
-/// Publish both current-frame pointers after every context-bearing helper
-/// that can continue native execution. This also handles an extra Box created
-/// by h_store_completion and an extra Box removed by a reentrant host callback.
-unsafe fn refresh_frame(ctx: *mut Ctx, realm: &mut Realm) {
-    let base = realm.frames.last().map(|frame| frame.base as usize).unwrap_or(0);
-    (*ctx).slots = realm.vstack.as_mut_ptr().add(base);
-    if !(*ctx).completion.is_null() {
-        // Only inspect the old pointer's nullness: callbacks may have freed
-        // its Box. The destination is always derived again before use.
-        (*ctx).completion = completion_ptr(realm);
-    }
 }
 
 /// Continue with the instruction's continuation in native code.
@@ -210,17 +198,16 @@ impl Realm {
 }
 
 /// Run a helper body with the realm, catching panics, and refresh
-/// the current frame pointers when native code continues.
+/// `ctx.slots` when native code continues.
 #[inline(always)]
 unsafe fn guard(ctx: *mut Ctx, f: impl FnOnce(&mut Realm, *mut Ctx) -> usize) -> usize {
     let realm = (*ctx).realm;
-    // Native code is suspended during the body, including nested JS. An
-    // active cache is refreshed before any successful continuation; its old
-    // pointer is never dereferenced here, even if a callback freed the Box.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *realm, ctx))) {
         Ok(st) => {
             if st == ST_NEXT || st == ST_JUMP {
-                refresh_frame(ctx, &mut *realm);
+                let r = &mut *realm;
+                let b = r.frames.last().map(|f| f.base as usize).unwrap_or(0);
+                (*ctx).slots = r.vstack.as_mut_ptr().add(b);
             } else if st == ST_RELOAD {
                 // A call pushed a frame or a return popped one: continue
                 // with the new last frame's native code when it has some.
@@ -228,13 +215,10 @@ unsafe fn guard(ctx: *mut Ctx, f: impl FnOnce(&mut Realm, *mut Ctx) -> usize) ->
                 if a != 0 {
                     return a;
                 }
-            } else {
-                (*ctx).completion = std::ptr::null_mut();
             }
             st
         }
         Err(p) => {
-            (*ctx).completion = std::ptr::null_mut();
             (*realm).jit.panic = Some(p);
             ST_PANIC
         }
@@ -377,7 +361,7 @@ unsafe fn switch_frame(ctx: *mut Ctx) -> usize {
         return 0;
     }
     let Some(f) = r.frames.last() else { return 0 };
-    let pc = f.pc;
+    let (pc, base) = (f.pc, f.base as usize);
     // SAFETY: the frame's code outlives the frame (see `Frame::code`).
     let code: &FunctionCode = &*f.code.as_ptr();
     if code.realm.get() != r.current_realm {
@@ -398,8 +382,8 @@ unsafe fn switch_frame(ctx: *mut Ctx) -> usize {
     if r.jit.stats.enabled {
         r.jit.stats.switches += 1;
     }
-    refresh_frame(ctx, r);
     let c = &mut *ctx;
+    c.slots = r.vstack.as_mut_ptr().add(base);
     c.consts = code.constants.as_ptr();
     c.code = code;
     c.pc = pc as u32;
@@ -436,7 +420,6 @@ unsafe fn fast_access(ctx: *mut Ctx, pc: u32, f: impl FnOnce(&mut Realm, &Functi
     let code: &FunctionCode = &*(*ctx).code;
     let slots = (*ctx).slots;
     if f(&mut *realm, code, slots) {
-        refresh_frame(ctx, &mut *realm);
         ST_NEXT
     } else {
         h_access(ctx, pc)
@@ -633,8 +616,9 @@ pub(crate) unsafe extern "sysv64" fn h_store_completion(ctx: *mut Ctx, pc: u32) 
         let v = (*slots.add(s as usize)).clone();
         // SAFETY: native code runs the last frame.
         r.frames.last_mut().unwrap_unchecked().extra_mut().completion = v;
-        // Activate even when the cache was null or this store created extra.
-        // fast_access then refreshes both current-frame pointers before return.
+        // The emitted call boundary cleared the cache. Publish only after
+        // materializing extra and completing the store/drop; no JS follows.
+        // This is the only activation point, including after frame switches.
         (*ctx).completion = completion_ptr(r);
         true
     })

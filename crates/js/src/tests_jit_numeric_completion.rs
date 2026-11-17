@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 thread_local! {
     static OBSERVATIONS: Cell<usize> = const { Cell::new(0) };
+    static NATIVE_ITERATIONS: Cell<usize> = const { Cell::new(0) };
     // Keep replaced allocations alive until generated code has returned: a
     // stale destination becomes a detectable wrong write, rather than a UAF.
     static RETIRED: RefCell<Vec<Box<FrameExtra>>> = const { RefCell::new(Vec::new()) };
@@ -22,9 +23,22 @@ fn realm(mode: Option<u32>) -> Realm {
     realm
 }
 
-fn evaluate(realm: &mut Realm, source: &str, mode: Option<u32>) -> Value {
+fn evaluate(realm: &mut Realm, source: &str, mode: Option<u32>, check_pair: bool) -> Value {
     let code = realm.compile(source, "numeric-completion.js", false).unwrap();
     assert!(code.ops.iter().any(|op| matches!(op, Op::StoreCompletionR(_))));
+    if check_pair {
+        let stores: Vec<usize> = code.ops.iter().enumerate()
+            .filter_map(|(pc, op)| matches!(op, Op::StoreCompletionR(_)).then_some(pc)).collect();
+        // Prove the fixture still contains a pair inside a loop, with only
+        // number/register templates between stores. Lowering must not remove
+        // one store or insert a helper that would invalidate their cache.
+        assert!(stores.windows(2).any(|pair| {
+            code.ops[pair[0] + 1..pair[1]].iter().all(|op| matches!(op,
+                Op::Mov(..) | Op::MovRaw(..) | Op::MovChecked(..) | Op::CheckInit(..) | Op::AddRR(..)))
+                && code.ops.iter().enumerate().any(|(latch, op)|
+                    op.jump_target().is_some_and(|target| (target as usize) <= pair[0] && pair[1] < latch))
+        }), "the numeric pair must survive lowering without a helper between it");
+    }
     let before = realm.jit_entries();
     // Exercise loop OSR without depending on an ambient GC stress interval.
     // Entry threshold/defaults are unchanged; only this test's first safe
@@ -42,30 +56,52 @@ fn evaluate(realm: &mut Realm, source: &str, mode: Option<u32>) -> Value {
     result
 }
 
+fn mark_native_iteration(r: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+    if r.jit.live_entries > 0 {
+        NATIVE_ITERATIONS.with(|n| n.set(n.get() + 1));
+    }
+    Ok(Value::Undefined)
+}
+
 #[test]
 fn numeric_completion_loop_last_statement_writes_numbers_and_preserves_bits() {
     for mode in [None, Some(0), Some(3)] {
         for (source, expected) in [
-            ("let sum=0;for(let i=0;i<80;i++)sum+=i;", 3160.0),
-            ("let v=0;for(let i=0;i<80;i++){v=i===79?-0:i;v;}", -0.0),
-            ("let v=0;for(let i=0;i<80;i++){v=i===79?nanPayload:i;v;}", f64::from_bits(0xFFF8_0000_0000_0042)),
+            ("for(let i=0,sum=0;i<80;i++){var observed=markCompletionNative();7;sum+=i;}", 3160.0),
+            ("for(let i=0,v=-0;i<80;i++){var observed=markCompletionNative();v;v;}", -0.0),
+            ("for(let i=0,v=nanPayload;i<80;i++){var observed=markCompletionNative();v;v;}", f64::from_bits(0xFFF8_0000_0000_0042)),
         ] {
             let mut r = realm(mode);
+            let mark = r.new_native_function("markCompletionNative", 0, mark_native_iteration);
+            r.define_global("markCompletionNative", Value::Object(mark));
+            NATIVE_ITERATIONS.with(|n| n.set(0));
             if expected.is_nan() {
                 // Explicit negative quiet-NaN payload: arithmetic such as
                 // 0/0 has no portable sign/payload oracle. This tests copying
                 // these exact Number bits through the completion fast store.
                 r.define_global("nanPayload", Value::Number(expected));
             }
-            let value = evaluate(&mut r, source, mode);
+            let value = evaluate(&mut r, source, mode, true);
             if expected.is_nan() { assert!(value.as_number().unwrap().is_nan()); }
             // No final expression overwrites the loop completion. This also
             // compares -0/NaN bits, without a JS coercion masking a wrong store.
             assert_eq!(value.bits(), Value::Number(expected).bits(), "{source}");
+            let native_iterations = NATIVE_ITERATIONS.with(Cell::get) as u64;
             if mode.is_some() && rabbithole_jit::supported() {
-                assert!(r.jit.completion_fallbacks <= 2, "80 iterations cannot all use the helper: {}", r.jit.completion_fallbacks);
-            } else { assert_eq!(r.jit.completion_fallbacks, 0); }
-            eprintln!("numeric-completion loop mode={mode:?} supported={} entries={} helper_fallbacks={} result_bits={:016x}", rabbithole_jit::supported(), r.jit_entries(), r.jit.completion_fallbacks, value.bits());
+                assert!((64..=80).contains(&native_iterations), "the measured body must run natively: {native_iterations}");
+                // Each host mark invalidates before the pair. The first
+                // numeric store must use the helper and activate the cache;
+                // the second has only register/number operations before it.
+                // The sole extra helper allowed is the For's initial
+                // undefined completion, when entry already runs natively.
+                // Calling the helper for BOTH stores costs 2*N and fails.
+                assert!((native_iterations..=native_iterations + 1).contains(&r.jit.completion_fallbacks),
+                    "native iterations={native_iterations}, helper fallbacks={}", r.jit.completion_fallbacks);
+            } else {
+                assert_eq!(native_iterations, 0);
+                assert_eq!(r.jit.completion_fallbacks, 0);
+            }
+            eprintln!("numeric-completion loop mode={mode:?} supported={} entries={} native_iterations={native_iterations} helper_fallbacks={} result_bits={:016x}", rabbithole_jit::supported(), r.jit_entries(), r.jit.completion_fallbacks, value.bits());
         }
     }
 }
@@ -112,7 +148,7 @@ fn numeric_completion_counted_values_gc_and_abrupt_finally_keep_helper_semantics
             sharedString;var s=observeCompletion('string');1;
             sharedBig;var b=observeCompletion('bigint');2;
             makeObject();var o=observeCompletion('object');3;
-        "#, mode);
+        "#, mode, false);
         assert_eq!(result, Value::Number(3.0));
         assert_eq!(OBSERVATIONS.with(Cell::get), 3);
         assert_eq!(Rc::strong_count(&big), references, "completion overwrite/frame exit releases the counted value exactly");
@@ -127,7 +163,7 @@ fn numeric_completion_counted_values_gc_and_abrupt_finally_keep_helper_semantics
         ] {
             let mut r = realm(mode);
             let source = format!("let n=0;for(let i=0;i<32;i++)n+=i;{suffix}");
-            let actual = evaluate(&mut r, &source, mode);
+            let actual = evaluate(&mut r, &source, mode, false);
             match (actual.v(), expected.v()) {
                 (V::String(actual), V::String(expected)) => assert_eq!(actual.to_rust_string(), expected.to_rust_string()),
                 _ => assert_eq!(actual, expected),
@@ -210,14 +246,14 @@ fn numeric_completion_refreshes_after_box_removal_reentry_replacement_and_panic(
             r.define_global(name, Value::Object(function));
         }
         VERIFIED.with(|done| done.set(false));
-        assert_eq!(evaluate(&mut r, "let a=0;for(let i=0;i<17;i++)a+=i;removeExtra();var ok=verifyCompletion(33);let b=0;for(let j=0;j<32;j++)b+=j;", mode), Value::Number(496.0));
+        assert_eq!(evaluate(&mut r, "let a=0;for(let i=0;i<17;i++)a+=i;removeExtra();var ok=verifyCompletion(33);let b=0;for(let j=0;j<32;j++)b+=j;", mode, false), Value::Number(496.0));
         assert!(VERIFIED.with(Cell::get));
         RETIRED.with(|retired| assert_eq!(retired.borrow()[0].completion, Value::Number(136.0), "missing extra must take the helper, never the old Box"));
         if mode.is_some() && rabbithole_jit::supported() { assert!(r.jit.completion_fallbacks > 0); }
         RETIRED.with(|retired| retired.borrow_mut().clear());
         VERIFIED.with(|done| done.set(false));
         REENTERED.with(|done| done.set(false));
-        assert_eq!(evaluate(&mut r, "let c=0;for(let i=0;i<17;i++)c+=i;reenterAndReplace();var ok2=verifyCompletion(5);let d=0;for(let j=0;j<32;j++)d+=j;", mode), Value::Number(496.0));
+        assert_eq!(evaluate(&mut r, "let c=0;for(let i=0;i<17;i++)c+=i;reenterAndReplace();var ok2=verifyCompletion(5);let d=0;for(let j=0;j<32;j++)d+=j;", mode, false), Value::Number(496.0));
         assert!(REENTERED.with(Cell::get) && VERIFIED.with(Cell::get));
         RETIRED.with(|retired| assert_eq!(retired.borrow()[0].completion, Value::Number(136.0), "generated stores must write the replacement, not its retained predecessor"));
         RETIRED.with(|retired| retired.borrow_mut().clear());
@@ -236,6 +272,6 @@ fn numeric_completion_refreshes_after_box_removal_reentry_replacement_and_panic(
         assert_eq!(r.jit.live_entries, 0, "the converted host panic leaves no generated activation");
         RETIRED.with(|retired| assert_eq!(retired.borrow()[0].completion, Value::Number(136.0)));
         RETIRED.with(|retired| retired.borrow_mut().clear());
-        assert_eq!(evaluate(&mut r, "let recovered=0;for(let i=0;i<32;i++)recovered+=i;", mode), Value::Number(496.0));
+        assert_eq!(evaluate(&mut r, "let recovered=0;for(let i=0;i<32;i++)recovered+=i;", mode, false), Value::Number(496.0));
     }
 }

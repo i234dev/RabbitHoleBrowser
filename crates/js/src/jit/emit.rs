@@ -257,6 +257,8 @@ enum Stub {
 struct Gen<'a> {
     a: Asm,
     code: &'a FunctionCode,
+    /// Emit cache invalidation only in code that can activate the cache.
+    has_completion: bool,
     labels: Vec<Label>,
     stubs: Vec<Stub>,
     /// Shared: non-zero helper status (exit or internal jump).
@@ -272,9 +274,19 @@ impl Gen<'_> {
         self.labels[pc]
     }
 
+    /// Clear before an actual effectful call, never on the untaken slow
+    /// path. RAX is already clobbered by call_abs; preserve packed RDX args.
+    fn invalidate_completion(&mut self) {
+        if self.has_completion {
+            self.a.mov_imm32(RAX, 0);
+            self.a.store64(Mem::base(CTX, CTX_COMPLETION), RAX);
+        }
+    }
+
     /// Call `helper(ctx, arg)` inline; on a non-zero status leave through
     /// the status stub; reload the slot base.
     fn call_helper(&mut self, helper: usize, name: &str, arg: u32) {
+        self.invalidate_completion();
         self.a.mov_rr64(RDI, CTX);
         self.a.mov_imm32(RSI, arg);
         self.a.call_abs(helper, name);
@@ -1349,6 +1361,7 @@ impl Gen<'_> {
                 // frame switch reloads SLOTS at INNER_ENTRY; every other
                 // outcome exits through the status stub. No old-frame slot
                 // reload or fall-through test is needed here.
+                self.invalidate_completion();
                 self.a.mov_rr64(RDI, CTX);
                 self.a.mov_imm32(RSI, slot as u32);
                 self.a.call_abs(h_return as *const () as usize, "h_return");
@@ -1440,7 +1453,8 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
     let dispatch_jump = a.pos();
     a.jmp_r(RAX);
 
-    let mut g = Gen { a, code, labels, stubs: Vec::new(), status, rc: super::rc_inline(), lay: if super::rc_inline() { super::layout::get() } else { None } };
+    let has_completion = code.ops.iter().any(|op| matches!(op, Op::StoreCompletionR(_)));
+    let mut g = Gen { a, code, has_completion, labels, stubs: Vec::new(), status, rc: super::rc_inline(), lay: if super::rc_inline() { super::layout::get() } else { None } };
     for (pc, op) in code.ops.iter().enumerate() {
         g.a.bind(g.labels[pc]);
         if g.a.listing_enabled() {
