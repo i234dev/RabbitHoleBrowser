@@ -184,7 +184,7 @@ fn validate(code: &FunctionCode) -> Result<(), String> {
     for (pc, op) in code.ops.iter().enumerate() {
         let (slots, k, t): (Vec<u16>, Option<u32>, Option<u32>) = match *op {
             Op::Mov(d, s) | Op::MovRaw(d, s) | Op::MovChecked(d, s) | Op::IncR(d, s) | Op::DecR(d, s) | Op::ToNumericR(d, s) | Op::NotR(d, s) | Op::UnR(_, d, s) => (vec![d, s], None, None),
-            Op::CheckInit(r) | Op::ReturnR(r) | Op::LoadThis(r) => (vec![r], None, None),
+            Op::CheckInit(r) | Op::ReturnR(r) | Op::LoadThis(r) | Op::StoreCompletionR(r) => (vec![r], None, None),
             Op::GetPropR(a, b, _) | Op::SetPropR(a, b, _) | Op::DefinePropR(a, b, _) => (vec![a, b], None, None),
             Op::GetElemR(a, b, c) | Op::SetElemR(a, b, c) => (vec![a, b, c], None, None),
             Op::GetLocalR(r, _, _) | Op::SetLocalR(r, _, _) | Op::GetGlobalR(r, _) | Op::SetGlobalR(r, _) => (vec![r], None, None),
@@ -1580,4 +1580,22 @@ fn _value_layout_checks() {
     // The templates depend on the NaN-boxing layout.
     const _: () = assert!(std::mem::size_of::<Value>() == 8);
     const _: () = assert!(TAG_MIN == 0xFFF9_0000_0000_0000);
+}
+
+
+#[cfg(test)]
+mod completion_operand_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_completion_rejects_out_of_range_native_slot() {
+        let mut realm = Realm::new();
+        let mut code = realm.compile("1;", "completion-operand.js", false).unwrap();
+        let code = std::rc::Rc::get_mut(&mut code).unwrap();
+        assert!(validate(code).is_ok());
+        let pc = code.ops.iter().position(|op| matches!(op, Op::StoreCompletionR(_))).unwrap();
+        code.ops[pc] = Op::StoreCompletionR(u16::MAX);
+        // Validate without entering malformed generated code or the helper.
+        assert_eq!(validate(code), Err(format!("invalid slot at {pc}")));
+    }
 }

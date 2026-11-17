@@ -26,6 +26,10 @@ fn evaluate(realm: &mut Realm, source: &str, mode: Option<u32>) -> Value {
     let code = realm.compile(source, "numeric-completion.js", false).unwrap();
     assert!(code.ops.iter().any(|op| matches!(op, Op::StoreCompletionR(_))));
     let before = realm.jit_entries();
+    // Exercise loop OSR without depending on an ambient GC stress interval.
+    // Entry threshold/defaults are unchanged; only this test's first safe
+    // point is scheduled while its bounded loop is still running.
+    if mode == Some(3) { realm.tick = 2; }
     let result = realm.run_script(code.clone()).unwrap();
     if mode.is_some() && rabbithole_jit::supported() {
         assert!(realm.jit_entries() > before, "this invocation must enter generated code");
@@ -206,13 +210,16 @@ fn numeric_completion_refreshes_after_box_removal_reentry_replacement_and_panic(
         assert!(REENTERED.with(Cell::get) && VERIFIED.with(Cell::get));
         RETIRED.with(|retired| assert_eq!(retired.borrow()[0].completion, Value::Number(136.0), "generated stores must write the replacement, not its retained predecessor"));
         RETIRED.with(|retired| retired.borrow_mut().clear());
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            r.eval("let p=0;for(let i=0;i<17;i++)p+=i;replaceAndPanic();", "completion-panic.js")
-        }));
-        let panic = panic.expect_err("the host panic crosses the helper boundary");
-        assert_eq!(panic.downcast_ref::<&str>().copied(), Some("numeric completion panic canary"));
+        // Host panics are caught by call_native and become an exact JS
+        // error, rather than unwinding through the generated activation.
+        if mode == Some(3) { r.tick = 2; }
+        let error = r.eval("let p=0;for(let i=0;i<17;i++)p+=i;replaceAndPanic();", "completion-panic.js")
+            .expect_err("the host panic becomes a JS error");
+        assert_eq!(r.get_str(error.clone(), "name").unwrap(), Value::str("Error"));
+        assert_eq!(r.get_str(error, "message").unwrap(), Value::str("internal error: numeric completion panic canary"));
         assert!(r.frames.is_empty() && r.vstack.is_empty() && r.new_target_stack.is_empty());
-        assert_eq!(r.jit.live_entries, 0, "panic leaves generated code before unwinding");
+        assert_eq!(r.jit.live_entries, 0, "the converted host panic leaves no generated activation");
+        RETIRED.with(|retired| assert_eq!(retired.borrow()[0].completion, Value::Number(136.0)));
         RETIRED.with(|retired| retired.borrow_mut().clear());
         assert_eq!(evaluate(&mut r, "let recovered=0;for(let i=0;i<32;i++)recovered+=i;", mode), Value::Number(496.0));
     }
