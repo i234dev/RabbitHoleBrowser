@@ -1775,7 +1775,45 @@ layout, VM, umbrales, selector y pruebas de la revisión anterior.
 La revisión estática independiente no encontró bloqueantes. Pasaron cuatro
 pruebas dirigidas y la biblioteca JS completa, 221 PASS y un ignorado por modo
 off/on con GC incremental y resultados nominales idénticos. La reducción de
-búsquedas en el código máquina todavía debe comprobarse en el ELF exacto
-antes de nuevas mediciones. No se atribuye un beneficio de rendimiento a la
-fuente ni a las pruebas funcionales; CI final, rendimiento y publicación están
-pendientes. La versión publicada sigue siendo 0.1.20 y la fase 8 permanece abierta.
+búsquedas se confirmó en el ELF final `d7d947c`: la ruta Number→Number bajó
+de 54 a 46 instrucciones respecto de `0f99069`, excluyendo el callee directo.
+La CI de tres SO pasó, al igual que 22.144 comparaciones diferenciales.
+Sin embargo, 864 observaciones válidas mostraron ocho señales de regresión:
+`calls/on` +4,68 %, `closure_calls/on` +5,07 %, `array_map/off` +7,24 % y
+`array_map/on` +6,80 %, `for_in/off` +5,08 %, `try_catch/on` +9,39 %,
+`arguments/off` +5,26 % y `switch/on` +9,51 %. `push_objects` quedó
+inconcluso. `let_loop/on` tardó un 35,85 % menos, insuficiente para aceptar
+el conjunto. Se descartó sin ejecutar Speedometer ni repetir o excluir datos.
+
+La inspección estática de ambos despachadores VM encontró el mismo tamaño,
+instrucciones y reservas de pila, salvo constantes TLS; no equivalió todos
+los accesos externos. El puente nativo sí pasó de reservar 48 a 64 bytes de
+pila al crecer `Ctx` de 48 a 56 bytes. Ninguna observación atribuye por sí
+sola las regresiones a ese cambio.
+
+
+### Compleción numérica: contexto compacto, en validación (2026-11-17)
+
+La revisión `0b00273` elimina el puntero derivado que sólo se usaba para
+acceder a `Realm.tick`. El emisor obtiene su dirección desde `Ctx.realm`
+y el offset real de Rust, calculado con `offset_of!`; se comprueban el rango
+del desplazamiento y el tipo `u32`. La caché de compleción ocupa el campo
+liberado: `Ctx` vuelve a 48 bytes, manteniendo `code` y `pc` en sus offsets.
+No se añade padding, no se adivina el layout de Rust y no se cambian los
+umbrales, la representación de Value, la VM ni el selector por defecto.
+
+Pasaron seis controles dirigidos y la biblioteca JS completa: 223 PASS,
+un ignorado existente y los mismos resultados nominales con JIT off/on y
+GC incremental, en Linux/TheOtherSide. Dos controles nuevos verifican un
+bucle sin llamadas que consume exactamente 80 pulsos: el contador real baja
+de 10.000 a 9.920 sin GC, o dispara 80 colecciones full nuevas y 80 slices
+incrementales según el modo, sin invocar GC manualmente. El control full
+contabiliza por separado el ciclo incremental que el bootstrap pueda dejar
+pendiente. Los canarios confirman entrada nativa y conservan las pruebas de
+reentrada, RC, NaN, menos cero, finally, error JS y slot inválido.
+
+La revisión estática independiente no encontró bloqueantes. Quedan pendientes
+la CI final de tres SO, comprobar el puente y el acceso generado en los ELF
+exactos y el protocolo completo de rendimiento sin cambiar sus criterios.
+No se afirma una mejora de tiempo. La versión publicada sigue siendo 0.1.20,
+la fase 8 está abierta y el JIT permanece apagado por defecto.
