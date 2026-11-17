@@ -1675,3 +1675,37 @@ Se descartó el cambio y se conservan las recargas anteriores. No se mezcló
 con el registro de unwind ni con la habilitación explícita de Windows. La
 puerta de rendimiento global sigue abierta; quitar una instrucción no basta
 para afirmar una mejora del motor.
+
+
+### Compleción numérica: candidato sin medición (2026-11-17)
+
+Sobre la versión publicada 0.1.20, `StoreCompletionR` conserva cada escritura
+pero evita el helper cuando el origen y la compleción anterior son Number.
+El camino generado comprueba ambos tags y un destino no nulo antes de copiar
+los ocho bytes exactos, incluidos NaN y menos cero. No elimina escrituras ni
+introduce coerciones, asignaciones o safepoints entre los guards y el store.
+Los demás casos mantienen el helper y sus efectos de RC/GC.
+
+El destino se obtiene mediante referencias Rust al `FrameExtra` actual. El
+contexto comienza sin caché; el helper la activa tras escribir, las
+continuaciones refrescan una caché activa y cada cambio de frame la invalida.
+Los tests conservan una asignación anterior como canario, reemplazan o quitan
+el extra desde callbacks, reentran en JS, reubican slots y fuerzan GC. Cubren
+también finally, pánicos convertidos en error JS y rechazo de slots inválidos.
+
+La fuente `3a5a6d6` pasó los cuatro controles dirigidos, la biblioteca JS
+completa (221 PASS, un ignorado existente) en modos off y on con GC incremental,
+y seis pruebas del ensamblador en Linux/TheOtherSide. Los resultados nominales
+off/on coinciden. Los intentos anteriores, con un import ausente y comparaciones
+de identidad de cadenas en fixtures, se conservaron y corrigieron antes del
+resultado verde. Esto no es validación completa del workspace ni de tres SO.
+
+El candidato anterior `503d7fd`, que almacenaba metadatos de llamadas nativas,
+se descartó: 22.144 comparaciones sin diferencias funcionales, pero seis señales
+de regresión entre 864 observaciones de microbenchmarks. No se ejecutó
+Speedometer ni se integró ese atajo. Sus cambios no están en este candidato.
+
+La compleción numérica todavía no tiene medición de rendimiento. Su alcance
+principal son scripts que capturan un resultado, como eval y consola; no
+justifica atribuir una mejora global al navegador. La fase 8 continúa abierta,
+el JIT permanece apagado por defecto y la 0.1.21 sigue sin publicarse.
