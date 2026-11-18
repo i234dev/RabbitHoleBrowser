@@ -519,7 +519,23 @@ impl FontContext {
     }
 
     fn find_fallback(&self, ch: char, primary: usize) -> Option<usize> {
-        let has = |idx: usize| -> bool { self.try_face(idx).map(|f| f.lookup_glyph_index(ch) != 0).unwrap_or(false) };
+        // A face not loaded yet is first checked in its character map:
+        // loading it (fontdue builds every glyph outline up front) costs far
+        // more, and most candidates of a fallback search lack the character.
+        // Only a face that maps it is loaded, which also confirms it is usable.
+        let has = |idx: usize| -> bool {
+            let loaded = self.faces.borrow().get(idx).and_then(|s| s.font.borrow().clone());
+            if let Some(f) = loaded {
+                return f.lookup_glyph_index(ch) != 0;
+            }
+            if self.faces.borrow().get(idx).is_none_or(|s| s.failed.get()) {
+                return false;
+            }
+            let mapped = self.face_bytes(idx).is_some_and(|b| {
+                rustybuzz::ttf_parser::Face::parse(&b, 0).ok().and_then(|f| f.glyph_index(ch)).is_some_and(|g| g.0 != 0)
+            });
+            mapped && self.try_face(idx).is_some_and(|f| f.lookup_glyph_index(ch) != 0)
+        };
         if has(primary) {
             return Some(primary);
         }
@@ -869,6 +885,30 @@ mod tests {
         assert_eq!(fc.face_name(f), "DejaVu Sans");
         // Bold should be wider.
         assert!(fc.measure(fc.select(Family::Sans, 700, false), 16.0, "Hello") > w);
+    }
+
+    /// Fallback candidates are screened by their character map before being
+    /// loaded; the chosen face must still map the character once loaded,
+    /// and the result must not depend on which faces were loaded before.
+    #[test]
+    fn fallback_faces_map_their_characters() {
+        let chars = ['A', 'é', 'Ж', 'ש', 'ب', 'क', '中', 'あ', '한', '€', '→', '∑', '★', '♪', '😀', '\u{10FFFF}'];
+        let fresh = || FontContext::with_system_fonts();
+        let warm = fresh();
+        // Load every face of the warm context first.
+        for i in 0..warm.faces.borrow().len() {
+            let _ = warm.try_face(i);
+        }
+        for &ch in &chars {
+            let cold = fresh();
+            let a = cold.fallback_for_char(ch, FontId(0));
+            let b = warm.fallback_for_char(ch, FontId(0));
+            assert_eq!(a, b, "fallback for {ch:?} depends on loaded faces");
+            if let Some(f) = a {
+                let face = cold.try_face(cold.resolve_index(f.0)).expect("chosen face loads");
+                assert_ne!(face.lookup_glyph_index(ch), 0, "chosen face lacks {ch:?}");
+            }
+        }
     }
 
     #[test]
