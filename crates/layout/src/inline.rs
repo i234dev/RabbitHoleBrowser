@@ -1902,9 +1902,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
 }
 
 fn needs_bg(style: &ComputedStyle) -> bool {
-    // Even a transparent positioned inline establishes a containing block.
-    // Preserve its fragments so absolute descendants can use its edges.
+    // Even a transparent positioned (or filtered) inline establishes a
+    // containing block. Preserve its fragments so absolute descendants can
+    // use its edges.
     style.position != rabbithole_style::Position::Static
+        || !style.filters.is_empty()
+        || !style.backdrop_filters.is_empty()
         || !style.background_color.is_transparent()
         || style.has_visible_border()
         || style.background_image.is_some()

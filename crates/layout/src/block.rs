@@ -1137,7 +1137,7 @@ impl<'a> Layouter<'a> {
         if let Some(&ancestor) = cache.get(&node) {
             return ancestor;
         }
-        let ancestor = if self.ctx.styles.get(node).is_some_and(|s| s.position != Position::Static) {
+        let ancestor = if self.ctx.styles.get(node).is_some_and(|s| contains_absolutes(s)) {
             Some(node)
         } else {
             self.ctx.doc.flat_parent(node).and_then(|parent| self.positioned_ancestor(parent, cache))
@@ -1384,6 +1384,15 @@ impl<'a> Layouter<'a> {
     }
 }
 
+/// Does an element whose inline fragments are flattened into lines contain
+/// its absolutely positioned descendants? Positioned inlines do, and so do
+/// filtered ones (Filter Effects §5: `filter` / `backdrop-filter` other than
+/// `none` establish a containing block for absolute descendants).
+fn contains_absolutes(style: &rabbithole_style::ComputedStyle) -> bool {
+    style.position != Position::Static
+        || (style.display == rabbithole_style::Display::Inline && (!style.filters.is_empty() || !style.backdrop_filters.is_empty()))
+}
+
 fn has_abs_descendants(b: &LayoutBox) -> bool {
     b.children.iter().any(|child| {
         child.flow == Flow::Absolute
@@ -1405,7 +1414,7 @@ fn inline_containing_blocks(b: &LayoutBox) -> HashMap<rabbithole_dom::NodeId, Re
         for line in &b.lines {
             for fragment in &line.fragments {
                 let (Some(node), FragmentKind::InlineBox { style, left_edge, right_edge }) = (fragment.node, &fragment.kind) else { continue };
-                if style.position == Position::Static {
+                if !contains_absolutes(style) {
                     continue;
                 }
                 // Inline background fragments include their horizontal
