@@ -1651,12 +1651,12 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.flex_direction = from.flex_direction;
             to.flex_wrap = from.flex_wrap;
         }
-        "justify-content" => to.justify_content = from.justify_content,
-        "align-items" => to.align_items = from.align_items,
-        "align-self" => to.align_self = from.align_self,
-        "align-content" => to.align_content = from.align_content,
-        "justify-items" => to.justify_items = from.justify_items,
-        "justify-self" => to.justify_self = from.justify_self,
+        "justify-content" => { to.justify_content = from.justify_content; to.justify_content_flags = from.justify_content_flags; }
+        "align-items" => { to.align_items = from.align_items; to.align_items_flags = from.align_items_flags; }
+        "align-self" => { to.align_self = from.align_self; to.align_self_flags = from.align_self_flags; }
+        "align-content" => { to.align_content = from.align_content; to.align_content_flags = from.align_content_flags; }
+        "justify-items" => { to.justify_items = from.justify_items; to.justify_items_flags = from.justify_items_flags; }
+        "justify-self" => { to.justify_self = from.justify_self; to.justify_self_flags = from.justify_self_flags; }
         "order" => to.order = from.order,
         "gap" | "grid-gap" => {
             to.row_gap = from.row_gap;

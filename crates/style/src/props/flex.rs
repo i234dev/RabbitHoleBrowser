@@ -40,6 +40,38 @@ fn item_align(kw: &str, allow_auto: bool) -> Option<ItemAlign> {
     })
 }
 
+/// The keyword details of one alignment value (see [`AlignFlags`]).
+fn align_flags<'k>(kws: impl IntoIterator<Item = &'k str>) -> AlignFlags {
+    let mut f = 0;
+    for kw in kws {
+        f |= match kw {
+            "safe" => AlignFlags::SAFE,
+            "last" => AlignFlags::LAST,
+            "self-start" | "self-end" => AlignFlags::SELF,
+            "left" => AlignFlags::LEFT,
+            "right" => AlignFlags::RIGHT,
+            "normal" => AlignFlags::NORMAL,
+            "flex-start" | "flex-end" => AlignFlags::FLEX,
+            _ => 0,
+        };
+    }
+    AlignFlags(f)
+}
+
+/// The details of the first (`n == 0`) or second value of a `place-*`
+/// shorthand: a second value starts after the first value's keyword.
+fn place_flags(comps: &[&[Token]], n: usize) -> AlignFlags {
+    let words: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
+    let is_modifier = |w: &str| matches!(w, "safe" | "unsafe" | "first" | "last");
+    let mut split = 0;
+    while split < words.len() && is_modifier(&words[split]) {
+        split += 1;
+    }
+    let (a, b) = words.split_at((split + 1).min(words.len()));
+    let part = if n == 0 || b.is_empty() { a } else { b };
+    align_flags(part.iter().map(String::as_str))
+}
+
 /// Keywords in a value, skipping `safe`/`unsafe`/`first`/`last` modifiers.
 fn keywords(comps: &[&[Token]]) -> Vec<String> {
     comps
@@ -196,6 +228,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(kw) = keywords(comps).first() {
                 if let Some(v) = content_distribution(kw, false) {
                     style.justify_content = v;
+                    style.justify_content_flags = place_flags(comps, 0);
                 }
             }
         }
@@ -203,6 +236,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(kw) = keywords(comps).first() {
                 if let Some(v) = content_distribution(kw, true) {
                     style.align_content = v;
+                    style.align_content_flags = place_flags(comps, 0);
                 }
             }
         }
@@ -210,6 +244,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(kw) = keywords(comps).first() {
                 if let Some(v) = item_align(kw, false) {
                     style.align_items = v;
+                    style.align_items_flags = place_flags(comps, 0);
                 }
             }
         }
@@ -217,6 +252,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(kw) = keywords(comps).first() {
                 if let Some(v) = item_align(kw, true) {
                     style.align_self = v;
+                    style.align_self_flags = place_flags(comps, 0);
                 }
             }
         }
@@ -224,6 +260,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(kw) = keywords(comps).first() {
                 if let Some(v) = item_align(kw, false) {
                     style.justify_items = v;
+                    style.justify_items_flags = place_flags(comps, 0);
                 }
             }
         }
@@ -231,6 +268,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(kw) = keywords(comps).first() {
                 if let Some(v) = item_align(kw, true) {
                     style.justify_self = v;
+                    style.justify_self_flags = place_flags(comps, 0);
                 }
             }
         }
@@ -239,6 +277,8 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(a) = kws.first().and_then(|k| item_align(k, false)) {
                 style.align_items = a;
                 style.justify_items = kws.get(1).and_then(|k| item_align(k, false)).unwrap_or(a);
+                style.align_items_flags = place_flags(comps, 0);
+                style.justify_items_flags = place_flags(comps, 1);
             }
         }
         "place-self" => {
@@ -246,6 +286,8 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(a) = kws.first().and_then(|k| item_align(k, true)) {
                 style.align_self = a;
                 style.justify_self = kws.get(1).and_then(|k| item_align(k, true)).unwrap_or(a);
+                style.align_self_flags = place_flags(comps, 0);
+                style.justify_self_flags = place_flags(comps, 1);
             }
         }
         "place-content" => {
@@ -253,6 +295,8 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             if let Some(a) = kws.first().and_then(|k| content_distribution(k, true)) {
                 style.align_content = a;
                 style.justify_content = kws.get(1).and_then(|k| content_distribution(k, false)).unwrap_or(a);
+                style.align_content_flags = place_flags(comps, 0);
+                style.justify_content_flags = place_flags(comps, 1);
             }
         }
         "order" => {

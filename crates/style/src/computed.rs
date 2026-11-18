@@ -528,6 +528,31 @@ pub enum ContentDistribution {
     Stretch,
 }
 
+/// Keyword details of a box-alignment value that [`ItemAlign`] and
+/// [`ContentDistribution`] fold together (CSS Align 3): `normal`, the
+/// overflow position, `last baseline` and the flavour of start/end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AlignFlags(pub u8);
+
+impl AlignFlags {
+    /// `safe` overflow position.
+    pub const SAFE: u8 = 1;
+    /// `last baseline`.
+    pub const LAST: u8 = 2;
+    /// `self-start` / `self-end`: the item's own writing mode.
+    pub const SELF: u8 = 4;
+    /// `left` / `right`: physical sides.
+    pub const LEFT: u8 = 8;
+    pub const RIGHT: u8 = 16;
+    /// `normal`.
+    pub const NORMAL: u8 = 32;
+    /// `flex-start` / `flex-end`.
+    pub const FLEX: u8 = 64;
+    pub fn has(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+}
+
 /// `align-items` / `align-self` / `justify-items` / `justify-self` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemAlign {
@@ -1077,6 +1102,13 @@ pub struct ComputedStyle {
     /// The ordinary grid/flex used value remains zero in either case.
     pub row_gap_normal: bool,
     pub column_gap_normal: bool,
+    /// Keyword details of the alignment properties (see [`AlignFlags`]).
+    pub justify_content_flags: AlignFlags,
+    pub align_content_flags: AlignFlags,
+    pub justify_items_flags: AlignFlags,
+    pub align_items_flags: AlignFlags,
+    pub justify_self_flags: AlignFlags,
+    pub align_self_flags: AlignFlags,
 
     // ---- grid
     pub grid_template_columns: Vec<TrackListItem>,
@@ -1329,6 +1361,12 @@ impl ComputedStyle {
             column_gap: Length::ZERO,
             row_gap_normal: true,
             column_gap_normal: true,
+            justify_content_flags: AlignFlags(AlignFlags::NORMAL),
+            align_content_flags: AlignFlags(AlignFlags::NORMAL),
+            justify_items_flags: AlignFlags(AlignFlags::NORMAL),
+            align_items_flags: AlignFlags(AlignFlags::NORMAL),
+            justify_self_flags: AlignFlags::default(),
+            align_self_flags: AlignFlags::default(),
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
             grid_auto_columns: Vec::new(),
