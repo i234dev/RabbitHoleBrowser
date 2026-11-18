@@ -12,6 +12,8 @@ use crate::value::V;
 use super::*;
 use crate::realm::SYM_TO_STRING_TAG;
 
+mod duration;
+
 // ------------------------------------------------------------- locales
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +21,8 @@ pub struct Locale {
     pub tag: String,
     pub lang: String,
     pub region: Option<String>,
+    /// The `-u-nu-` (numbering system) extension value, if any.
+    pub nu: Option<String>,
 }
 
 impl Locale {
@@ -39,12 +43,29 @@ impl Locale {
         }
         let mut out = lang.clone();
         let mut region = None;
-        for p in parts {
+        let mut nu = None;
+        let mut parts = parts.peekable();
+        while let Some(p) = parts.next() {
             if p.is_empty() {
                 return None;
             }
             if p.len() == 1 {
-                break; // extension singleton: drop extensions
+                // Extensions are dropped from the tag; `-u-nu-` is kept aside.
+                if p.eq_ignore_ascii_case("u") {
+                    while let Some(k) = parts.next() {
+                        if k.len() == 1 {
+                            break;
+                        }
+                        if k.eq_ignore_ascii_case("nu") {
+                            if let Some(v) = parts.peek() {
+                                if v.len() > 2 {
+                                    nu = Some(v.to_ascii_lowercase());
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
             }
             if p.len() == 4 && p.chars().all(|c| c.is_ascii_alphabetic()) {
                 let mut s = p[..1].to_ascii_uppercase();
@@ -61,7 +82,7 @@ impl Locale {
                 out.push_str(&p.to_ascii_lowercase());
             }
         }
-        Some(Locale { tag: out, lang, region })
+        Some(Locale { tag: out, lang, region, nu })
     }
 }
 
@@ -123,6 +144,58 @@ fn canonical_locale_list(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
             Ok(out)
         }
     }
+}
+
+// ---------------------------------------------------- numbering systems
+
+/// Numbering systems with ten contiguous decimal digits (ECMA-402 table
+/// "Numbering systems with simple digit mappings"): the code point of zero.
+const NUMBERING_SYSTEMS: &[(&str, u32)] = &[
+    ("adlm", 0x1E950), ("ahom", 0x11730), ("arab", 0x0660), ("arabext", 0x06F0), ("bali", 0x1B50),
+    ("beng", 0x09E6), ("bhks", 0x11C50), ("brah", 0x11066), ("cakm", 0x11136), ("cham", 0xAA50),
+    ("deva", 0x0966), ("diak", 0x11950), ("fullwide", 0xFF10), ("gara", 0x10D40), ("gong", 0x11DA0),
+    ("gonm", 0x11D50), ("gujr", 0x0AE6), ("gukh", 0x16130), ("guru", 0x0A66), ("hmng", 0x16B50),
+    ("hmnp", 0x1E140), ("java", 0xA9D0), ("kali", 0xA900), ("kawi", 0x11F50), ("khmr", 0x17E0),
+    ("knda", 0x0CE6), ("krai", 0x16D70), ("lana", 0x1A80), ("lanatham", 0x1A90), ("laoo", 0x0ED0),
+    ("latn", 0x0030), ("lepc", 0x1C40), ("limb", 0x1946), ("mathbold", 0x1D7CE), ("mathdbl", 0x1D7D8),
+    ("mathmono", 0x1D7F6), ("mathsanb", 0x1D7EC), ("mathsans", 0x1D7E2), ("mlym", 0x0D66), ("modi", 0x11650),
+    ("mong", 0x1810), ("mroo", 0x16A60), ("mtei", 0xABF0), ("mymr", 0x1040), ("mymrepka", 0x116DA),
+    ("mymrpao", 0x116D0), ("mymrshan", 0x1090), ("mymrtlng", 0xA9F0), ("nagm", 0x1E4F0), ("newa", 0x11450),
+    ("nkoo", 0x07C0), ("olck", 0x1C50), ("onao", 0x1E5F1), ("orya", 0x0B66), ("osma", 0x104A0),
+    ("outlined", 0x1CCF0), ("rohg", 0x10D30), ("saur", 0xA8D0), ("segment", 0x1FBF0), ("shrd", 0x111D0),
+    ("sind", 0x112F0), ("sinh", 0x0DE6), ("sora", 0x110F0), ("sund", 0x1BB0), ("sunu", 0x11BF0),
+    ("takr", 0x116C0), ("talu", 0x19D0), ("tamldec", 0x0BE6), ("telu", 0x0C66), ("thai", 0x0E50),
+    ("tibt", 0x0F20), ("tirh", 0x114D0), ("tnsa", 0x16AC0), ("tols", 0x11DE0), ("vaii", 0xA620),
+    ("wara", 0x118E0), ("wcho", 0x1E2F0),
+];
+
+/// The zero digit of a supported numbering system.
+pub(super) fn numbering_zero(name: &str) -> Option<u32> {
+    if name == "hanidec" {
+        return Some(0);
+    }
+    NUMBERING_SYSTEMS.iter().find(|(n, _)| *n == name).map(|(_, z)| *z)
+}
+
+/// Replace ASCII digits by the numbering system's digits.
+fn transliterate_digits(s: &str, system: &str) -> String {
+    if system == "latn" || system.is_empty() {
+        return s.to_string();
+    }
+    const HANIDEC: [char; 10] = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+    let Some(zero) = numbering_zero(system) else { return s.to_string() };
+    s.chars()
+        .map(|c| match c.to_digit(10) {
+            Some(d) if c.is_ascii_digit() => {
+                if system == "hanidec" {
+                    HANIDEC[d as usize]
+                } else {
+                    char::from_u32(zero + d).unwrap_or(c)
+                }
+            }
+            _ => c,
+        })
+        .collect()
 }
 
 // ----------------------------------------------------------- options
@@ -659,6 +732,7 @@ pub struct NfOptions {
     compact: bool,
     compact_long: bool,
     sign_display: String,
+    numbering_system: String,
 }
 
 fn currency_digits(code: &str) -> usize {
@@ -766,8 +840,9 @@ fn read_nf_options(realm: &mut Realm, locales: Value, options: Value) -> JsResul
         }
         None => true,
     };
+    let nf_locale = locale.clone();
     Ok(NfOptions {
-        locale,
+        locale: nf_locale,
         style,
         currency,
         currency_display: opt_str(realm, opts, "currencyDisplay")?.unwrap_or_else(|| "symbol".into()),
@@ -782,6 +857,17 @@ fn read_nf_options(realm: &mut Realm, locales: Value, options: Value) -> JsResul
         compact,
         compact_long: opt_str(realm, opts, "compactDisplay")?.as_deref() == Some("long"),
         sign_display: opt_str(realm, opts, "signDisplay")?.unwrap_or_else(|| "auto".into()),
+        numbering_system: {
+            let nu = opt_str(realm, opts, "numberingSystem")?;
+            if let Some(n) = &nu {
+                if !duration::is_unicode_type(n) {
+                    return realm.range_error(&format!("Invalid numberingSystem: {}", n));
+                }
+            }
+            nu.filter(|n| numbering_zero(n).is_some())
+                .or_else(|| locale.nu.clone().filter(|n| numbering_zero(n).is_some()))
+                .unwrap_or_else(|| "latn".into())
+        },
     })
 }
 
@@ -998,11 +1084,11 @@ fn format_parts_impl(x: f64, exact_digits: Option<String>, o: &NfOptions) -> Num
             if !parts.is_empty() && matches!(parts.last(), Some(("integer", _))) {
                 parts.push(("group", gsep.to_string()));
             }
-            parts.push(("integer", piece.to_string()));
+            parts.push(("integer", transliterate_digits(piece, &o.numbering_system)));
         }
         if let Some(f) = frac {
             parts.push(("decimal", dsep.to_string()));
-            parts.push(("fraction", f));
+            parts.push(("fraction", transliterate_digits(&f, &o.numbering_system)));
         }
         if !compact_suffix.is_empty() {
             parts.push(("compact", compact_suffix));
@@ -1502,6 +1588,11 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(dn, "of", 1, display_names_of);
     realm.define_method(dn, "resolvedOptions", 0, display_names_resolved_options);
 
+    let (_, df) = mk(realm, "DurationFormat", "Intl.DurationFormat", duration::ctor, 0);
+    realm.define_method(df, "format", 1, duration::format);
+    realm.define_method(df, "formatToParts", 1, duration::format_to_parts);
+    realm.define_method(df, "resolvedOptions", 0, duration::resolved_options);
+
     let (_, seg) = mk(realm, "Segmenter", "Intl.Segmenter", segmenter_ctor, 0);
     realm.define_method(seg, "segment", 1, segmenter_segment);
     realm.define_method(seg, "resolvedOptions", 0, segmenter_resolved_options);
@@ -1531,7 +1622,12 @@ fn supported_values_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
         "calendar" => vec!["gregory"],
         "collation" => vec!["default"],
         "currency" => vec!["AUD", "BRL", "CAD", "CHF", "CNY", "EUR", "GBP", "HKD", "INR", "JPY", "KRW", "MXN", "NZD", "RUB", "USD"],
-        "numberingSystem" => vec!["latn"],
+        "numberingSystem" => {
+            let mut v: Vec<&str> = NUMBERING_SYSTEMS.iter().map(|(n, _)| *n).collect();
+            v.push("hanidec");
+            v.sort_unstable();
+            v
+        }
         "timeZone" => vec!["UTC"],
         "unit" => vec!["byte", "celsius", "centimeter", "day", "gram", "hour", "kilogram", "kilometer", "liter", "meter", "mile", "minute", "month", "percent", "pound", "second", "week", "year"],
         _ => return realm.range_error(&format!("Invalid key : {}", key)),
@@ -1781,7 +1877,7 @@ fn nf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRes
     let o: NfOptions = host(realm, &this, "Intl.NumberFormat.prototype.resolvedOptions")?;
     let obj = realm.new_object();
     realm.define_property(obj, "locale", Value::str(&o.locale.tag), ALL);
-    realm.define_property(obj, "numberingSystem", Value::str("latn"), ALL);
+    realm.define_property(obj, "numberingSystem", Value::str(&o.numbering_system), ALL);
     let style = match o.style {
         NfStyle::Decimal => "decimal",
         NfStyle::Currency => "currency",
@@ -1984,32 +2080,34 @@ fn lf_format(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
 fn lf_format_to_parts(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o: ListOptions = host(realm, &this, "Intl.ListFormat.prototype.formatToParts")?;
     let items = lf_items(realm, arg(args, 0))?;
-    let s = format_list(&items, &o);
-    // Split the formatted string into element / literal parts.
+    let mut out = Vec::new();
+    for (t, v) in list_parts(&items, &o) {
+        let obj = realm.new_object();
+        realm.define_property(obj, "type", Value::str(t), ALL);
+        realm.define_property(obj, "value", Value::str(&v), ALL);
+        out.push(Value::Object(obj));
+    }
+    Ok(realm.new_array_value(out))
+}
+
+/// The formatted list as element / literal parts.
+fn list_parts(items: &[String], o: &ListOptions) -> Vec<(&'static str, String)> {
+    let s = format_list(items, o);
     let mut out = Vec::new();
     let mut rest = s.as_str();
-    for it in &items {
+    for it in items {
         if let Some(pos) = rest.find(it.as_str()) {
             if pos > 0 {
-                let obj = realm.new_object();
-                realm.define_property(obj, "type", Value::str("literal"), ALL);
-                realm.define_property(obj, "value", Value::str(&rest[..pos]), ALL);
-                out.push(Value::Object(obj));
+                out.push(("literal", rest[..pos].to_string()));
             }
-            let obj = realm.new_object();
-            realm.define_property(obj, "type", Value::str("element"), ALL);
-            realm.define_property(obj, "value", Value::str(it), ALL);
-            out.push(Value::Object(obj));
+            out.push(("element", it.clone()));
             rest = &rest[pos + it.len()..];
         }
     }
     if !rest.is_empty() {
-        let obj = realm.new_object();
-        realm.define_property(obj, "type", Value::str("literal"), ALL);
-        realm.define_property(obj, "value", Value::str(rest), ALL);
-        out.push(Value::Object(obj));
+        out.push(("literal", rest.to_string()));
     }
-    Ok(realm.new_array_value(out))
+    out
 }
 
 fn lf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
