@@ -462,13 +462,16 @@ impl<'a> Layouter<'a> {
                 if l <= cb.x && r >= cb.x + cb.width {
                     break;
                 }
-                let outer = content_w + pb_h + ml + mr;
+                // The used margins of a sized box absorb the rest of the
+                // containing block; next to floats only its own margins count.
+                let (sml, smr) = (style.margin.left.resolve(cbw).unwrap_or(0.0), style.margin.right.resolve(cbw).unwrap_or(0.0));
+                let outer = content_w + pb_h + sml + smr;
                 if style.width.is_auto() {
                     content_w = (r - l - ml - mr - pb_h).max(0.0);
                     x = l + ml;
                     break;
                 } else if outer <= r - l + 0.01 {
-                    x = l + ml;
+                    x = l + sml;
                     break;
                 }
                 match bfc.next_y(y) {
