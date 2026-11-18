@@ -449,10 +449,11 @@ impl<'a> Layouter<'a> {
     }
 
     /// Row-lane track sizing; the items are `widths[i]` wide.
-    fn size_row_lanes(&mut self, b: &mut LayoutBox, tl: &mut TrackList, items: &[LaneItem], widths: &[f32], avail: Option<f32>, gap: f32, cbw: f32, stretch: bool) {
-        if tl.inherited.is_some() {return;}
+    fn size_row_lanes(&mut self, b: &mut LayoutBox, tl: &mut TrackList, items: &[LaneItem], widths: &[f32], avail: Option<f32>, gap: f32, cbw: f32, stretch: bool) -> Vec<Contribution> {
+        if tl.inherited.is_some() {return Vec::new();}
         let contribs=self.lane_row_contributions(b,tl,items,widths,gap,avail,cbw,MeasurePhase::Initial);
         size_tracks(&mut tl.tracks, &contribs, avail, gap, stretch);
+        contribs
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -593,7 +594,11 @@ impl<'a> Layouter<'a> {
         let (mut tl, items) = self.lanes_setup(b, &style, true, avail, row_gap, cbw, (cx, cy));
         let mut widths=self.row_lane_widths(b,&tl,&items,row_gap,avail,cbw,Some(cbw),MeasurePhase::Initial);
         let stretch = stretches_tracks(&style, true);
-        self.size_row_lanes(b, &mut tl, &items, &widths, avail, row_gap, cbw, stretch);
+        let contribs = self.size_row_lanes(b, &mut tl, &items, &widths, avail, row_gap, cbw, stretch);
+        let mut row_avail = avail;
+        if avail.is_none() && tl.inherited.is_none() {
+            row_avail = resize_rows_to_limits(&mut tl.tracks, &contribs, &style, cbw, row_gap, stretch);
+        }
         if items.iter().any(|it|subgrid::requests(&b.children[it.idx]).1) {
             let adjusted=self.row_lane_widths(b,&tl,&items,row_gap,avail,cbw,Some(cbw),MeasurePhase::Adjusted);
             if adjusted!=widths {
@@ -602,7 +607,7 @@ impl<'a> Layouter<'a> {
                 widths=adjusted;
             }
         }
-        let (row_pos, rows_extent) = subgrid::positions(&tl, row_gap, avail, style.align_content);
+        let (row_pos, rows_extent) = subgrid::positions(&tl, row_gap, row_avail, style.align_content);
         let tol = tolerance(&style, avail);
         let tracks = tl.tracks.clone();
         let mut placed: Vec<(f32, f32)> = vec![(0.0, 0.0); items.len()];

@@ -936,6 +936,34 @@ impl ItemBases {
     }
 }
 
+/// A definite `min-height` / `max-height` as a content-box height
+/// (lengths only).
+fn definite_height_limit(style: &ComputedStyle, cbw: f32, max: bool) -> Option<f32> {
+    let Length::Px(v) = (if max { style.max_height } else { style.min_height }) else { return None };
+    let pad = crate::block::resolve_edges(&style.padding, cbw);
+    let pb = pad.top + pad.bottom + style.border_width.top + style.border_width.bottom;
+    let v = if style.box_sizing == BoxSizing::BorderBox { v - pb } else { v };
+    (v > 0.0 || max).then_some(v.max(0.0))
+}
+
+/// Rows sized in an indefinite height that end up shorter than a definite
+/// `min-height` are maximized/stretched/flexed in that size instead
+/// (§12.6-12.8); flexible rows that make it taller than `max-height` are
+/// redone in that size (§12.7.1). Returns the size used.
+fn resize_rows_to_limits(tracks: &mut [Track], contribs: &[Contribution], style: &ComputedStyle, cbw: f32, gap: f32, stretch: bool) -> Option<f32> {
+    let visible = tracks.iter().filter(|t| !t.collapsed).count();
+    let used = tracks.iter().map(|t| t.base).sum::<f32>() + gap * visible.saturating_sub(1) as f32;
+    if let Some(min) = definite_height_limit(style, cbw, false).filter(|&min| used + 0.01 < min) {
+        size_tracks_with_space(tracks, contribs, GridSpace::Definite(min), gap, stretch);
+        return Some(min);
+    }
+    if let Some(max) = definite_height_limit(style, cbw, true).filter(|&max| used > max + 0.01 && tracks.iter().any(|t| t.is_flex())) {
+        size_tracks_with_space(tracks, contribs, GridSpace::Definite(max), gap, stretch);
+        return Some(max);
+    }
+    None
+}
+
 fn span_size(tracks: &[Track], pos: &[f32], start: usize, end: usize) -> (f32, f32) {
     if tracks.is_empty() || start >= end {
         return (0.0, 0.0);
@@ -986,6 +1014,7 @@ impl<'a> Layouter<'a> {
         let row_stretch=stretches_tracks(&style,true);
         let ordinary_axis_consumer=traversal::ordinary_orthogonal_grid(b);
         let mirror=mirrored(b,&cols);
+        let mut row_avail=cb.height;
         let mut col_pos;
         if ordinary_axis_consumer {
             let spaces=[phases::AvailableSpace::Definite(cbw),cb.height.map(phases::AvailableSpace::Definite).unwrap_or(phases::AvailableSpace::Indefinite)];
@@ -1007,6 +1036,12 @@ impl<'a> Layouter<'a> {
                 row_contribs=if project {self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Initial)} else {self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,&rows,row_gap)};
                 let space=subgrid::standalone_space(b,true,cb.height);
                 size_tracks_with_space(&mut rows.tracks, &row_contribs, space, row_gap, row_stretch);
+                // §12.6-12.8: with an indefinite height, a definite
+                // min-height is the free space for maximizing, flexible and
+                // stretched tracks.
+                if cb.height.is_none() && space == GridSpace::MaxContent {
+                    row_avail = resize_rows_to_limits(&mut rows.tracks, &row_contribs, &style, cbw, row_gap, row_stretch).or(row_avail);
+                }
             }
             // Grid2 §12.1 steps 3-4: at most one adjustment of each axis.
             // Ordinary grids retain the existing path; subgrid descendants now
@@ -1028,7 +1063,7 @@ impl<'a> Layouter<'a> {
                 }
             }
         }
-        let (row_pos, rows_extent) = subgrid::positions(&rows, row_gap, cb.height, style.align_content);
+        let (row_pos, rows_extent) = subgrid::positions(&rows, row_gap, row_avail, style.align_content);
 
         // Final item layout and alignment (§10).
         for it in items.iter_mut() {
