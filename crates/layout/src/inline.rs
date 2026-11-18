@@ -193,6 +193,33 @@ pub(crate) fn emphasis_of(style: &ComputedStyle) -> Option<crate::tree::Emphasis
     Some(crate::tree::Emphasis { mark: Rc::from(mark.as_str()), color: style.text_emphasis_color.unwrap_or(style.color), over })
 }
 
+/// Combining marks and variation selectors: they belong to the preceding
+/// character, which stays the one that decides spacing and breaks.
+fn attaches_to_previous(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x300..=0x36F
+            | 0x0591..=0x05BD
+            | 0x05BF
+            | 0x05C1..=0x05C2
+            | 0x05C4..=0x05C5
+            | 0x05C7
+            | 0x064B..=0x065F
+            | 0x0670
+            | 0x06D6..=0x06DC
+            | 0x06DF..=0x06E4
+            | 0x06E7..=0x06E8
+            | 0x06EA..=0x06ED
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF
+            | 0xFE20..=0xFE2F
+            | 0x180B..=0x180F
+            | 0xFE00..=0xFE0F
+            | 0xE0100..=0xE01EF
+    )
+}
+
 /// `text-autospace` applies between `a` and `b`: an ideograph next to a
 /// letter or digit of another script.
 fn autospace_between(a: char, b: char) -> bool {
@@ -200,7 +227,7 @@ fn autospace_between(a: char, b: char) -> bool {
         matches!(c as u32, 0x3041..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x3FFFD)
     }
     fn other(c: char) -> bool {
-        c.is_alphanumeric() && (c as u32) < 0x2E80 && !matches!(c as u32, 0x0590..=0x08FF)
+        c.is_alphanumeric() && (c as u32) < 0x2E80
     }
     (ideo(a) && other(b)) || (other(a) && ideo(b))
 }
@@ -298,7 +325,7 @@ impl<'a> Layouter<'a> {
                                     }
                                 }
                                 let prev_before = prev_char;
-                                prev_char = w.chars().rev().find(|c| !matches!(*c as u32, 0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)).or(w.chars().last());
+                                prev_char = w.chars().rev().find(|&c| !attaches_to_previous(c)).or(w.chars().last());
                                 let mut parts: Vec<(String, bool)> = Vec::new();
                                 for (part, continuation) in split_hyphens(&w) {
                                     if wraps && !is_space_word {
@@ -333,7 +360,7 @@ impl<'a> Layouter<'a> {
                                                 gapped.push((String::new(), false, true));
                                             }
                                             cur.push(c);
-                                            if !matches!(c as u32, 0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F) {
+                                            if !attaches_to_previous(c) {
                                                 last = Some(c);
                                             }
                                         }
