@@ -246,6 +246,9 @@ pub struct LayoutBox {
     /// Self-alignment within a static-position rectangle whose start corner
     /// is `static_pos` (CSS Align 3 §A; children of grid containers).
     pub static_align: Option<StaticAlign>,
+    /// A grid container whose items' areas overlap: its items then paint
+    /// atomically (as inline blocks) so later items cover earlier ones.
+    pub grid_items_overlap: bool,
     pub colspan: u32,
     /// Whether this box establishes a block formatting context.
     pub bfc_root: bool,
@@ -348,6 +351,7 @@ impl LayoutBox {
             bottom_margins: (0.0, 0.0),
             static_pos: (0.0, 0.0),
             static_align: None,
+            grid_items_overlap: false,
             colspan: 1,
             bfc_root: false,
             clips: false,

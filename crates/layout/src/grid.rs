@@ -210,6 +210,14 @@ struct TrackList {
     inherited: Option<std::sync::Arc<subgrid::SharedTracks>>,
 }
 
+impl TrackList {
+    /// Whether fixed track sizes are known: own tracks, or shared tracks
+    /// whose geometry is definite (not a placeholder while being sized).
+    fn sized(&self) -> bool {
+        self.inherited.as_ref().is_none_or(|parent| parent.definite)
+    }
+}
+
 /// Expand a template track list into tracks (§7.2), resolving `repeat()`.
 fn expand_tracks(list: &[TrackListItem], avail: Option<f32>, gap: f32) -> TrackList {
     expand_tracks_sized(list, avail, gap, None, None)
@@ -875,6 +883,59 @@ fn justify_for_pass(value: ItemAlign, flags: rabbithole_style::AlignFlags, item_
     if right != mirror { ItemAlign::FlexEnd } else { ItemAlign::FlexStart }
 }
 
+/// The size of the tracks [start, end) with their gaps when all of them
+/// have fixed sizing functions (a definite percentage basis before sizing).
+fn fixed_span(tracks: &[Track], start: i32, end: i32, gap: f32) -> Option<f32> {
+    let (start, end) = (start.max(0) as usize, end.max(0) as usize);
+    if start >= end || end > tracks.len() {
+        return None;
+    }
+    let mut sum = gap * (end - start - 1) as f32;
+    for t in &tracks[start..end] {
+        match (t.min, t.max) {
+            (Sizing::Fixed(a), Sizing::Fixed(b)) => sum += a.max(b),
+            _ => return None,
+        }
+    }
+    Some(sum)
+}
+
+/// The sum of the fixed maximum sizing functions of [start, end) and their
+/// gaps, when all of them have one (Grid2 §6.6: the automatic minimum size
+/// of an item in such tracks is clamped to fit its area).
+fn fixed_max_span(tracks: &[Track], start: i32, end: i32, gap: f32) -> Option<f32> {
+    let (start, end) = (start.max(0) as usize, end.max(0) as usize);
+    if start >= end || end > tracks.len() {
+        return None;
+    }
+    let mut sum = gap * (end - start - 1) as f32;
+    for t in &tracks[start..end] {
+        match t.max {
+            Sizing::Fixed(v) => sum += v,
+            _ => return None,
+        }
+    }
+    Some(sum)
+}
+
+/// Definite sizes known before track sizing for one item: the clamp of its
+/// automatic minimum width, and the block-size percentage basis.
+#[derive(Clone, Copy, Default)]
+struct ItemBases {
+    min_limit: Option<f32>,
+    row_basis: Option<f32>,
+}
+
+impl ItemBases {
+    fn new(it: &GridItem, cols: Option<(&TrackList, f32)>, rows: Option<(&TrackList, f32)>) -> ItemBases {
+        // Shared (subgrid) tracks are placeholders while they are sized.
+        ItemBases {
+            min_limit: cols.filter(|(c, _)| c.sized()).and_then(|(c, gap)| fixed_max_span(&c.tracks, it.area.col.0, it.area.col.1, gap)),
+            row_basis: rows.filter(|(r, _)| r.sized()).and_then(|(r, gap)| fixed_span(&r.tracks, it.area.row.0, it.area.row.1, gap)),
+        }
+    }
+}
+
 fn span_size(tracks: &[Track], pos: &[f32], start: usize, end: usize) -> (f32, f32) {
     if tracks.is_empty() || start >= end {
         return (0.0, 0.0);
@@ -936,14 +997,14 @@ impl<'a> Layouter<'a> {
             let mut row_contribs=Vec::new();
             // Column sizing.
             if cols.inherited.is_none() {
-                col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw)};
+                col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw,Some((&cols,col_gap)),Some((&rows,row_gap)))};
                 size_tracks(&mut cols.tracks, &col_contribs, Some(cbw), col_gap, col_stretch);
             }
             col_pos = subgrid::positions(&cols, col_gap, Some(cbw), style.justify_content).0;
 
             // Row sizing: contributions are item heights at their column width.
             if rows.inherited.is_none() {
-                row_contribs=if project {self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Initial)} else {self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,cb.height)};
+                row_contribs=if project {self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Initial)} else {self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,&rows,row_gap)};
                 let space=subgrid::standalone_space(b,true,cb.height);
                 size_tracks_with_space(&mut rows.tracks, &row_contribs, space, row_gap, row_stretch);
             }
@@ -1222,8 +1283,10 @@ impl<'a> Layouter<'a> {
         let mut occ = Occupancy { cells: HashSet::new() };
         let mut placed: Vec<Option<Area>> = vec![None; pending.len()];
         // Step 1: definite in both axes.
+        let mut overlap = false;
         for (k, p) in pending.iter().enumerate() {
             if let (Ok(r), Ok(c)) = (p.row, p.col) {
+                overlap = overlap || !occ.fits(r.0, r.1, c.0, c.1);
                 occ.mark(r.0, r.1, c.0, c.1);
                 placed[k] = Some(Area { row: r, col: c });
                 if column_flow {
@@ -1233,6 +1296,7 @@ impl<'a> Layouter<'a> {
                 }
             }
         }
+        b.grid_items_overlap = overlap;
         // Items with a span larger than the minor axis grow the explicit grid.
         for p in &pending {
             let minor_span = if column_flow {
@@ -1432,8 +1496,8 @@ impl<'a> Layouter<'a> {
     }
 
     /// Column contributions: min-/max-content widths incl. margins/padding/border.
-    fn column_contributions(&mut self,b:&mut LayoutBox,items:&[GridItem],cbw:f32)->Vec<Contribution> {
-        items.iter().map(|it|self.column_contribution(&mut b.children[it.idx],it,cbw)).collect()
+    fn column_contributions(&mut self,b:&mut LayoutBox,items:&[GridItem],cbw:f32,cols:Option<(&TrackList,f32)>,rows:Option<(&TrackList,f32)>)->Vec<Contribution> {
+        items.iter().map(|it|self.column_contribution(&mut b.children[it.idx],it,cbw,ItemBases::new(it,cols,rows))).collect()
     }
 
     /// Shared-axis items are empty for this sizing pass: their descendants
@@ -1447,7 +1511,7 @@ impl<'a> Layouter<'a> {
             let child=&mut b.children[it.idx];
             let (column_request,row_request)=subgrid::requests(child);
             if !column_request&&!row_request {
-                out.push(self.column_contribution(child,it,cbw));
+                out.push(self.column_contribution(child,it,cbw,ItemBases::new(it,Some((cols,col_gap)),rows.map(|r|(r,row_gap)))));
                 continue;
             }
             self.grid_work.charge(1);
@@ -1470,10 +1534,10 @@ impl<'a> Layouter<'a> {
                 self.grid_work.charge(nested.len());
                 out.extend(nested);
             } else if row_request&&row_source.is_some() {
-                let contribution=self.with_subgrid(child,None,row_source,reference,|this,child|this.column_contribution(child,it,reference));
+                let contribution=self.with_subgrid(child,None,row_source,reference,|this,child|this.column_contribution(child,it,reference,ItemBases::default()));
                 out.push(contribution);
             } else {
-                out.extend(self.column_contributions(b,std::slice::from_ref(it),cbw));
+                out.extend(self.column_contributions(b,std::slice::from_ref(it),cbw,Some((cols,col_gap)),rows.map(|r|(r,row_gap))));
             }
         }
         out
@@ -1481,19 +1545,31 @@ impl<'a> Layouter<'a> {
 
     /// Single ordinary item, after any perpendicular inherited geometry has
     /// been installed. This shares the same sizing/automatic-minimum rules.
-    fn column_contribution(&mut self,child:&mut LayoutBox,it:&GridItem,cbw:f32)->Contribution {
+    fn column_contribution(&mut self,child:&mut LayoutBox,it:&GridItem,cbw:f32,bases:ItemBases)->Contribution {
         // Keep the ordinary collector and projected collector on one path.
         let bb=child.style.box_sizing==BoxSizing::BorderBox;
         let extras=it.edges.pb_h+it.edges.margin_sum(Axis::Row);
+        let pct=|l:Length|matches!(l,Length::Percent(_)|Length::Calc(..)|Length::Math(_));
+        // A preferred aspect ratio transfers a block size definite against
+        // fixed rows (Grid2 §6.6 / CSS Sizing 4 §5).
+        let ratio_width=match (child.style.aspect_ratio,child.kind) {
+            (Some(r),k) if k!=BoxKind::Image&&r>0.&&child.style.width.is_auto()&&pct(child.style.height)=>bases.row_basis.and_then(|basis|resolve_size(child.style.height,Some(basis),bb,it.edges.pb_v)).map(|h|{
+                if bb {((h+it.edges.pb_v)*r-it.edges.pb_h).max(0.)} else {h*r}
+            }),
+            _=>None,
+        };
         let (min,max)=match resolve_size(child.style.width,Some(cbw),bb,it.edges.pb_h) {
-            Some(w) if !matches!(child.style.width,Length::Percent(_)|Length::Calc(..)|Length::Math(_))=>(w,w),
+            Some(w) if !pct(child.style.width)=>(w,w),
+            _ if ratio_width.is_some()=>{let w=ratio_width.unwrap_or(0.);(w,w)},
             // A percentage of the (still indefinite) grid area behaves as auto.
-            _ if child.kind==BoxKind::Image=>{let cyclic=matches!(child.style.width,Length::Percent(_)|Length::Calc(..)|Length::Math(_));let(w,_)=self.replaced_size(child,(!cyclic).then_some(cbw),None,it.edges.pb_h);(w,w)},
+            _ if child.kind==BoxKind::Image=>{let cyclic=pct(child.style.width);let(w,_)=self.replaced_size(child,(!cyclic).then_some(cbw),bases.row_basis,it.edges.pb_h);(w,w)},
             _=>{let(min,max)=self.intrinsic(child);match child.style.width {Length::MinContent=>(min,min),Length::MaxContent=>(max,max),_=>(min,max)}}
         };
         let min=match child.style.min_width {
             Length::Px(m) if child.kind!=BoxKind::Image=>if bb {(m-it.edges.pb_h).max(0.).min(min)} else {m.min(min)},
             Length::Auto if child.kind!=BoxKind::Image&&crate::flex::is_scroll_container(&child.style)=>0.,
+            // The automatic minimum fits an area of fixed maximum tracks.
+            Length::Auto if child.style.width.is_auto()=>match bases.min_limit {Some(limit)=>min.min((limit-extras).max(0.)),None=>min},
             _=>min,
         };
         Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras}
@@ -1504,7 +1580,7 @@ impl<'a> Layouter<'a> {
         let _probe = self.grid_publication.probe();
         let align=b.style.align_content;
         let ordinary:Vec<GridItem>=items.iter().copied().filter(|it|!subgrid::requests(&b.children[it.idx]).1).collect();
-        let mut out=self.row_contributions(b,&ordinary,cols,col_pos,col_gap,cbw,cbh);
+        let mut out=self.row_contributions(b,&ordinary,cols,col_pos,col_gap,cbw,rows,row_gap);
         for it in items {
             if !subgrid::requests(&b.children[it.idx]).1 {
                 continue;
@@ -1532,7 +1608,7 @@ impl<'a> Layouter<'a> {
 
     /// Row contributions: the item's height when laid out at its column width.
     #[allow(clippy::too_many_arguments)]
-    fn row_contributions(&mut self, b: &mut LayoutBox, items: &[GridItem], cols: &TrackList, col_pos: &[f32], col_gap: f32, cbw: f32, cbh: Option<f32>) -> Vec<Contribution> {
+    fn row_contributions(&mut self, b: &mut LayoutBox, items: &[GridItem], cols: &TrackList, col_pos: &[f32], col_gap: f32, cbw: f32, rows: &TrackList, row_gap: f32) -> Vec<Contribution> {
         let _probe = self.grid_publication.probe();
         let mut out = Vec::with_capacity(items.len());
         // (contribution, row, baseline offset) of baseline-aligned items.
@@ -1544,13 +1620,16 @@ impl<'a> Layouter<'a> {
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
             let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column);
             let baseline = it.align == ItemAlign::Baseline;
+            // Percentages of the block size resolve against the grid area
+            // only when its rows have fixed sizes; otherwise they are cyclic.
+            let cbh = if rows.sized() { fixed_span(&rows.tracks, it.area.row.0, it.area.row.1, row_gap) } else { None };
             let h = match resolve_size(child.style.height, cbh, bb, it.edges.pb_v) {
                 Some(h) if !baseline => h + extras_v,
                 _ => {
                     let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,true));
                     self.with_subgrid(child,columns,None,aw,|this,child| {
                         let inner_w = this.grid_item_width(child, it, aw, cbw);
-                        let cb = Cb { x:0., width:aw, height:None };
+                        let cb = Cb { x:0., width:aw, height:cbh };
                         let mut bfc = Bfc::new();
                         this.forced_content_height = None;
                         this.layout_block(child,&cb,0.,&mut bfc,WidthMode::Fixed(inner_w));
@@ -1561,10 +1640,15 @@ impl<'a> Layouter<'a> {
             if baseline {
                 baselines.push((out.len(), it.area.row.0, Self::item_baseline(child)));
             }
+            // The automatic minimum fits an area of fixed maximum tracks.
+            let min = match fixed_max_span(&rows.tracks, it.area.row.0, it.area.row.1, row_gap).filter(|_| rows.sized()) {
+                Some(limit) if child.style.height.is_auto() && child.style.min_height.is_auto() && !crate::flex::is_scroll_container(&child.style) => h.min(limit.max(extras_v)),
+                _ => h,
+            };
             out.push(Contribution {
                 start: it.area.row.0.max(0) as usize,
                 end: it.area.row.1.max(1) as usize,
-                min: h,
+                min,
                 max: h,
             });
         }
@@ -1645,22 +1729,10 @@ impl<'a> Layouter<'a> {
         let replaced_w = child.kind == BoxKind::Image && stretch_replaced(it.justify, child.style.width.is_auto(), it.edges.auto.left, it.edges.auto.right);
         let replaced_h = child.kind == BoxKind::Image && stretch_replaced(it.align, child.style.height.is_auto(), it.edges.auto.top, it.edges.auto.bottom);
         if replaced_w || replaced_h {
-            // A stretched replaced item: a temporary definite size in the
-            // stretched axes; an unstretched axis follows the aspect ratio.
-            let mut st = (*child.style).clone();
-            let border_box = st.box_sizing == BoxSizing::BorderBox;
-            if replaced_w {
-                st.width = Length::Px(inner_w + if border_box { it.edges.pb_h } else { 0.0 });
-            }
-            if replaced_h {
-                let h = (ah - it.edges.pb_v - it.edges.margin_sum(Axis::Column)).max(0.0);
-                let h = self.clamp_height(&st, h, Some(ah), it.edges.pb_v);
-                st.height = Length::Px(h + if border_box { it.edges.pb_v } else { 0.0 });
-            }
-            let orig = std::mem::replace(&mut child.style, std::rc::Rc::new(st));
-            self.forced_content_height = None;
-            self.layout_block(child, &cb, 0.0, &mut bfc, WidthMode::Fixed(inner_w));
-            child.style = orig;
+            // A stretched replaced item: an unstretched axis follows the
+            // aspect ratio.
+            let h = replaced_h.then(|| self.clamp_height(&child.style.clone(), (ah - it.edges.pb_v - it.edges.margin_sum(Axis::Column)).max(0.0), Some(ah), it.edges.pb_v));
+            self.layout_replaced_sized(child, &cb, replaced_w.then_some(inner_w), h, it.edges.pb_h, it.edges.pb_v);
         } else {
             self.forced_content_height = forced;
             self.layout_block(child, &cb, 0.0, &mut bfc, WidthMode::Fixed(inner_w));
@@ -1716,6 +1788,25 @@ impl<'a> Layouter<'a> {
         let y = ay + dy + it.edges.margin.top;
         child.translate(x - child.rect.x, y - child.rect.y);
         child.margin = margin;
+    }
+
+    /// Lay out a replaced item with temporary definite content sizes in the
+    /// given axes (stretch alignment).
+    pub(crate) fn layout_replaced_sized(&mut self, child: &mut LayoutBox, cb: &Cb, w: Option<f32>, h: Option<f32>, pb_h: f32, pb_v: f32) {
+        let mut st = (*child.style).clone();
+        let border_box = st.box_sizing == BoxSizing::BorderBox;
+        if let Some(w) = w {
+            st.width = Length::Px(w + if border_box { pb_h } else { 0.0 });
+        }
+        if let Some(h) = h {
+            st.height = Length::Px(h + if border_box { pb_v } else { 0.0 });
+        }
+        let inner_w = w.unwrap_or(0.0);
+        let orig = std::mem::replace(&mut child.style, std::rc::Rc::new(st));
+        self.forced_content_height = None;
+        let mut bfc = Bfc::new();
+        self.layout_block(child, cb, 0.0, &mut bfc, WidthMode::Fixed(inner_w));
+        child.style = orig;
     }
 
     /// Intrinsic (min-content, max-content) widths of a grid container.

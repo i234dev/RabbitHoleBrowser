@@ -463,7 +463,15 @@ impl<'a> Layouter<'a> {
         for (it, &w) in items.iter().zip(widths) {
             if tl.inherited.is_none()&&subgrid::requests(&b.children[it.idx])==(false,false) {
                 let h=self.lane_item_height(&mut b.children[it.idx],it,w,cbw);
-                for s in Self::lane_positions(it,&tl.tracks) {contribs.push(Contribution{start:s,end:s+it.span.min(tl.tracks.len()),min:h,max:h});}
+                let st=&b.children[it.idx].style;
+                let auto_min=st.height.is_auto()&&st.min_height.is_auto()&&!crate::flex::is_scroll_container(st);
+                let extras=it.edges.pb_v+it.edges.margin_sum(Axis::Column);
+                for s in Self::lane_positions(it,&tl.tracks) {
+                    let end=s+it.span.min(tl.tracks.len());
+                    // The automatic minimum fits an area of fixed maximum tracks.
+                    let min=match fixed_max_span(&tl.tracks,s as i32,end as i32,gap) {Some(limit) if auto_min=>h.min(limit.max(extras)),_=>h};
+                    contribs.push(Contribution{start:s,end,min,max:h});
+                }
                 continue;
             }
             self.grid_work.charge(if it.fixed.is_some() {1} else {tl.tracks.len().saturating_sub(it.span.min(tl.tracks.len())).saturating_add(1)});
@@ -527,9 +535,16 @@ impl<'a> Layouter<'a> {
                     subgrid::stretch_item(child,&mut gi);
                     let inner_w = this.grid_item_width(child, &gi, aw, cbw);
                     let lcb = Cb { x: 0.0, width: aw, height: cb.height };
-                    let mut bfc = Bfc::new();
-                    this.forced_content_height = None;
-                    this.layout_block(child, &lcb, 0.0, &mut bfc, WidthMode::Fixed(inner_w));
+                    if child.kind == BoxKind::Image && gi.justify == ItemAlign::Stretch && child.style.width.is_auto() && !gi.edges.auto.left && !gi.edges.auto.right {
+                        // Stretched in the grid axis; a stretched stacking
+                        // axis keeps the natural size instead of the ratio.
+                        let h = (gi.align == ItemAlign::Stretch && child.style.height.is_auto()).then(|| this.replaced_size(child, None, None, gi.edges.pb_h).1);
+                        this.layout_replaced_sized(child, &lcb, Some(inner_w), h, gi.edges.pb_h, gi.edges.pb_v);
+                    } else {
+                        let mut bfc = Bfc::new();
+                        this.forced_content_height = None;
+                        this.layout_block(child, &lcb, 0.0, &mut bfc, WidthMode::Fixed(inner_w));
+                    }
                     let mut margin = gi.edges.margin;
                     let free = aw - (child.rect.w + margin.left + margin.right);
                     let dx = align_offset(gi.justify, gi.edges.auto.left, gi.edges.auto.right, free, &mut margin.left, &mut margin.right);
@@ -608,9 +623,15 @@ impl<'a> Layouter<'a> {
                     && child.style.height.is_auto() && child.kind != BoxKind::Image;
                 let lcb = Cb { x:0.,width:cbw,height:Some(ah) };
                 let mut bfc = Bfc::new();
-                this.forced_content_height = if stretch {Some((ah-gi.edges.pb_v-gi.edges.margin_sum(Axis::Column)).max(0.))} else {None};
-                this.layout_block(child,&lcb,0.,&mut bfc,WidthMode::Fixed(widths[i]));
-                this.forced_content_height = None;
+                if child.kind == BoxKind::Image && gi.align == ItemAlign::Stretch && child.style.height.is_auto() && !gi.edges.auto.top && !gi.edges.auto.bottom {
+                    let h = (ah-gi.edges.pb_v-gi.edges.margin_sum(Axis::Column)).max(0.);
+                    let w = (gi.justify == ItemAlign::Stretch && child.style.width.is_auto()).then(|| this.replaced_size(child, None, None, gi.edges.pb_h).0);
+                    this.layout_replaced_sized(child, &lcb, w, Some(h), gi.edges.pb_h, gi.edges.pb_v);
+                } else {
+                    this.forced_content_height = if stretch {Some((ah-gi.edges.pb_v-gi.edges.margin_sum(Axis::Column)).max(0.))} else {None};
+                    this.layout_block(child,&lcb,0.,&mut bfc,WidthMode::Fixed(widths[i]));
+                    this.forced_content_height = None;
+                }
                 let free=ah-(child.rect.h+margin.top+margin.bottom);
                 let dy=align_offset(gi.align,gi.edges.auto.top,gi.edges.auto.bottom,free,&mut margin.top,&mut margin.bottom);
                 child.margin=margin;
