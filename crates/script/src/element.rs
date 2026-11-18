@@ -2491,6 +2491,10 @@ pub(crate) const EVENT_HANDLER_NAMES: &[&str] = &[
 
 pub(crate) fn install(realm: &mut Realm) {
     let el = define_class(realm, "Element", Some("Node"), illegal_ctor);
+    crate::node::install_parent_node(realm, el);
+    crate::node::install_get_elements_by(realm, el);
+    crate::node::install_child_node(realm, el);
+    crate::node::install_non_document_type_child_node(realm, el);
     let acc = |realm: &mut Realm, name: &str, g: rabbithole_js::NativeFn, s: Option<rabbithole_js::NativeFn>| realm.define_accessor(el, name, Some(g), s, ACC);
     acc(realm, "tagName", e_tag_name, None);
     acc(realm, "localName", e_local_name, None);

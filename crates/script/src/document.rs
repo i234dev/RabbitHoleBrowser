@@ -826,6 +826,8 @@ pub(crate) fn validate_qname(realm: &mut Realm, _this: Value, args: &[Value]) ->
 
 pub(crate) fn install(realm: &mut Realm) {
     let d = define_class(realm, "Document", Some("Node"), doc_ctor);
+    crate::node::install_parent_node(realm, d);
+    crate::node::install_get_elements_by(realm, d);
     state().borrow_mut().protos.insert("HTMLDocument", d);
     let acc = |realm: &mut Realm, name: &str, g: rabbithole_js::NativeFn, s: Option<rabbithole_js::NativeFn>| realm.define_accessor(d, name, Some(g), s, ACC);
     acc(realm, "documentElement", d_document_element, None);
