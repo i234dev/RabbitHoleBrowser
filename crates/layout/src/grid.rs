@@ -559,6 +559,115 @@ fn distribute_extra(tracks: &mut [Track], candidates: &[usize], extra: f32, beyo
     remaining.max(0.0)
 }
 
+/// The phases of §12.5 step 3 for items spanning several tracks.
+#[derive(Clone, Copy, PartialEq)]
+enum SpanPhase {
+    /// Base sizes of tracks with intrinsic minimums, from the items'
+    /// minimum contributions (steps 3.1-3.2).
+    IntrinsicMinimums,
+    /// Base sizes of tracks with max-content minimums, from max-content
+    /// contributions (step 3.3).
+    MaxContentMinimums,
+    /// Growth limits of tracks with intrinsic maximums, from minimum
+    /// contributions (step 3.5).
+    IntrinsicMaximums,
+    /// Growth limits of tracks with max-content maximums (auto,
+    /// max-content, fit-content), from max-content contributions (3.6).
+    MaxContentMaximums,
+}
+
+/// §12.5.1: the increases one spanning item needs in `phase`, folded into
+/// `planned` (largest per track). Returns whether any track is affected.
+fn distribute_span(tracks: &[Track], c: &Contribution, gap: f32, phase: SpanPhase, planned: &mut [f32]) -> bool {
+    let range = c.start..c.end;
+    let max_content_max = |t: &Track| matches!(t.max, Sizing::MaxContent | Sizing::Auto | Sizing::FitContent(_));
+    let affected: Vec<usize> = range
+        .clone()
+        .filter(|&i| {
+            let t = &tracks[i];
+            match phase {
+                SpanPhase::IntrinsicMinimums => t.min.is_intrinsic(),
+                SpanPhase::MaxContentMinimums => matches!(t.min, Sizing::MaxContent),
+                SpanPhase::IntrinsicMaximums => t.max.is_intrinsic(),
+                SpanPhase::MaxContentMaximums => max_content_max(t),
+            }
+        })
+        .collect();
+    if affected.is_empty() {
+        return false;
+    }
+    let limits_phase = matches!(phase, SpanPhase::IntrinsicMaximums | SpanPhase::MaxContentMaximums);
+    let size = |t: &Track| if limits_phase { t.limit.unwrap_or(t.base) } else { t.base };
+    let contribution = match phase {
+        SpanPhase::IntrinsicMinimums | SpanPhase::IntrinsicMaximums => c.min,
+        SpanPhase::MaxContentMinimums | SpanPhase::MaxContentMaximums => c.max,
+    };
+    let gaps = gap * ((c.end - c.start) as f32 - 1.0);
+    let mut space = contribution - range.clone().map(|i| size(&tracks[i])).sum::<f32>() - gaps;
+    if space <= 0.0 {
+        return true;
+    }
+    // Up to each track's limit.
+    let cap = |t: &Track| -> f32 {
+        let fit = match t.max {
+            Sizing::FitContent(l) => Some(l),
+            _ => None,
+        };
+        if limits_phase {
+            match (t.limit, t.infinitely_growable, fit) {
+                (Some(l), false, _) => l,
+                (_, _, Some(f)) => f.max(t.base),
+                _ => f32::INFINITY,
+            }
+        } else {
+            let l = t.limit.unwrap_or(f32::INFINITY);
+            fit.map_or(l, |f| l.min(f.max(t.base)))
+        }
+    };
+    let mut incurred = vec![0.0f32; affected.len()];
+    let mut open: Vec<usize> = (0..affected.len()).collect();
+    for _ in 0..affected.len() + 1 {
+        if space <= 0.001 || open.is_empty() {
+            break;
+        }
+        let share = space / open.len() as f32;
+        let mut next = Vec::with_capacity(open.len());
+        for &k in &open {
+            let t = &tracks[affected[k]];
+            let room = (cap(t) - size(t) - incurred[k]).max(0.0);
+            let give = share.min(room);
+            incurred[k] += give;
+            space -= give;
+            if room - give > 0.001 {
+                next.push(k);
+            }
+        }
+        open = next;
+    }
+    // Beyond the limits.
+    if space > 0.001 {
+        let beyond: Vec<usize> = match phase {
+            SpanPhase::IntrinsicMinimums => (0..affected.len()).filter(|&k| tracks[affected[k]].max.is_intrinsic()).collect(),
+            SpanPhase::MaxContentMinimums => (0..affected.len()).filter(|&k| max_content_max(&tracks[affected[k]])).collect(),
+            _ => (0..affected.len()).filter(|&k| {
+                let t = &tracks[affected[k]];
+                t.limit.is_none() || t.infinitely_growable
+            }).collect(),
+        };
+        let beyond = if beyond.is_empty() && !limits_phase { (0..affected.len()).collect() } else { beyond };
+        if !beyond.is_empty() {
+            let share = space / beyond.len() as f32;
+            for k in beyond {
+                incurred[k] += share;
+            }
+        }
+    }
+    for (k, &i) in affected.iter().enumerate() {
+        planned[i] = planned[i].max(incurred[k]);
+    }
+    true
+}
+
 /// §11 track sizing algorithm for one axis.
 fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f32>, gap: f32, stretch: bool) {
     // Content-based automatic sizes, including auto block sizes, use the
@@ -620,62 +729,65 @@ fn resolve_intrinsic_tracks(tracks: &mut [Track], contribs: &[Contribution], gap
             }
         }
     }
-    // Items spanning multiple tracks (no flex tracks), by increasing span.
-    let mut span = 2;
+    // §12.5 step 3: items spanning several tracks (none flexible), in
+    // groups of equal span; each phase applies the largest increase any
+    // item of the group needs (§12.5.1).
     let max_span = sorted.iter().map(|c| c.end - c.start).max().unwrap_or(1);
-    while span <= max_span {
-        for c in sorted.iter().filter(|c| c.end - c.start == span) {
-            let spanned: Vec<usize> = (c.start..c.end).collect();
-            if spanned.iter().any(|&i| tracks[i].is_flex()) {
+    let mut planned = vec![0.0f32; tracks.len()];
+    for span in 2..=max_span {
+        let group: Vec<&Contribution> = sorted.iter().copied().filter(|c| c.end - c.start == span && c.end <= tracks.len() && !(c.start..c.end).any(|i| tracks[i].is_flex() || tracks[i].collapsed)).collect();
+        if group.is_empty() {
+            continue;
+        }
+        for phase in [SpanPhase::IntrinsicMinimums, SpanPhase::MaxContentMinimums, SpanPhase::IntrinsicMaximums, SpanPhase::MaxContentMaximums] {
+            planned.iter_mut().for_each(|p| *p = 0.0);
+            let mut any = false;
+            for c in &group {
+                any |= distribute_span(tracks, c, gap, phase, &mut planned);
+            }
+            if !any {
                 continue;
             }
-            let gaps = gap * ((c.end - c.start) as f32 - 1.0);
-            // Minimums.
-            let sum_base: f32 = spanned.iter().map(|&i| tracks[i].base).sum();
-            let extra = c.min - sum_base - gaps;
-            if extra > 0.0 {
-                let cands: Vec<usize> = spanned.iter().copied().filter(|&i| tracks[i].min.is_intrinsic()).collect();
-                if !cands.is_empty() {
-                    let left = distribute_extra(tracks, &cands, extra, false, false);
-                    if left > 0.001 {
-                        let cands2: Vec<usize> = cands.iter().copied().filter(|&i| tracks[i].max.is_intrinsic()).collect();
-                        let cands2 = if cands2.is_empty() { cands.clone() } else { cands2 };
-                        distribute_extra(tracks, &cands2, left, true, false);
+            for (i, t) in tracks.iter_mut().enumerate() {
+                if planned[i] <= 0.0 {
+                    continue;
+                }
+                match phase {
+                    SpanPhase::IntrinsicMinimums | SpanPhase::MaxContentMinimums => t.base += planned[i],
+                    SpanPhase::IntrinsicMaximums => {
+                        if t.limit.is_none() {
+                            t.infinitely_growable = true;
+                        }
+                        t.limit = Some(t.limit.unwrap_or(t.base) + planned[i]);
                     }
+                    SpanPhase::MaxContentMaximums => t.limit = Some(t.limit.unwrap_or(t.base) + planned[i]),
                 }
             }
-            // Max-content minimums (tracks with max-content min sizing).
-            let sum_base: f32 = spanned.iter().map(|&i| tracks[i].base).sum();
-            let extra = c.max - sum_base - gaps;
-            if extra > 0.0 {
-                let cands: Vec<usize> = spanned.iter().copied().filter(|&i| matches!(tracks[i].min, Sizing::MaxContent)).collect();
-                if !cands.is_empty() {
-                    let left = distribute_extra(tracks, &cands, extra, false, false);
-                    if left > 0.001 {
-                        distribute_extra(tracks, &cands, left, true, false);
-                    }
-                }
-            }
-            // Growth limits.
-            let sum_limit: f32 = spanned.iter().map(|&i| tracks[i].limit_or_base()).sum();
-            let extra = c.max - sum_limit - gaps;
-            if extra > 0.0 {
-                let cands: Vec<usize> = spanned.iter().copied().filter(|&i| tracks[i].max.is_intrinsic()).collect();
-                if !cands.is_empty() {
-                    distribute_extra(tracks, &cands, extra, false, true);
-                }
-            }
-            for &i in &spanned {
-                let t = &mut tracks[i];
-                if let Some(l) = t.limit {
-                    if l < t.base {
-                        t.limit = Some(t.base);
+            if matches!(phase, SpanPhase::MaxContentMinimums) {
+                // Step 3.4: growth limits below their base sizes rise to them.
+                for t in tracks.iter_mut() {
+                    if let Some(l) = t.limit {
+                        if l < t.base {
+                            t.limit = Some(t.base);
+                        }
                     }
                 }
             }
         }
-        span += 1;
+        for t in tracks.iter_mut() {
+            if let Some(l) = t.limit {
+                if l < t.base {
+                    t.limit = Some(t.base);
+                }
+            }
+        }
     }
+    for t in tracks.iter_mut() {
+        t.infinitely_growable = false;
+    }
+    // §12.5 step 4 (items spanning flexible tracks) contributes nothing
+    // here: such items' automatic minimum size is zero (§6.6), and the
+    // contributions do not carry an explicit min-width separately.
     for t in tracks.iter_mut() {
         if t.limit.is_none() {
             t.limit = Some(t.base);
@@ -967,6 +1079,31 @@ fn resize_rows_to_limits(tracks: &mut [Track], contribs: &[Contribution], style:
     None
 }
 
+/// Absolutely positioned descendants of `b` whose containing block is
+/// outside it (no positioned box in between).
+fn abs_descendants(b: &LayoutBox, out: &mut Vec<(rabbithole_dom::NodeId, std::rc::Rc<ComputedStyle>)>) {
+    if b.no_abs_below {
+        return;
+    }
+    for c in &b.children {
+        if c.flow == Flow::Absolute {
+            if let Some(node) = c.node {
+                out.push((node, c.style.clone()));
+            }
+        } else if c.style.position == rabbithole_style::Position::Static && c.formatting != crate::tree::Formatting::Grid && !c.wm_wrapper {
+            // A nested grid (a subgrid) resolves its own children's lines.
+            abs_descendants(c, out);
+        }
+    }
+}
+
+/// Percentage margins and paddings of a grid item resolve against the
+/// inline size of its grid area (Grid2 §6.4), once the columns are sized.
+fn percent_edges(style: &ComputedStyle) -> bool {
+    let pct = |l: &Length| matches!(l, Length::Percent(_) | Length::Calc(..) | Length::Math(_));
+    [&style.padding, &style.margin].iter().any(|e| pct(&e.top) || pct(&e.right) || pct(&e.bottom) || pct(&e.left))
+}
+
 fn span_size(tracks: &[Track], pos: &[f32], start: usize, end: usize) -> (f32, f32) {
     if tracks.is_empty() || start >= end {
         return (0.0, 0.0);
@@ -1083,7 +1220,7 @@ impl<'a> Layouter<'a> {
         for it in items.iter_mut() {
             let (ax, aw) = span_size(&cols.tracks, &col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
             let (ay, ah) = span_size(&rows.tracks, &row_pos, it.area.row.0 as usize, it.area.row.1 as usize);
-            if ordinary_axis_consumer||subgrid::requests(&b.children[it.idx])!=(false,false) {*it=subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw);}
+            if ordinary_axis_consumer||subgrid::requests(&b.children[it.idx])!=(false,false)||percent_edges(&b.children[it.idx].style) {*it=subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw);}
             let child=&mut b.children[it.idx];
             let (column_request,row_request)=subgrid::requests(child);
             if !column_request&&!row_request {
@@ -1128,8 +1265,8 @@ impl<'a> Layouter<'a> {
         // (§9.1; an auto line is the padding edge). With auto insets they
         // are aligned by their self-alignment in a static-position
         // rectangle: that area, or the content box (§9.4, CSS Align 3 §A).
-        if b.children.iter().any(|c| c.flow == Flow::Absolute) {
-            let positioned = style.position != rabbithole_style::Position::Static;
+        let positioned = style.position != rabbithole_style::Position::Static;
+        if b.children.iter().any(|c| c.flow == Flow::Absolute) || (positioned && !b.no_abs_below) {
             let pad = crate::block::resolve_edges(&style.padding, cbw);
             let content_h = cb.height.unwrap_or(rows_extent);
             let (px0, px1) = (content_x - pad.left, content_x + cbw + pad.right);
@@ -1148,21 +1285,8 @@ impl<'a> Layouter<'a> {
             let n_cols = cols.tracks.len() as i32 + 1;
             let n_rows = rows.tracks.len() as i32 + 1;
             let rtl = mirror;
-            for c in b.children.iter_mut() {
-                if c.flow != Flow::Absolute {
-                    continue;
-                }
-                let factor = (
-                    static_align_factor(c.style.justify_self, c.style.justify_self_flags, style.justify_items, style.justify_items_flags, rtl, c.style.direction == rabbithole_style::Direction::Rtl),
-                    static_align_factor(c.style.align_self, c.style.align_self_flags, style.align_items, style.align_items_flags, false, false),
-                );
-                let content = (content_x, content_y, cbw, content_h);
-                let Some(node) = c.node.filter(|_| positioned) else {
-                    c.static_pos = (content.0, content.1);
-                    c.static_align = Some(crate::tree::StaticAlign { size: (content.2, content.3), factor });
-                    continue;
-                };
-                let s = c.style.clone();
+            // The grid area of a line placement (None when all lines are auto).
+            let area_of = |s: &ComputedStyle| -> Option<Rect> {
                 let axis = |start: &rabbithole_style::GridLine, end: &rabbithole_style::GridLine, names: &[Vec<String>], n: i32| -> (Option<i32>, Option<i32>) {
                     let (start, end) = line_specs(start, end, names, n);
                     let a = match start {
@@ -1180,12 +1304,14 @@ impl<'a> Layouter<'a> {
                     };
                     (a, e)
                 };
+                // Lines outside the grid are auto for absolutely positioned
+                // boxes (§9.1): the padding edge.
+                let inside = |n: i32| move |l: &i32| (0..n).contains(l);
                 let (c0, c1) = axis(&s.grid_column_start, &s.grid_column_end, &cols.names, n_cols);
                 let (r0, r1) = axis(&s.grid_row_start, &s.grid_row_end, &rows.names, n_rows);
+                let (c0, c1, r0, r1) = (c0.filter(inside(n_cols)), c1.filter(inside(n_cols)), r0.filter(inside(n_rows)), r1.filter(inside(n_rows)));
                 if c0.is_none() && c1.is_none() && r0.is_none() && r1.is_none() {
-                    c.static_pos = (content.0, content.1);
-                    c.static_align = Some(crate::tree::StaticAlign { size: (content.2, content.3), factor });
-                    continue;
+                    return None;
                 }
                 let (x0, x1) = if mirror {
                     let x = |l| content_x + cbw - line_x(&col_pos, &cols.tracks, l);
@@ -1196,11 +1322,40 @@ impl<'a> Layouter<'a> {
                 };
                 let y0 = r0.map(|l| content_y + line_x(&row_pos, &rows.tracks, l)).unwrap_or(py0);
                 let y1 = r1.map(|l| content_y + line_x(&row_pos, &rows.tracks, l)).unwrap_or(py1);
-                let area = Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0));
+                Some(Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)))
+            };
+            for c in b.children.iter_mut() {
+                if c.flow != Flow::Absolute {
+                    continue;
+                }
+                let factor = (
+                    static_align_factor(c.style.justify_self, c.style.justify_self_flags, style.justify_items, style.justify_items_flags, rtl, c.style.direction == rabbithole_style::Direction::Rtl),
+                    static_align_factor(c.style.align_self, c.style.align_self_flags, style.align_items, style.align_items_flags, false, false),
+                );
+                let content = (content_x, content_y, cbw, content_h);
+                let area = c.node.filter(|_| positioned).and_then(|node| area_of(&c.style).map(|area| (node, area)));
+                let Some((node, area)) = area else {
+                    c.static_pos = (content.0, content.1);
+                    c.static_align = Some(crate::tree::StaticAlign { size: (content.2, content.3), factor });
+                    continue;
+                };
                 self.abs_cb.insert(node, area);
                 // With auto insets the item is aligned in its area.
-                c.static_pos = (x0, y0);
+                c.static_pos = (area.x, area.y);
                 c.static_align = Some(crate::tree::StaticAlign { size: (area.w, area.h), factor });
+            }
+            // Deeper absolutely positioned descendants whose containing block
+            // is this grid are placed by their grid lines too (§9.1).
+            if positioned {
+                let mut found = Vec::new();
+                for item in b.children.iter().filter(|c| c.flow != Flow::Absolute && c.style.position == rabbithole_style::Position::Static && c.formatting != crate::tree::Formatting::Grid && !c.wm_wrapper) {
+                    abs_descendants(item, &mut found);
+                }
+                for (node, style) in found {
+                    if let Some(area) = area_of(&style) {
+                        self.abs_cb.insert(node, area);
+                    }
+                }
             }
         }
 
@@ -1596,6 +1751,8 @@ impl<'a> Layouter<'a> {
     /// been installed. This shares the same sizing/automatic-minimum rules.
     fn column_contribution(&mut self,child:&mut LayoutBox,it:&GridItem,cbw:f32,bases:ItemBases)->Contribution {
         // Keep the ordinary collector and projected collector on one path.
+        // Percentage margins and paddings are cyclic here: zero (§6.4).
+        let rebased=if percent_edges(&child.style) {subgrid::rebase_item(it,&child.style,cbw,0.)} else {*it};let it=&rebased;
         let bb=child.style.box_sizing==BoxSizing::BorderBox;
         let extras=it.edges.pb_h+it.edges.margin_sum(Axis::Row);
         let pct=|l:Length|matches!(l,Length::Percent(_)|Length::Calc(..)|Length::Math(_));
@@ -1664,7 +1821,7 @@ impl<'a> Layouter<'a> {
         let mut baselines: Vec<(usize, i32, f32)> = Vec::new();
         for it in items {
             let (_, aw) = span_size(&cols.tracks, col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
-            let item=if subgrid::requests(&b.children[it.idx])!=(false,false) {subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw)} else {*it};let it=&item;
+            let item=if subgrid::requests(&b.children[it.idx])!=(false,false)||percent_edges(&b.children[it.idx].style) {subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw)} else {*it};let it=&item;
             let child = &mut b.children[it.idx];
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
             let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column);

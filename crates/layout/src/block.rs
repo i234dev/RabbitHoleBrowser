@@ -1215,7 +1215,11 @@ impl<'a> Layouter<'a> {
         let (mut mode, mut avail) = match (l, r, style.width.is_auto()) {
             (Some(l), Some(r), true) => (WidthMode::Fixed((cb.w - l - r - ml - mr - pb_h).max(0.0)), cb.w),
             _ => {
-                let used = l.or(r).unwrap_or(0.0);
+                // With both insets auto the box starts at its static
+                // position (CSS 2.1 §10.3.7); one left of the containing
+                // block (a grid area) widens the space up to its right edge.
+                let before = if l.is_none() && r.is_none() && c.static_align.is_none() && !static_right { (c.static_pos.0 + ml - cb.x).min(0.0) } else { 0.0 };
+                let used = l.or(r).unwrap_or(before);
                 (WidthMode::ShrinkToFit, (cb.w - used).max(0.0))
             }
         };
