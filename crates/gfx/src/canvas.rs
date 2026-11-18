@@ -792,6 +792,30 @@ mod tests {
         assert_eq!(px(&c, 99, 29), Color::WHITE);
     }
 
+    /// A box shadow repainted in place reuses its blurred mask: the result
+    /// equals the first paint, and another position is drawn on its own.
+    #[test]
+    fn repeated_box_shadows_match_first_paint() {
+        let draw = |x: f32| {
+            let mut c = Canvas::new(80, 60);
+            c.clear(Color::WHITE);
+            let radii = [(6.0, 6.0); 4];
+            c.draw_box_shadow(Rect::new(x, 15.0, 30.0, 20.0), radii, (3.0, 4.0), 8.0, 2.0, Color::rgba(0, 0, 0, 120), false);
+            c.data.clone()
+        };
+        let first = draw(20.25);
+        let again = draw(20.25);
+        assert_eq!(first, again);
+        let moved = draw(21.25);
+        assert_ne!(first, moved);
+        // The moved shadow is the first one shifted by one pixel.
+        for y in 0..60usize {
+            for x in 1..80usize {
+                assert_eq!(moved[y * 80 + x], first[y * 80 + x - 1], "pixel {x},{y}");
+            }
+        }
+    }
+
     /// An image drawn at its own size at a whole-pixel offset takes a direct
     /// copy path; it must give exactly what sampling each pixel centre gives.
     #[test]

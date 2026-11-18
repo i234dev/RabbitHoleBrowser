@@ -17,6 +17,40 @@ pub use crate::path::{ellipse_path, parse_svg_path, rounded_rect_path};
 /// Flattening tolerance in device pixels.
 const TOLERANCE: f32 = 0.2;
 
+/// Blurred outset box-shadow masks of this thread, by exact geometry.
+struct ShadowMasks {
+    map: std::collections::HashMap<Vec<u32>, std::rc::Rc<Mask>>,
+    bytes: usize,
+}
+
+/// Masks kept per thread before the cache is emptied.
+const SHADOW_CACHE_BYTES: usize = 32 << 20;
+
+thread_local! {
+    static SHADOW_MASKS: std::cell::RefCell<ShadowMasks> = std::cell::RefCell::new(ShadowMasks { map: Default::default(), bytes: 0 });
+}
+
+fn shadow_mask_cached(key: Vec<u32>, make: impl FnOnce() -> Mask) -> std::rc::Rc<Mask> {
+    if let Some(m) = SHADOW_MASKS.with(|c| c.borrow().map.get(&key).cloned()) {
+        return m;
+    }
+    let m = std::rc::Rc::new(make());
+    SHADOW_MASKS.with(|c| {
+        let mut c = c.borrow_mut();
+        let size = m.data.len() + key.len() * 4 + 64;
+        if size > SHADOW_CACHE_BYTES / 4 {
+            return;
+        }
+        if c.bytes + size > SHADOW_CACHE_BYTES {
+            c.map.clear();
+            c.bytes = 0;
+        }
+        c.bytes += size;
+        c.map.insert(key, m.clone());
+    });
+    m
+}
+
 impl Canvas {
     // ------------------------------------------------------------ transforms
 
@@ -408,10 +442,24 @@ impl Canvas {
             if region.is_empty() {
                 return;
             }
-            let mut mask = shape_mask(&shadow_shape, region);
-            box_blur(&mut mask.data, mask.width as usize, mask.height as usize, blur_r, 3);
-            // Knock out the element's own border box.
-            knock_out(&mut mask, &box_shape);
+            // The blurred mask depends only on this geometry (exact bits):
+            // a box repainted in place reuses it instead of blurring again.
+            let mut key: Vec<u32> = Vec::with_capacity(29);
+            for v in [region.x, region.y, region.w, region.h, srect.x, srect.y, srect.w, srect.h, dr.x, dr.y, dr.w, dr.h] {
+                key.push(v.to_bits());
+            }
+            for (h, v) in sradii.iter().chain(radii.iter()) {
+                key.push(h.to_bits());
+                key.push(v.to_bits());
+            }
+            key.push(blur_r as u32);
+            let mask = shadow_mask_cached(key, || {
+                let mut mask = shape_mask(&shadow_shape, region);
+                box_blur(&mut mask.data, mask.width as usize, mask.height as usize, blur_r, 3);
+                // Knock out the element's own border box.
+                knock_out(&mut mask, &box_shape);
+                mask
+            });
             self.fill_mask(&mask, &Shader::Solid(color));
         } else {
             let region = dr;
