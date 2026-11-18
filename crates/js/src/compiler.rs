@@ -2394,8 +2394,9 @@ impl Compiler {
                         self.emit(Op::Undefined);
                     }
                 }
-                if self.fs_ref().flags.is_async && self.fs_ref().flags.is_generator {
-                    // return in async generator awaits the value
+                if arg.is_some() && self.fs_ref().flags.is_async && self.fs_ref().flags.is_generator {
+                    // `return expr` in an async generator awaits the value;
+                    // a bare `return` does not (§15.6 Return statement).
                     self.emit(Op::Await);
                 }
                 self.emit_return_exits()?;
@@ -3814,6 +3815,18 @@ impl Compiler {
                     to_return.push(self.emit(Op::JumpIfTrue(0)));
                     self.emit(if is_async { Op::AsyncYield } else { Op::YieldRaw });
                     self.emit(Op::ResumeMode);
+                    if is_async {
+                        // AsyncGeneratorYield awaits a `return(v)` value
+                        // before the delegate sees it: [received mode].
+                        self.emit(Op::Dup);
+                        self.emit_number(2.0);
+                        self.emit(Op::StrictEq);
+                        let not_return = self.emit(Op::JumpIfFalse(0));
+                        self.emit(Op::Swap);
+                        self.emit(Op::Await);
+                        self.emit(Op::Swap);
+                        self.patch_jump(not_return);
+                    }
                     self.emit(Op::Jump(start as u32));
                     // Return completion from the delegate (or `return()`
                     // without an inner `return`): finally blocks run.

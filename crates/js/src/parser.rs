@@ -1399,7 +1399,19 @@ impl<'a> Parser<'a> {
                 StmtKind::Export(ExportDecl::DefaultExpr(e))
             }
         } else if self.eat_punct("*")? {
-            let namespace = if self.eat_ident("as")? { Some(self.expect_identifier_name()?.to_string()) } else { None };
+            let namespace = if self.eat_ident("as")? {
+                match &self.tok.kind {
+                    TokenKind::Str(s) => {
+                        let s = s.clone();
+                        self.check_module_export_name()?;
+                        self.advance()?;
+                        Some(s)
+                    }
+                    _ => Some(self.expect_identifier_name()?.to_string()),
+                }
+            } else {
+                None
+            };
             self.expect_ident("from")?;
             let source = match &self.tok.kind {
                 TokenKind::Str(s) => s.clone(),
@@ -2354,8 +2366,18 @@ impl<'a> Parser<'a> {
                 return Err(self.error_at(spos, "'super' keyword unexpected here"));
             }
             self.parse_call_tail(Expr { pos: spos, kind: ExprKind::Super }, false)?
-        } else if self.is_ident("import") {
+        } else if self.is_ident("import") && !self.peek_is_punct_any(&["."])? {
             return Err(self.error("Cannot use new with import"));
+        } else if self.is_ident("import") {
+            // `new import.meta()`: valid syntax, a TypeError when evaluated.
+            let ipos = self.tok.pos;
+            self.advance()?;
+            self.expect_punct(".")?;
+            self.expect_ident("meta")?;
+            if !self.ctx.is_module {
+                return Err(self.error_at(ipos, "Cannot use 'import.meta' outside a module"));
+            }
+            self.parse_call_tail(Expr { pos: ipos, kind: ExprKind::ImportMeta }, false)?
         } else {
             let p = self.parse_primary()?;
             self.parse_call_tail(p, false)?

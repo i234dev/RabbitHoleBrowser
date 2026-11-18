@@ -4,7 +4,7 @@ use super::*;
 use crate::value::V;
 use crate::realm::{SYM_ITERATOR, SYM_MATCH, SYM_MATCH_ALL, SYM_REPLACE, SYM_SEARCH, SYM_SPLIT};
 
-mod normalization;
+pub(crate) mod normalization;
 
 pub fn register(realm: &mut Realm) {
     let sp = realm.intrinsics.string_proto;

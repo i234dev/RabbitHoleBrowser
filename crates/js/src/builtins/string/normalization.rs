@@ -59,7 +59,7 @@ fn compose_pair(starter: u32, next: u32) -> Option<u32> {
     data::COMPOSITIONS.binary_search_by_key(&key, |entry| entry.0).ok().map(|i| data::COMPOSITIONS[i].1)
 }
 
-pub(super) fn normalize(units: &[u16], form: &str) -> Vec<u16> {
+pub(crate) fn normalize(units: &[u16], form: &str) -> Vec<u16> {
     let compatibility = matches!(form, "NFKC" | "NFKD");
     let composition = matches!(form, "NFC" | "NFKC");
     let mut decomposed = Vec::with_capacity(units.len());

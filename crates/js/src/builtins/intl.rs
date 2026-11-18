@@ -1125,8 +1125,24 @@ fn collation_key(s: &str, o: &CollatorOptions) -> Vec<(u32, u8, u8)> {
     out
 }
 
+/// NFC form of `s`: canonically equivalent strings collate as equal.
+fn nfc(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.is_ascii() {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let n = super::string::normalization::normalize(&units, "NFC");
+    if n == units {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        std::borrow::Cow::Owned(String::from_utf16_lossy(&n))
+    }
+}
+
 pub fn collator_compare(a: &str, b: &str, o: &CollatorOptions) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    let (a, b) = (nfc(a), nfc(b));
+    let (a, b) = (a.as_ref(), b.as_ref());
     let ka = collation_key(a, o);
     let kb = collation_key(b, o);
     let primary = ka.iter().map(|k| k.0).cmp(kb.iter().map(|k| k.0));

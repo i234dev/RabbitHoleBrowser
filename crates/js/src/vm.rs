@@ -4163,14 +4163,14 @@ impl Realm {
                 }
                 Op::DynamicImport => {
                     let specifier = pop!();
-                    let referrer = frame!().code().filename.clone();
+                    let referrer = self.import_referrer();
                     let p = self.start_dynamic_import(specifier, &referrer, Value::Undefined);
                     push!(Value::Object(p));
                 }
                 Op::DynamicImportWith => {
                     let options = pop!();
                     let specifier = pop!();
-                    let referrer = frame!().code().filename.clone();
+                    let referrer = self.import_referrer();
                     let p = self.start_dynamic_import(specifier, &referrer, options);
                     push!(Value::Object(p));
                 }
@@ -4900,6 +4900,20 @@ impl Realm {
             },
             _ => unreachable!("not a unary operator"),
         })
+    }
+
+    /// The script or module a dynamic `import()` resolves against: eval
+    /// code has none of its own and uses the code that called `eval`.
+    fn import_referrer(&self) -> Rc<str> {
+        let mut last = None;
+        for f in self.frames.iter().rev() {
+            let name = &f.code().filename;
+            if &**name != "eval" {
+                return name.clone();
+            }
+            last = Some(name.clone());
+        }
+        last.unwrap_or_else(|| Rc::from("eval"))
     }
 
     /// Direct `eval(src)` from frame `fi`: the code runs in the caller's

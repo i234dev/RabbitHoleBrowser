@@ -531,6 +531,12 @@ impl Realm {
         set.push((id, name.to_string()));
         let rec = self.rec(id);
         if let Some(le) = rec.local_exports.iter().find(|e| e.export_name == name) {
+            // Re-exporting an imported namespace object resolves to that
+            // namespace, so two modules re-exporting the same one agree.
+            let ns_import = rec.imports.iter().find(|i| i.local_name == le.local_name && matches!(i.import_name, ImportName::Namespace));
+            if let Some(dep) = ns_import.and_then(|i| rec.resolved.get(&i.module_request)) {
+                return Resolved::Found(Resolution::Namespace(*dep));
+            }
             return Resolved::Found(Resolution::Binding(id, le.local_name.clone()));
         }
         if let Some(ie) = rec.indirect_exports.iter().find(|e| e.export_name == name) {
