@@ -1,0 +1,121 @@
+{
+  "date": "2026-11-18",
+  "change": "Measuring layouts (grid tracks not published) reuse layout cache entries that also published grid tracks",
+  "base_source": "89f489a + stretched flex item layout cache (the change released in 0.1.23)",
+  "candidate": "base + this change (released in 0.1.24)",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fe), 20 default suites, iterationCount=3, served locally",
+  "binaries": {
+    "build": "release + line tables + frame pointers, all functions and branch targets aligned to 64 bytes (same flags for both)",
+    "base_sha256": "468030d6bb62b2f8419e7cca702bb2fb5ed51ee0def1c5186a15291b930ee342",
+    "candidate_sha256": "fec2c848c73c7dcc8816c9e856d45bd9050e449ae9077bd554ee8f7567d8de59",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one run at a time",
+    "order": "8 rounds, rotated",
+    "jit": "on (default)",
+    "utc_interval": "2026-11-18 03:07-03:24"
+  },
+  "pairs": [
+    {
+      "round": 1,
+      "base_geomean_ms": 449.1,
+      "candidate_geomean_ms": 418.11,
+      "base_score": 2.23,
+      "candidate_score": 2.39,
+      "ratio_base_over_candidate": 1.074119250914831
+    },
+    {
+      "round": 2,
+      "base_geomean_ms": 449.06,
+      "candidate_geomean_ms": 421.82,
+      "base_score": 2.23,
+      "candidate_score": 2.37,
+      "ratio_base_over_candidate": 1.0645773078564316
+    },
+    {
+      "round": 3,
+      "base_geomean_ms": 447.84,
+      "candidate_geomean_ms": 419.55,
+      "base_score": 2.23,
+      "candidate_score": 2.38,
+      "ratio_base_over_candidate": 1.0674293886306756
+    },
+    {
+      "round": 4,
+      "base_geomean_ms": 449.76,
+      "candidate_geomean_ms": 420.62,
+      "base_score": 2.22,
+      "candidate_score": 2.38,
+      "ratio_base_over_candidate": 1.0692786838476533
+    },
+    {
+      "round": 5,
+      "base_geomean_ms": 448.68,
+      "candidate_geomean_ms": 420.84,
+      "base_score": 2.23,
+      "candidate_score": 2.38,
+      "ratio_base_over_candidate": 1.0661534074707728
+    },
+    {
+      "round": 6,
+      "base_geomean_ms": 488.31,
+      "candidate_geomean_ms": 419.93,
+      "base_score": 2.05,
+      "candidate_score": 2.38,
+      "ratio_base_over_candidate": 1.1628366632533993
+    },
+    {
+      "round": 7,
+      "base_geomean_ms": 448.71,
+      "candidate_geomean_ms": 421.52,
+      "base_score": 2.23,
+      "candidate_score": 2.37,
+      "ratio_base_over_candidate": 1.064504649838679
+    },
+    {
+      "round": 8,
+      "base_geomean_ms": 449,
+      "candidate_geomean_ms": 419.36,
+      "base_score": 2.23,
+      "candidate_score": 2.38,
+      "ratio_base_over_candidate": 1.070679130103014
+    }
+  ],
+  "summary": {
+    "median_ratio": 1.0683540362391644,
+    "min": 1.064504649838679,
+    "max": 1.1628366632533993,
+    "rounds_faster": 8,
+    "rounds": 8,
+    "mean_score_base": 2.20625,
+    "mean_score_candidate": 2.37875
+  },
+  "per_suite_median_ratio": {
+    "Charts-chartjs": 1.0001,
+    "Charts-observable-plot": 1.0073,
+    "Editor-CodeMirror": 1.0289,
+    "Editor-TipTap": 1.1542,
+    "NewsSite-Next": 1.5585,
+    "NewsSite-Nuxt": 1.5707,
+    "Perf-Dashboard": 1.0042,
+    "React-Stockcharts-SVG": 1.0031,
+    "TodoMVC-Angular-Complex-DOM": 1.0164,
+    "TodoMVC-Backbone": 1.0007,
+    "TodoMVC-JavaScript-ES5": 1.0011,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 1.0271,
+    "TodoMVC-Lit-Complex-DOM": 1.0726,
+    "TodoMVC-Preact-Complex-DOM": 1.0702,
+    "TodoMVC-React-Complex-DOM": 1.0212,
+    "TodoMVC-React-Redux": 0.9971,
+    "TodoMVC-Svelte-Complex-DOM": 1.094,
+    "TodoMVC-Vue": 0.9916,
+    "TodoMVC-WebComponents": 0.9983,
+    "TodoMVC-jQuery": 0.9987
+  },
+  "correctness": "Full Speedometer run with RH_VERIFY_INCREMENTAL=1: 0 differences; layout cache 5.83 M hits, 2.54 M misses (3.62 M misses before).",
+  "limitations": [
+    "One Linux x64 host; harness scores, not comparable with other browsers."
+  ]
+}

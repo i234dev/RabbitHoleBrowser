@@ -627,3 +627,35 @@ fn stretched_flex_items_are_reused_from_the_layout_cache() {
     assert!(hits >= 80, "hits {hits}, misses {misses}");
     assert!(misses <= 100, "hits {hits}, misses {misses}");
 }
+
+/// Grid items are measured (used grid tracks not published) and then laid
+/// out (published). The measuring pass reuses the published layout from the
+/// cache (same geometry), so grids are not laid out from scratch on every
+/// relayout of their container.
+#[test]
+fn measured_grid_items_reuse_published_layouts() {
+    let mut html = String::from("<html><head><style>.g{display:grid;grid-template-columns:120px 1fr;gap:2px} .side.alt{color:red}</style></head><body>");
+    for i in 0..40 {
+        html.push_str(&format!("<div class=\"wrap\"><div class=\"g\"><div><p>a{i} text</p></div><div><p>b {i} with more words</p></div><div><p>c</p></div><div class=\"side\" id=\"s{i}\"><p>d</p></div></div></div>"));
+    }
+    html.push_str("</body></html>");
+    let (engine, mut page) = load(&html);
+    let sides: Vec<NodeId> = (0..40).map(|i| id(&page, &format!("s{i}"))).collect();
+    let mut last = (0, 0, 0);
+    for round in 0..3 {
+        for &s in &sides {
+            page.doc.set_attr(s, "class", Some(if round % 2 == 0 { "side alt" } else { "side" }));
+        }
+        check(&engine, &mut page, "grid relayout");
+        let _ = rabbithole_engine::layout::take_cache_stats();
+        for &s in &sides {
+            page.doc.set_attr(s, "class", Some(if round % 2 == 0 { "side" } else { "side alt" }));
+        }
+        engine.restyle(&mut page);
+        last = rabbithole_engine::layout::take_cache_stats();
+    }
+    let (hits, misses, _) = last;
+    // Without reuse every measuring pass misses (0 hits, 560 misses); the
+    // remaining misses measure items at other widths (min/max-content).
+    assert!(hits >= 200, "hits {hits}, misses {misses}");
+}
