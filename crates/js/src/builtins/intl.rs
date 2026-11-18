@@ -14,6 +14,7 @@ use crate::realm::SYM_TO_STRING_TAG;
 
 mod duration;
 mod number_format;
+mod plural_rules;
 pub use number_format::{format_bigint_parts, format_number, format_number_parts, number_to_locale_string, read_nf_options, NfOptions, NumberParts};
 #[allow(unused_imports)]
 use number_format::number_arg;
@@ -851,12 +852,6 @@ pub fn locale_compare(realm: &mut Realm, a: &str, b: &str, args: &[Value]) -> Js
 
 // ---------------------------------------------------------- PluralRules
 
-#[derive(Debug, Clone)]
-pub struct PluralOptions {
-    locale: Locale,
-    ordinal: bool,
-}
-
 pub fn plural_category(n: f64, lang: &str, ordinal: bool) -> &'static str {
     if ordinal {
         return match lang {
@@ -1125,10 +1120,10 @@ pub fn register(realm: &mut Realm) {
     realm.define_accessor(coll, "compare", Some(collator_compare_getter), None, CONFIGURABLE);
     realm.define_method(coll, "resolvedOptions", 0, collator_resolved_options);
 
-    let (_, pr) = mk(realm, "PluralRules", "Intl.PluralRules", plural_ctor, 0);
-    realm.define_method(pr, "select", 1, plural_select);
-    realm.define_method(pr, "selectRange", 2, plural_select_range);
-    realm.define_method(pr, "resolvedOptions", 0, plural_resolved_options);
+    let (_, pr) = mk(realm, "PluralRules", "Intl.PluralRules", plural_rules::ctor, 0);
+    realm.define_method(pr, "select", 1, plural_rules::select);
+    realm.define_method(pr, "selectRange", 2, plural_rules::select_range);
+    realm.define_method(pr, "resolvedOptions", 0, plural_rules::resolved_options);
 
     let (_, rtf) = mk(realm, "RelativeTimeFormat", "Intl.RelativeTimeFormat", rtf_ctor, 0);
     realm.define_method(rtf, "format", 2, rtf_format);
@@ -1445,37 +1440,6 @@ fn collator_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) ->
     realm.define_property(obj, "collation", Value::str("default"), ALL);
     realm.define_property(obj, "numeric", Value::Bool(o.numeric), ALL);
     realm.define_property(obj, "caseFirst", Value::str("false"), ALL);
-    Ok(Value::Object(obj))
-}
-
-// PluralRules
-fn plural_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let locale = resolve_locale(realm, arg(args, 0))?;
-    let opts = options_object(realm, arg(args, 1))?;
-    let ordinal = opt_str(realm, opts, "type")?.as_deref() == Some("ordinal");
-    Ok(Value::Object(new_intl_object(realm, "Intl.PluralRules", PluralOptions { locale, ordinal })?))
-}
-
-fn plural_select(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let o: PluralOptions = host(realm, &this, "Intl.PluralRules.prototype.select")?;
-    let n = realm.to_number(arg(args, 0))?;
-    Ok(Value::str(plural_category(n, &o.locale.lang, o.ordinal)))
-}
-
-fn plural_select_range(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let o: PluralOptions = host(realm, &this, "Intl.PluralRules.prototype.selectRange")?;
-    let n = realm.to_number(arg(args, 1))?;
-    Ok(Value::str(plural_category(n, &o.locale.lang, o.ordinal)))
-}
-
-fn plural_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let o: PluralOptions = host(realm, &this, "Intl.PluralRules.prototype.resolvedOptions")?;
-    let obj = realm.new_object();
-    realm.define_property(obj, "locale", Value::str(&o.locale.tag), ALL);
-    realm.define_property(obj, "type", Value::str(if o.ordinal { "ordinal" } else { "cardinal" }), ALL);
-    let cats: Vec<Value> = if o.ordinal { vec!["few", "one", "two", "other"] } else { vec!["one", "other"] }.into_iter().map(Value::str).collect();
-    let arr = realm.new_array_value(cats);
-    realm.define_property(obj, "pluralCategories", arr, ALL);
     Ok(Value::Object(obj))
 }
 

@@ -470,7 +470,7 @@ pub struct NfOptions {
 }
 
 /// GetOption for a string option restricted to `allowed`.
-fn get_option(realm: &mut Realm, opts: Option<ObjectId>, name: &str, allowed: &[&'static str], default: &'static str) -> JsResult<&'static str> {
+pub(super) fn get_option(realm: &mut Realm, opts: Option<ObjectId>, name: &str, allowed: &[&'static str], default: &'static str) -> JsResult<&'static str> {
     let Some(o) = opts else { return Ok(default) };
     let v = realm.get_str(Value::Object(o), name)?;
     if v.is_undefined() {
@@ -536,14 +536,14 @@ fn currency_digits(code: &str) -> usize {
 }
 
 /// The resolved locale: (locale string, data tag, numbering system).
-fn resolve_nf_locale(realm: &mut Realm, requested: &[String], nu_option: Option<&str>) -> (String, locale_id::LocaleId, String) {
+fn resolve_nf_locale(realm: &mut Realm, requested: &[String], nu_option: Option<&str>, extra: &[&str]) -> (String, locale_id::LocaleId, String) {
     let mut found: Option<(locale_id::LocaleId, Option<String>)> = None;
     for tag in requested {
         let Some(id) = locale_id::parse(tag) else { continue };
         let mut base = id.clone();
         base.u_attributes.clear();
         base.u_keywords.clear();
-        if is_available(&locale_id::to_string(&base)) {
+        if is_available(&locale_id::to_string(&base)) || extra.contains(&base.language.as_str()) {
             let nu = id.u_keywords.iter().find(|(k, _)| k == "nu").map(|(_, v)| v.clone());
             found = Some((base, nu));
             break;
@@ -589,7 +589,7 @@ pub fn read_nf_options(realm: &mut Realm, locales: Value, options: Value) -> JsR
             return realm.range_error(&format!("Invalid numberingSystem: {}", n));
         }
     }
-    let (locale, id, numbering_system) = resolve_nf_locale(realm, &requested, nu.as_deref());
+    let (locale, id, numbering_system) = resolve_nf_locale(realm, &requested, nu.as_deref(), &[]);
 
     // SetNumberFormatUnitOptions
     let style = match get_option(realm, opts, "style", &["decimal", "percent", "currency", "unit"], "decimal")? {
@@ -620,14 +620,91 @@ pub fn read_nf_options(realm: &mut Realm, locales: Value, options: Value) -> JsR
         "compact" => Notation::Compact,
         _ => Notation::Standard,
     };
-    let (mnfd_default, mut mxfd_default) = if style == NfStyle::Currency && notation == Notation::Standard {
+    let (mnfd_default, mxfd_default) = if style == NfStyle::Currency && notation == Notation::Standard {
         let d = currency_digits(&currency.as_deref().unwrap_or("").to_ascii_uppercase());
         (d, d)
     } else {
         (0, if style == NfStyle::Percent { 0 } else { 3 })
     };
 
-    // SetNumberFormatDigitOptions
+    let Digits { min_int, min_frac, max_frac, min_sig, max_sig, rounding_type, rounding_priority, rounding_increment, rounding_mode, trailing_zero_display } =
+        set_digit_options(realm, opts, mnfd_default, mxfd_default, notation)?;
+
+    let compact_display = get_option(realm, opts, "compactDisplay", &["short", "long"], "short")?;
+    let default_grouping = if notation == Notation::Compact { "min2" } else { "auto" };
+    let use_grouping = {
+        let v = get_value(realm, opts, "useGrouping")?;
+        let g: Option<&'static str> = if v.is_undefined() {
+            Some(default_grouping)
+        } else if matches!(v.v(), V::Bool(true)) {
+            Some("always")
+        } else if !v.truthy() {
+            None
+        } else {
+            let s = realm.to_rust_string(v)?;
+            match s.as_str() {
+                "min2" => Some("min2"),
+                "auto" => Some("auto"),
+                "always" => Some("always"),
+                "true" | "false" => Some(default_grouping),
+                _ => return realm.range_error(&format!("Value {} out of range for Intl.NumberFormat options property useGrouping", s)),
+            }
+        };
+        match g {
+            None => Grouping::False,
+            Some("min2") => Grouping::Min2,
+            Some("always") => Grouping::Always,
+            _ => Grouping::Auto,
+        }
+    };
+    let sign_display = get_option(realm, opts, "signDisplay", &["auto", "never", "always", "exceptZero", "negative"], "auto")?;
+
+    Ok(NfOptions {
+        locale,
+        lang: id.language.clone(),
+        region: id.region.clone().map(|r| r.to_ascii_uppercase()).unwrap_or_default(),
+        script: id.script.clone().unwrap_or_default(),
+        numbering_system,
+        style,
+        currency: if style == NfStyle::Currency { currency.map(|c| c.to_ascii_uppercase()) } else { None },
+        currency_display,
+        currency_sign,
+        unit: if style == NfStyle::Unit { unit } else { None },
+        unit_display,
+        min_int,
+        min_frac,
+        max_frac,
+        min_sig,
+        max_sig,
+        rounding_type,
+        rounding_priority,
+        rounding_increment,
+        rounding_mode,
+        trailing_zero_display,
+        notation,
+        compact_display,
+        use_grouping,
+        sign_display,
+    })
+}
+
+/// The digit options of SetNumberFormatDigitOptions.
+#[derive(Debug, Clone)]
+pub(super) struct Digits {
+    min_int: usize,
+    min_frac: Option<usize>,
+    max_frac: Option<usize>,
+    min_sig: Option<usize>,
+    max_sig: Option<usize>,
+    rounding_type: RoundingType,
+    rounding_priority: &'static str,
+    rounding_increment: u32,
+    rounding_mode: &'static str,
+    trailing_zero_display: &'static str,
+}
+
+/// SetNumberFormatDigitOptions.
+fn set_digit_options(realm: &mut Realm, opts: Option<ObjectId>, mnfd_default: usize, mut mxfd_default: usize, notation: Notation) -> JsResult<Digits> {
     let mnid = get_value(realm, opts, "minimumIntegerDigits")?;
     let min_int = default_number_option(realm, mnid, 1.0, 21.0, "minimumIntegerDigits")?.unwrap_or(1);
     let mnfd = get_value(realm, opts, "minimumFractionDigits")?;
@@ -716,63 +793,7 @@ pub fn read_nf_options(realm: &mut Realm, locales: Value, options: Value) -> JsR
             return realm.range_error("roundingIncrement requires equal minimumFractionDigits and maximumFractionDigits");
         }
     }
-
-    let compact_display = get_option(realm, opts, "compactDisplay", &["short", "long"], "short")?;
-    let default_grouping = if notation == Notation::Compact { "min2" } else { "auto" };
-    let use_grouping = {
-        let v = get_value(realm, opts, "useGrouping")?;
-        let g: Option<&'static str> = if v.is_undefined() {
-            Some(default_grouping)
-        } else if matches!(v.v(), V::Bool(true)) {
-            Some("always")
-        } else if !v.truthy() {
-            None
-        } else {
-            let s = realm.to_rust_string(v)?;
-            match s.as_str() {
-                "min2" => Some("min2"),
-                "auto" => Some("auto"),
-                "always" => Some("always"),
-                "true" | "false" => Some(default_grouping),
-                _ => return realm.range_error(&format!("Value {} out of range for Intl.NumberFormat options property useGrouping", s)),
-            }
-        };
-        match g {
-            None => Grouping::False,
-            Some("min2") => Grouping::Min2,
-            Some("always") => Grouping::Always,
-            _ => Grouping::Auto,
-        }
-    };
-    let sign_display = get_option(realm, opts, "signDisplay", &["auto", "never", "always", "exceptZero", "negative"], "auto")?;
-
-    Ok(NfOptions {
-        locale,
-        lang: id.language.clone(),
-        region: id.region.clone().map(|r| r.to_ascii_uppercase()).unwrap_or_default(),
-        script: id.script.clone().unwrap_or_default(),
-        numbering_system,
-        style,
-        currency: if style == NfStyle::Currency { currency.map(|c| c.to_ascii_uppercase()) } else { None },
-        currency_display,
-        currency_sign,
-        unit: if style == NfStyle::Unit { unit } else { None },
-        unit_display,
-        min_int,
-        min_frac,
-        max_frac,
-        min_sig,
-        max_sig,
-        rounding_type,
-        rounding_priority,
-        rounding_increment,
-        rounding_mode,
-        trailing_zero_display,
-        notation,
-        compact_display,
-        use_grouping,
-        sign_display,
-    })
+    Ok(Digits { min_int, min_frac, max_frac, min_sig, max_sig, rounding_type, rounding_priority, rounding_increment, rounding_mode, trailing_zero_display })
 }
 
 // ----------------------------------------------------------- locale data
@@ -1479,6 +1500,91 @@ fn partition_range(o: &NfOptions, x: &MathValue, y: &MathValue) -> Vec<(&'static
     out
 }
 
+// ------------------------------------------------- PluralRules support
+
+/// The number formatting state of an `Intl.PluralRules`: InitializePluralRules
+/// reads `notation` and `compactDisplay` (already read by the caller) and
+/// the digit options, and resolves the locale without extension keys.
+pub(super) fn plural_nf_options(
+    realm: &mut Realm,
+    requested: &[String],
+    opts: Option<ObjectId>,
+    notation: &str,
+    compact_display: &'static str,
+    extra_languages: &[&str],
+) -> JsResult<NfOptions> {
+    let notation = match notation {
+        "scientific" => Notation::Scientific,
+        "engineering" => Notation::Engineering,
+        "compact" => Notation::Compact,
+        _ => Notation::Standard,
+    };
+    let Digits { min_int, min_frac, max_frac, min_sig, max_sig, rounding_type, rounding_priority, rounding_increment, rounding_mode, trailing_zero_display } =
+        set_digit_options(realm, opts, 0, 3, notation)?;
+    let (_, id, _) = resolve_nf_locale(realm, requested, None, extra_languages);
+    Ok(NfOptions {
+        locale: locale_id::to_string(&id),
+        lang: id.language.clone(),
+        region: id.region.clone().map(|r| r.to_ascii_uppercase()).unwrap_or_default(),
+        script: id.script.clone().unwrap_or_default(),
+        numbering_system: "latn".into(),
+        style: NfStyle::Decimal,
+        currency: None,
+        currency_display: "symbol",
+        currency_sign: "standard",
+        unit: None,
+        unit_display: "short",
+        min_int,
+        min_frac,
+        max_frac,
+        min_sig,
+        max_sig,
+        rounding_type,
+        rounding_priority,
+        rounding_increment,
+        rounding_mode,
+        trailing_zero_display,
+        notation,
+        compact_display,
+        use_grouping: Grouping::False,
+        sign_display: "auto",
+    })
+}
+
+/// The resolvedOptions digit entries shared with PluralRules, in table
+/// order: (minimumIntegerDigits, fraction digits, significant digits).
+pub(super) fn digit_resolved(o: &NfOptions) -> (usize, Option<(usize, usize)>, Option<(usize, usize)>) {
+    (o.min_int, o.min_frac.zip(o.max_frac), o.min_sig.zip(o.max_sig))
+}
+
+/// (roundingIncrement, roundingMode, roundingPriority, trailingZeroDisplay).
+pub(super) fn rounding_resolved(o: &NfOptions) -> (u32, &'static str, &'static str, &'static str) {
+    (o.rounding_increment, o.rounding_mode, o.rounding_priority, o.trailing_zero_display)
+}
+
+pub(super) fn notation_name(o: &NfOptions) -> (&'static str, Option<&'static str>) {
+    match o.notation {
+        Notation::Standard => ("standard", None),
+        Notation::Scientific => ("scientific", None),
+        Notation::Engineering => ("engineering", None),
+        Notation::Compact => ("compact", Some(o.compact_display)),
+    }
+}
+
+pub(super) fn locale_of(o: &NfOptions) -> (&str, &str) {
+    (&o.locale, &o.lang)
+}
+
+/// The plural operands source of ResolvePlural: the formatted digits of
+/// |x| ("1.50") and the compact/scientific exponent; None if not finite.
+pub(super) fn plural_digits(o: &NfOptions, x: &MathValue) -> Option<(String, i64)> {
+    let MathValue::Finite(neg, d) = x else { return None };
+    let ld = locale_data(o);
+    let exponent = compute_exponent(o, &ld, d);
+    let (_, s) = format_numeric_to_string(o, *neg, &d.scale(-exponent));
+    Some((s, exponent))
+}
+
 // ------------------------------------------------------------- natives
 
 /// Captures of the NumberFormat natives: [%NumberFormat%, FallbackSymbol,
@@ -1666,7 +1772,9 @@ fn nf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRes
     Ok(Value::Object(obj))
 }
 
-/// A numeric argument as a Number (BigInts converted).
+/// A numeric argument as a Number (BigInts converted), for services that
+/// format plain Numbers.
+#[allow(dead_code)]
 pub(super) fn number_arg(realm: &mut Realm, v: Value) -> JsResult<f64> {
     match (realm.to_numeric(v)?).v() {
         V::BigInt(b) => Ok(b.to_f64()),
