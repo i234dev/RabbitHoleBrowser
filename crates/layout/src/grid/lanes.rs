@@ -147,18 +147,6 @@ fn place(items: &[LaneItem], tracks: &[Track], tol: f32, gap: f32, reverse: bool
     Placement { start: item_starts, pos, range }
 }
 
-/// Absolutely positioned children with auto insets start at the content
-/// edge where the reversed track order or fill starts (Grid3 §6.3): per
-/// axis whether that is the end edge of the content box (`size`).
-fn reversed_static_positions(b: &mut LayoutBox, size: (f32, f32), end: (bool, bool)) {
-    if !end.0 && !end.1 {
-        return;
-    }
-    for c in b.children.iter_mut().filter(|c| c.flow == Flow::Absolute) {
-        c.static_align = Some(crate::tree::StaticAlign { size, factor: (if end.0 { 1.0 } else { 0.0 }, if end.1 { 1.0 } else { 0.0 }) });
-    }
-}
-
 /// The end of each item's stacking-axis alignment container (§6.4): the
 /// next item in any of its tracks (less the gap), or `end` (the end of the
 /// container's stacking extent) for the last items.
@@ -215,6 +203,71 @@ impl<'a> Layouter<'a> {
             ItemAlign::Center => free / 2.0,
             ItemAlign::FlexEnd => free,
             _ => 0.0,
+        }
+    }
+
+    /// Absolutely positioned children (Grid3 §6.3): a positioned container
+    /// gives those placed in the grid axis the span of their lines (the
+    /// stacking axis spans the padding box); with auto insets they align
+    /// in that span (or the content box) by their self-alignment, and
+    /// start where a reversed track order or fill starts (`end` per axis).
+    #[allow(clippy::too_many_arguments)]
+    fn lanes_abspos(&mut self, b: &mut LayoutBox, tl: &TrackList, pos: &[f32], rows: bool, size: (f32, f32), mirror: bool, end: (bool, bool)) {
+        if !b.children.iter().any(|c| c.flow == Flow::Absolute) {
+            return;
+        }
+        let style = b.style.clone();
+        let positioned = style.position != rabbithole_style::Position::Static;
+        let (cx, cy) = (b.content_rect.x, b.content_rect.y);
+        let pad = crate::block::resolve_edges(&style.padding, size.0);
+        let n = tl.tracks.len() as i32 + 1;
+        let line = |i: i32| -> f32 {
+            match tl.tracks.len() {
+                0 => 0.0,
+                len => {
+                    let i = i.clamp(0, len as i32) as usize;
+                    if i < len { pos[i] } else { pos[len - 1] + tl.tracks[len - 1].base }
+                }
+            }
+        };
+        let rtl = style.direction == rabbithole_style::Direction::Rtl;
+        for c in b.children.iter_mut().filter(|c| c.flow == Flow::Absolute) {
+            let s = c.style.clone();
+            let (gs, ge) = if rows { (&s.grid_row_start, &s.grid_row_end) } else { (&s.grid_column_start, &s.grid_column_end) };
+            let (start, end_line) = line_specs(gs, ge, &tl.names, n);
+            let a = match start { LineSpec::Line(l) => Some(l), _ => None };
+            let e = match end_line {
+                LineSpec::Line(l) => Some(l),
+                LineSpec::Span(k) => a.map(|a| a + k),
+                LineSpec::Auto => None,
+            };
+            let a = match (a, start) { (None, LineSpec::Span(k)) => e.map(|e| e - k), (a, _) => a };
+            let (a, e) = (a.filter(|l| (0..n).contains(l)), e.filter(|l| (0..n).contains(l)));
+            let extent = if rows { size.1 } else { size.0 };
+            let (g0, g1) = (a.map(line), e.map(line));
+            let (lo, hi) = if mirror && !rows { (g1.map(|v| extent - v), g0.map(|v| extent - v)) } else { (g0, g1) };
+            let justify = if s.justify_self == ItemAlign::Auto { (style.justify_items, style.justify_items_flags) } else { (s.justify_self, s.justify_self_flags) };
+            let align = if s.align_self == ItemAlign::Auto { (style.align_items, style.align_items_flags) } else { (s.align_self, s.align_self_flags) };
+            let explicit = |v: ItemAlign| matches!(v, ItemAlign::FlexStart | ItemAlign::FlexEnd | ItemAlign::Center);
+            let fx = if end.0 && !explicit(justify.0) { 1.0 } else { static_align_factor(justify.0, justify.1, justify.0, justify.1, rtl, s.direction == rabbithole_style::Direction::Rtl) };
+            let fy = if end.1 && !explicit(align.0) { 1.0 } else { static_align_factor(align.0, align.1, align.0, align.1, false, false) };
+            let (s0, s1) = (lo.unwrap_or(0.0), hi.unwrap_or(extent));
+            let (rect_x, rect_y) = if rows { ((0.0, size.0), (s0, s1)) } else { ((s0, s1), (0.0, size.1)) };
+            c.static_pos = (cx + rect_x.0, cy + rect_y.0);
+            c.static_align = Some(crate::tree::StaticAlign { size: ((rect_x.1 - rect_x.0).max(0.0), (rect_y.1 - rect_y.0).max(0.0)), factor: (fx, fy) });
+            if positioned && (lo.is_some() || hi.is_some()) {
+                if let Some(node) = c.abs_node() {
+                    let (p0, p1) = if rows { (cy - pad.top, cy + size.1 + pad.bottom) } else { (cx - pad.left, cx + size.0 + pad.right) };
+                    let origin = if rows { cy } else { cx };
+                    let (g0, g1) = (lo.map(|v| origin + v).unwrap_or(p0), hi.map(|v| origin + v).unwrap_or(p1));
+                    let area = if rows {
+                        Rect::new(cx - pad.left, g0, size.0 + pad.left + pad.right, (g1 - g0).max(0.0))
+                    } else {
+                        Rect::new(g0, cy - pad.top, (g1 - g0).max(0.0), size.1 + pad.top + pad.bottom)
+                    };
+                    self.abs_cb.insert(node, area);
+                }
+            }
         }
     }
 
@@ -605,7 +658,7 @@ impl<'a> Layouter<'a> {
                 b.used_grid_tracks[0] = resolved::capture(b, false, &tl, GridSpace::Definite(cbw), &mut self.grid_work);
             }
             let rtl = style.direction == rabbithole_style::Direction::Rtl;
-            reversed_static_positions(b, (cbw, extent), (dir.track_reverse != rtl, dir.fill_reverse));
+            self.lanes_abspos(b, &tl, &col_pos, false, (cbw, extent), mirror, (dir.track_reverse != rtl, dir.fill_reverse));
             return pl.range;
         }
 
@@ -710,7 +763,7 @@ impl<'a> Layouter<'a> {
         if self.grid_publication.enabled() {
             b.used_grid_tracks[1] = resolved::capture(b, true, &tl, subgrid::standalone_space(b, true, avail), &mut self.grid_work);
         }
-        reversed_static_positions(b, (cbw, row_avail.unwrap_or(rows_extent)), (dir.fill_reverse != rtl, dir.track_reverse));
+        self.lanes_abspos(b, &tl, &row_pos, true, (cbw, row_avail.unwrap_or(rows_extent)), false, (dir.fill_reverse != rtl, dir.track_reverse));
         rows_extent.max(0.0)
     }
 
