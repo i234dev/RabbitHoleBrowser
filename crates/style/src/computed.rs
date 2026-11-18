@@ -1040,6 +1040,8 @@ pub struct Animation {
     pub iterations: Option<f32>,
     pub direction: String,
     pub fill_mode: String,
+    /// `animation-play-state: paused`.
+    pub paused: bool,
 }
 
 /// Simple affine matrix helpers for transforms: [a, b, c, d, e, f] with
@@ -1222,6 +1224,10 @@ pub struct ComputedStyle {
     /// Names of the properties declared `!important` for the element
     /// (animations do not override them); `None` when there are none.
     pub important: Option<std::rc::Rc<Vec<String>>>,
+    /// Legacy `clip: rect(top, right, bottom, left)` offsets from the
+    /// border box origin (`Length::Auto` = the box edge); `None` = `auto`.
+    /// Only absolutely positioned boxes are clipped.
+    pub clip_rect: Option<[Length; 4]>,
     pub clip_overflow_text: bool,
 
     // ---- text
@@ -1451,6 +1457,7 @@ impl ComputedStyle {
             filters: Vec::new(),
             backdrop_filters: Vec::new(),
             clip_path: None,
+            clip_rect: None,
             important: None,
             clip_overflow_text: false,
             text_overflow: TextOverflow::Clip,

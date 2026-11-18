@@ -94,6 +94,8 @@ pub enum DisplayItem {
         /// The clipped box's origin: the path moves with it when boxes are
         /// snapped to device pixels.
         anchor: Point,
+        /// The path as a rounded rectangle / ellipse, when it is one.
+        rounded: Option<(Rect, Radii)>,
     },
     PopClip,
     PushTransform(Matrix),
@@ -511,6 +513,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 None => Rect::new(self.bounds.x, self.bounds.y, 0.0, 0.0),
             };
         }
+        // Legacy `clip` of absolutely positioned boxes.
+        let rect_clipped = match root.style.clip_rect {
+            Some(edges) if root.flow == Flow::Absolute => {
+                let r = root.rect;
+                let at = |l: rabbithole_style::Length, auto: f32| if l.is_auto() { auto } else { l.resolve_or_zero(0.0) };
+                let (top, right, bottom, left) = (at(edges[0], 0.0), at(edges[1], r.w), at(edges[2], r.h), at(edges[3], 0.0));
+                let c = Rect::new(r.x + left, r.y + top, (right - left).max(0.0), (bottom - top).max(0.0));
+                self.list.push(DisplayItem::PushClip(c));
+                self.push_scope(HitScope::Clip(c));
+                true
+            }
+            _ => false,
+        };
         // `clip-path`: clips the element's whole painting (after filters,
         // before masks and opacity) and its hit testing.
         let clipped = match root.style.clip_path.as_deref() {
@@ -563,6 +578,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if clipped {
             self.list.push(DisplayItem::PopClip);
         }
+        if rect_clipped {
+            self.list.push(DisplayItem::PopClip);
+        }
         self.pop_wrappers(pushed_matrix, pushed_transform);
         self.scope = saved_scope;
         self.bounds = saved_bounds;
@@ -581,7 +599,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let poly = rabbithole_gfx::path::flatten(&g.path, &rabbithole_gfx::IDENTITY, 0.25);
         let bounds = rabbithole_gfx::path::polylines_bounds(&poly).unwrap_or_default();
         let anchor = Point::new(b.rect.x, b.rect.y);
-        self.list.push(DisplayItem::PushClipPath { bounds, path: Arc::new(g.path), evenodd: g.rule == FillRule::EvenOdd, anchor });
+        self.list.push(DisplayItem::PushClipPath { bounds, path: Arc::new(g.path), evenodd: g.rule == FillRule::EvenOdd, anchor, rounded: g.rounded });
         self.hits.shapes.push((poly, g.rule));
         let i = (self.hits.shapes.len() - 1) as u32;
         self.push_scope(HitScope::Shape(i));

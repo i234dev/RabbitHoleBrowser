@@ -40,8 +40,8 @@ fn item_eq(a: &DisplayItem, b: &DisplayItem) -> bool {
         }
         (D::PushClip(a), D::PushClip(b)) => a == b,
         (D::PushClipRounded(a, q1), D::PushClipRounded(b, q2)) => a == b && q1 == q2,
-        (D::PushClipPath { bounds: a, path: p1, evenodd: e1, anchor: o1 }, D::PushClipPath { bounds: b, path: p2, evenodd: e2, anchor: o2 }) => {
-            a == b && e1 == e2 && o1 == o2 && (Arc::ptr_eq(p1, p2) || p1 == p2)
+        (D::PushClipPath { bounds: a, path: p1, evenodd: e1, anchor: o1, rounded: r1 }, D::PushClipPath { bounds: b, path: p2, evenodd: e2, anchor: o2, rounded: r2 }) => {
+            a == b && e1 == e2 && o1 == o2 && r1 == r2 && (Arc::ptr_eq(p1, p2) || p1 == p2)
         }
         (D::PopClip, D::PopClip) | (D::PopTransform, D::PopTransform) | (D::PushFixed, D::PushFixed) | (D::PopFixed, D::PopFixed) => true,
         (D::PushTransform(a), D::PushTransform(b)) => a == b,

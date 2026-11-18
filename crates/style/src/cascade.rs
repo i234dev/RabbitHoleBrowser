@@ -1691,6 +1691,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.opacity = from.opacity;
             to.creates_stacking_context = from.creates_stacking_context;
         }
+        "clip" => to.clip_rect = from.clip_rect,
         "clip-path" | "-webkit-clip-path" => {
             to.clip_path = from.clip_path.clone();
             to.creates_stacking_context = from.creates_stacking_context;

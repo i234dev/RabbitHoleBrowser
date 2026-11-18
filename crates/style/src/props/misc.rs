@@ -77,6 +77,7 @@ fn parse_animations(comps: &[&[Token]]) -> Vec<Animation> {
             iterations: Some(1.0),
             direction: "normal".into(),
             fill_mode: "none".into(),
+            paused: false,
         };
         let mut times = 0;
         for c in item {
@@ -96,7 +97,7 @@ fn parse_animations(comps: &[&[Token]]) -> Vec<Animation> {
                     "infinite" => a.iterations = None,
                     "normal" | "reverse" | "alternate" | "alternate-reverse" => a.direction = kw,
                     "none" | "forwards" | "backwards" | "both" => a.fill_mode = kw,
-                    "running" | "paused" => {}
+                    "running" | "paused" => a.paused = kw == "paused",
                     _ => a.name = kw,
                 }
             } else if let [Token::String(s)] = c {
@@ -132,7 +133,7 @@ fn each_animation<T: Clone>(style: &mut ComputedStyle, vals: Vec<T>, f: impl Fn(
     if style.animations.len() < vals.len() {
         style.animations.resize(
             vals.len(),
-            Animation { name: String::new(), duration: 0.0, delay: 0.0, timing: "ease".into(), iterations: Some(1.0), direction: "normal".into(), fill_mode: "none".into() },
+            Animation { name: String::new(), duration: 0.0, delay: 0.0, timing: "ease".into(), iterations: Some(1.0), direction: "normal".into(), fill_mode: "none".into(), paused: false },
         );
     }
     let n = style.animations.len();
@@ -343,7 +344,12 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 each_animation(style, v, |a, f| a.fill_mode = f);
             }
         }
-        "animation-play-state" | "animation-composition" | "animation-timeline" => {}
+        "animation-play-state" => {
+            if let Some(v) = single_list(comps, |c| values::ident(c).filter(|k| k == "paused" || k == "running")) {
+                each_animation(style, v, |a, k| a.paused = k == "paused");
+            }
+        }
+        "animation-composition" | "animation-timeline" => {}
         "scroll-margin-top" | "scroll-margin" => {
             if let Some(v) = super::px(c0, ctx) {
                 style.scroll_margin_top = v;

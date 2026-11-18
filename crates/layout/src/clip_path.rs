@@ -12,6 +12,9 @@ use rabbithole_style::{ClipPath, ShapeBox};
 pub struct ClipGeometry {
     pub path: Vec<PathSeg>,
     pub rule: FillRule,
+    /// The same clip as a rounded rectangle (or ellipse), when it is one:
+    /// painted with the exact rounded-box coverage of borders.
+    pub rounded: Option<(Rect, Radii)>,
 }
 
 /// The reference box of `b` and its corner radii.
@@ -62,12 +65,17 @@ pub fn geometry(b: &LayoutBox, cp: &ClipPath) -> Option<ClipGeometry> {
     match cp {
         ClipPath::Box(which) => {
             let (r, radii) = reference_box(b, *which);
-            Some(ClipGeometry { path: rounded_rect_path(r, radii), rule: FillRule::NonZero })
+            Some(ClipGeometry { path: rounded_rect_path(r, radii), rule: FillRule::NonZero, rounded: Some((r, radii)) })
         }
         ClipPath::Shape(shape, which) => {
             let (r, _) = reference_box(b, *which);
             let (path, rule) = rabbithole_style::shapes::basic_shape_path(shape, r);
-            Some(ClipGeometry { path, rule })
+            // Circles and ellipses get the exact coverage of rounded boxes
+            // (like `border-radius`); rectangles keep the path, whose
+            // corners rasterize like the same path drawn elsewhere.
+            let ellipse = matches!(shape, rabbithole_style::BasicShape::Circle { .. } | rabbithole_style::BasicShape::Ellipse { .. });
+            let rounded = if ellipse { rabbithole_style::shapes::basic_shape_rounded(shape, r) } else { None };
+            Some(ClipGeometry { path, rule, rounded })
         }
         ClipPath::Url(_) => None,
     }
@@ -132,5 +140,41 @@ pub(crate) fn url_geometry(b: &LayoutBox, id: &str, ctx: &crate::LayoutContext) 
         .filter(|s| s.has_transform())
         .map(|s| rabbithole_style::transform_matrix(&s.transform, 0.0, 0.0, s.font_size));
     let (path, rule) = tree.clip_outline(id, b.rect, transform)?;
-    Some(ClipGeometry { path, rule })
+    Some(ClipGeometry { path, rule, rounded: None })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rabbithole_gfx::Point;
+
+    fn square(x: f32, y: f32, s: f32) -> Vec<PathSeg> {
+        vec![
+            PathSeg::MoveTo(Point::new(x, y)),
+            PathSeg::LineTo(Point::new(x + s, y)),
+            PathSeg::LineTo(Point::new(x + s, y + s)),
+            PathSeg::LineTo(Point::new(x, y + s)),
+            PathSeg::Close,
+        ]
+    }
+
+    #[test]
+    fn hit_testing_follows_the_fill_rule() {
+        let mut path = square(0.0, 0.0, 100.0);
+        path.extend(square(25.0, 25.0, 50.0));
+        let poly = rabbithole_gfx::path::flatten(&path, &rabbithole_gfx::IDENTITY, 0.25);
+        assert!(contains(&poly, FillRule::NonZero, 50.0, 50.0));
+        assert!(!contains(&poly, FillRule::EvenOdd, 50.0, 50.0));
+        assert!(contains(&poly, FillRule::EvenOdd, 10.0, 10.0));
+        assert!(!contains(&poly, FillRule::NonZero, 150.0, 50.0));
+    }
+
+    #[test]
+    fn margin_box_radii_grow_and_content_box_radii_shrink() {
+        let outer = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inner = Rect::new(10.0, 5.0, 80.0, 90.0);
+        assert_eq!(shrink_radii([(20.0, 20.0); 4], outer, inner)[0], (10.0, 15.0));
+        assert_eq!(grow_radii([(20.0, 20.0), (0.0, 0.0), (20.0, 20.0), (20.0, 20.0)], inner, outer)[0], (30.0, 25.0));
+        assert_eq!(grow_radii([(20.0, 20.0), (0.0, 0.0), (20.0, 20.0), (20.0, 20.0)], inner, outer)[1], (0.0, 0.0));
+    }
 }

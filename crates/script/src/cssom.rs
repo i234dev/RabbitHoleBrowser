@@ -714,7 +714,7 @@ fn timing_css(s: &ComputedStyle, prop: &str) -> Option<String> {
         "animation-iteration-count" => list(s.animations.iter().map(|a| a.iterations.map(|n| format!("{n}")).unwrap_or_else(|| "infinite".into())).collect(), "1"),
         "animation-direction" => list(s.animations.iter().map(|a| a.direction.clone()).collect(), "normal"),
         "animation-fill-mode" => list(s.animations.iter().map(|a| a.fill_mode.clone()).collect(), "none"),
-        "animation-play-state" => list(s.animations.iter().map(|_| "running".to_string()).collect(), "running"),
+        "animation-play-state" => list(s.animations.iter().map(|a| if a.paused { "paused" } else { "running" }.to_string()).collect(), "running"),
         _ => return None,
     })
 }

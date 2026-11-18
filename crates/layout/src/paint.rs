@@ -393,7 +393,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             }
             st.clips.push(true);
         }
-        DisplayItem::PushClipPath { bounds, path, evenodd, anchor } => {
+        DisplayItem::PushClipPath { bounds, path, evenodd, anchor, rounded } => {
             if st.ext {
                 let rule = if *evenodd { rabbithole_gfx::FillRule::EvenOdd } else { rabbithole_gfx::FillRule::NonZero };
                 // Follow the box when `snap` moves it to device pixels.
@@ -403,7 +403,9 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                     dx += ax.round() - ax;
                     dy += ay.round() - ay;
                 }
-                if dx == 0.0 && dy == 0.0 {
+                if let Some((r, radii)) = rounded.filter(|(_, q)| q.iter().any(|(h, v)| *h > 0.0 && *v > 0.0)) {
+                    canvas.push_clip_rounded(r.translate(dx, dy), radii);
+                } else if dx == 0.0 && dy == 0.0 {
                     canvas.push_clip_path(path, rule);
                 } else {
                     canvas.push_clip_path(&rabbithole_style::shapes::translate_path(path, dx, dy), rule);

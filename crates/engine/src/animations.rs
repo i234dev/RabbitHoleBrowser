@@ -17,7 +17,7 @@ use std::rc::Rc;
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::Color;
 use rabbithole_script::{EventDetail, EventInit};
-use rabbithole_style::{ComputedStyle, FilterOp, Length, TransformOp, Visibility};
+use rabbithole_style::{BasicShape, ClipPath, ComputedStyle, ControlPoint, FilterOp, Length, ShapeCommand, ShapeRadius, TransformOp, Visibility};
 
 use crate::scripting::ScriptOutcome;
 use crate::{Engine, Page};
@@ -57,6 +57,7 @@ enum Prop {
     BorderRadius,
     Filter,
     BackdropFilter,
+    ClipPath,
 }
 
 const ALL: &[Prop] = &[
@@ -92,6 +93,7 @@ const ALL: &[Prop] = &[
     Prop::BorderRadius,
     Prop::Filter,
     Prop::BackdropFilter,
+    Prop::ClipPath,
 ];
 
 impl Prop {
@@ -129,6 +131,7 @@ impl Prop {
             Prop::BorderRadius => "border-radius",
             Prop::Filter => "filter",
             Prop::BackdropFilter => "backdrop-filter",
+            Prop::ClipPath => "clip-path",
         }
     }
 
@@ -168,6 +171,7 @@ enum Val {
     T(Vec<TransformOp>),
     V(Visibility),
     Fl(Vec<FilterOp>),
+    Cp(Option<std::sync::Arc<ClipPath>>),
 }
 
 fn get(s: &ComputedStyle, p: Prop) -> Val {
@@ -205,6 +209,7 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         BorderRadius => Val::F(s.border_radius),
         Filter => Val::Fl(s.filters.clone()),
         BackdropFilter => Val::Fl(s.backdrop_filters.clone()),
+        ClipPath => Val::Cp(s.clip_path.clone()),
     }
 }
 
@@ -247,6 +252,12 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
                 s.creates_stacking_context = true;
             }
         }
+        (ClipPath, Val::Cp(c)) => {
+            s.clip_path = c.clone();
+            if c.is_some() {
+                s.creates_stacking_context = true;
+            }
+        }
         (BackdropFilter, Val::Fl(f)) => {
             s.backdrop_filters = f.clone();
             s.backdrop = !f.is_empty();
@@ -266,6 +277,275 @@ fn lerp_len(a: &Length, b: &Length, t: f32) -> Option<Length> {
     match (a, b) {
         (Length::Px(x), Length::Px(y)) => Some(Length::Px(lerp(*x, *y, t))),
         (Length::Percent(x), Length::Percent(y)) => Some(Length::Percent(lerp(*x, *y, t))),
+        _ => None,
+    }
+}
+
+/// A length-percentage as (px, percent), for interpolating mixed units.
+fn len_parts(l: &Length) -> Option<(f32, f32)> {
+    match *l {
+        Length::Px(v) => Some((v, 0.0)),
+        Length::Percent(p) => Some((0.0, p)),
+        Length::Calc(v, p) => Some((v, p)),
+        _ => None,
+    }
+}
+
+/// Interpolate two length-percentages (mixed units give `calc()`).
+fn lerp_lp(a: &Length, b: &Length, t: f32) -> Option<Length> {
+    if let Some(l) = lerp_len(a, b, t) {
+        return Some(l);
+    }
+    let ((ax, ap), (bx, bp)) = (len_parts(a)?, len_parts(b)?);
+    Some(Length::Calc(lerp(ax, bx, t), lerp(ap, bp, t)))
+}
+
+fn lerp_pair(a: &(Length, Length), b: &(Length, Length), t: f32) -> Option<(Length, Length)> {
+    Some((lerp_lp(&a.0, &b.0, t)?, lerp_lp(&a.1, &b.1, t)?))
+}
+
+fn lerp_radii(a: &[(Length, Length); 4], b: &[(Length, Length); 4], t: f32) -> Option<[(Length, Length); 4]> {
+    Some([lerp_pair(&a[0], &b[0], t)?, lerp_pair(&a[1], &b[1], t)?, lerp_pair(&a[2], &b[2], t)?, lerp_pair(&a[3], &b[3], t)?])
+}
+
+fn lerp_radius(a: &ShapeRadius, b: &ShapeRadius, t: f32) -> Option<ShapeRadius> {
+    match (a, b) {
+        (ShapeRadius::Len(x), ShapeRadius::Len(y)) => Some(ShapeRadius::Len(lerp_lp(x, y, t)?)),
+        _ if a == b => Some(*a),
+        _ => None,
+    }
+}
+
+fn lerp_point(a: rabbithole_gfx::Point, b: rabbithole_gfx::Point, t: f32) -> rabbithole_gfx::Point {
+    rabbithole_gfx::Point::new(lerp(a.x, b.x, t), lerp(a.y, b.y, t))
+}
+
+fn lerp_seg(a: &rabbithole_gfx::PathSeg, b: &rabbithole_gfx::PathSeg, t: f32) -> Option<rabbithole_gfx::PathSeg> {
+    use rabbithole_gfx::PathSeg::*;
+    Some(match (a, b) {
+        (MoveTo(p), MoveTo(q)) => MoveTo(lerp_point(*p, *q, t)),
+        (LineTo(p), LineTo(q)) => LineTo(lerp_point(*p, *q, t)),
+        (QuadTo(p1, p), QuadTo(q1, q)) => QuadTo(lerp_point(*p1, *q1, t), lerp_point(*p, *q, t)),
+        (CubicTo(p1, p2, p), CubicTo(q1, q2, q)) => CubicTo(lerp_point(*p1, *q1, t), lerp_point(*p2, *q2, t), lerp_point(*p, *q, t)),
+        (ArcTo { rx: arx, ry: ary, rotation: ar, large_arc: al, sweep: asw, to: at }, ArcTo { rx: brx, ry: bry, rotation: br, large_arc: bl, sweep: bsw, to: bt }) => {
+            // Flags are discrete (SVG paths interpolate them as booleans).
+            let pick = |x: bool, y: bool| if t < 0.5 { x } else { y };
+            ArcTo { rx: lerp(*arx, *brx, t), ry: lerp(*ary, *bry, t), rotation: lerp(*ar, *br, t), large_arc: pick(*al, *bl), sweep: pick(*asw, *bsw), to: lerp_point(*at, *bt, t) }
+        }
+        (Close, Close) => Close,
+        _ => return None,
+    })
+}
+
+fn lerp_control(a: &ControlPoint, b: &ControlPoint, t: f32) -> Option<ControlPoint> {
+    (a.anchor == b.anchor).then_some(())?;
+    Some(ControlPoint { x: lerp_lp(&a.x, &b.x, t)?, y: lerp_lp(&a.y, &b.y, t)?, anchor: a.anchor })
+}
+
+fn lerp_command(a: &ShapeCommand, b: &ShapeCommand, t: f32) -> Option<ShapeCommand> {
+    use ShapeCommand::*;
+    let l = |x: &Length, y: &Length| lerp_lp(x, y, t);
+    Some(match (a, b) {
+        (Move { by: ab, x: ax, y: ay }, Move { by: bb, x: bx, y: by }) if ab == bb => Move { by: *ab, x: l(ax, bx)?, y: l(ay, by)? },
+        (Line { by: ab, x: ax, y: ay }, Line { by: bb, x: bx, y: by }) if ab == bb => Line { by: *ab, x: l(ax, bx)?, y: l(ay, by)? },
+        (HLine { by: ab, x: ax }, HLine { by: bb, x: bx }) if ab == bb => HLine { by: *ab, x: l(ax, bx)? },
+        (VLine { by: ab, y: ay }, VLine { by: bb, y: by }) if ab == bb => VLine { by: *ab, y: l(ay, by)? },
+        (Curve { by: ab, x: ax, y: ay, c1: a1, c2: a2 }, Curve { by: bb, x: bx, y: by, c1: b1, c2: b2 }) if ab == bb => {
+            let c2 = match (a2, b2) {
+                (Some(p), Some(q)) => Some(lerp_control(p, q, t)?),
+                (None, None) => None,
+                _ => return None,
+            };
+            Curve { by: *ab, x: l(ax, bx)?, y: l(ay, by)?, c1: lerp_control(a1, b1, t)?, c2 }
+        }
+        (Smooth { by: ab, x: ax, y: ay, c: ac }, Smooth { by: bb, x: bx, y: by, c: bc }) if ab == bb => {
+            let c = match (ac, bc) {
+                (Some(p), Some(q)) => Some(lerp_control(p, q, t)?),
+                (None, None) => None,
+                _ => return None,
+            };
+            Smooth { by: *ab, x: l(ax, bx)?, y: l(ay, by)?, c }
+        }
+        (Arc { by: ab, x: ax, y: ay, rx: arx, ry: ary, cw: acw, large: al, rotation: ar }, Arc { by: bb, x: bx, y: by, rx: brx, ry: bry, cw: bcw, large: bl, rotation: br }) if ab == bb => {
+            let ry = match (ary, bry) {
+                (Some(p), Some(q)) => Some(l(p, q)?),
+                (None, None) => None,
+                _ => return None,
+            };
+            let pick = |x: bool, y: bool| if t < 0.5 { x } else { y };
+            Arc { by: *ab, x: l(ax, bx)?, y: l(ay, by)?, rx: l(arx, brx)?, ry, cw: pick(*acw, *bcw), large: pick(*al, *bl), rotation: lerp(*ar, *br, t) }
+        }
+        (Close, Close) => Close,
+        _ => return None,
+    })
+}
+
+/// Interpolate two shapes of the same kind (CSS Shapes 1 §4); `None`
+/// when they do not interpolate (the animation is then discrete).
+fn lerp_shape(a: &BasicShape, b: &BasicShape, t: f32) -> Option<BasicShape> {
+    use BasicShape::*;
+    let l = |x: &Length, y: &Length| lerp_lp(x, y, t);
+    Some(match (a, b) {
+        (Inset { insets: ai, radii: ar }, Inset { insets: bi, radii: br }) => {
+            Inset { insets: [l(&ai[0], &bi[0])?, l(&ai[1], &bi[1])?, l(&ai[2], &bi[2])?, l(&ai[3], &bi[3])?], radii: lerp_radii(ar, br, t)? }
+        }
+        (Xywh { x: ax, y: ay, w: aw, h: ah, radii: ar }, Xywh { x: bx, y: by, w: bw, h: bh, radii: br }) => {
+            Xywh { x: l(ax, bx)?, y: l(ay, by)?, w: l(aw, bw)?, h: l(ah, bh)?, radii: lerp_radii(ar, br, t)? }
+        }
+        (Rect { edges: ae, radii: ar }, Rect { edges: be, radii: br }) => {
+            let e = |i: usize| if ae[i].is_auto() && be[i].is_auto() { Some(Length::Auto) } else { l(&ae[i], &be[i]) };
+            Rect { edges: [e(0)?, e(1)?, e(2)?, e(3)?], radii: lerp_radii(ar, br, t)? }
+        }
+        (Circle { r: ar, at: aa }, Circle { r: br, at: ba }) => Circle { r: lerp_radius(ar, br, t)?, at: lerp_pair(aa, ba, t)? },
+        (Ellipse { rx: ax, ry: ay, at: aa }, Ellipse { rx: bx, ry: by, at: ba }) => {
+            Ellipse { rx: lerp_radius(ax, bx, t)?, ry: lerp_radius(ay, by, t)?, at: lerp_pair(aa, ba, t)? }
+        }
+        (Polygon { evenodd: ae, points: ap, round: ar }, Polygon { evenodd: be, points: bp, round: br }) if ae == be && ap.len() == bp.len() => {
+            let points: Option<Vec<(Length, Length)>> = ap.iter().zip(bp).map(|(p, q)| lerp_pair(p, q, t)).collect();
+            Polygon { evenodd: *ae, points: points?, round: lerp(*ar, *br, t).max(0.0) }
+        }
+        (Path { evenodd: ae, path: ap }, Path { evenodd: be, path: bp }) if ae == be && ap.len() == bp.len() => {
+            let path: Option<Vec<rabbithole_gfx::PathSeg>> = ap.iter().zip(bp).map(|(p, q)| lerp_seg(p, q, t)).collect();
+            Path { evenodd: *ae, path: path? }
+        }
+        (Shape { evenodd: ae, from: af, cmds: ac }, Shape { evenodd: be, from: bf, cmds: bc }) if ae == be && ac.len() == bc.len() => {
+            let direct: Option<Vec<ShapeCommand>> = ac.iter().zip(bc).map(|(p, q)| lerp_command(p, q, t)).collect();
+            let cmds = match direct {
+                Some(c) => c,
+                None => {
+                    // CSS Shapes 2 §4.2.1: mismatched `by` / `to` (and
+                    // `hline` / `vline` against `line`) interpolate in
+                    // absolute form.
+                    let (x, y) = (absolute_commands(*af, ac)?, absolute_commands(*bf, bc)?);
+                    let (x, y) = unify_lines(x, *af, y, *bf)?;
+                    x.iter().zip(&y).map(|(p, q)| lerp_command(p, q, t)).collect::<Option<Vec<_>>>()?
+                }
+            };
+            Shape { evenodd: *ae, from: lerp_pair(af, bf, t)?, cmds }
+        }
+        // `path()` interpolates with `shape()` as its equivalent shape.
+        (Path { .. }, Shape { .. }) => return lerp_shape(&path_as_shape(a)?, b, t),
+        (Shape { .. }, Path { .. }) => return lerp_shape(a, &path_as_shape(b)?, t),
+        _ => return None,
+    })
+}
+
+fn add_lp(a: Length, b: Length) -> Option<Length> {
+    let ((ax, ap), (bx, bp)) = (len_parts(&a)?, len_parts(&b)?);
+    Some(if ap + bp == 0.0 { Length::Px(ax + bx) } else { Length::Calc(ax + bx, ap + bp) })
+}
+
+/// `shape()` commands with every end point made absolute (`to`).
+fn absolute_commands(from: (Length, Length), cmds: &[ShapeCommand]) -> Option<Vec<ShapeCommand>> {
+    use ShapeCommand::*;
+    let (mut cx, mut cy) = from;
+    let (mut sx, mut sy) = from;
+    let mut out = Vec::with_capacity(cmds.len());
+    for c in cmds {
+        let end = |by: bool, x: Length, y: Length| -> Option<(Length, Length)> { if by { Some((add_lp(cx, x)?, add_lp(cy, y)?)) } else { Some((x, y)) } };
+        let cmd = match c {
+            Move { by, x, y } => {
+                (cx, cy) = end(*by, *x, *y)?;
+                (sx, sy) = (cx, cy);
+                Move { by: false, x: cx, y: cy }
+            }
+            Line { by, x, y } => {
+                (cx, cy) = end(*by, *x, *y)?;
+                Line { by: false, x: cx, y: cy }
+            }
+            HLine { by, x } => {
+                cx = if *by { add_lp(cx, *x)? } else { *x };
+                HLine { by: false, x: cx }
+            }
+            VLine { by, y } => {
+                cy = if *by { add_lp(cy, *y)? } else { *y };
+                VLine { by: false, y: cy }
+            }
+            Arc { by, x, y, rx, ry, cw, large, rotation } => {
+                (cx, cy) = end(*by, *x, *y)?;
+                Arc { by: false, x: cx, y: cy, rx: *rx, ry: *ry, cw: *cw, large: *large, rotation: *rotation }
+            }
+            Close => {
+                (cx, cy) = (sx, sy);
+                Close
+            }
+            // Control points relative to the start of a `by` segment do
+            // not survive the conversion: keep curves as they are.
+            Curve { by: false, .. } | Smooth { by: false, .. } => c.clone(),
+            _ => return None,
+        };
+        out.push(cmd);
+    }
+    Some(out)
+}
+
+/// Make `hline` / `vline` paired with `line` (absolute commands) a `line`.
+fn unify_lines(mut a: Vec<ShapeCommand>, af: (Length, Length), mut b: Vec<ShapeCommand>, bf: (Length, Length)) -> Option<(Vec<ShapeCommand>, Vec<ShapeCommand>)> {
+    use ShapeCommand::*;
+    fn as_lines(cmds: &[ShapeCommand], from: (Length, Length)) -> Vec<Option<ShapeCommand>> {
+        // The current point before each command.
+        let mut cur: Option<(Length, Length)> = Some(from);
+        let mut start = cur;
+        let mut out = Vec::with_capacity(cmds.len());
+        for c in cmds {
+            let line = match (c, cur) {
+                (HLine { x, .. }, Some((_, y))) => Some(Line { by: false, x: *x, y }),
+                (VLine { y, .. }, Some((x, _))) => Some(Line { by: false, x, y: *y }),
+                (Line { .. }, _) => Some(c.clone()),
+                _ => None,
+            };
+            cur = match c {
+                Move { x, y, .. } => {
+                    start = Some((*x, *y));
+                    start
+                }
+                Line { x, y, .. } | Arc { x, y, .. } | Curve { x, y, .. } | Smooth { x, y, .. } => Some((*x, *y)),
+                HLine { x, .. } => cur.map(|(_, y)| (*x, y)),
+                VLine { y, .. } => cur.map(|(x, _)| (x, *y)),
+                Close => start,
+            };
+            out.push(line);
+        }
+        out
+    }
+    let (la, lb) = (as_lines(&a, af), as_lines(&b, bf));
+    for i in 0..a.len() {
+        if std::mem::discriminant(&a[i]) != std::mem::discriminant(&b[i]) {
+            a[i] = la[i].clone()?;
+            b[i] = lb[i].clone()?;
+        }
+    }
+    Some((a, b))
+}
+
+/// The `shape()` equivalent of a `path()` (absolute px commands).
+fn path_as_shape(p: &BasicShape) -> Option<BasicShape> {
+    use rabbithole_gfx::PathSeg;
+    use rabbithole_style::ControlAnchor;
+    let BasicShape::Path { evenodd, path } = p else { return None };
+    let px = |v: f32| Length::Px(v);
+    let ctl = |q: rabbithole_gfx::Point| ControlPoint { x: px(q.x), y: px(q.y), anchor: ControlAnchor::Origin };
+    let (first, rest) = path.split_first()?;
+    let PathSeg::MoveTo(f) = first else { return None };
+    let cmds = rest
+        .iter()
+        .map(|s| match *s {
+            PathSeg::MoveTo(q) => ShapeCommand::Move { by: false, x: px(q.x), y: px(q.y) },
+            PathSeg::LineTo(q) => ShapeCommand::Line { by: false, x: px(q.x), y: px(q.y) },
+            PathSeg::QuadTo(c, q) => ShapeCommand::Curve { by: false, x: px(q.x), y: px(q.y), c1: ctl(c), c2: None },
+            PathSeg::CubicTo(c1, c2, q) => ShapeCommand::Curve { by: false, x: px(q.x), y: px(q.y), c1: ctl(c1), c2: Some(ctl(c2)) },
+            PathSeg::ArcTo { rx, ry, rotation, large_arc, sweep, to } => {
+                ShapeCommand::Arc { by: false, x: px(to.x), y: px(to.y), rx: px(rx), ry: Some(px(ry)), cw: sweep, large: large_arc, rotation }
+            }
+            PathSeg::Close => ShapeCommand::Close,
+        })
+        .collect();
+    Some(BasicShape::Shape { evenodd: *evenodd, from: (px(f.x), px(f.y)), cmds })
+}
+
+fn lerp_clip(a: &ClipPath, b: &ClipPath, t: f32) -> Option<ClipPath> {
+    match (a, b) {
+        (ClipPath::Shape(x, bx), ClipPath::Shape(y, by)) if bx == by => Some(ClipPath::Shape(lerp_shape(x, y, t)?, *bx)),
         _ => None,
     }
 }
@@ -378,6 +658,10 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
             }
             discrete()
         }
+        (Val::Cp(Some(x)), Val::Cp(Some(y))) => match lerp_clip(x, y, t) {
+            Some(c) => Val::Cp(Some(std::sync::Arc::new(c))),
+            None => discrete(),
+        },
         (Val::V(x), Val::V(y)) => {
             if t <= 0.0 {
                 Val::V(*x)
@@ -516,6 +800,28 @@ struct Animation {
     started: bool,
     iteration: i64,
     finished: bool,
+    /// Time the animation is held at while paused
+    /// (`animation-play-state: paused`).
+    held: Option<f64>,
+}
+
+impl Animation {
+    /// The time the animation is at: held while paused.
+    fn time(&self, now: f64) -> f64 {
+        self.held.unwrap_or(now)
+    }
+
+    /// Follow `animation-play-state`.
+    fn set_paused(&mut self, paused: bool, now: f64) {
+        match (paused, self.held) {
+            (true, None) => self.held = Some(now),
+            (false, Some(h)) => {
+                self.start += now - h;
+                self.held = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -744,6 +1050,9 @@ impl Engine {
             if spec.name.is_empty() || spec.name == "none" {
                 continue;
             }
+            if let Some(a) = page.anim.animations.iter_mut().find(|a| a.node == node && a.name == spec.name) {
+                a.set_paused(spec.paused, now);
+            }
             let running = page.anim.animations.iter().any(|a| a.node == node && a.name == spec.name);
             if running || (old_names.contains(&spec.name.as_str()) && before.is_some() && page.anim.base.contains_key(&node)) {
                 continue;
@@ -776,6 +1085,7 @@ impl Engine {
                 started: false,
                 iteration: 0,
                 finished: false,
+                held: spec.paused.then_some(now),
             });
         }
     }
@@ -864,7 +1174,7 @@ impl Engine {
             if a.finished {
                 continue;
             }
-            let local = now - a.start - a.delay;
+            let local = a.time(now) - a.start - a.delay;
             if !a.started && local >= 0.0 {
                 a.started = true;
                 page.anim.events.push(QueuedEvent { node: a.node, ty: "animationstart", name: a.name.clone(), elapsed: 0.0, transition: false });
@@ -944,6 +1254,7 @@ fn interpolable(a: &Val, b: &Val) -> bool {
             };
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| lerp_op(p, q, 0.5).is_some())
         }
+        (Val::Cp(Some(x)), Val::Cp(Some(y))) => lerp_clip(x, y, 0.5).is_some(),
         _ => false,
     }
 }
@@ -951,7 +1262,7 @@ fn interpolable(a: &Val, b: &Val) -> bool {
 /// Values of animation `a` at time `now` (base values fill keyframes that
 /// do not declare a property).
 fn animation_values(a: &Animation, base: &ComputedStyle, now: f64) -> Vec<(Prop, Val)> {
-    let local = now - a.start - a.delay;
+    let local = a.time(now) - a.start - a.delay;
     let active = match a.iterations {
         Some(n) => a.duration * n,
         None => f64::INFINITY,

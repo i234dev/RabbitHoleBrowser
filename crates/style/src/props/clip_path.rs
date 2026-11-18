@@ -55,6 +55,27 @@ pub fn parse_clip_path(comps: &[&[Token]], ctx: &LengthContext) -> Option<Option
     }
 }
 
+/// Legacy `clip`: `auto` (`Some(None)`) or `rect()` with comma or space
+/// separated offsets, each a length or `auto`; `None` = invalid.
+pub fn parse_clip_rect(comps: &[&[Token]], ctx: &LengthContext) -> Option<Option<[Length; 4]>> {
+    let [c] = comps else { return None };
+    if values::is_ident(c, "auto") {
+        return Some(None);
+    }
+    if super::fn_name(c)? != "rect" {
+        return None;
+    }
+    let args: Vec<&[Token]> = inner_comps(c).into_iter().filter(|a| !matches!(a, [Token::Comma])).collect();
+    let [t, r, b, l] = args.as_slice() else { return None };
+    let one = |a: &[Token]| -> Option<Length> {
+        if values::is_ident(a, "auto") {
+            return Some(Length::Auto);
+        }
+        Some(Length::Px(super::px(a, ctx)?))
+    };
+    Some(Some([one(t)?, one(r)?, one(b)?, one(l)?]))
+}
+
 fn shape_box(k: &str) -> Option<ShapeBox> {
     Some(match k {
         "margin-box" => ShapeBox::Margin,

@@ -19,17 +19,17 @@ fn radii_in(radii: &[(Length, Length); 4], r: Rect, rb: Rect) -> Radii {
     clamp_radii(r, out)
 }
 
-fn rect_shape(r: Rect, radii: &[(Length, Length); 4], rb: Rect) -> Vec<PathSeg> {
-    let q = radii_in(radii, r, rb);
-    rounded_rect_path(r, q)
+/// A rectangle shape `r` with its radii.
+fn rect_shape(r: Rect, radii: &[(Length, Length); 4], rb: Rect) -> (Rect, Radii) {
+    (r, radii_in(radii, r, rb))
 }
 
-/// A basic shape resolved in the reference box `rb`.
-pub fn basic_shape_path(shape: &BasicShape, rb: Rect) -> (Vec<PathSeg>, FillRule) {
+/// The shapes that are rounded rectangles (`inset()`, `xywh()`, `rect()`,
+/// `circle()`, `ellipse()`) as their rectangle and corner radii, resolved in
+/// the reference box `rb`; `None` for the others.
+pub fn basic_shape_rounded(shape: &BasicShape, rb: Rect) -> Option<(Rect, Radii)> {
     let (w, h) = (rb.w, rb.h);
-    let nonzero = |path| (path, FillRule::NonZero);
-    let rule = |evenodd: bool| if evenodd { FillRule::EvenOdd } else { FillRule::NonZero };
-    match shape {
+    Some(match shape {
         BasicShape::Inset { insets, radii } => {
             let (mut t, mut r, mut bo, mut l) = (res(insets[0], h), res(insets[1], w), res(insets[2], h), res(insets[3], w));
             // Insets adding up to more than the box are scaled down.
@@ -44,11 +44,11 @@ pub fn basic_shape_path(shape: &BasicShape, rb: Rect) -> (Vec<PathSeg>, FillRule
                 bo *= f;
             }
             let rr = Rect::new(rb.x + l, rb.y + t, (w - l - r).max(0.0), (h - t - bo).max(0.0));
-            nonzero(rect_shape(rr, radii, rb))
+            rect_shape(rr, radii, rb)
         }
         BasicShape::Xywh { x, y, w: rw, h: rh, radii } => {
             let rr = Rect::new(rb.x + res(*x, w), rb.y + res(*y, h), res(*rw, w).max(0.0), res(*rh, h).max(0.0));
-            nonzero(rect_shape(rr, radii, rb))
+            rect_shape(rr, radii, rb)
         }
         BasicShape::Rect { edges, radii } => {
             let edge = |l: Length, base: f32, auto: f32| if l.is_auto() { auto } else { res(l, base) };
@@ -57,7 +57,7 @@ pub fn basic_shape_path(shape: &BasicShape, rb: Rect) -> (Vec<PathSeg>, FillRule
             let bottom = edge(edges[2], h, h);
             let left = edge(edges[3], w, 0.0);
             let rr = Rect::new(rb.x + left, rb.y + top, (right - left).max(0.0), (bottom - top).max(0.0));
-            nonzero(rect_shape(rr, radii, rb))
+            rect_shape(rr, radii, rb)
         }
         BasicShape::Circle { r, at } => {
             let (cx, cy) = (res(at.0, w), res(at.1, h));
@@ -69,34 +69,55 @@ pub fn basic_shape_path(shape: &BasicShape, rb: Rect) -> (Vec<PathSeg>, FillRule
                 ShapeRadius::FarthestSide => dl.max(dr).max(dt).max(db),
                 ShapeRadius::ClosestCorner => corners.into_iter().fold(f32::INFINITY, f32::min),
                 ShapeRadius::FarthestCorner => corners.into_iter().fold(0.0, f32::max),
-            };
-            nonzero(ellipse_path(Point::new(rb.x + cx, rb.y + cy), radius.max(0.0), radius.max(0.0)))
+            }
+            .max(0.0);
+            ellipse_box(rb.x + cx, rb.y + cy, radius, radius)
         }
         BasicShape::Ellipse { rx, ry, at } => {
             let (cx, cy) = (res(at.0, w), res(at.1, h));
             let (dl, dr, dt, db) = (cx.abs(), (w - cx).abs(), cy.abs(), (h - cy).abs());
+            let corners = [(dl, dt), (dr, dt), (dl, db), (dr, db)].map(|(a, b)| a.hypot(b));
             let side = |r: &ShapeRadius, a: f32, b: f32, base: f32| -> f32 {
                 match r {
                     ShapeRadius::Len(l) => res(*l, base),
                     ShapeRadius::ClosestSide => a.min(b),
                     ShapeRadius::FarthestSide => a.max(b),
-                    // Corner keywords: the side ratio of the closest /
-                    // farthest-side ellipse scaled through the corner
-                    // (like radial gradients).
-                    ShapeRadius::ClosestCorner => a.min(b) * std::f32::consts::SQRT_2,
-                    ShapeRadius::FarthestCorner => a.max(b) * std::f32::consts::SQRT_2,
+                    // Corner keywords: the distance to the closest /
+                    // farthest corner of the box, for either radius.
+                    ShapeRadius::ClosestCorner => corners.into_iter().fold(f32::INFINITY, f32::min),
+                    ShapeRadius::FarthestCorner => corners.into_iter().fold(0.0, f32::max),
                 }
             };
-            let erx = side(rx, dl, dr, w).max(0.0);
-            let ery = side(ry, dt, db, h).max(0.0);
-            nonzero(ellipse_path(Point::new(rb.x + cx, rb.y + cy), erx, ery))
+            ellipse_box(rb.x + cx, rb.y + cy, side(rx, dl, dr, w).max(0.0), side(ry, dt, db, h).max(0.0))
         }
+        _ => return None,
+    })
+}
+
+fn ellipse_box(cx: f32, cy: f32, rx: f32, ry: f32) -> (Rect, Radii) {
+    (Rect::new(cx - rx, cy - ry, 2.0 * rx, 2.0 * ry), [(rx, ry); 4])
+}
+
+/// A basic shape resolved in the reference box `rb`.
+pub fn basic_shape_path(shape: &BasicShape, rb: Rect) -> (Vec<PathSeg>, FillRule) {
+    let (w, h) = (rb.w, rb.h);
+    let rule = |evenodd: bool| if evenodd { FillRule::EvenOdd } else { FillRule::NonZero };
+    if let Some((r, radii)) = basic_shape_rounded(shape, rb) {
+        let path = if matches!(shape, BasicShape::Circle { .. } | BasicShape::Ellipse { .. }) {
+            ellipse_path(Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0), r.w / 2.0, r.h / 2.0)
+        } else {
+            rounded_rect_path(r, radii)
+        };
+        return (path, FillRule::NonZero);
+    }
+    match shape {
         BasicShape::Polygon { evenodd, points, round } => {
             let pts: Vec<Point> = points.iter().map(|(x, y)| Point::new(rb.x + res(*x, w), rb.y + res(*y, h))).collect();
             (polygon_path(&pts, *round), rule(*evenodd))
         }
         BasicShape::Path { evenodd, path } => (translate_path(path, rb.x, rb.y), rule(*evenodd)),
         BasicShape::Shape { evenodd, from, cmds } => (shape_fn_path(*from, cmds, rb), rule(*evenodd)),
+        _ => (Vec::new(), FillRule::NonZero),
     }
 }
 
