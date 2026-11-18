@@ -83,6 +83,63 @@ pub(crate) struct LayoutCache {
     /// Floats the contents placed into the parent BFC, relative to the
     /// content origin.
     pub escaped: Vec<crate::float::RelFloat>,
+    /// Another `inner_h` proven to give the same contents and results (a
+    /// flex item is measured without a definite height and then stretched
+    /// to one; when its contents never depend on that height, both layouts
+    /// are the same and both are served from this entry).
+    pub alt_h: Option<Option<f32>>,
+}
+
+/// Geometry of everything laid out inside `b`, relative to its content
+/// origin `(ox, oy)`: two layouts with the same fingerprint placed every
+/// descendant box, line, fragment and marker at the same place.
+pub(crate) fn contents_fingerprint(b: &LayoutBox, ox: f32, oy: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn rect(h: &mut impl Hasher, r: &rabbithole_gfx::Rect, ox: f32, oy: f32) {
+        for v in [r.x - ox, r.y - oy, r.w, r.h] {
+            v.to_bits().hash(h);
+        }
+    }
+    fn walk(h: &mut impl Hasher, b: &LayoutBox, ox: f32, oy: f32) {
+        b.lines.len().hash(h);
+        for line in &b.lines {
+            rect(h, &line.rect, ox, oy);
+            (line.baseline - oy).to_bits().hash(h);
+            line.fragments.len().hash(h);
+            for f in &line.fragments {
+                rect(h, &f.rect, ox, oy);
+                (f.baseline - oy).to_bits().hash(h);
+            }
+        }
+        if let Some(m) = &b.marker {
+            (m.x - ox).to_bits().hash(h);
+            (m.baseline - oy).to_bits().hash(h);
+        }
+        b.children.len().hash(h);
+        for c in &b.children {
+            rect(h, &c.rect, ox, oy);
+            rect(h, &c.content_rect, ox, oy);
+            (c.static_pos.0 - ox).to_bits().hash(h);
+            (c.static_pos.1 - oy).to_bits().hash(h);
+            c.scroll_width.to_bits().hash(h);
+            c.scroll_height.to_bits().hash(h);
+            c.collapsed_bottom_margin.to_bits().hash(h);
+            match &c.wm_transform {
+                // Contents in their own logical space: hash them as they are.
+                Some(m) => {
+                    for (i, v) in m.iter().enumerate() {
+                        let v = if i == 4 { v - ox } else if i == 5 { v - oy } else { *v };
+                        v.to_bits().hash(h);
+                    }
+                    walk(h, c, 0.0, 0.0);
+                }
+                None => walk(h, c, ox, oy),
+            }
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    walk(&mut h, b, ox, oy);
+    h.finish()
 }
 
 /// Old boxes available for reuse while building the new tree.

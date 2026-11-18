@@ -526,11 +526,26 @@ impl<'a> Layouter<'a> {
         // contents are not where the cache expects them.
         let cacheable = b.kind != BoxKind::TableCell && self.clamp.is_none() && b.style.line_clamp.is_none();
         let had_cache = prev_cache.is_some();
+        // Laid out last with only another definite height: remember what the
+        // contents were, to prove below whether the height changes them.
+        let alt_candidate = prev_cache
+            .as_ref()
+            .filter(|c| {
+                cacheable
+                    && c.inner_h != inner_cb.height
+                    && c.alt_h != Some(inner_cb.height)
+                    && c.grid_publication == self.grid_publication.enabled()
+                    && c.inner_w == inner_cb.width
+                    && c.top_collapsible == top_collapsible
+                    && c.bottom_collapsible == bottom_collapsible
+                    && crate::float::same_floats(&c.float_env, &float_env)
+            })
+            .map(|c| (c.inner_h, crate::incremental::contents_fingerprint(b, prev_origin.0, prev_origin.1), c.content_h, c.collapsed_bottom_margin, c.bottom_margins, c.float_extent, c.escaped.clone()));
         let reuse = prev_cache.filter(|c| {
             cacheable
                 && c.grid_publication == self.grid_publication.enabled()
                 && c.inner_w == inner_cb.width
-                && c.inner_h == inner_cb.height
+                && (c.inner_h == inner_cb.height || c.alt_h == Some(inner_cb.height))
                 && c.top_collapsible == top_collapsible
                 && c.bottom_collapsible == bottom_collapsible
                 && crate::float::same_floats(&c.float_env, &float_env)
@@ -555,6 +570,18 @@ impl<'a> Layouter<'a> {
                 self.layout_contents(b, &inner_cb, bfc, top_collapsible, bottom_collapsible)
             };
             let float_extent = if b.bfc_root && !local_bfc.is_empty() { Some(local_bfc.max_bottom() - content_y) } else { None };
+            let escaped = bfc.relative_since(floats_before, origin);
+            // Same contents and results as with the previous height: either
+            // height is served from this entry from now on.
+            let alt_h = alt_candidate.and_then(|(h, fp, ch, cbm, bms, fe, esc)| {
+                (ch == content_h
+                    && cbm == b.collapsed_bottom_margin
+                    && bms == b.bottom_margins
+                    && fe == float_extent
+                    && esc == escaped
+                    && fp == crate::incremental::contents_fingerprint(b, origin.0, origin.1))
+                .then_some(h)
+            });
             b.layout_cache = cacheable.then(|| crate::incremental::LayoutCache {
                 grid_publication: self.grid_publication.enabled(),
                 inner_w: inner_cb.width,
@@ -566,7 +593,8 @@ impl<'a> Layouter<'a> {
                 bottom_margins: b.bottom_margins,
                 float_extent,
                 float_env,
-                escaped: bfc.relative_since(floats_before, origin),
+                escaped,
+                alt_h,
             });
             (content_h, float_extent)
         };
