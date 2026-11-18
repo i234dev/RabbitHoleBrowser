@@ -1,0 +1,536 @@
+{
+  "schema": "rabbithole-test262-measurement-v1",
+  "source_revision": "fe3d71ea04dd08790cc1cfca3f63cda9f4d64f4d",
+  "version": "0.1.34 (JavaScript code of the release)",
+  "corpus_revision": "2e58f87d8350ad51224617a041c6e041d52f8444",
+  "measurement_date": "2026-11-18",
+  "TZ": "Europe/Madrid",
+  "started_at_utc": "2026-11-18T20:43:58+00:00",
+  "finished_at_utc": "2026-11-18T20:44:56+00:00",
+  "workers": 8,
+  "cpu_timeout_per_mode_seconds": 10,
+  "profile": "ci",
+  "features": [
+    "jit"
+  ],
+  "conditions": {
+    "jit": "on (default)",
+    "gc": "normal",
+    "test_mode": "Both sloppy/strict where applicable",
+    "main_agent_can_block": true,
+    "agents": "$262.agent with threads"
+  },
+  "machine": "Intel Core i7-12700H, Linux x86-64 under WSL2",
+  "runner_sha256": "515ee848f50095e21169b631ec0d11b4e0f7ed30ef3fc706ff905e776c033940",
+  "counts": {
+    "PASS": 46017,
+    "FAIL": 47,
+    "SKIP": 7614,
+    "TIMEOUT": 0,
+    "CRASH": 0,
+    "executed": 46064,
+    "pass_percent_executed": 99.898,
+    "total_files": 53678
+  },
+  "without_intl402": {
+    "PASS": 44834,
+    "FAIL": 30,
+    "SKIP": 5420,
+    "TIMEOUT": 0,
+    "CRASH": 0,
+    "executed": 44864,
+    "pass_percent_executed": 99.9331,
+    "total_files": 50284
+  },
+  "counts_by_top_level": {
+    "annexB": {
+      "PASS": 1085,
+      "FAIL": 1,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1086,
+      "pass_percent_executed": 99.9079,
+      "total_files": 1086
+    },
+    "built-ins": {
+      "PASS": 19035,
+      "FAIL": 3,
+      "SKIP": 4841,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 19038,
+      "pass_percent_executed": 99.9842,
+      "total_files": 23879
+    },
+    "intl402": {
+      "PASS": 1183,
+      "FAIL": 17,
+      "SKIP": 2194,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1200,
+      "pass_percent_executed": 98.5833,
+      "total_files": 3394
+    },
+    "language": {
+      "PASS": 23263,
+      "FAIL": 3,
+      "SKIP": 566,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 23266,
+      "pass_percent_executed": 99.9871,
+      "total_files": 23832
+    },
+    "staging": {
+      "PASS": 1451,
+      "FAIL": 23,
+      "SKIP": 13,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1474,
+      "pass_percent_executed": 98.4396,
+      "total_files": 1487
+    }
+  },
+  "counts_by_intl402_directory": {
+    "intl402/Array": {
+      "PASS": 2,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 2,
+      "pass_percent_executed": 100.0,
+      "total_files": 2
+    },
+    "intl402/BigInt": {
+      "PASS": 11,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 11,
+      "pass_percent_executed": 100.0,
+      "total_files": 11
+    },
+    "intl402/Collator": {
+      "PASS": 63,
+      "FAIL": 2,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 65,
+      "pass_percent_executed": 96.9231,
+      "total_files": 65
+    },
+    "intl402/Date": {
+      "PASS": 12,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 12,
+      "pass_percent_executed": 100.0,
+      "total_files": 12
+    },
+    "intl402/DateTimeFormat": {
+      "PASS": 170,
+      "FAIL": 6,
+      "SKIP": 70,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 176,
+      "pass_percent_executed": 96.5909,
+      "total_files": 246
+    },
+    "intl402/DisplayNames": {
+      "PASS": 57,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 57,
+      "pass_percent_executed": 100.0,
+      "total_files": 57
+    },
+    "intl402/DurationFormat": {
+      "PASS": 104,
+      "FAIL": 0,
+      "SKIP": 6,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 104,
+      "pass_percent_executed": 100.0,
+      "total_files": 110
+    },
+    "intl402/FallbackSymbol": {
+      "PASS": 2,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 2,
+      "pass_percent_executed": 100.0,
+      "total_files": 2
+    },
+    "intl402/Intl": {
+      "PASS": 64,
+      "FAIL": 1,
+      "SKIP": 1,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 65,
+      "pass_percent_executed": 98.4615,
+      "total_files": 66
+    },
+    "intl402/ListFormat": {
+      "PASS": 81,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 81,
+      "pass_percent_executed": 100.0,
+      "total_files": 81
+    },
+    "intl402/Locale": {
+      "PASS": 108,
+      "FAIL": 5,
+      "SKIP": 77,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 113,
+      "pass_percent_executed": 95.5752,
+      "total_files": 190
+    },
+    "intl402/Number": {
+      "PASS": 7,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 7,
+      "pass_percent_executed": 100.0,
+      "total_files": 7
+    },
+    "intl402/NumberFormat": {
+      "PASS": 251,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 251,
+      "pass_percent_executed": 100.0,
+      "total_files": 251
+    },
+    "intl402/PluralRules": {
+      "PASS": 53,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 53,
+      "pass_percent_executed": 100.0,
+      "total_files": 53
+    },
+    "intl402/RelativeTimeFormat": {
+      "PASS": 77,
+      "FAIL": 3,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 80,
+      "pass_percent_executed": 96.25,
+      "total_files": 80
+    },
+    "intl402/Segmenter": {
+      "PASS": 79,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 79,
+      "pass_percent_executed": 100.0,
+      "total_files": 79
+    },
+    "intl402/String": {
+      "PASS": 19,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 19,
+      "pass_percent_executed": 100.0,
+      "total_files": 19
+    },
+    "intl402/Temporal": {
+      "PASS": 0,
+      "FAIL": 0,
+      "SKIP": 2040,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 0,
+      "pass_percent_executed": 0,
+      "total_files": 2040
+    },
+    "intl402/TypedArray": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/constructors-string-and-single-element-array.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/constructors-taint-Object-prototype-2.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/constructors-taint-Object-prototype.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/default-locale-is-canonicalized.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/default-locale-is-supported.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/fallback-locales-are-supported.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/language-tags-canonicalized.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/language-tags-invalid.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/language-tags-valid.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/language-tags-with-underscore.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-consistent-with-resolvedOptions.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-default-locale-and-zxx-locale.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-duplicate-elements-removed.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-empty-and-undefined.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-locales-arg-coered-to-object.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-locales-arg-empty-array.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-returned-array-elements-are-not-frozen.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-taint-Array-2.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-taint-Array.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-test-option-localeMatcher.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-throws-if-element-not-string-or-object.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "intl402/supportedLocalesOf-unicode-extensions-ignored.js": {
+      "PASS": 1,
+      "FAIL": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "CRASH": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    }
+  },
+  "skip_reasons": {
+    "feature Temporal": 6716,
+    "feature source-phase-imports": 253,
+    "feature import-defer": 252,
+    "feature await-dictionary": 89,
+    "feature Intl.Locale-info": 77,
+    "feature ShadowRealm": 64,
+    "feature error-stack-accessor": 35,
+    "feature tail-call-optimization": 35,
+    "feature decorators": 31,
+    "feature Intl.Era-monthcode": 28,
+    "feature Iterator.prototype.join": 18,
+    "feature import-text": 6,
+    "feature import-bytes": 5,
+    "feature nonextensible-applies-to-private": 3,
+    "flag CanBlockIsFalse": 2
+  },
+  "comparison_with_previous_record": {
+    "previous": "docs/benchmarks/test262-2026-11-14-v0.1.11.json",
+    "previous_counts": "45262 pass / 45848 executed / 7830 skipped",
+    "skip_changes": "$262.agent tests and Intl.NumberFormat-v3 tests now run; CanBlockIsFalse tests are skipped instead of CanBlockIsTrue (the main agent can block, as in shell hosts)"
+  },
+  "results_sha256": "e408bd0f097a2b77cf44c2ebc279d5782c5c95dd0c69d890ab171b73b853ec44",
+  "notes": [
+    "Percentages use executed files; skipped files are Temporal (ES2026), stage 3 proposals, tail-call-optimization and 2 CanBlockIsFalse tests.",
+    "Remaining non-Intl failures: 3 Date.prototype.toISOString tests that depend on the Europe/Madrid offset for year -271821 (they pass with TZ=UTC), 2 legacy arguments.callee.caller extension tests, 1 global assignment ordering test, 1 Annex B test that contradicts SpiderMonkey staging tests, and SpiderMonkey staging tests."
+  ]
+}

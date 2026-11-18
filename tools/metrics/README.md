@@ -34,11 +34,14 @@ context: all 27 cases are reported individually, including `array_map` at
 source `37cb93d` with CSS code identical to final 0.1.18; it is not a new global
 CSS/WPT result. These rows retain their measured 0.1.18 context in later builds.
 
-The [complete test262 run](../../docs/benchmarks/test262-2026-11-14-v0.1.11.json)
-remains measured on source `baca2a7`, and the [functional framework checks](../../docs/benchmarks/frameworks-2026-11-14-v0.1.11.json)
+The [complete test262 run](../../docs/benchmarks/test262-2026-11-18-v0.1.34.md)
+was measured on source `fe3d71e` (0.1.34 JavaScript code) on 2026-11-18; the
+[0.1.11 run](../../docs/benchmarks/test262-2026-11-14-v0.1.11.json) on `baca2a7`
+stays as measured. The [functional framework checks](../../docs/benchmarks/frameworks-2026-11-14-v0.1.11.json)
 on source `b88c8ff`. Each retains its original date and conditions; a later build
-does not imply that those suites were repeated. CSS, DOM and other WPT totals
-retain their previous measured baselines.
+does not imply that those suites were repeated. The [CSS reftest run](../../docs/benchmarks/wpt-css-2026-11-18.md) was
+measured on 2026-11-18 on source `68a3dd7`. DOM and other WPT totals retain
+their previous measured baselines (2026-11-13).
 
 Historical records remain unchanged: [test262 on cc90](../../docs/benchmarks/test262-2026-11-14.json),
 [Speedometer on 0.1.11](../../docs/benchmarks/speedometer-2026-11-14-v0.1.11.md),

@@ -32,6 +32,15 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.1.34 completes JavaScript up to ES2025: test262 passes 99.93 % of the
+executed files outside Intl and 99.90 % overall (ECMA-402 98.6 %), `SharedArrayBuffer` memory is
+shared between threads with real `Atomics`, module cycles with top-level `await`
+follow the specification, and Intl gains `DurationFormat` and specification-level
+`NumberFormat`, `PluralRules`, `DateTimeFormat`, `Locale`, `ListFormat`,
+`RelativeTimeFormat`, `DisplayNames`, `Segmenter` and `Collator` ([measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md)).
+Speedometer 3.1 and page loads are unchanged by these changes (paired runs:
+1.002× and 1.001×).
+
 Version 0.1.33 reuses an element's custom property map when neither its parent's
 map nor its own declarations changed: pages with many custom properties load up
 to 1.34× faster, other pages and Speedometer 3.1 are unchanged
@@ -90,9 +99,9 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 
 | Suite | Result | Notes |
 |---|---|---|
-| **test262** (ECMAScript) | **98.72 %** (45,262 / 45,848 run) | 2026-11-14, v0.1.11 source `baca2a7`, JIT off/normal GC, one worker, profile ci on a Linux VM; 99.88 % excluding Intl; 7,830 skipped files; [measurement](docs/benchmarks/test262-2026-11-14-v0.1.11.json) and `crates/js/tests/test262_baseline.txt` |
+| **test262** (ECMAScript) | **99.90 %** (46,017 / 46,064 run) | 2026-11-18, 0.1.34 JavaScript code `fe3d71e`, JIT on, 8 workers, profile ci; **99.93 % excluding Intl**, ECMA-402 98.6 %; multi-agent `Atomics` and `Intl.NumberFormat` v3 tests included; [measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md) and `crates/js/tests/test262_baseline.txt` |
 | **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **61.1 %** (11,983 / 19,627) | committed baseline in `crates/engine/tests/wpt-css-baseline.txt`; CSS2 79.6 %, color 79.4 %, css-ui 91.1 %, css-text-decor 75.5 %, flexbox 61.2 % |
+| **WPT CSS reftests** (pixel comparison) | **63.2 %** (12,397 / 19,627) | 2026-11-18, 0.1.34 CSS/layout code; CSS2 80.7 %, css-ui 90.3 %, color 80.4 %, flexbox 69.3 %, grid 58.7 %; [measurement](docs/benchmarks/wpt-css-2026-11-18.md) and `crates/engine/tests/wpt-css-baseline.txt` |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
@@ -146,7 +155,8 @@ reports agent-task results supplied by the project owner for v0.1.15 on
 
 - Own JavaScript engine (`crates/js`): lazy parser and compiler, register-based
   interpreter with hidden classes and inline caches, 8-byte NaN-boxed values,
-  size-class allocator, mark-and-sweep GC, ES2023 standard library,
+  size-class allocator, mark-and-sweep GC, ES2025 language and standard library
+  (including `SharedArrayBuffer`/`Atomics` across threads) and ECMA-402 `Intl`,
   ES modules, own regular expression engine, and a baseline x86-64 JIT with
   loop OSR (on by default on x86-64; `--jit=off` disables it).
 - Own WebAssembly engine (`crates/wasm`): validator, interpreter and a
