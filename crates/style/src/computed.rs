@@ -32,6 +32,7 @@ impl Length {
         matches!(self, Length::MinContent | Length::MaxContent | Length::FitContent)
     }
     /// Resolve against `base` (the containing block dimension). `Auto` → None.
+    #[inline]
     pub fn resolve(&self, base: f32) -> Option<f32> {
         match *self {
             Length::Px(v) => Some(v),
@@ -43,6 +44,7 @@ impl Length {
     }
     /// Resolve against an optional base: percentages (and calc() with
     /// percentages) need a definite base.
+    #[inline]
     pub fn resolve_definite(&self, base: Option<f32>) -> Option<f32> {
         match *self {
             Length::Px(v) => Some(v),
@@ -55,9 +57,11 @@ impl Length {
     pub fn has_percent(&self) -> bool {
         matches!(self, Length::Percent(_) | Length::Calc(..) | Length::Math(_))
     }
+    #[inline]
     pub fn resolve_or(&self, base: f32, default: f32) -> f32 {
         self.resolve(base).unwrap_or(default)
     }
+    #[inline]
     pub fn resolve_or_zero(&self, base: f32) -> f32 {
         self.resolve(base).unwrap_or(0.0)
     }
