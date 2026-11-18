@@ -512,6 +512,7 @@ impl<'a> Layouter<'a> {
                 lines: &mut lines,
                 cur: Line::default(),
                 pending_floats: Vec::new(),
+                pending_abs: Vec::new(),
                 first_line: true,
                 indent,
                 ellipsis,
@@ -643,6 +644,9 @@ struct InlineLayout<'l, 'a> {
     lines: &'l mut Vec<LineBox>,
     cur: Line,
     pending_floats: Vec<usize>,
+    /// Hypothetical block-level absolutes met after inline content: their
+    /// static position is below the line they would have broken.
+    pending_abs: Vec<usize>,
     first_line: bool,
     indent: f32,
     /// `text-overflow: ellipsis` applies (overflow clipped).
@@ -825,6 +829,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     let y = self.cur.y;
                     let (rx, ry) = self.rel_kids.get(*c).copied().unwrap_or((0.0, 0.0));
                     self.children[*c].static_pos = (x + rx, y + ry);
+                    if block && self.cur.has_content {
+                        self.pending_abs.push(*c);
+                    }
                 }
                 Piece::Break => self.finish_line(true),
                 Piece::Gap(w) => {
@@ -1882,6 +1889,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         });
         self.first_line = false;
         let new_y = y + h;
+        for c in std::mem::take(&mut self.pending_abs) {
+            let ry = self.rel_kids.get(c).map_or(0.0, |r| r.1);
+            self.children[c].static_pos.1 = new_y + ry;
+        }
         let pending = std::mem::take(&mut self.pending_floats);
         for c in pending {
             self.layout_float_at(c, new_y);
