@@ -1018,7 +1018,7 @@ fn intl_number_format() {
     eq("(1234.5).toLocaleString('en-US', {style: 'currency', currency: 'EUR'})", "€1,234.50");
     eq("(5000).toLocaleString('ja-JP', {style: 'currency', currency: 'JPY'})", "¥5,000");
     eq("(1234.5).toLocaleString('en-US', {style: 'currency', currency: 'USD', currencyDisplay: 'code'})", "USD\u{a0}1,234.50");
-    eq("(1).toLocaleString('en-US', {style: 'currency', currency: 'USD', currencyDisplay: 'name'}) + '|' + (2).toLocaleString('en-US', {style: 'currency', currency: 'USD', currencyDisplay: 'name'})", "1.00 US dollar|2.00 US dollars");
+    eq("(1).toLocaleString('en-US', {style: 'currency', currency: 'USD', currencyDisplay: 'name'}) + '|' + (2).toLocaleString('en-US', {style: 'currency', currency: 'USD', currencyDisplay: 'name'})", "1.00 US dollars|2.00 US dollars");
     eq("new Intl.NumberFormat('en-US', {minimumFractionDigits: 2}).format(3)", "3.00");
     eq("new Intl.NumberFormat('en-US', {maximumFractionDigits: 0}).format(2.5) + ',' + new Intl.NumberFormat('en-US', {maximumFractionDigits: 0}).format(3.5) + ',' + new Intl.NumberFormat('en-US', {maximumFractionDigits: 2}).format(1.005)", "3,4,1.01");
     eq("new Intl.NumberFormat('en-US', {notation: 'compact'}).format(1234) + ',' + new Intl.NumberFormat('en-US', {notation: 'compact'}).format(12345) + ',' + new Intl.NumberFormat('en-US', {notation: 'compact'}).format(1500000) + ',' + new Intl.NumberFormat('en-US', {notation: 'compact'}).format(999)", "1.2K,12K,1.5M,999");
