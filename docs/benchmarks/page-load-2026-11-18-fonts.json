@@ -1,0 +1,184 @@
+{
+  "date": "2026-11-18",
+  "change": "Font fallback candidates checked in their character map before being loaded; bundled fonts parsed on first use instead of at engine start-up",
+  "base_source": "9819455da30755b27c642c3a0b43b1f1dd2cc30b (0.1.30)",
+  "candidate": "base + these changes (released in 0.1.31)",
+  "benchmark": "tools/bench/page_load.py: each Speedometer 3.1 workload page (suite commit 1386415be8fe, 32 URLs) loaded in a fresh shot process, 4 rounds, order alternated",
+  "binaries": {
+    "build": "release + line tables + frame pointers, functions and branch targets aligned to 64 bytes (same flags for both)",
+    "base_sha256": "944831d886d699717bf64d100f922f93d2c752ea50065bab50c28f0b110f28b7",
+    "candidate_sha256": "dd3bcdafb1d08a0dcb04011249d9fb90a2ed540dc33f7b7be08d0f1cc52af1f7",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one load at a time",
+    "viewport": "1280x900",
+    "utc_interval": "2026-11-18 15:15-15:26"
+  },
+  "summary": {
+    "wall_ms": {
+      "base_total_ms": 53619,
+      "candidate_total_ms": 39663,
+      "ratio": 1.352
+    },
+    "build_page": {
+      "base_total_ms": 17393,
+      "candidate_total_ms": 21709,
+      "ratio": 0.801
+    },
+    "fonts": {
+      "base_total_ms": 16295,
+      "candidate_total_ms": 377,
+      "ratio": 43.24
+    },
+    "layout": {
+      "base_total_ms": 27487,
+      "candidate_total_ms": 31473,
+      "ratio": 0.873
+    },
+    "paint": {
+      "base_total_ms": 4534,
+      "candidate_total_ms": 3545,
+      "ratio": 1.279
+    },
+    "loads_faster": 128,
+    "loads": 128
+  },
+  "per_page": {
+    "todomvc/vanilla-examples/javascript-es5/dist/index.html": {
+      "base_median_ms": 227,
+      "candidate_median_ms": 134
+    },
+    "todomvc/vanilla-examples/javascript-es5-complex/dist/index.html": {
+      "base_median_ms": 553,
+      "candidate_median_ms": 477
+    },
+    "todomvc/vanilla-examples/javascript-es6-webpack/dist/index.html": {
+      "base_median_ms": 219,
+      "candidate_median_ms": 129
+    },
+    "todomvc/vanilla-examples/javascript-es6-webpack-complex/dist/index.html": {
+      "base_median_ms": 541,
+      "candidate_median_ms": 470
+    },
+    "todomvc/vanilla-examples/javascript-web-components/dist/index.html": {
+      "base_median_ms": 257,
+      "candidate_median_ms": 162
+    },
+    "todomvc/vanilla-examples/javascript-web-components-complex/dist/index.html": {
+      "base_median_ms": 579,
+      "candidate_median_ms": 510
+    },
+    "todomvc/architecture-examples/react/dist/index.html#/home": {
+      "base_median_ms": 242,
+      "candidate_median_ms": 147
+    },
+    "todomvc/architecture-examples/react-complex/dist/index.html#/home": {
+      "base_median_ms": 562,
+      "candidate_median_ms": 487
+    },
+    "todomvc/architecture-examples/react-redux/dist/index.html": {
+      "base_median_ms": 245,
+      "candidate_median_ms": 151
+    },
+    "todomvc/architecture-examples/react-redux-complex/dist/index.html": {
+      "base_median_ms": 564,
+      "candidate_median_ms": 494
+    },
+    "todomvc/architecture-examples/backbone/dist/index.html": {
+      "base_median_ms": 244,
+      "candidate_median_ms": 152
+    },
+    "todomvc/architecture-examples/backbone-complex/dist/index.html": {
+      "base_median_ms": 932,
+      "candidate_median_ms": 867
+    },
+    "todomvc/architecture-examples/angular/dist/index.html": {
+      "base_median_ms": 272,
+      "candidate_median_ms": 175
+    },
+    "todomvc/architecture-examples/angular-complex/dist/index.html": {
+      "base_median_ms": 609,
+      "candidate_median_ms": 529
+    },
+    "todomvc/architecture-examples/vue/dist/index.html": {
+      "base_median_ms": 243,
+      "candidate_median_ms": 148
+    },
+    "todomvc/architecture-examples/vue-complex/dist/index.html": {
+      "base_median_ms": 564,
+      "candidate_median_ms": 491
+    },
+    "todomvc/architecture-examples/jquery/dist/index.html": {
+      "base_median_ms": 253,
+      "candidate_median_ms": 161
+    },
+    "todomvc/architecture-examples/jquery-complex/dist/index.html": {
+      "base_median_ms": 943,
+      "candidate_median_ms": 875
+    },
+    "todomvc/architecture-examples/preact/dist/index.html#/home": {
+      "base_median_ms": 220,
+      "candidate_median_ms": 127
+    },
+    "todomvc/architecture-examples/preact-complex/dist/index.html#/home": {
+      "base_median_ms": 542,
+      "candidate_median_ms": 471
+    },
+    "todomvc/architecture-examples/svelte/dist/index.html": {
+      "base_median_ms": 222,
+      "candidate_median_ms": 127
+    },
+    "todomvc/architecture-examples/svelte-complex/dist/index.html": {
+      "base_median_ms": 543,
+      "candidate_median_ms": 474
+    },
+    "todomvc/architecture-examples/lit/dist/index.html": {
+      "base_median_ms": 224,
+      "candidate_median_ms": 131
+    },
+    "todomvc/architecture-examples/lit-complex/dist/index.html": {
+      "base_median_ms": 551,
+      "candidate_median_ms": 474
+    },
+    "newssite/news-next/dist/index.html#/home": {
+      "base_median_ms": 581,
+      "candidate_median_ms": 332
+    },
+    "newssite/news-nuxt/dist/index.html": {
+      "base_median_ms": 627,
+      "candidate_median_ms": 372
+    },
+    "editors/dist/codemirror.html": {
+      "base_median_ms": 417,
+      "candidate_median_ms": 158
+    },
+    "editors/dist/tiptap.html": {
+      "base_median_ms": 385,
+      "candidate_median_ms": 128
+    },
+    "charts/dist/observable-plot.html": {
+      "base_median_ms": 237,
+      "candidate_median_ms": 123
+    },
+    "charts/dist/chartjs.html": {
+      "base_median_ms": 239,
+      "candidate_median_ms": 123
+    },
+    "react-stockcharts/build/index.html?type=svg": {
+      "base_median_ms": 294,
+      "candidate_median_ms": 175
+    },
+    "perf.webkit.org/public/v3/#/charts/?since=1678991819934&paneList=((55-1974-null-null-(5-2.5-500)))": {
+      "base_median_ms": 247,
+      "candidate_median_ms": 135
+    }
+  },
+  "phases": "fonts = engine creation (font discovery); build_page = parse, scripts, style; layout = load+layout; paint = first paint (shot timings).",
+  "correctness": "gfx tests fallback_faces_map_their_characters and bundled_faces_load_lazily_and_parse; gfx, layout and engine tests 574/574.",
+  "limitations": [
+    "One Linux x64 host with its installed system fonts; local pages, no network.",
+    "Speedometer 3.1 does not time page loads; see its own records."
+  ]
+}

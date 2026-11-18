@@ -32,6 +32,10 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.1.31 loads pages about 35 % faster: bundled fonts are parsed on
+first use instead of at start-up, and font fallback checks a candidate's
+character map before loading it ([measurement](docs/benchmarks/page-load-2026-11-18-fonts.md)).
+
 Versions 0.1.23–0.1.30 made Speedometer 3.1 much faster, each step measured
 on the complete suite with paired, rotated runs of identically built binaries
 (the records give every pair, the per-suite results and the conditions):
