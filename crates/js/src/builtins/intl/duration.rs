@@ -31,7 +31,7 @@ pub struct DurationOptions {
 }
 
 /// GetOptionsObject: undefined gives an empty bag; other non-objects throw.
-fn get_options_object(realm: &mut Realm, v: Value) -> JsResult<Option<ObjectId>> {
+pub(super) fn get_options_object(realm: &mut Realm, v: Value) -> JsResult<Option<ObjectId>> {
     match v.v() {
         V::Undefined => Ok(None),
         V::Object(id) => Ok(Some(id)),
@@ -40,7 +40,7 @@ fn get_options_object(realm: &mut Realm, v: Value) -> JsResult<Option<ObjectId>>
 }
 
 /// GetOption with a list of allowed string values.
-fn get_string_option(realm: &mut Realm, opts: Option<ObjectId>, name: &str, allowed: &[&str], default: Option<&str>) -> JsResult<Option<String>> {
+pub(super) fn get_string_option(realm: &mut Realm, opts: Option<ObjectId>, name: &str, allowed: &[&str], default: Option<&str>) -> JsResult<Option<String>> {
     let v = match opts {
         Some(o) => realm.get_str(Value::Object(o), name)?,
         None => Value::Undefined,

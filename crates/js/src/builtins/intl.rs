@@ -15,6 +15,10 @@ use crate::realm::SYM_TO_STRING_TAG;
 mod duration;
 pub mod locale_id;
 mod locale_obj;
+mod list_format;
+mod relative_time;
+pub use list_format::{format_list, ListOptions};
+use list_format::list_parts;
 
 // ------------------------------------------------------------- locales
 
@@ -141,6 +145,21 @@ fn canonical_locale_list(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
         }
     }
     Ok(out)
+}
+
+/// ResolveLocale's locale part (lookup matcher): the first requested
+/// locale with available data, else the default locale. Extensions are
+/// left to each service.
+pub(super) fn lookup_locale(realm: &mut Realm, locales: Value) -> JsResult<Locale> {
+    let requested = canonical_locale_list(realm, locales)?;
+    for t in &requested {
+        if is_available(t) {
+            if let Some(l) = Locale::parse(t) {
+                return Ok(l);
+            }
+        }
+    }
+    Ok(Locale::default_locale())
 }
 
 // ---------------------------------------------------- numbering systems
@@ -1355,173 +1374,6 @@ pub fn plural_category(n: f64, lang: &str, ordinal: bool) -> &'static str {
     }
 }
 
-// ----------------------------------------------------- RelativeTimeFormat
-
-#[derive(Debug, Clone)]
-pub struct RtfOptions {
-    locale: Locale,
-    numeric_auto: bool,
-    style: String,
-}
-
-fn rtf_unit(unit: &str) -> Option<&'static str> {
-    Some(match unit.trim_end_matches('s') {
-        "second" => "second",
-        "minute" => "minute",
-        "hour" => "hour",
-        "day" => "day",
-        "week" => "week",
-        "month" => "month",
-        "quarter" => "quarter",
-        "year" => "year",
-        _ => return None,
-    })
-}
-
-pub fn format_relative(value: f64, unit: &str, o: &RtfOptions) -> String {
-    let lang = o.locale.lang.as_str();
-    let abs = value.abs();
-    let n = if abs.fract() == 0.0 { format!("{}", abs as i64) } else { format!("{}", abs) };
-    let past = value < 0.0 || (value == 0.0 && value.is_sign_negative());
-    if o.numeric_auto && abs <= 1.0 && abs.fract() == 0.0 {
-        let special = match (lang, unit, value as i64) {
-            ("es", "day", 0) => Some("hoy"),
-            ("es", "day", 1) => Some("mañana"),
-            ("es", "day", -1) => Some("ayer"),
-            ("es", "second", 0) => Some("ahora"),
-            ("es", u, 0) => Some(match u {
-                "year" => "este año",
-                "month" => "este mes",
-                "week" => "esta semana",
-                "quarter" => "este trimestre",
-                "hour" => "esta hora",
-                "minute" => "este minuto",
-                _ => "ahora",
-            }),
-            ("en", "day", 0) => Some("today"),
-            ("en", "day", 1) => Some("tomorrow"),
-            ("en", "day", -1) => Some("yesterday"),
-            ("en", "second", 0) => Some("now"),
-            ("en", u, 0) => Some(match u {
-                "year" => "this year",
-                "month" => "this month",
-                "week" => "this week",
-                "quarter" => "this quarter",
-                "hour" => "this hour",
-                "minute" => "this minute",
-                _ => "now",
-            }),
-            ("en", u, 1) => Some(match u {
-                "year" => "next year",
-                "month" => "next month",
-                "week" => "next week",
-                "quarter" => "next quarter",
-                _ => "",
-            }),
-            ("en", u, -1) => Some(match u {
-                "year" => "last year",
-                "month" => "last month",
-                "week" => "last week",
-                "quarter" => "last quarter",
-                _ => "",
-            }),
-            _ => None,
-        };
-        if let Some(s) = special.filter(|s| !s.is_empty()) {
-            return s.to_string();
-        }
-    }
-    let plural = abs != 1.0;
-    match lang {
-        "es" => {
-            let (one, many) = match unit {
-                "second" => ("segundo", "segundos"),
-                "minute" => ("minuto", "minutos"),
-                "hour" => ("hora", "horas"),
-                "day" => ("día", "días"),
-                "week" => ("semana", "semanas"),
-                "month" => ("mes", "meses"),
-                "quarter" => ("trimestre", "trimestres"),
-                _ => ("año", "años"),
-            };
-            let u = if plural { many } else { one };
-            if past {
-                format!("hace {} {}", n, u)
-            } else {
-                format!("dentro de {} {}", n, u)
-            }
-        }
-        _ => {
-            let u = match (o.style.as_str(), unit) {
-                ("long", u) => if plural { format!("{}s", u) } else { u.to_string() },
-                (_, "second") => "sec.".into(),
-                (_, "minute") => "min.".into(),
-                (_, "hour") => "hr.".into(),
-                (_, "day") => if plural { "days".into() } else { "day".into() },
-                (_, "week") => "wk.".into(),
-                (_, "month") => "mo.".into(),
-                (_, "quarter") => if plural { "qtrs.".into() } else { "qtr.".into() },
-                _ => "yr.".into(),
-            };
-            if past {
-                format!("{} {} ago", n, u)
-            } else {
-                format!("in {} {}", n, u)
-            }
-        }
-    }
-}
-
-// ------------------------------------------------------------ ListFormat
-
-#[derive(Debug, Clone)]
-pub struct ListOptions {
-    locale: Locale,
-    kind: String,
-    style: String,
-}
-
-pub fn format_list(items: &[String], o: &ListOptions) -> String {
-    let lang = o.locale.lang.as_str();
-    let (word, narrow_sep) = match (lang, o.kind.as_str()) {
-        ("es", "disjunction") => ("o", ", "),
-        ("es", "unit") => ("y", " "),
-        ("es", _) => ("y", ", "),
-        ("de", "disjunction") => ("oder", ", "),
-        ("de", _) => ("und", ", "),
-        ("fr", "disjunction") => ("ou", ", "),
-        ("fr", _) => ("et", ", "),
-        ("it", "disjunction") => ("o", ", "),
-        ("it", _) => ("e", ", "),
-        ("pt", "disjunction") => ("ou", ", "),
-        ("pt", _) => ("e", ", "),
-        (_, "disjunction") => ("or", ", "),
-        (_, "unit") => ("", ", "),
-        _ => (if o.style == "short" { "&" } else { "and" }, ", "),
-    };
-    match items.len() {
-        0 => String::new(),
-        1 => items[0].clone(),
-        2 => {
-            if o.kind == "unit" || (o.style == "narrow" && o.kind != "disjunction") {
-                format!("{}{}{}", items[0], if o.style == "narrow" { " " } else { ", " }, items[1])
-            } else {
-                format!("{} {} {}", items[0], word, items[1])
-            }
-        }
-        n => {
-            let head = items[..n - 1].join(", ");
-            if o.kind == "unit" || (o.style == "narrow" && o.kind != "disjunction") {
-                format!("{}{}{}", head, if o.style == "narrow" { " " } else { narrow_sep }, items[n - 1])
-            } else if lang == "en" {
-                format!("{}, {} {}", head, word, items[n - 1])
-            } else {
-                format!("{} {} {}", head, word, items[n - 1])
-            }
-        }
-    }
-}
-
 // --------------------------------------------------------- registration
 
 pub fn register(realm: &mut Realm) {
@@ -1563,15 +1415,15 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(pr, "selectRange", 2, plural_select_range);
     realm.define_method(pr, "resolvedOptions", 0, plural_resolved_options);
 
-    let (_, rtf) = mk(realm, "RelativeTimeFormat", "Intl.RelativeTimeFormat", rtf_ctor, 0);
-    realm.define_method(rtf, "format", 2, rtf_format);
-    realm.define_method(rtf, "formatToParts", 2, rtf_format_to_parts);
-    realm.define_method(rtf, "resolvedOptions", 0, rtf_resolved_options);
+    let (_, rtf) = mk(realm, "RelativeTimeFormat", "Intl.RelativeTimeFormat", relative_time::ctor, 0);
+    realm.define_method(rtf, "format", 2, relative_time::format);
+    realm.define_method(rtf, "formatToParts", 2, relative_time::format_to_parts);
+    realm.define_method(rtf, "resolvedOptions", 0, relative_time::resolved_options);
 
-    let (_, lf) = mk(realm, "ListFormat", "Intl.ListFormat", lf_ctor, 0);
-    realm.define_method(lf, "format", 1, lf_format);
-    realm.define_method(lf, "formatToParts", 1, lf_format_to_parts);
-    realm.define_method(lf, "resolvedOptions", 0, lf_resolved_options);
+    let (_, lf) = mk(realm, "ListFormat", "Intl.ListFormat", list_format::ctor, 0);
+    realm.define_method(lf, "format", 1, list_format::format);
+    realm.define_method(lf, "formatToParts", 1, list_format::format_to_parts);
+    realm.define_method(lf, "resolvedOptions", 0, list_format::resolved_options);
 
     let (_, loc) = mk(realm, "Locale", "Intl.Locale", locale_obj::ctor, 1);
     realm.define_method(loc, "toString", 0, locale_obj::to_string);
@@ -2032,113 +1884,6 @@ fn plural_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> J
     let cats: Vec<Value> = if o.ordinal { vec!["few", "one", "two", "other"] } else { vec!["one", "other"] }.into_iter().map(Value::str).collect();
     let arr = realm.new_array_value(cats);
     realm.define_property(obj, "pluralCategories", arr, ALL);
-    Ok(Value::Object(obj))
-}
-
-// RelativeTimeFormat
-fn rtf_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let locale = resolve_locale(realm, arg(args, 0))?;
-    let opts = options_object(realm, arg(args, 1))?;
-    let numeric_auto = opt_str(realm, opts, "numeric")?.as_deref() == Some("auto");
-    let style = opt_str(realm, opts, "style")?.unwrap_or_else(|| "long".into());
-    Ok(Value::Object(new_intl_object(realm, "Intl.RelativeTimeFormat", RtfOptions { locale, numeric_auto, style })?))
-}
-
-fn rtf_format(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let o: RtfOptions = host(realm, &this, "Intl.RelativeTimeFormat.prototype.format")?;
-    let v = realm.to_number(arg(args, 0))?;
-    if !v.is_finite() {
-        return realm.range_error("Value need to be finite number for Intl.RelativeTimeFormat.prototype.format()");
-    }
-    let unit = realm.to_rust_string(arg(args, 1))?;
-    let Some(unit) = rtf_unit(&unit) else { return realm.range_error(&format!("Invalid unit argument for format() '{}'", unit)) };
-    Ok(Value::str(&format_relative(v, unit, &o)))
-}
-
-fn rtf_format_to_parts(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let s = rtf_format(realm, this, args)?;
-    let obj = realm.new_object();
-    realm.define_property(obj, "type", Value::str("literal"), ALL);
-    realm.define_property(obj, "value", s, ALL);
-    Ok(realm.new_array_value(vec![Value::Object(obj)]))
-}
-
-fn rtf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let o: RtfOptions = host(realm, &this, "Intl.RelativeTimeFormat.prototype.resolvedOptions")?;
-    let obj = realm.new_object();
-    realm.define_property(obj, "locale", Value::str(&o.locale.tag), ALL);
-    realm.define_property(obj, "style", Value::str(&o.style), ALL);
-    realm.define_property(obj, "numeric", Value::str(if o.numeric_auto { "auto" } else { "always" }), ALL);
-    realm.define_property(obj, "numberingSystem", Value::str("latn"), ALL);
-    Ok(Value::Object(obj))
-}
-
-// ListFormat
-fn lf_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let locale = resolve_locale(realm, arg(args, 0))?;
-    let opts = options_object(realm, arg(args, 1))?;
-    let kind = opt_str(realm, opts, "type")?.unwrap_or_else(|| "conjunction".into());
-    let style = opt_str(realm, opts, "style")?.unwrap_or_else(|| "long".into());
-    Ok(Value::Object(new_intl_object(realm, "Intl.ListFormat", ListOptions { locale, kind, style })?))
-}
-
-fn lf_items(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
-    let vals = if v.is_undefined() { Vec::new() } else { realm.iterate_to_vec(v)? };
-    let mut out = Vec::new();
-    for v in vals {
-        match v.v() {
-            V::String(s) => out.push(s.to_rust_string()),
-            _ => return realm.type_error("Iterable yielded a non-String value"),
-        }
-    }
-    Ok(out)
-}
-
-fn lf_format(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let o: ListOptions = host(realm, &this, "Intl.ListFormat.prototype.format")?;
-    let items = lf_items(realm, arg(args, 0))?;
-    Ok(Value::str(&format_list(&items, &o)))
-}
-
-fn lf_format_to_parts(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let o: ListOptions = host(realm, &this, "Intl.ListFormat.prototype.formatToParts")?;
-    let items = lf_items(realm, arg(args, 0))?;
-    let mut out = Vec::new();
-    for (t, v) in list_parts(&items, &o) {
-        let obj = realm.new_object();
-        realm.define_property(obj, "type", Value::str(t), ALL);
-        realm.define_property(obj, "value", Value::str(&v), ALL);
-        out.push(Value::Object(obj));
-    }
-    Ok(realm.new_array_value(out))
-}
-
-/// The formatted list as element / literal parts.
-fn list_parts(items: &[String], o: &ListOptions) -> Vec<(&'static str, String)> {
-    let s = format_list(items, o);
-    let mut out = Vec::new();
-    let mut rest = s.as_str();
-    for it in items {
-        if let Some(pos) = rest.find(it.as_str()) {
-            if pos > 0 {
-                out.push(("literal", rest[..pos].to_string()));
-            }
-            out.push(("element", it.clone()));
-            rest = &rest[pos + it.len()..];
-        }
-    }
-    if !rest.is_empty() {
-        out.push(("literal", rest.to_string()));
-    }
-    out
-}
-
-fn lf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let o: ListOptions = host(realm, &this, "Intl.ListFormat.prototype.resolvedOptions")?;
-    let obj = realm.new_object();
-    realm.define_property(obj, "locale", Value::str(&o.locale.tag), ALL);
-    realm.define_property(obj, "type", Value::str(&o.kind), ALL);
-    realm.define_property(obj, "style", Value::str(&o.style), ALL);
     Ok(Value::Object(obj))
 }
 
