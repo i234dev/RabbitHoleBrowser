@@ -148,13 +148,13 @@ fn place(items: &[LaneItem], tracks: &[Track], tol: f32, gap: f32, reverse: bool
 }
 
 /// The end of each item's stacking-axis alignment container (§6.4): the
-/// next item in any of its tracks (less the gap), or the end of the
-/// stacking range for the last items.
-fn stacking_limits(items: &[LaneItem], pl: &Placement, gap: f32) -> Vec<f32> {
+/// next item in any of its tracks (less the gap), or `end` (the end of the
+/// container's stacking extent) for the last items.
+fn stacking_limits(items: &[LaneItem], pl: &Placement, gap: f32, end: f32) -> Vec<f32> {
     (0..items.len())
         .map(|i| {
             let (s, e) = (pl.start[i], pl.start[i] + items[i].span);
-            let mut limit = pl.range;
+            let mut limit = end.max(pl.range);
             for j in 0..items.len() {
                 let (sj, ej) = (pl.start[j], pl.start[j] + items[j].span);
                 if j != i && sj < e && s < ej && pl.pos[j] > pl.pos[i] + 0.01 {
@@ -248,7 +248,7 @@ impl<'a> Layouter<'a> {
     #[allow(clippy::too_many_arguments)]
     fn lanes_setup_with(&mut self, b: &mut LayoutBox, style: &ComputedStyle, rows: bool, avail: Option<f32>, gap: f32, cbw: f32, origin: (f32, f32), sizes: Option<&[f32]>, reps: Option<usize>) -> (TrackList, Vec<LaneItem>, usize) {
         let (list, auto_list) = if rows { (&style.grid_template_rows, &style.grid_auto_rows) } else { (&style.grid_template_columns, &style.grid_auto_columns) };
-        let mut tl = if subgrid::shared(b,rows).is_some() {subgrid::tracks(b,rows,avail,gap)} else {expand_tracks_sized(list,avail,gap,sizes,reps)};
+        let mut tl = if subgrid::shared(b,rows).is_some() {subgrid::tracks(b,rows,avail,gap)} else {if sizes.is_none()&&reps.is_none() {expand_tracks_for(style,rows,list,avail,gap)} else {expand_tracks_sized(list,avail,gap,sizes,reps)}};
         let n_lines = tl.tracks.len() as i32 + 1;
         // Column lanes of an RTL container are mirrored after layout.
         let mirror = !rows && mirrored(b, &tl);
@@ -556,7 +556,7 @@ impl<'a> Layouter<'a> {
             });
             let extent = cb.height.unwrap_or(pl.range);
             let shift = stacking_shift(style.align_content, extent - pl.range);
-            let limits = stacking_limits(&items, &pl, row_gap);
+            let limits = stacking_limits(&items, &pl, row_gap, extent - shift);
             for (i, it) in items.iter().enumerate() {
                 let (x, mut outer) = placed[i];
                 let free = limits[i] - pl.pos[i] - outer;
@@ -664,7 +664,7 @@ impl<'a> Layouter<'a> {
         let extent = cbw;
         let rtl = style.direction == rabbithole_style::Direction::Rtl;
         let shift = stacking_shift(style.justify_content, extent - pl.range);
-        let limits = stacking_limits(&items, &pl, col_gap);
+        let limits = stacking_limits(&items, &pl, col_gap, extent - shift);
         for (i, it) in items.iter().enumerate() {
             let (y, mut outer) = placed[i];
             let free = limits[i] - pl.pos[i] - outer;

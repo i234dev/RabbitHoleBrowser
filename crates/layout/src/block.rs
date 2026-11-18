@@ -1163,7 +1163,7 @@ impl<'a> Layouter<'a> {
         let mut found = false;
         for i in 0..b.children.len() {
             if b.children[i].flow == Flow::Absolute {
-                let area = b.children[i].node.and_then(|n| {
+                let area = b.children[i].abs_node().and_then(|n| {
                     if inline_cbs.is_empty() {
                         return self.abs_cb.get(&n).copied();
                     }

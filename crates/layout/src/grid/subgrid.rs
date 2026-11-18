@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::cell::Cell;
 
-use super::{expand_tracks, size_tracks_with_space, Contribution, GridGeometry, GridItem, GridSpace, MeasurePhase, Sizing, Track, TrackList};
+use super::{size_tracks_with_space, Contribution, GridGeometry, GridItem, GridSpace, MeasurePhase, Sizing, Track, TrackList};
 use crate::block::Layouter;
 use crate::flex::ItemEdges;
 use crate::tree::{Formatting, LayoutBox, WmKind};
@@ -236,7 +236,7 @@ pub(super) fn local_names(spec:&[SubgridLineNames], count:usize)->Vec<Vec<String
 
 pub(super) fn tracks(b:&LayoutBox,rows:bool,avail:Option<f32>,gap:f32)->TrackList {
     let list=if rows {&b.style.grid_template_rows} else {&b.style.grid_template_columns};
-    let Some(inherited)=shared(b,rows) else {return expand_tracks(list,avail,gap);};
+    let Some(inherited)=shared(b,rows) else {return super::expand_tracks_for(&b.style,rows,list,avail,gap);};
     let mut names=inherited.names.clone();
     let line_count=names.len();
     if let Some(TrackListItem::Subgrid{line_names})=list.first() {

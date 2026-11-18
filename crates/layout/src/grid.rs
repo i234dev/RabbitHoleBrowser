@@ -223,6 +223,55 @@ fn expand_tracks(list: &[TrackListItem], avail: Option<f32>, gap: f32) -> TrackL
     expand_tracks_sized(list, avail, gap, None, None)
 }
 
+/// [`expand_tracks`] for a container's own axis: with an indefinite size,
+/// automatic repetitions fit a definite maximum size, else repeat as few
+/// times as fill a definite minimum size (including one transferred by an
+/// aspect ratio) (Grid2 §7.2.3.2).
+fn expand_tracks_for(style: &ComputedStyle, rows: bool, list: &[TrackListItem], avail: Option<f32>, gap: f32) -> TrackList {
+    if avail.is_some() || !list.iter().any(|it| matches!(it, TrackListItem::Repeat { count: None, .. })) {
+        return expand_tracks(list, avail, gap);
+    }
+    let pb = |style: &ComputedStyle, rows: bool| {
+        let pad = crate::block::resolve_edges(&style.padding, 0.0);
+        let bw = style.border_width;
+        if rows { pad.top + pad.bottom + bw.top + bw.bottom } else { pad.left + pad.right + bw.left + bw.right }
+    };
+    let content = |v: f32, rows: bool| if style.box_sizing == BoxSizing::BorderBox { (v - pb(style, rows)).max(0.0) } else { v };
+    let (max, min, other_min) = if rows { (style.max_height, style.min_height, style.min_width) } else { (style.max_width, style.min_width, style.min_height) };
+    if let Length::Px(v) = max {
+        return expand_tracks(list, Some(content(v, rows)), gap);
+    }
+    let min = match (min, style.aspect_ratio, other_min) {
+        (Length::Px(v), _, _) => Some(content(v, rows)),
+        (_, Some(r), Length::Px(v)) if r > 0.0 => Some(if rows { content(v, false) / r } else { content(v, true) * r }),
+        _ => None,
+    };
+    let Some(min) = min.filter(|&m| m > 0.0) else {
+        return expand_tracks(list, None, gap);
+    };
+    let fitted = expand_tracks(list, Some(min), gap);
+    let size = |t: &TrackList| {
+        t.tracks.iter().map(|t| repeat_fixed_size_of(t)).sum::<f32>() + gap * t.tracks.len().saturating_sub(1) as f32
+    };
+    if size(&fitted) + 0.01 >= min {
+        return fitted;
+    }
+    let (before, per_rep) = auto_repeat_shape(list);
+    let explicit = expand_tracks_sized(list, Some(0.0), gap, None, Some(0)).tracks.len();
+    let reps = (fitted.tracks.len().saturating_sub(explicit)) / per_rep.max(1);
+    let _ = before;
+    expand_tracks_sized(list, Some(min), gap, None, Some(reps + 1))
+}
+
+/// The fixed size of an expanded track for counting repetitions.
+fn repeat_fixed_size_of(t: &Track) -> f32 {
+    match (t.min, t.max) {
+        (Sizing::Fixed(min), Sizing::Fixed(max)) => max.max(min),
+        (_, Sizing::Fixed(v)) | (Sizing::Fixed(v), _) => v,
+        _ => 0.0,
+    }
+}
+
 /// The number of tracks before an automatic repetition, and in one
 /// repetition of it.
 fn auto_repeat_shape(list: &[TrackListItem]) -> (usize, usize) {
@@ -1087,7 +1136,7 @@ fn abs_descendants(b: &LayoutBox, out: &mut Vec<(rabbithole_dom::NodeId, std::rc
     }
     for c in &b.children {
         if c.flow == Flow::Absolute {
-            if let Some(node) = c.node {
+            if let Some(node) = c.abs_node() {
                 out.push((node, c.style.clone()));
             }
         } else if c.style.position == rabbithole_style::Position::Static && c.formatting != crate::tree::Formatting::Grid && !c.wm_wrapper {
@@ -1333,7 +1382,7 @@ impl<'a> Layouter<'a> {
                     static_align_factor(c.style.align_self, c.style.align_self_flags, style.align_items, style.align_items_flags, false, false),
                 );
                 let content = (content_x, content_y, cbw, content_h);
-                let area = c.node.filter(|_| positioned).and_then(|node| area_of(&c.style).map(|area| (node, area)));
+                let area = c.abs_node().filter(|_| positioned).and_then(|node| area_of(&c.style).map(|area| (node, area)));
                 let Some((node, area)) = area else {
                     c.static_pos = (content.0, content.1);
                     c.static_align = Some(crate::tree::StaticAlign { size: (content.2, content.3), factor });

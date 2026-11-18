@@ -535,6 +535,12 @@ pub struct StaticAlign {
 }
 
 impl LayoutBox {
+    /// The element of an out-of-flow box: its own, or that of the box an
+    /// orthogonal writing-mode wrapper contains.
+    pub(crate) fn abs_node(&self) -> Option<rabbithole_dom::NodeId> {
+        self.node.or_else(|| if self.wm_wrapper { self.children.first().and_then(|c| c.node) } else { None })
+    }
+
     /// Move this box and everything inside it.
     pub fn translate(&mut self, dx: f32, dy: f32) {
         if dx == 0.0 && dy == 0.0 {
