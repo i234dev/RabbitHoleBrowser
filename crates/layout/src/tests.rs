@@ -1089,6 +1089,29 @@ fn hypothetical_absolute_block_after_text_starts_below_its_line() {
 }
 
 #[test]
+fn filtered_inline_contains_absolute_descendants() {
+    let fx = Fixture::new(
+        "<div>xxxx<span id=filtered>a<b id=absolute></b></span></div>",
+        "body{margin:0;font:20px/30px serif} span{filter:blur(0px)} #absolute{position:absolute;left:10px;top:5px;width:30px;height:40px}",
+    );
+    let t = fx.layout();
+    let absolute = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+    // The inline's padding box starts after `xxxx`, and below the half-leading.
+    assert!(absolute.x > 10.5 && absolute.y > 5.5, "relative to the filtered inline, not the page: {absolute:?}");
+}
+
+#[test]
+fn percentage_height_grid_items_do_not_size_their_rows_from_the_container() {
+    let fx = Fixture::new(
+        "<div id=grid><i id=item></i></div>",
+        "body{margin:0} #grid{display:grid;height:40px;width:40px;grid-template-rows:auto auto} #item{grid-row:2;height:100%;align-self:start}",
+    );
+    let t = fx.layout();
+    let item = t.box_of(&fx.doc, fx.doc.element_by_id("item").unwrap()).unwrap().rect;
+    assert!((item.y - 20.0).abs() < 0.01 && (item.h - 20.0).abs() < 0.01, "{item:?}");
+}
+
+#[test]
 fn absolute_aspect_ratio_selects_one_automatic_axis_before_stretching() {
     for (container, style, expected) in [
         ("width:100px;height:500px", "inset:0;aspect-ratio:1", (100.0, 100.0)),
