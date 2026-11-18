@@ -379,7 +379,10 @@ impl<'a> Builder<'a> {
             || matches!(kind, BoxKind::InlineBlock | BoxKind::TableCell | BoxKind::Table)
             || style.overflow_x.clips()
             || style.overflow_y.clips()
-            || matches!(style.display, Display::FlowRoot | Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid);
+            || matches!(style.display, Display::FlowRoot | Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid)
+            // A block container with `align-content` other than normal
+            // is an independent formatting context (CSS Align §5.4).
+            || (style.align_content != rabbithole_style::ContentDistribution::Stretch && style.display.is_block_level());
         let contained = !matches!(style.display, Display::Inline | Display::Contents) && !matches!(tag, "html" | "body");
         b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && !matches!(tag, "html" | "body");
         if contained && (style.contain_paint || style.contain_layout) {

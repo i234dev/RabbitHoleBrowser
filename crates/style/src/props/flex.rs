@@ -188,6 +188,10 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             let mut basis = None;
             for c in comps {
                 if let Some(n) = values::number(c) {
+                    if n < 0.0 && matches!(c, [Token::Number(_)]) {
+                        return true;
+                    }
+                    let n = n.max(0.0);
                     if grow.is_none() {
                         grow = Some(n);
                     } else if shrink.is_none() {
@@ -215,13 +219,14 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             style.flex_basis = length;
             style.flex_basis_content = content;
         }
+        // Negative literal factors are invalid; math functions clamp.
         "flex-grow" | "-webkit-box-flex" => {
-            if let Some(n) = values::number(c0) {
+            if let Some(n) = values::number(c0).filter(|n| *n >= 0.0 || !matches!(c0, [Token::Number(_)])) {
                 style.flex_grow = n.max(0.0);
             }
         }
         "flex-shrink" => {
-            if let Some(n) = values::number(c0) {
+            if let Some(n) = values::number(c0).filter(|n| *n >= 0.0 || !matches!(c0, [Token::Number(_)])) {
                 style.flex_shrink = n.max(0.0);
             }
         }
@@ -232,16 +237,28 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             }
         }
         "flex-wrap" => {
-            if let Some(kw) = values::ident(c0) {
-                style.flex_wrap = match kw.as_str() {
-                    "nowrap" => FlexWrap::NoWrap,
-                    "wrap" => FlexWrap::Wrap,
-                    "wrap-reverse" => FlexWrap::WrapReverse,
-                    _ => return true,
-                };
+            // `nowrap | wrap | wrap-reverse | [balance || wrap-reverse]`.
+            let Some(kws) = idents(comps) else { return true };
+            let (wrap, balance) = match kws.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                ["nowrap"] => (FlexWrap::NoWrap, false),
+                ["wrap"] => (FlexWrap::Wrap, false),
+                ["wrap-reverse"] => (FlexWrap::WrapReverse, false),
+                ["balance"] => (FlexWrap::Wrap, true),
+                ["balance", "wrap-reverse"] | ["wrap-reverse", "balance"] => (FlexWrap::WrapReverse, true),
+                _ => return true,
+            };
+            style.flex_wrap = wrap;
+            style.flex_wrap_balance = balance;
+        }
+        "flex-line-count" => {
+            if values::is_ident(c0, "auto") {
+                style.flex_line_count = None;
+            } else if let Some(n) = values::number(c0).filter(|n| comps.len() == 1 && *n >= 1.0 && n.fract() == 0.0) {
+                style.flex_line_count = Some(n.min(1.0e6) as u32);
             }
         }
         "flex-flow" => {
+            style.flex_wrap_balance = false;
             for c in comps {
                 if let Some(kw) = values::ident(c) {
                     match kw.as_str() {
@@ -252,6 +269,12 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
                         "nowrap" => style.flex_wrap = FlexWrap::NoWrap,
                         "wrap" => style.flex_wrap = FlexWrap::Wrap,
                         "wrap-reverse" => style.flex_wrap = FlexWrap::WrapReverse,
+                        "balance" => {
+                            style.flex_wrap_balance = true;
+                            if style.flex_wrap == FlexWrap::NoWrap {
+                                style.flex_wrap = FlexWrap::Wrap;
+                            }
+                        }
                         _ => {}
                     }
                 }

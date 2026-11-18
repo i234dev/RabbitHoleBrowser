@@ -142,6 +142,10 @@ struct FlexItem {
     main: f32,
     /// Hypothetical cross size (inner) after laying out with the main size.
     cross_hyp: f32,
+    /// The used main size is a definite base for the contents'
+    /// percentages (§9.8: the container's main size is definite, or the
+    /// item's flex basis is).
+    main_definite: bool,
     /// Whether the cross size property is `auto` (stretchable).
     cross_auto: bool,
     /// Resolved `align-self` (flex-relative: `start`/`end`/`self-*` are
@@ -251,7 +255,7 @@ impl<'a> Layouter<'a> {
 
         // The cross size of the single line of a container with a definite
         // cross size, which stretched items take (§9.8).
-        let stretch_line = if style.flex_wrap == FlexWrap::NoWrap { avail_cross } else { None };
+        let stretch_line = if !is_multi_line(&style) { avail_cross } else { None };
         // §9.2 determine flex base size and hypothetical main size.
         let mut items: Vec<FlexItem> = Vec::with_capacity(order.len());
         for &(_, idx) in &order {
@@ -261,30 +265,19 @@ impl<'a> Layouter<'a> {
 
         // §9.3 collect into flex lines.
         let mut lines: Vec<Vec<usize>> = Vec::new();
-        let wraps = style.flex_wrap != FlexWrap::NoWrap;
+        let wraps = is_multi_line(&style);
         // A column container with an indefinite height breaks lines at its
         // maximum height (§9.2 step 2).
         let break_main = avail_main.or_else(|| limits.map(|(_, max)| max).filter(|m| m.is_finite()));
         if !wraps || break_main.is_none() {
             lines.push((0..items.len()).collect());
         } else {
-            let avail = break_main.unwrap_or(f32::INFINITY);
-            let mut cur: Vec<usize> = Vec::new();
-            let mut used = 0.0f32;
-            for (i, it) in items.iter().enumerate() {
-                let outer = it.hyp + it.edges.pb(axis) + it.edges.margin_sum(axis);
-                let needed = if cur.is_empty() { outer } else { used + gap_main + outer };
-                if !cur.is_empty() && needed > avail + 0.01 {
-                    lines.push(std::mem::take(&mut cur));
-                    used = outer;
-                } else {
-                    used = needed;
-                }
-                cur.push(i);
+            let outers: Vec<f32> = items.iter().map(|it| it.hyp + it.edges.pb(axis) + it.edges.margin_sum(axis)).collect();
+            let mut avail = break_main.unwrap_or(f32::INFINITY);
+            if style.flex_wrap_balance && outers.len() > 1 {
+                avail = balanced_width(&outers, gap_main, avail, style.flex_line_count);
             }
-            if !cur.is_empty() || lines.is_empty() {
-                lines.push(cur);
-            }
+            lines = break_lines(&outers, gap_main, avail);
         }
 
         // §9.2 step 3: an indefinite column container is as tall as its
@@ -297,7 +290,8 @@ impl<'a> Layouter<'a> {
                     .map(|line| line.iter().map(|&i| items[i].hyp + items[i].edges.pb(axis) + items[i].edges.margin_sum(axis)).sum::<f32>() + gap_main * line.len().saturating_sub(1) as f32)
                     .fold(0.0f32, f32::max);
                 let clamped = longest.clamp(min, max);
-                if (clamped - longest).abs() > 0.01 {
+                // Shorter lines flex within the container's size too.
+                if (clamped - longest).abs() > 0.01 || lines.len() > 1 {
                     avail_main = Some(clamped);
                 }
             }
@@ -553,7 +547,6 @@ impl<'a> Layouter<'a> {
             Axis::Column => (child_style.height, child_style.min_height, child_style.max_height, child_style.width),
         };
         let specified = resolve_size(size_prop, avail_main, bb, pb_main);
-        let max = resolve_size(max_prop, avail_main, bb, pb_main).unwrap_or(f32::INFINITY);
 
         let (align, mods) = match child_style.align_self {
             ItemAlign::Auto => (container.align_items, container.align_items_mods),
@@ -626,6 +619,14 @@ impl<'a> Layouter<'a> {
                 content_max = content_min;
             }
         }
+        // Intrinsic size keywords of min/max-width/height in the main axis.
+        let keyword = |l: Length| match l {
+            Length::MinContent => Some(content_min),
+            Length::MaxContent => Some(content_max),
+            Length::FitContent => Some(avail_main.map(|a| content_max.min((a - pb_main - edges.margin_sum(axis)).max(0.0)).max(content_min)).unwrap_or(content_max)),
+            _ => None,
+        };
+        let max = resolve_size(max_prop, avail_main, bb, pb_main).or_else(|| keyword(max_prop)).unwrap_or(f32::INFINITY);
         let base = match used_basis {
             Length::MinContent => content_min,
             Length::MaxContent => content_max,
@@ -661,7 +662,7 @@ impl<'a> Layouter<'a> {
                     }
                 }
             }
-            None => 0.0,
+            None => keyword(min_prop).unwrap_or(0.0),
         };
         let max = max.max(min);
         let hyp = base.clamp(min, max);
@@ -677,6 +678,7 @@ impl<'a> Layouter<'a> {
             max,
             main: hyp,
             cross_hyp: 0.0,
+            main_definite: basis.is_some() || transferred.is_some() || !matches!(b.children[idx].formatting, crate::tree::Formatting::Block | crate::tree::Formatting::Inline),
             cross_auto,
             align,
             align_safe: mods.safe,
@@ -818,6 +820,7 @@ impl<'a> Layouter<'a> {
                     child.style = orig;
                 } else {
                     self.forced_content_height = Some(it.main);
+                    self.forced_height_indefinite = cbh.is_none() && !it.main_definite;
                     self.layout_block(child, &cb, 0.0, &mut bfc, mode);
                 }
                 it.cross_hyp = child.content_rect.w;
@@ -886,7 +889,16 @@ impl<'a> Layouter<'a> {
             if unfrozen.is_empty() {
                 break;
             }
-            let sum_factors: f32 = unfrozen.iter().map(|&i| if grow { items[i].grow } else { items[i].shrink }).sum();
+            let mut sum_factors: f32 = unfrozen.iter().map(|&i| if grow { items[i].grow } else { items[i].shrink }).sum();
+            if sum_factors.is_infinite() {
+                // Infinite factors share the free space; finite ones get none.
+                for &i in &unfrozen {
+                    let it = &mut items[i];
+                    let f = if grow { &mut it.grow } else { &mut it.shrink };
+                    *f = if f.is_infinite() { 1.0 } else { 0.0 };
+                }
+                sum_factors = unfrozen.iter().map(|&i| if grow { items[i].grow } else { items[i].shrink }).sum();
+            }
             let mut remaining = free_space(items);
             if sum_factors < 1.0 {
                 let scaled = initial_free * sum_factors;
@@ -953,11 +965,15 @@ impl<'a> Layouter<'a> {
     pub(crate) fn flex_intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
         let style = b.style.clone();
         let row = matches!(style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
-        let wraps = style.flex_wrap != FlexWrap::NoWrap;
+        let wraps = is_multi_line(&style);
         let gap = if row { px_or_zero(style.column_gap) } else { 0.0 };
         let mut min: f32 = 0.0;
         let mut max: f32 = 0.0;
         let mut count = 0usize;
+        // Balanced lines with a line count: max-content is the narrowest
+        // length that fits the items in that many lines.
+        let balanced_count = style.flex_line_count.filter(|_| row && wraps && style.flex_wrap_balance);
+        let mut contributions: Vec<f32> = Vec::new();
         for c in &mut b.children {
             if !c.is_in_flow() {
                 continue;
@@ -990,6 +1006,9 @@ impl<'a> Layouter<'a> {
                     cmin = cmin.min(inner);
                 }
             }
+            if balanced_count.is_some() {
+                contributions.push(cmax + ex);
+            }
             if row {
                 if wraps {
                     min = min.max(cmin + ex);
@@ -1010,7 +1029,65 @@ impl<'a> Layouter<'a> {
                 min += g;
             }
         }
+        if balanced_count.is_some() && contributions.len() > 1 {
+            max = balanced_width(&contributions, gap, f32::INFINITY, balanced_count).max(min);
+        }
         (min, max)
+    }
+}
+
+/// Whether a flex container is multi-line (`-webkit-box` does not
+/// balance lines).
+fn is_multi_line(style: &ComputedStyle) -> bool {
+    style.flex_wrap != FlexWrap::NoWrap && !(style.webkit_box && style.flex_wrap_balance)
+}
+
+/// Greedy line breaking of outer main sizes in `avail` (§9.3).
+fn break_lines(outers: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut cur: Vec<usize> = Vec::new();
+    let mut used = 0.0f32;
+    for (i, &outer) in outers.iter().enumerate() {
+        let needed = if cur.is_empty() { outer } else { used + gap + outer };
+        if !cur.is_empty() && needed > avail + 0.01 {
+            lines.push(std::mem::take(&mut cur));
+            used = outer;
+        } else {
+            used = needed;
+        }
+        cur.push(i);
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// `flex-wrap: balance`: the narrowest line length that breaks the items
+/// into as many lines as greedy breaking in `avail` does (at least
+/// `flex-line-count`, at most one line per item).
+fn balanced_width(outers: &[f32], gap: f32, avail: f32, line_count: Option<u32>) -> f32 {
+    let count = |w: f32| break_lines(outers, gap, w).len();
+    let target = count(avail).max(line_count.unwrap_or(1) as usize).min(outers.len());
+    let widest = outers.iter().copied().fold(0.0f32, f32::max);
+    let total: f32 = outers.iter().sum::<f32>() + gap * (outers.len() - 1) as f32;
+    let (mut lo, mut hi) = (widest, total.min(avail).max(widest));
+    if count(lo) > target {
+        // Searching between the widest item and the greedy length.
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if count(mid) <= target {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+            if hi - lo < 0.01 {
+                break;
+            }
+        }
+        hi
+    } else {
+        lo
     }
 }
 

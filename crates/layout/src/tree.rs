@@ -565,6 +565,19 @@ impl LayoutBox {
             .iter()
             .filter(|c| c.is_in_flow())
             .find_map(|c| c.first_baseline())
+            .or_else(|| self.synthesized_item_baseline(false))
+    }
+
+    /// A grid container whose items have no baseline synthesizes one from
+    /// the first (last) item's border box (CSS Align §9.1).
+    fn synthesized_item_baseline(&self, last: bool) -> Option<f32> {
+        if self.formatting != Formatting::Grid {
+            return None;
+        }
+        let mut items = self.children.iter().filter(|c| c.is_in_flow());
+        let item = if last { items.last() } else { items.next() };
+        // (Orthogonal items keep the margin-box fallback of the container.)
+        item.filter(|c| !c.wm_wrapper).map(|c| c.rect.bottom())
     }
 
     /// Baseline of the last line (absolute y).
@@ -580,6 +593,7 @@ impl LayoutBox {
             .rev()
             .filter(|c| c.is_in_flow())
             .find_map(|c| c.last_baseline())
+            .or_else(|| self.synthesized_item_baseline(true))
     }
 
     /// Visit every absolutely positioned descendant whose containing block is

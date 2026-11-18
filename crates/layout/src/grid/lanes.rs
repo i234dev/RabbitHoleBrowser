@@ -294,7 +294,7 @@ impl<'a> Layouter<'a> {
                     fixed,
                     edges: ItemEdges::new(&cs, cbw),
                     justify: if cs.justify_self == ItemAlign::Auto { style.justify_items } else { cs.justify_self },
-                    align: if cs.align_self == ItemAlign::Auto { style.align_items } else { cs.align_self },
+                    align: last_baseline_as_end(if cs.align_self == ItemAlign::Auto { (style.align_items, style.align_items_mods) } else { (cs.align_self, cs.align_self_mods) }),
                 }
             })
             .collect();
@@ -692,6 +692,16 @@ fn align_offset(align: ItemAlign, auto_start: bool, auto_end: bool, free: f32, m
             ItemAlign::Center => free / 2.0,
             _ => 0.0,
         }
+    }
+}
+
+/// `last baseline` items share the end edge (their fallback alignment);
+/// lanes align them there.
+fn last_baseline_as_end((align, mods): (ItemAlign, rabbithole_style::AlignMods)) -> ItemAlign {
+    if align == ItemAlign::Baseline && mods.last {
+        ItemAlign::FlexEnd
+    } else {
+        align
     }
 }
 

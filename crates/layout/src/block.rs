@@ -7,7 +7,7 @@ use crate::text::Measurer;
 use crate::tree::{BoxKind, Flow, Formatting, FragmentKind, LayoutBox, LayoutTree, Marker};
 use crate::LayoutContext;
 use rabbithole_gfx::{FontId, Rect};
-use rabbithole_style::{BoxSizing, Clear, ComputedStyle, Edges, Length, Position};
+use rabbithole_style::{BoxSizing, Clear, ComputedStyle, Edges, ItemAlign, Length, Position};
 use std::collections::HashMap;
 
 /// Containing block information passed down during layout.
@@ -43,6 +43,10 @@ pub(crate) struct Layouter<'a> {
     /// whose contents are about to be laid out with an indefinite height
     /// (single-line cross-size clamping, column main size).
     pub(crate) flex_limits: Option<(f32, f32)>,
+    /// Flex hook: the `forced_content_height` of the next box is its used
+    /// height but not a definite base for its children's percentages (a
+    /// column item flexed in a container with an indefinite height).
+    pub(crate) forced_height_indefinite: bool,
     /// Intrinsic sizing: the definite content height of the containing
     /// block of the box being measured (percentage heights of replaced
     /// elements and aspect-ratio boxes resolve against it).
@@ -94,6 +98,38 @@ pub(crate) fn horizontal_extras(style: &ComputedStyle, cbw: f32) -> f32 {
 pub(crate) fn vertical_extras(style: &ComputedStyle) -> f32 {
     let p = resolve_edges(&style.padding, 0.0);
     p.top + p.bottom + style.border_width.top + style.border_width.bottom
+}
+
+/// Static-position rectangle of an absolutely positioned box (inline
+/// axis) and the alignment defaults of its static parent.
+#[derive(Clone, Copy)]
+pub(crate) struct StaticRect {
+    /// The rectangle applies (a block-level box in a block container).
+    block_level: bool,
+    x: f32,
+    w: f32,
+    rtl: bool,
+    justify_items: (ItemAlign, rabbithole_style::AlignMods),
+}
+
+/// Where an explicitly aligned absolutely positioned box goes in its free
+/// space (0 = physical left/top, 1 = right/bottom); None for `normal`
+/// and `stretch`, which keep the CSS 2.1 placement. `rtl` is the
+/// direction of the alignment container, `own_rtl` the box's own (for
+/// `self-*`); `inline` says whether this is the inline axis.
+fn abs_align_fraction(align: ItemAlign, mods: rabbithole_style::AlignMods, rtl: bool, own_rtl: bool, inline: bool) -> Option<f32> {
+    use rabbithole_style::AlignPos;
+    let start = |reversed: bool| if reversed { 1.0 } else { 0.0 };
+    Some(match (mods.pos, align) {
+        (AlignPos::Left, _) => 0.0,
+        (AlignPos::Right, _) => if inline { 1.0 } else { 0.0 },
+        (AlignPos::SelfStart, _) => start(inline && own_rtl),
+        (AlignPos::SelfEnd, _) => 1.0 - start(inline && own_rtl),
+        (_, ItemAlign::FlexStart) => start(inline && rtl),
+        (_, ItemAlign::FlexEnd) => 1.0 - start(inline && rtl),
+        (_, ItemAlign::Center) => 0.5,
+        _ => return None,
+    })
 }
 
 /// A set of adjoining vertical margins being collapsed (CSS 2.1 §8.3.1):
@@ -204,6 +240,7 @@ impl<'a> Layouter<'a> {
             measurer: Measurer::new(ctx.fonts),
             forced_content_height: None,
             flex_limits: None,
+            forced_height_indefinite: false,
             intrinsic_cb_h: None,
             intrinsic_cb_used: false,
             intrinsic_forced_h: None,
@@ -404,6 +441,7 @@ impl<'a> Layouter<'a> {
     pub fn layout_block(&mut self, b: &mut LayoutBox, cb: &Cb, top: f32, bfc: &mut Bfc, mode: WidthMode) {
         if b.wm_wrapper {
             let _ = bfc;
+            self.forced_height_indefinite = false;
             let forced = self.forced_content_height.take();
             return self.layout_wm_wrapper(b, cb, top, mode, forced);
         }
@@ -416,6 +454,7 @@ impl<'a> Layouter<'a> {
             return;
         }
         let forced_h = self.forced_content_height.take(); // grid/flex hook
+        let forced_indefinite = std::mem::take(&mut self.forced_height_indefinite) && forced_h.is_some();
         // Where the contents' origin is now (for reuse by translation): the
         // current content box (relative offsets included) minus the scroll
         // offset already applied to the contents. Reuse first translates
@@ -528,10 +567,19 @@ impl<'a> Layouter<'a> {
                 explicit_h = Some((w / ratio - h_extra).max(0.0));
             }
         }
+        // The base of the contents' percentage heights. Anonymous block
+        // boxes are transparent to it (CSS 2.1 §10.5).
+        let anonymous = b.node.is_none() && b.pseudo.is_none() && b.kind == BoxKind::Block && matches!(b.formatting, Formatting::Block | Formatting::Inline);
         let inner_cb = Cb {
             x: b.content_rect.x,
             width: content_w,
-            height: explicit_h,
+            height: if forced_indefinite {
+                None
+            } else if explicit_h.is_none() && anonymous {
+                cb.height
+            } else {
+                explicit_h
+            },
         };
         let bottom_collapsible = explicit_h.is_none()
             && !b.bfc_root
@@ -643,7 +691,7 @@ impl<'a> Layouter<'a> {
             Some(e) if matches!(b.formatting, Formatting::Table) || b.kind == BoxKind::TableCell => e.max(content_h),
             Some(e) => e,
             // Size containment: laid out as if empty.
-            None if style.contain_size && b.kind != BoxKind::Inline => style.contain_intrinsic_height.unwrap_or(0.0),
+            None if (style.contain_size || style.container_size) && b.kind != BoxKind::Inline => style.contain_intrinsic_height.unwrap_or(0.0),
             None => content_h,
         };
         // The ratio-dependent automatic block size still has a content
@@ -652,7 +700,7 @@ impl<'a> Layouter<'a> {
             && style.aspect_ratio.is_some_and(|ratio| ratio > 0.0)
             && !matches!(style.overflow_y, rabbithole_style::Overflow::Hidden | rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto)
         {
-            let minimum = if style.contain_size { style.contain_intrinsic_height.unwrap_or(0.0) } else { content_h };
+            let minimum = if style.contain_size || style.container_size { style.contain_intrinsic_height.unwrap_or(0.0) } else { content_h };
             h = h.max(minimum);
         }
         if explicit_h.is_none() {
@@ -714,8 +762,9 @@ impl<'a> Layouter<'a> {
             // A ruby pair aligns by its base.
             b.children.iter().find(|c| c.ruby == 2).and_then(|c| c.last_baseline()).map(|bl| bl - b.rect.y)
         } else {
-            // An inline-level flex container aligns by its first baseline.
-            if b.formatting == Formatting::Flex { b.first_baseline() } else { b.last_baseline() }.map(|bl| bl - b.rect.y)
+            // Inline-level flex containers and tables align by their first
+            // baseline (a table's is its first row's).
+            if matches!(b.formatting, Formatting::Flex | Formatting::Table | Formatting::TableWrapper) { b.first_baseline() } else { b.last_baseline() }.map(|bl| bl - b.rect.y)
         };
         // An empty one-line control has the baseline its text would have.
         if control_baseline && b.lines.iter().all(|l| l.fragments.is_empty()) && b.node.is_some_and(|n| self.is_line_control(n)) {
@@ -919,6 +968,16 @@ impl<'a> Layouter<'a> {
                 specified = Some(self.clamp_width(&style, w.max(0.0), cbw, pb_h));
             }
         }
+        // An auto-width block aligned by `justify-self` is fit-content
+        // sized (CSS Align §6.1, Sizing §3.3).
+        if specified.is_none() && matches!(mode, WidthMode::Fill) && style.width.is_auto() && style.justify_self != ItemAlign::Auto
+            && b.kind == BoxKind::Block
+            && abs_align_fraction(style.justify_self, style.justify_self_mods, false, false, true).is_some()
+        {
+            let (min, max) = self.intrinsic_in(b, cb_h);
+            let avail = (cbw - ml.unwrap_or(0.0) - mr.unwrap_or(0.0) - pb_h).max(0.0);
+            specified = Some(self.clamp_width(&style, shrink_to_fit(min, max, avail), cbw, pb_h));
+        }
         match mode {
             WidthMode::Fixed(w) => (self.clamp_width(&style, w.max(0.0), cbw, pb_h), ml.unwrap_or(0.0), mr.unwrap_or(0.0)),
             WidthMode::ShrinkToFit => {
@@ -968,6 +1027,19 @@ impl<'a> Layouter<'a> {
                         }
                         (None, Some(r)) => (w, (rem - r).max(0.0), r),
                         (Some(l), None) => (w, l, rem - l),
+                        (Some(l), Some(r)) if style.justify_self != ItemAlign::Auto => {
+                            // `justify-self` aligns a sized block in its
+                            // containing block (CSS Align §6.1).
+                            let own_rtl = style.direction == rabbithole_style::Direction::Rtl;
+                            match abs_align_fraction(style.justify_self, style.justify_self_mods, self.cb_rtl, own_rtl, true) {
+                                Some(f) => {
+                                    let left = l + (rem - l - r) * f;
+                                    (w, left, rem - left)
+                                }
+                                None if self.cb_rtl => (w, rem - r, r),
+                                None => (w, l, rem - l),
+                            }
+                        }
                         (Some(_), Some(r)) if self.cb_rtl => (w, rem - r, r),
                         (Some(l), Some(_)) => (w, l, rem - l),
                     }
@@ -1214,10 +1286,19 @@ impl<'a> Layouter<'a> {
                         .and_then(|a| inline_cbs.get(&a).copied())
                         .or_else(|| self.abs_cb.get(&n).copied())
                 });
-                let static_right = matches!(b.formatting, Formatting::Block | Formatting::Inline)
-                    && b.style.direction == rabbithole_style::Direction::Rtl
-                    && !b.children[i].style.display_before_blockification.is_inline_level();
-                self.layout_absolute(&mut b.children[i], area.unwrap_or(cb), static_right);
+                let block_level = matches!(b.formatting, Formatting::Block | Formatting::Inline) && !b.children[i].style.display_before_blockification.is_inline_level();
+                let static_right = block_level && b.style.direction == rabbithole_style::Direction::Rtl;
+                // The static-position rectangle of a block-level box: the
+                // parent's content box in the inline axis, its static
+                // position in the block axis (CSS Position §4.1).
+                let static_rect = Some(StaticRect {
+                    block_level,
+                    x: b.content_rect.x,
+                    w: b.content_rect.w,
+                    rtl: b.style.direction == rabbithole_style::Direction::Rtl,
+                    justify_items: (b.style.justify_items, b.style.justify_items_mods),
+                });
+                self.layout_absolute(&mut b.children[i], area.unwrap_or(cb), static_right, static_rect);
                 found = true;
             } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below {
                 // Kept boxes remember having none (their subtree is
@@ -1230,7 +1311,7 @@ impl<'a> Layouter<'a> {
         found
     }
 
-    fn layout_absolute(&mut self, c: &mut LayoutBox, cb: Rect, static_right: bool) {
+    fn layout_absolute(&mut self, c: &mut LayoutBox, cb: Rect, static_right: bool, static_rect: Option<StaticRect>) {
         let cb = if c.style.position == Position::Fixed {
             Rect::new(0.0, 0.0, self.ctx.viewport_width, self.ctx.viewport_height)
         } else {
@@ -1350,6 +1431,49 @@ impl<'a> Layouter<'a> {
         } else {
             c.static_pos.1 + mt
         };
+        // Box alignment (CSS Align §6, Position §4): `justify-self` /
+        // `align-self` align the box in its static-position rectangle, or
+        // in the inset-modified containing block when both insets are set.
+        let (mut x, mut y) = (x, y);
+        if let Some(sr) = static_rect {
+            let own_rtl = style.direction == rabbithole_style::Direction::Rtl;
+            // `auto` uses the parent's `*-items` for the static position
+            // only; it is `normal` in the inset-modified containing block.
+            let (js_static, jm_static) = if style.justify_self == ItemAlign::Auto { sr.justify_items } else { (style.justify_self, style.justify_self_mods) };
+            // (`align-items` does not apply to block containers.)
+            let (al_static, am_static) = (style.align_self, style.align_self_mods);
+            let (js, jm) = (style.justify_self, style.justify_self_mods);
+            let (al, am) = (style.align_self, style.align_self_mods);
+            let outer_w = c.rect.w + ml + mr;
+            let outer_h = c.rect.h + mt + mb;
+            match (l, r) {
+                (None, None) if sr.block_level => {
+                    if let Some(f) = abs_align_fraction(js_static, jm_static, sr.rtl, own_rtl, true) {
+                        x = sr.x + (sr.w - outer_w) * f + ml;
+                    }
+                }
+                (Some(l), Some(r)) if sized_w && !style.margin.left.is_auto() && !style.margin.right.is_auto() => {
+                    if let Some(f) = abs_align_fraction(js, jm, sr.rtl, own_rtl, true) {
+                        x = cb.x + l + (cb.w - l - r - outer_w) * f + ml;
+                    }
+                }
+                _ => {}
+            }
+            match (t, btm) {
+                // A zero-height rectangle at the static position.
+                (None, None) if sr.block_level => {
+                    if let Some(f) = abs_align_fraction(al_static, am_static, false, false, false) {
+                        y = c.static_pos.1 - outer_h * f + mt;
+                    }
+                }
+                (Some(t), Some(bt)) if sized_h && !style.margin.top.is_auto() && !style.margin.bottom.is_auto() => {
+                    if let Some(f) = abs_align_fraction(al, am, false, false, false) {
+                        y = cb.y + t + (cb.h - t - bt - outer_h) * f + mt;
+                    }
+                }
+                _ => {}
+            }
+        }
         // The static position is where the box would have been in flow; it
         // must not move with the box (laying it out again would drift).
         let static_pos = c.static_pos;

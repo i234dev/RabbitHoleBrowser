@@ -73,7 +73,7 @@ impl<'a> Layouter<'a> {
         } else if let Length::Px(w) = style.width {
             let w = adj(w);
             (w, w)
-        } else if style.contain_size && !matches!(style.display, rabbithole_style::Display::Inline) && b.kind != BoxKind::Image {
+        } else if (style.contain_size || style.container_size) && !matches!(style.display, rabbithole_style::Display::Inline) && b.kind != BoxKind::Image {
             let w = style.contain_intrinsic_width.unwrap_or(0.0);
             (w, w)
         } else if b.kind == BoxKind::Image {

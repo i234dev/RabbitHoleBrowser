@@ -442,6 +442,14 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 }
             }
         }
+        // Only the size containment of size containers matters to layout.
+        "container-type" => {
+            style.container_size = comps.iter().any(|c| values::is_ident(c, "size"));
+        }
+        "container" => {
+            let slash = comps.iter().position(|c| matches!(c, [Token::Delim('/')]));
+            style.container_size = slash.is_some_and(|i| comps[i + 1..].iter().any(|c| values::is_ident(c, "size")));
+        }
         "columns" | "column-count" | "column-width" => {
             style.multicol = !comps.iter().all(|c| values::is_ident(c, "auto"));
         }
@@ -453,7 +461,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color"
         | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"
         | "-ms-touch-action" | "speak" | "orphans" | "widows" | "page" | "size" | "marks" | "quotes-x" | "all-x"
-        | "container" | "container-type" | "container-name" | "view-transition-name"
+        | "container-name" | "view-transition-name"
         | "anchor-name" | "position-anchor" | "field-sizing" | "forced-color-adjust" | "interpolate-size" | "math-style"
         | "-webkit-box-sizing" | "-moz-box-sizing" | "-webkit-user-drag" | "-webkit-user-modify" | "-webkit-locale"
         | "-webkit-margin-before" | "-webkit-margin-after" | "-webkit-margin-start" | "-webkit-margin-end"

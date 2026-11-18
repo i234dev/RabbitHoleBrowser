@@ -1218,7 +1218,7 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
         v.parse::<f32>().ok().map(|n| format!("{n}px"))
     };
     match tag {
-        "img" | "td" | "th" | "table" | "iframe" | "video" | "canvas" | "embed" | "object" | "hr" | "col" | "colgroup" | "svg" | "input" | "select" => {
+        "img" | "td" | "th" | "table" | "iframe" | "video" | "embed" | "object" | "hr" | "col" | "colgroup" | "svg" | "input" | "select" => {
             if let Some(w) = el.attr("width").and_then(dim) {
                 css.push_str(&format!("width:{w};"));
             }
@@ -1646,7 +1646,8 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.flex_basis = from.flex_basis;
             to.flex_basis_content = from.flex_basis_content;
         }
-        "flex-wrap" => to.flex_wrap = from.flex_wrap,
+        "flex-wrap" => { to.flex_wrap = from.flex_wrap; to.flex_wrap_balance = from.flex_wrap_balance; }
+        "flex-line-count" => to.flex_line_count = from.flex_line_count,
         "flex-flow" => {
             to.flex_direction = from.flex_direction;
             to.flex_wrap = from.flex_wrap;
@@ -1750,6 +1751,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "unicode-bidi" => to.unicode_bidi = from.unicode_bidi,
         "tab-size" => to.tab_size = from.tab_size,
         "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
+        "container-type" | "container" => to.container_size = from.container_size,
         "contain" => {
             to.contain_paint = from.contain_paint;
             to.contain_layout = from.contain_layout;
@@ -2479,9 +2481,22 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             // Shorthand: omitted longhands reset to their initial values.
             style.flex_direction = FlexDirection::Row;
             style.flex_wrap = FlexWrap::NoWrap;
+            style.flex_wrap_balance = false;
             for c in &comps {
                 match values::ident(c).as_deref() {
-                    Some("nowrap" | "wrap" | "wrap-reverse") => apply_property("flex-wrap", c, style, parent, ctx),
+                    Some("balance") => {
+                        style.flex_wrap_balance = true;
+                        if style.flex_wrap == FlexWrap::NoWrap {
+                            style.flex_wrap = FlexWrap::Wrap;
+                        }
+                    }
+                    Some("nowrap" | "wrap" | "wrap-reverse") => {
+                        let balance = style.flex_wrap_balance;
+                        apply_property("flex-wrap", c, style, parent, ctx);
+                        if balance && style.flex_wrap == FlexWrap::Wrap {
+                            style.flex_wrap_balance = true;
+                        }
+                    }
                     _ => apply_property("flex-direction", c, style, parent, ctx),
                 }
             }

@@ -1090,6 +1090,12 @@ pub struct ComputedStyle {
     /// Its numeric storage is `Auto`; keep it distinct from the `auto` keyword.
     pub flex_basis_content: bool,
     pub flex_wrap: FlexWrap,
+    /// `flex-wrap: balance`: lines are balanced (with `flex_wrap` Wrap or
+    /// WrapReverse).
+    pub flex_wrap_balance: bool,
+    /// `flex-line-count` (None = `auto`): the minimum number of balanced
+    /// lines.
+    pub flex_line_count: Option<u32>,
     pub justify_content: ContentDistribution,
     pub align_items: ItemAlign,
     pub align_self: ItemAlign,
@@ -1234,6 +1240,8 @@ pub struct ComputedStyle {
     pub contain_paint: bool,
     pub contain_layout: bool,
     pub contain_size: bool,
+    /// `container-type: size`: a size container, which is size-contained.
+    pub container_size: bool,
     /// `contain-intrinsic-width` / `-height` (px; `None` = `none`): the
     /// size a size-contained box is laid out as.
     pub contain_intrinsic_width: Option<f32>,
@@ -1352,6 +1360,8 @@ impl ComputedStyle {
             flex_basis: Length::Auto,
             flex_basis_content: false,
             flex_wrap: FlexWrap::NoWrap,
+            flex_wrap_balance: false,
+            flex_line_count: None,
             justify_content: ContentDistribution::FlexStart,
             align_items: ItemAlign::Normal,
             align_self: ItemAlign::Auto,
@@ -1433,6 +1443,7 @@ impl ComputedStyle {
             contain_paint: false,
             contain_layout: false,
             contain_size: false,
+            container_size: false,
             contain_intrinsic_width: None,
             contain_intrinsic_height: None,
             line_clamp_prefixed: false,
