@@ -147,6 +147,18 @@ fn place(items: &[LaneItem], tracks: &[Track], tol: f32, gap: f32, reverse: bool
     Placement { start: item_starts, pos, range }
 }
 
+/// Absolutely positioned children with auto insets start at the content
+/// edge where the reversed track order or fill starts (Grid3 §6.3): per
+/// axis whether that is the end edge of the content box (`size`).
+fn reversed_static_positions(b: &mut LayoutBox, size: (f32, f32), end: (bool, bool)) {
+    if !end.0 && !end.1 {
+        return;
+    }
+    for c in b.children.iter_mut().filter(|c| c.flow == Flow::Absolute) {
+        c.static_align = Some(crate::tree::StaticAlign { size, factor: (if end.0 { 1.0 } else { 0.0 }, if end.1 { 1.0 } else { 0.0 }) });
+    }
+}
+
 /// The end of each item's stacking-axis alignment container (§6.4): the
 /// next item in any of its tracks (less the gap), or `end` (the end of the
 /// container's stacking extent) for the last items.
@@ -592,6 +604,8 @@ impl<'a> Layouter<'a> {
             if self.grid_publication.enabled() {
                 b.used_grid_tracks[0] = resolved::capture(b, false, &tl, GridSpace::Definite(cbw), &mut self.grid_work);
             }
+            let rtl = style.direction == rabbithole_style::Direction::Rtl;
+            reversed_static_positions(b, (cbw, extent), (dir.track_reverse != rtl, dir.fill_reverse));
             return pl.range;
         }
 
@@ -696,6 +710,7 @@ impl<'a> Layouter<'a> {
         if self.grid_publication.enabled() {
             b.used_grid_tracks[1] = resolved::capture(b, true, &tl, subgrid::standalone_space(b, true, avail), &mut self.grid_work);
         }
+        reversed_static_positions(b, (cbw, row_avail.unwrap_or(rows_extent)), (dir.fill_reverse != rtl, dir.track_reverse));
         rows_extent.max(0.0)
     }
 
