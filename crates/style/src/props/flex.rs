@@ -33,7 +33,8 @@ fn item_align(kw: &str, allow_auto: bool) -> Option<ItemAlign> {
         "normal" => ItemAlign::Normal,
         "flex-start" | "start" | "self-start" | "left" => ItemAlign::FlexStart,
         "flex-end" | "end" | "self-end" | "right" => ItemAlign::FlexEnd,
-        "center" => ItemAlign::Center,
+        // (`anchor-center` without an anchor behaves as center.)
+        "center" | "anchor-center" => ItemAlign::Center,
         "baseline" | "first" | "last" => ItemAlign::Baseline,
         "legacy" => ItemAlign::Normal,
         _ => return None,

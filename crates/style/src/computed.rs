@@ -83,6 +83,9 @@ pub enum MathNode {
     /// argument between the min- and max-content sizes; elsewhere it
     /// evaluates to the argument.
     FitContent(Box<MathNode>),
+    /// The `stretch` sizing keyword: layout fills the containing block
+    /// with the margin box; elsewhere it evaluates to 100%.
+    Stretch,
 }
 
 impl MathNode {
@@ -98,6 +101,7 @@ impl MathNode {
                 v.min(hi).max(lo)
             }
             MathNode::FitContent(a) => a.eval(base),
+            MathNode::Stretch => base,
         }
     }
     /// Does any term depend on the base?
@@ -108,6 +112,7 @@ impl MathNode {
             MathNode::Scale(n, _) => n.has_percent(),
             MathNode::Clamp(a) => a.iter().any(|n| n.has_percent()),
             MathNode::FitContent(a) => a.has_percent(),
+            MathNode::Stretch => true,
         }
     }
     /// CSS serialisation (`min(100%, 500px)`, `calc(100% - 20px)`).
@@ -132,6 +137,7 @@ impl MathNode {
             MathNode::Max(v) => format!("max({})", list(v)),
             MathNode::Clamp(a) => format!("clamp({})", list(&a[..])),
             MathNode::FitContent(a) => format!("fit-content({})", a.to_css()),
+            MathNode::Stretch => "stretch".to_string(),
             MathNode::Leaf(px, p) if *p == 0.0 => format!("{}px", num(*px)),
             MathNode::Leaf(px, p) if *px == 0.0 => format!("{}%", num(*p)),
             other => format!("calc({})", inner(other)),
@@ -166,6 +172,17 @@ pub fn intern_math(n: MathNode) -> u32 {
 /// The interned expression `id`.
 pub fn math_node(id: u32) -> Option<std::sync::Arc<MathNode>> {
     MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get(id as usize).cloned()
+}
+
+/// The `stretch` sizing keyword as a length.
+pub fn stretch_length() -> Length {
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    Length::Math(*ID.get_or_init(|| intern_math(MathNode::Stretch)))
+}
+
+/// Whether `l` is the `stretch` sizing keyword.
+pub fn is_stretch(l: Length) -> bool {
+    matches!(l, Length::Math(_)) && l == stretch_length()
 }
 
 /// The argument of a `fit-content(<length-percentage>)` length.

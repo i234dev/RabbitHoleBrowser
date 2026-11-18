@@ -2530,7 +2530,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     "max-content" | "-webkit-max-content" | "-moz-max-content" => Length::MaxContent,
                     "min-content" | "-webkit-min-content" | "-moz-min-content" => Length::MinContent,
                     "fit-content" | "-webkit-fit-content" | "-moz-fit-content" => Length::FitContent,
-                    "-webkit-fill-available" | "-moz-available" | "fill-available" | "stretch" => Length::Auto,
+                    "-webkit-fill-available" | "-moz-available" | "fill-available" | "stretch" => stretch_length(),
                     _ => return,
                 }
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
@@ -2556,7 +2556,8 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
             let l = if let Some(kw) = values::ident(c0) {
                 match kw.as_str() {
-                    "none" | "-webkit-fill-available" | "-moz-available" | "stretch" => Length::Auto,
+                    "none" => Length::Auto,
+                    "-webkit-fill-available" | "-moz-available" | "fill-available" | "stretch" => stretch_length(),
                     "max-content" | "-webkit-max-content" | "-moz-max-content" => Length::MaxContent,
                     "min-content" | "-webkit-min-content" | "-moz-min-content" => Length::MinContent,
                     "fit-content" | "-webkit-fit-content" | "-moz-fit-content" => Length::FitContent,

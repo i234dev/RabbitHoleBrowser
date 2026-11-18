@@ -1204,7 +1204,8 @@ fn may_use_definite_height(c: &LayoutBox) -> bool {
     use crate::tree::Formatting;
     c.kind == BoxKind::Image
         || c.style.aspect_ratio.is_some()
-        || matches!(c.formatting, Formatting::Flex | Formatting::Grid)
+        // (A column-wrap container's width follows its height.)
+        || (c.formatting == Formatting::Flex && is_multi_line(&c.style) && matches!(c.style.flex_direction, FlexDirection::Column | FlexDirection::ColumnReverse))
         || c.children.iter().any(|g| g.style.height.has_percent() || g.style.max_height.has_percent() || g.style.min_height.has_percent())
 }
 

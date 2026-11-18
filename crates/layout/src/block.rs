@@ -103,6 +103,13 @@ pub(crate) fn vertical_extras(style: &ComputedStyle) -> f32 {
     p.top + p.bottom + style.border_width.top + style.border_width.bottom
 }
 
+/// The content height of a `stretch` box in a containing block of
+/// content height `cb_h`: its margin box fills it.
+fn stretch_height(style: &ComputedStyle, cb_h: f32, pb_v: f32) -> f32 {
+    let m = style.margin.top.resolve_or_zero(0.0) + style.margin.bottom.resolve_or_zero(0.0);
+    (cb_h - m - pb_v).max(0.0)
+}
+
 /// Static-position rectangle of an absolutely positioned box (inline
 /// axis) and the alignment defaults of its static parent.
 #[derive(Clone, Copy)]
@@ -131,6 +138,8 @@ fn abs_align_fraction(align: ItemAlign, mods: rabbithole_style::AlignMods, rtl: 
         (_, ItemAlign::FlexStart) => start(inline && rtl),
         (_, ItemAlign::FlexEnd) => 1.0 - start(inline && rtl),
         (_, ItemAlign::Center) => 0.5,
+        // `last baseline` falls back to (safe) end without a baseline set.
+        (_, ItemAlign::Baseline) if mods.last => 1.0 - start(inline && rtl),
         _ => return None,
     })
 }
@@ -531,7 +540,7 @@ impl<'a> Layouter<'a> {
                     break;
                 }
                 let outer = content_w + pb_h + ml + mr;
-                if style.width.is_auto() {
+                if style.width.is_auto() || rabbithole_style::is_stretch(style.width) {
                     content_w = (r - l - ml - mr - pb_h).max(0.0);
                     x = l + ml;
                     break;
@@ -762,7 +771,8 @@ impl<'a> Layouter<'a> {
         let control_baseline = b.pseudo.is_none() && b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("input" | "select" | "button")));
         // A scroll container's baseline is synthesized from its margin box,
         // except for flex and grid containers (CSS Align §9.1).
-        b.baseline = if b.clips && !control_baseline && !matches!(b.formatting, Formatting::Flex | Formatting::Grid) {
+        let content_baseline = matches!(b.formatting, Formatting::Flex | Formatting::Grid) && !style.contain_size && !style.container_size;
+        b.baseline = if b.clips && !control_baseline && !content_baseline {
             None
         } else if b.ruby == 1 {
             // A ruby pair aligns by its base.
@@ -965,6 +975,13 @@ impl<'a> Layouter<'a> {
     #[allow(clippy::too_many_arguments)]
     fn compute_width_inner(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
         let style = b.style.clone();
+        // `width: stretch`: the margin box fills the containing block
+        // (auto margins count as zero).
+        if rabbithole_style::is_stretch(style.width) && !matches!(mode, WidthMode::Fixed(_)) {
+            let (l, r) = (ml.unwrap_or(0.0), mr.unwrap_or(0.0));
+            let w = self.clamp_width(&style, (cbw - l - r - pb_h).max(0.0), cbw, pb_h);
+            return (w, l, r);
+        }
         // `width: fit-content(<length-percentage>)`.
         if let (Some(arg), Some((mn, mx))) = (rabbithole_style::fit_content_arg(style.width), self.width_intrinsic) {
             let a = arg.eval(cbw);
@@ -1110,6 +1127,10 @@ impl<'a> Layouter<'a> {
         // Intrinsic keywords and fit-content() need the box's min/max-content
         // widths, which `compute_width` provides.
         let intrinsic = |l: Length| -> Option<f32> {
+            if rabbithole_style::is_stretch(l) {
+                let m = style.margin.left.resolve_or_zero(cbw) + style.margin.right.resolve_or_zero(cbw);
+                return Some((cbw - m - pb_h).max(0.0));
+            }
             let (mn, mx) = self.width_intrinsic?;
             match l {
                 Length::MinContent => Some(mn),
@@ -1130,6 +1151,9 @@ impl<'a> Layouter<'a> {
 
     fn resolve_height(&self, style: &ComputedStyle, cb_h: Option<f32>, pb_v: f32) -> Option<f32> {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
+        if rabbithole_style::is_stretch(style.height) {
+            return cb_h.map(|h| stretch_height(style, h, pb_v));
+        }
         match style.height {
             Length::Px(v) => Some(adj(v.max(0.0))),
             Length::Percent(p) => cb_h.map(|h| adj(h * p / 100.0)),
@@ -1141,33 +1165,15 @@ impl<'a> Layouter<'a> {
     /// Content-box (min, max) heights (`max` is infinite for `none`).
     pub(crate) fn height_limits(&self, style: &ComputedStyle, cb_h: Option<f32>, pb_v: f32) -> (f32, f32) {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v.max(0.0) };
-        let max = style.max_height.resolve_definite(cb_h).map(adj).unwrap_or(f32::INFINITY);
-        let min = style.min_height.resolve_definite(cb_h).map(adj).unwrap_or(0.0);
+        let limit = |l: Length| if rabbithole_style::is_stretch(l) { cb_h.map(|h| stretch_height(style, h, pb_v)) } else { l.resolve_definite(cb_h).map(adj) };
+        let max = limit(style.max_height).unwrap_or(f32::INFINITY);
+        let min = limit(style.min_height).unwrap_or(0.0);
         (min, max.max(min))
     }
 
     fn clamp_height(&self, style: &ComputedStyle, h: f32, cb_h: Option<f32>, pb_v: f32) -> f32 {
-        let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
-        let mut h = h;
-        let max = match style.max_height {
-            Length::Px(v) => Some(v),
-            Length::Percent(p) => cb_h.map(|b| b * p / 100.0),
-            l @ (Length::Calc(..) | Length::Math(_)) => cb_h.map(|b| l.resolve_or_zero(b)),
-            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
-        };
-        if let Some(m) = max {
-            h = h.min(adj(m));
-        }
-        let min = match style.min_height {
-            Length::Px(v) => Some(v),
-            Length::Percent(p) => cb_h.map(|b| b * p / 100.0),
-            l @ (Length::Calc(..) | Length::Math(_)) => cb_h.map(|b| l.resolve_or_zero(b)),
-            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
-        };
-        if let Some(m) = min {
-            h = h.max(adj(m));
-        }
-        h.max(0.0)
+        let (min, max) = self.height_limits(style, cb_h, pb_v);
+        h.min(max).max(min).max(0.0)
     }
 
     /// Size of a replaced box's content area. `cbw == None` means

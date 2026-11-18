@@ -793,3 +793,84 @@ fn grid_items_share_a_baseline() {
     let g = fx.by_id(&t, "g");
     assert!(g.rect.bottom() + 0.5 >= a.rect.bottom().max(b.rect.bottom()));
 }
+
+#[test]
+fn flex_column_min_height_flexes_items() {
+    // `min-height` sizes an indefinite column container; its items flex in it.
+    let html = "<div id=c><div id=a></div><div id=b></div></div>";
+    let css = "#c { display: flex; flex-direction: column; min-height: 300px; width: 100px } #a { height: 50px } #b { flex: 1 }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    assert_near!(fx.by_id(&t, "c").rect.h, 300.0);
+    assert_near!(fx.by_id(&t, "b").rect.h, 250.0);
+}
+
+#[test]
+fn flex_single_line_clamped_by_min_height_stretches() {
+    let html = "<div id=c><div id=a></div></div>";
+    let css = "#c { display: flex; min-height: 120px; width: 100px } #a { width: 50px }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    assert_near!(fx.by_id(&t, "a").rect.h, 120.0);
+}
+
+#[test]
+fn flex_justify_start_follows_writing_mode_in_row_reverse() {
+    let html = "<div id=c><div id=a></div><div id=b></div></div>";
+    let css = "#c { display: flex; flex-direction: row-reverse; justify-content: start; width: 600px } #c > div { width: 100px; height: 10px }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    let cx = fx.by_id(&t, "c").content_rect.x;
+    // `start` is the left edge; row-reverse puts the first item last.
+    assert_near!(fx.by_id(&t, "b").rect.x, cx);
+    assert_near!(fx.by_id(&t, "a").rect.x, cx + 100.0);
+}
+
+#[test]
+fn flex_rtl_row_starts_at_the_right() {
+    let html = "<div id=c><div id=a></div></div>";
+    let css = "#c { display: flex; direction: rtl; width: 600px } #a { width: 100px; height: 10px }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    let c = fx.by_id(&t, "c").content_rect;
+    assert_near!(fx.by_id(&t, "a").rect.right(), c.right());
+}
+
+#[test]
+fn flex_aspect_ratio_item_takes_its_width_from_a_definite_height() {
+    let html = "<div id=c><div id=a></div></div>";
+    let css = "#c { display: flex } #a { height: 100px; aspect-ratio: 2 / 1; min-width: 0 }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    assert_near!(fx.by_id(&t, "a").rect.w, 200.0);
+}
+
+#[test]
+fn flex_balance_evens_out_lines() {
+    let html = "<div id=c><div id=a></div><div id=b></div><div id=d></div><div id=e></div></div>";
+    let css = "#c { display: flex; flex-wrap: balance; width: 300px } #c > div { width: 100px; height: 10px }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    // Greedy breaking gives 3 + 1 items; balanced lines hold 2 + 2.
+    let (a, d) = (fx.by_id(&t, "a"), fx.by_id(&t, "d"));
+    assert_near!(d.rect.x, a.rect.x);
+    assert_near!(d.rect.y, a.rect.y + 10.0);
+}
+
+#[test]
+fn fit_content_function_clamps_the_width() {
+    let html = "<div id=a><span style='display:inline-block;width:150px'></span></div>";
+    let css = "#a { width: fit-content(100px); height: 10px }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    assert_near!(fx.by_id(&t, "a").rect.w, 150.0);
+}
+
+#[test]
+fn stretch_height_fills_the_containing_block() {
+    let html = "<div id=c><div id=a></div></div>";
+    let css = "#c { height: 200px } #a { height: stretch; margin: 10px 0; padding: 5px 0 }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    assert_near!(fx.by_id(&t, "a").rect.h, 180.0);
+}
