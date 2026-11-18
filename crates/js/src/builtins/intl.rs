@@ -14,6 +14,7 @@ use crate::realm::SYM_TO_STRING_TAG;
 
 mod duration;
 pub mod locale_id;
+mod locale_obj;
 
 // ------------------------------------------------------------- locales
 
@@ -101,8 +102,8 @@ fn canonical_locale_list(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
     let mut out = Vec::new();
     let add = |realm: &mut Realm, item: Value, out: &mut Vec<String>| -> JsResult<()> {
         let tag = match item.v() {
-            V::Object(id) => match realm.host_data::<Locale>(id) {
-                Some(l) => l.full.clone(),
+            V::Object(id) => match realm.host_data::<locale_obj::LocaleObject>(id) {
+                Some(l) => l.tag.clone(),
                 _ => realm.to_rust_string(item.clone())?,
             },
             V::String(s) => s.to_rust_string(),
@@ -124,7 +125,7 @@ fn canonical_locale_list(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
             add(realm, v, &mut out)?;
             return Ok(out);
         }
-        V::Object(id) if realm.host_data::<Locale>(id).is_some() => {
+        V::Object(id) if realm.host_data::<locale_obj::LocaleObject>(id).is_some() => {
             add(realm, v, &mut out)?;
             return Ok(out);
         }
@@ -1572,13 +1573,25 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(lf, "formatToParts", 1, lf_format_to_parts);
     realm.define_method(lf, "resolvedOptions", 0, lf_resolved_options);
 
-    let (_, loc) = mk(realm, "Locale", "Intl.Locale", locale_ctor, 1);
-    realm.define_method(loc, "toString", 0, locale_to_string);
-    realm.define_accessor(loc, "baseName", Some(locale_to_string), None, CONFIGURABLE);
-    realm.define_accessor(loc, "language", Some(locale_language), None, CONFIGURABLE);
-    realm.define_accessor(loc, "region", Some(locale_region), None, CONFIGURABLE);
-    realm.define_method(loc, "maximize", 0, locale_self);
-    realm.define_method(loc, "minimize", 0, locale_self);
+    let (_, loc) = mk(realm, "Locale", "Intl.Locale", locale_obj::ctor, 1);
+    realm.define_method(loc, "toString", 0, locale_obj::to_string);
+    realm.define_method(loc, "maximize", 0, locale_obj::maximize);
+    realm.define_method(loc, "minimize", 0, locale_obj::minimize);
+    for (name, f) in [
+        ("baseName", locale_obj::base_name as NativeFn),
+        ("calendar", locale_obj::calendar),
+        ("caseFirst", locale_obj::case_first),
+        ("collation", locale_obj::collation),
+        ("hourCycle", locale_obj::hour_cycle),
+        ("numeric", locale_obj::numeric),
+        ("numberingSystem", locale_obj::numbering_system),
+        ("language", locale_obj::language),
+        ("script", locale_obj::script),
+        ("region", locale_obj::region),
+        ("variants", locale_obj::variants),
+    ] {
+        realm.define_accessor(loc, name, Some(f), None, CONFIGURABLE);
+    }
 
     let (_, dn) = mk(realm, "DisplayNames", "Intl.DisplayNames", display_names_ctor, 2);
     realm.define_method(dn, "of", 1, display_names_of);
@@ -2129,37 +2142,6 @@ fn lf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRes
     Ok(Value::Object(obj))
 }
 
-// Locale
-fn locale_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let tag = match (arg(args, 0)).v() {
-        V::String(s) => s.to_rust_string(),
-        V::Object(id) => match realm.host_data::<Locale>(id) {
-            Some(l) => l.full.clone(),
-            None => realm.to_rust_string(arg(args, 0))?,
-        },
-        _ => return realm.type_error("First argument to Intl.Locale constructor can't be empty or missing"),
-    };
-    let Some(l) = Locale::parse(&tag) else { return realm.range_error("Incorrect locale information provided") };
-    Ok(Value::Object(new_intl_object(realm, "Intl.Locale", l)?))
-}
-
-fn locale_to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let l: Locale = host(realm, &this, "Intl.Locale.prototype.toString")?;
-    Ok(Value::str(&l.full))
-}
-fn locale_language(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let l: Locale = host(realm, &this, "Intl.Locale.prototype.language")?;
-    Ok(Value::str(&l.lang))
-}
-fn locale_region(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let l: Locale = host(realm, &this, "Intl.Locale.prototype.region")?;
-    Ok(l.region.map(|r| Value::str(&r)).unwrap_or(Value::Undefined))
-}
-fn locale_self(_realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    Ok(this)
-}
-
-// DisplayNames
 #[derive(Debug, Clone)]
 struct DisplayNamesOptions {
     locale: Locale,
