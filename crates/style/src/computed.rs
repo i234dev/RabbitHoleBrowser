@@ -528,6 +528,30 @@ pub enum ContentDistribution {
     Stretch,
 }
 
+/// The positional keyword behind a box-alignment value, when it is not
+/// the flex-relative one the [`ItemAlign`] / [`ContentDistribution`]
+/// value names (`start` and `end` are stored as `FlexStart`/`FlexEnd`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlignPos {
+    #[default]
+    Flex,
+    Start,
+    End,
+    SelfStart,
+    SelfEnd,
+    Left,
+    Right,
+}
+
+/// Modifiers of a box-alignment value: its positional keyword, the
+/// `safe` overflow keyword and `last baseline`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AlignMods {
+    pub pos: AlignPos,
+    pub safe: bool,
+    pub last: bool,
+}
+
 /// `align-items` / `align-self` / `justify-items` / `justify-self` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemAlign {
@@ -1070,6 +1094,14 @@ pub struct ComputedStyle {
     pub align_items: ItemAlign,
     pub align_self: ItemAlign,
     pub align_content: ContentDistribution,
+    /// Modifiers of `justify-content`, `align-content`, `align-items`,
+    /// `align-self`, `justify-items` and `justify-self`.
+    pub justify_content_mods: AlignMods,
+    pub align_content_mods: AlignMods,
+    pub align_items_mods: AlignMods,
+    pub align_self_mods: AlignMods,
+    pub justify_items_mods: AlignMods,
+    pub justify_self_mods: AlignMods,
     pub order: i32,
     pub row_gap: Length,
     pub column_gap: Length,
@@ -1323,6 +1355,12 @@ impl ComputedStyle {
             justify_content: ContentDistribution::FlexStart,
             align_items: ItemAlign::Normal,
             align_self: ItemAlign::Auto,
+            justify_content_mods: AlignMods::default(),
+            align_content_mods: AlignMods::default(),
+            align_items_mods: AlignMods::default(),
+            align_self_mods: AlignMods::default(),
+            justify_items_mods: AlignMods::default(),
+            justify_self_mods: AlignMods::default(),
             align_content: ContentDistribution::Stretch,
             order: 0,
             row_gap: Length::ZERO,

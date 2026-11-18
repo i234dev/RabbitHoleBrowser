@@ -40,13 +40,78 @@ fn item_align(kw: &str, allow_auto: bool) -> Option<ItemAlign> {
     })
 }
 
-/// Keywords in a value, skipping `safe`/`unsafe`/`first`/`last` modifiers.
-fn keywords(comps: &[&[Token]]) -> Vec<String> {
-    comps
-        .iter()
-        .filter_map(|c| values::ident(c))
-        .filter(|k| !matches!(k.as_str(), "safe" | "unsafe"))
-        .collect()
+/// One box-alignment value at the start of `kws`: its main keyword, its
+/// modifiers and how many keywords it used (`safe center`, `last
+/// baseline`, `legacy left`, ...). None when the value is invalid.
+fn align_prefix(kws: &[String]) -> Option<(&str, AlignMods, usize)> {
+    let mut mods = AlignMods::default();
+    let mut i = 0;
+    let first = kws.first()?.as_str();
+    let overflow = matches!(first, "safe" | "unsafe");
+    let baseline_prefix = matches!(first, "first" | "last");
+    if overflow || baseline_prefix {
+        mods.safe = first == "safe";
+        mods.last = first == "last";
+        i = 1;
+    }
+    let mut kw = kws.get(i)?.as_str();
+    i += 1;
+    // `legacy` combines with left/right/center (justify-items).
+    if kw == "legacy" && kws.get(i).is_some_and(|k| matches!(k.as_str(), "left" | "right" | "center")) {
+        kw = kws[i].as_str();
+        i += 1;
+    } else if matches!(kw, "left" | "right" | "center") && kws.get(i).is_some_and(|k| k == "legacy") {
+        i += 1;
+    }
+    mods.pos = match kw {
+        "start" => AlignPos::Start,
+        "end" => AlignPos::End,
+        "self-start" => AlignPos::SelfStart,
+        "self-end" => AlignPos::SelfEnd,
+        "left" => AlignPos::Left,
+        "right" => AlignPos::Right,
+        _ => AlignPos::Flex,
+    };
+    let positional = matches!(kw, "center" | "start" | "end" | "self-start" | "self-end" | "flex-start" | "flex-end" | "left" | "right");
+    if (overflow && !positional) || (baseline_prefix && kw != "baseline") {
+        return None;
+    }
+    Some((kw, mods, i))
+}
+
+/// Identifiers of a value (None if any component is not one).
+fn idents(comps: &[&[Token]]) -> Option<Vec<String>> {
+    comps.iter().map(|c| values::ident(c)).collect()
+}
+
+/// A whole value of an item-alignment property.
+fn item_value(comps: &[&[Token]], allow_auto: bool) -> Option<(ItemAlign, AlignMods)> {
+    let kws = idents(comps)?;
+    let (kw, mods, used) = align_prefix(&kws)?;
+    (used == kws.len()).then_some(())?;
+    Some((item_align(kw, allow_auto)?, mods))
+}
+
+/// A whole value of a content-distribution property.
+fn content_value(comps: &[&[Token]], for_align_content: bool) -> Option<(ContentDistribution, AlignMods)> {
+    let kws = idents(comps)?;
+    let (kw, mods, used) = align_prefix(&kws)?;
+    (used == kws.len()).then_some(())?;
+    Some((content_distribution(kw, for_align_content)?, mods))
+}
+
+/// The two values of a `place-*` shorthand (the second defaults to the
+/// first).
+fn place_values(comps: &[&[Token]]) -> Option<((String, AlignMods), Option<(String, AlignMods)>)> {
+    let kws = idents(comps)?;
+    let (a, am, used) = align_prefix(&kws)?;
+    let first = (a.to_string(), am);
+    if used == kws.len() {
+        return Some((first, None));
+    }
+    let (b, bm, used2) = align_prefix(&kws[used..])?;
+    (used + used2 == kws.len()).then_some(())?;
+    Some((first, Some((b.to_string(), bm))))
 }
 
 fn flex_basis(c: &[Token], ctx: &ApplyCtx) -> Option<(Length, bool)> {
@@ -193,66 +258,73 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             }
         }
         "justify-content" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = content_distribution(kw, false) {
-                    style.justify_content = v;
-                }
+            if let Some((v, m)) = content_value(comps, false) {
+                style.justify_content = v;
+                style.justify_content_mods = m;
             }
         }
         "align-content" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = content_distribution(kw, true) {
-                    style.align_content = v;
-                }
+            if let Some((v, m)) = content_value(comps, true) {
+                style.align_content = v;
+                style.align_content_mods = m;
             }
         }
         "align-items" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = item_align(kw, false) {
-                    style.align_items = v;
-                }
+            if let Some((v, m)) = item_value(comps, false) {
+                style.align_items = v;
+                style.align_items_mods = m;
             }
         }
         "align-self" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = item_align(kw, true) {
-                    style.align_self = v;
-                }
+            if let Some((v, m)) = item_value(comps, true) {
+                style.align_self = v;
+                style.align_self_mods = m;
             }
         }
         "justify-items" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = item_align(kw, false) {
-                    style.justify_items = v;
-                }
+            if let Some((v, m)) = item_value(comps, false) {
+                style.justify_items = v;
+                style.justify_items_mods = m;
             }
         }
         "justify-self" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = item_align(kw, true) {
-                    style.justify_self = v;
-                }
+            if let Some((v, m)) = item_value(comps, true) {
+                style.justify_self = v;
+                style.justify_self_mods = m;
             }
         }
         "place-items" => {
-            let kws = keywords(comps);
-            if let Some(a) = kws.first().and_then(|k| item_align(k, false)) {
-                style.align_items = a;
-                style.justify_items = kws.get(1).and_then(|k| item_align(k, false)).unwrap_or(a);
+            if let Some(((a, am), second)) = place_values(comps) {
+                let (b, bm) = second.unwrap_or_else(|| (a.clone(), am));
+                if let (Some(av), Some(bv)) = (item_align(&a, false), item_align(&b, false)) {
+                    style.align_items = av;
+                    style.align_items_mods = am;
+                    style.justify_items = bv;
+                    style.justify_items_mods = bm;
+                }
             }
         }
         "place-self" => {
-            let kws = keywords(comps);
-            if let Some(a) = kws.first().and_then(|k| item_align(k, true)) {
-                style.align_self = a;
-                style.justify_self = kws.get(1).and_then(|k| item_align(k, true)).unwrap_or(a);
+            if let Some(((a, am), second)) = place_values(comps) {
+                let (b, bm) = second.unwrap_or_else(|| (a.clone(), am));
+                if let (Some(av), Some(bv)) = (item_align(&a, true), item_align(&b, true)) {
+                    style.align_self = av;
+                    style.align_self_mods = am;
+                    style.justify_self = bv;
+                    style.justify_self_mods = bm;
+                }
             }
         }
         "place-content" => {
-            let kws = keywords(comps);
-            if let Some(a) = kws.first().and_then(|k| content_distribution(k, true)) {
-                style.align_content = a;
-                style.justify_content = kws.get(1).and_then(|k| content_distribution(k, false)).unwrap_or(a);
+            if let Some(((a, am), second)) = place_values(comps) {
+                // A single baseline value sets justify-content to `start`.
+                let (b, bm) = second.unwrap_or_else(|| if a == "baseline" { ("start".to_string(), AlignMods { pos: AlignPos::Start, ..AlignMods::default() }) } else { (a.clone(), am) });
+                if let (Some(av), Some(bv)) = (content_distribution(&a, true), content_distribution(&b, false)) {
+                    style.align_content = av;
+                    style.align_content_mods = am;
+                    style.justify_content = bv;
+                    style.justify_content_mods = bm;
+                }
             }
         }
         "order" => {
@@ -302,6 +374,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
         }
         "-webkit-box-pack" => {
             if let Some(kw) = values::ident(c0) {
+                style.justify_content_mods = AlignMods::default();
                 style.justify_content = match kw.as_str() {
                     "start" => ContentDistribution::FlexStart,
                     "end" => ContentDistribution::FlexEnd,
@@ -313,6 +386,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
         }
         "-webkit-box-align" => {
             if let Some(kw) = values::ident(c0) {
+                style.align_items_mods = AlignMods::default();
                 style.align_items = match kw.as_str() {
                     "start" => ItemAlign::FlexStart,
                     "end" => ItemAlign::FlexEnd,
