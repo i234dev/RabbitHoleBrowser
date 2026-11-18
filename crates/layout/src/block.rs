@@ -43,6 +43,16 @@ pub(crate) struct Layouter<'a> {
     /// whose contents are about to be laid out with an indefinite height
     /// (single-line cross-size clamping, column main size).
     pub(crate) flex_limits: Option<(f32, f32)>,
+    /// Intrinsic sizing: the definite content height of the containing
+    /// block of the box being measured (percentage heights of replaced
+    /// elements and aspect-ratio boxes resolve against it).
+    pub(crate) intrinsic_cb_h: Option<f32>,
+    /// Intrinsic sizing: a measured box read `intrinsic_cb_h` (or a forced
+    /// height); such results are not cached.
+    pub(crate) intrinsic_cb_used: bool,
+    /// Intrinsic sizing: the stretched definite height of the next box
+    /// measured (a flex item in a container with a definite height).
+    pub(crate) intrinsic_forced_h: Option<f32>,
     /// Whether `FontContext::select_family` & co. are implemented.
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
@@ -77,6 +87,13 @@ pub(crate) fn resolve_edges(e: &Edges<Length>, base: f32) -> Edges<f32> {
 pub(crate) fn horizontal_extras(style: &ComputedStyle, cbw: f32) -> f32 {
     let p = resolve_edges(&style.padding, cbw);
     p.left + p.right + style.border_width.left + style.border_width.right
+}
+
+/// Vertical padding + border in px (percentages count as 0, as in
+/// intrinsic sizing).
+pub(crate) fn vertical_extras(style: &ComputedStyle) -> f32 {
+    let p = resolve_edges(&style.padding, 0.0);
+    p.top + p.bottom + style.border_width.top + style.border_width.bottom
 }
 
 /// A set of adjoining vertical margins being collapsed (CSS 2.1 §8.3.1):
@@ -187,6 +204,9 @@ impl<'a> Layouter<'a> {
             measurer: Measurer::new(ctx.fonts),
             forced_content_height: None,
             flex_limits: None,
+            intrinsic_cb_h: None,
+            intrinsic_cb_used: false,
+            intrinsic_forced_h: None,
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
             abs_cb: HashMap::new(),
@@ -444,7 +464,7 @@ impl<'a> Layouter<'a> {
             };
             (w, l, r, Some(h))
         } else {
-            let (w, l, r) = self.compute_width(b, cbw, pb_h, ml, mr, mode);
+            let (w, l, r) = self.compute_width(b, cbw, cb.height, pb_h, ml, mr, mode);
             (w, l, r, None)
         };
         b.margin = Edges {
@@ -873,7 +893,8 @@ impl<'a> Layouter<'a> {
 
     /// CSS 2.1 §10.3 width resolution for non-replaced boxes. Returns
     /// (content width, margin-left, margin-right).
-    fn compute_width(&mut self, b: &mut LayoutBox, cbw: f32, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn compute_width(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
         let style = b.style.clone();
         let mut specified = style.width.resolve(cbw).map(|w| {
             let w = if style.box_sizing == BoxSizing::BorderBox { w - pb_h } else { w };
@@ -881,7 +902,7 @@ impl<'a> Layouter<'a> {
         });
         // Intrinsic sizing keywords.
         if style.width.is_intrinsic() {
-            let (min, max) = self.intrinsic(b);
+            let (min, max) = self.intrinsic_in(b, cb_h);
             let ml0 = ml.unwrap_or(0.0);
             let mr0 = mr.unwrap_or(0.0);
             let avail = (cbw - ml0 - mr0 - pb_h).max(0.0);
@@ -905,7 +926,7 @@ impl<'a> Layouter<'a> {
                 let w = match specified {
                     Some(w) => w,
                     None => {
-                        let (min, max) = self.intrinsic(b);
+                        let (min, max) = self.intrinsic_in(b, cb_h);
                         let avail = (cbw - ml - mr - pb_h).max(0.0);
                         self.clamp_width(&style, shrink_to_fit(min, max, avail), cbw, pb_h)
                     }
@@ -1087,7 +1108,7 @@ impl<'a> Layouter<'a> {
                 w = min;
             }
         }
-        if let Length::Px(max_h) = style.max_height {
+        if let Some(max_h) = style.max_height.resolve_definite(cb_h) {
             if h > max_h {
                 if h > 0.0 {
                     w *= max_h / h;

@@ -581,7 +581,7 @@ impl<'a> Layouter<'a> {
             Axis::Row => (cbh, child_style.min_height, child_style.max_height),
             Axis::Column => (Some(cbw), child_style.min_width, child_style.max_width),
         };
-        let ratio = flex_item_ratio(&b.children[idx]);
+        let ratio = item_ratio(&b.children[idx]);
         let is_replaced = b.children[idx].kind == BoxKind::Image;
         // The ratio relates content boxes for natural ratios and the
         // box-sizing boxes for `aspect-ratio`.
@@ -596,15 +596,13 @@ impl<'a> Layouter<'a> {
         };
         let cross_min = resolve_size(cross_min_prop, avail_cross, bb, pb_cross).unwrap_or(0.0);
         let cross_max = resolve_size(cross_max_prop, avail_cross, bb, pb_cross).unwrap_or(f32::INFINITY).max(cross_min);
-        let definite_cross = ratio.and_then(|_| {
-            resolve_size(cross_prop, avail_cross, bb, pb_cross)
-                .or_else(|| {
-                    let (ma, mb) = edges.autos(cross_axis);
-                    let stretched = cross_prop.is_auto() && matches!(align, ItemAlign::Stretch | ItemAlign::Normal) && !ma && !mb;
-                    stretch_line.filter(|_| stretched).map(|line| (line - pb_cross - edges.margin_sum(cross_axis)).max(0.0))
-                })
-                .map(|c| c.clamp(cross_min, cross_max))
-        });
+        let (ma, mb) = edges.autos(cross_axis);
+        let stretch_like = cross_prop.is_auto() && matches!(align, ItemAlign::Stretch | ItemAlign::Normal) && !ma && !mb;
+        let stretched_cross = {
+            let stretched = stretch_like;
+            stretch_line.filter(|_| stretched).map(|line| (line - pb_cross - edges.margin_sum(cross_axis)).max(0.0).clamp(cross_min, cross_max))
+        };
+        let definite_cross = ratio.and_then(|_| resolve_size(cross_prop, avail_cross, bb, pb_cross).map(|c| c.clamp(cross_min, cross_max)).or(stretched_cross));
         let transferred = definite_cross.and_then(transfer);
 
         // Flex §7.2.3 / §9.2: `auto` retrieves the preferred main-size
@@ -617,7 +615,7 @@ impl<'a> Layouter<'a> {
         };
         let basis = resolve_size(used_basis, avail_main, bb, pb_main);
         // Content size along the main axis (also the automatic minimum).
-        let (mut content_min, mut content_max) = self.flex_content_sizes(b, idx, axis, cbw, cbh);
+        let (mut content_min, mut content_max) = self.flex_content_sizes(b, idx, axis, cbw, cbh, stretched_cross, stretch_like);
         if let Some(t) = transferred {
             // A replaced item's contents are its ratio; other boxes keep at
             // least their min-content contents.
@@ -693,7 +691,8 @@ impl<'a> Layouter<'a> {
     }
 
     /// (min-content, max-content) sizes of an item along the main axis.
-    fn flex_content_sizes(&mut self, b: &mut LayoutBox, idx: usize, axis: Axis, cbw: f32, cbh: Option<f32>) -> (f32, f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn flex_content_sizes(&mut self, b: &mut LayoutBox, idx: usize, axis: Axis, cbw: f32, cbh: Option<f32>, stretched_cross: Option<f32>, stretch_like: bool) -> (f32, f32) {
         let _probe = self.grid_publication.probe();
         let child = &mut b.children[idx];
         // Content suggestions and content flex bases measure the item's
@@ -725,7 +724,11 @@ impl<'a> Layouter<'a> {
                     let (w, _) = self.replaced_size(child, Some(cbw), cbh, pb);
                     (w, w)
                 } else {
-                    self.intrinsic(child)
+                    // Measured with its stretched height when that can matter.
+                    self.intrinsic_forced_h = stretched_cross.filter(|_| may_use_definite_height(child));
+                    let r = self.intrinsic_in(child, cbh);
+                    self.intrinsic_forced_h = None;
+                    r
                 }
             }
             Axis::Column => {
@@ -734,7 +737,8 @@ impl<'a> Layouter<'a> {
                 let bb = child.style.box_sizing == BoxSizing::BorderBox;
                 let mode = match resolve_size(child.style.width, Some(cbw), bb, edges.pb_h) {
                     Some(w) => WidthMode::Fixed(w),
-                    None => WidthMode::Fixed((cbw - edges.pb_h - edges.margin_sum(Axis::Row)).max(0.0)),
+                    None if stretch_like => WidthMode::Fixed(stretched_cross.unwrap_or(cbw - edges.pb_h - edges.margin_sum(Axis::Row)).max(0.0)),
+                    None => WidthMode::ShrinkToFit,
                 };
                 let cb = Cb {
                     x: 0.0,
@@ -959,7 +963,25 @@ impl<'a> Layouter<'a> {
                 continue;
             }
             let ex = crate::intrinsic::extras_px(&c.style);
+            // Items stretched in a single line of a definite height are
+            // measured with that height (it transfers through ratios and
+            // resolves percentages).
+            if row && !wraps {
+                if let Some(h) = self.intrinsic_cb_h.filter(|_| stretches_in_cross(c, &style) && may_use_definite_height(c)) {
+                    let pb_v = crate::block::vertical_extras(&c.style);
+                    let m = px_or_zero(c.style.margin.top) + px_or_zero(c.style.margin.bottom);
+                    let mut inner = (h - pb_v - m).max(0.0);
+                    if let Some(max) = resolve_size(c.style.max_height, None, c.style.box_sizing == BoxSizing::BorderBox, pb_v) {
+                        inner = inner.min(max);
+                    }
+                    if let Some(min) = resolve_size(c.style.min_height, None, c.style.box_sizing == BoxSizing::BorderBox, pb_v) {
+                        inner = inner.max(min);
+                    }
+                    self.intrinsic_forced_h = Some(inner);
+                }
+            }
             let (mut cmin, mut cmax) = self.intrinsic(c);
+            self.intrinsic_forced_h = None;
             if row {
                 if let Length::Px(basis) = c.style.flex_basis {
                     let pb = crate::block::horizontal_extras(&c.style, 0.0);
@@ -992,9 +1014,29 @@ impl<'a> Layouter<'a> {
     }
 }
 
+/// Whether a box's intrinsic widths can depend on its definite height:
+/// replaced and aspect-ratio boxes, flex/grid containers, and contents
+/// with percentage heights.
+fn may_use_definite_height(c: &LayoutBox) -> bool {
+    use crate::tree::Formatting;
+    c.kind == BoxKind::Image
+        || c.style.aspect_ratio.is_some()
+        || matches!(c.formatting, Formatting::Flex | Formatting::Grid)
+        || c.children.iter().any(|g| g.style.height.has_percent() || g.style.max_height.has_percent() || g.style.min_height.has_percent())
+}
+
+/// Whether a flex item is stretched in the cross axis of `container`:
+/// `align-self` stretch (or normal), an auto cross size and no auto
+/// cross-axis margins (row containers).
+fn stretches_in_cross(c: &LayoutBox, container: &ComputedStyle) -> bool {
+    let align = if c.style.align_self == ItemAlign::Auto { container.align_items } else { c.style.align_self };
+    let mods = if c.style.align_self == ItemAlign::Auto { container.align_items_mods } else { c.style.align_self_mods };
+    matches!(align, ItemAlign::Stretch | ItemAlign::Normal) && mods.pos == AlignPos::Flex && c.style.height.is_auto() && !c.style.margin.top.is_auto() && !c.style.margin.bottom.is_auto()
+}
+
 /// The preferred aspect ratio (width / height) of a flex item: its
 /// `aspect-ratio`, else a replaced element's natural ratio.
-fn flex_item_ratio(b: &LayoutBox) -> Option<f32> {
+pub(crate) fn item_ratio(b: &LayoutBox) -> Option<f32> {
     if let Some(r) = b.style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()) {
         return Some(r);
     }

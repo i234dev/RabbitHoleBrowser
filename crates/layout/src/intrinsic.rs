@@ -18,11 +18,25 @@ pub(crate) fn extras_px(style: &rabbithole_style::ComputedStyle) -> f32 {
 }
 
 impl<'a> Layouter<'a> {
+    /// [`Self::intrinsic`] of a box whose containing block has the content
+    /// height `cb_h` (for percentage heights of replaced descendants).
+    pub(crate) fn intrinsic_in(&mut self, b: &mut LayoutBox, cb_h: Option<f32>) -> (f32, f32) {
+        let saved = std::mem::replace(&mut self.intrinsic_cb_h, cb_h);
+        let saved_used = std::mem::replace(&mut self.intrinsic_cb_used, false);
+        let r = self.intrinsic(b);
+        self.intrinsic_cb_h = saved;
+        self.intrinsic_cb_used = saved_used;
+        r
+    }
+
     /// (min-content, max-content) widths of the box's content area.
     pub(crate) fn intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
         let _probe = self.grid_publication.probe();
-        if let Some(c) = b.intrinsic_cache {
-            return c;
+        let forced_h = self.intrinsic_forced_h.take();
+        if forced_h.is_none() {
+            if let Some(c) = b.intrinsic_cache {
+                return c;
+            }
         }
         if b.wm_wrapper {
             let r = self.wm_wrapper_intrinsic(b);
@@ -32,6 +46,20 @@ impl<'a> Layouter<'a> {
         let style = b.style.clone();
         let pb = horizontal_extras(&style, 0.0);
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb).max(0.0) } else { v };
+        // The box's own definite content height, against which its
+        // contents resolve percentage heights (CSS Sizing §5.2.1).
+        let outer_h = self.intrinsic_cb_h;
+        let pb_v = crate::block::vertical_extras(&style);
+        let adj_v = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v.max(0.0) };
+        let own_h = forced_h.or_else(|| match style.height {
+            Length::Px(v) => Some(adj_v(v)),
+            l if l.has_percent() => l.resolve_definite(outer_h).map(adj_v),
+            _ => None,
+        });
+        // Whether this result depends on the containing block's height.
+        let mut reads_outer = forced_h.is_some();
+        let saved_cb = std::mem::replace(&mut self.intrinsic_cb_h, own_h);
+        let saved_used = std::mem::replace(&mut self.intrinsic_cb_used, false);
         let mut result = if b.formatting == Formatting::Table {
             // A table is never narrower than its columns.
             let (min, max) = self.table_intrinsic(b);
@@ -49,9 +77,44 @@ impl<'a> Layouter<'a> {
             let w = style.contain_intrinsic_width.unwrap_or(0.0);
             (w, w)
         } else if b.kind == BoxKind::Image {
-            let (w, _) = self.replaced_size(b, None, None, pb);
+            let pct = style.height.has_percent() || style.max_height.has_percent() || style.min_height.has_percent();
+            reads_outer |= pct;
+            let (w, _) = match forced_h {
+                // A stretched image's width follows its ratio.
+                Some(h) if style.width.is_auto() => match crate::flex::item_ratio(b) {
+                    Some(r) => (h * r, h),
+                    None => self.replaced_size(b, None, None, pb),
+                },
+                _ => self.replaced_size(b, None, if pct { outer_h } else { None }, pb),
+            };
             (w, w)
+        } else if let (Some(ratio), Some(h), true) = (style.aspect_ratio.filter(|r| *r > 0.0), own_h, style.width.is_auto()) {
+            // A definite height transfers through `aspect-ratio`; the
+            // contents still set a minimum.
+            reads_outer |= style.height.has_percent();
+            let w = if style.box_sizing == BoxSizing::BorderBox { ((h + pb_v) * ratio - pb).max(0.0) } else { h * ratio };
+            let (cmin, _) = self.intrinsic_contents(b);
+            (w.max(cmin), w.max(cmin))
         } else {
+            self.intrinsic_contents(b)
+        };
+        let children_read = self.intrinsic_cb_used;
+        self.intrinsic_cb_h = saved_cb;
+        // Contents that read this box's height depend on the outer height
+        // only through a percentage height.
+        reads_outer |= children_read && style.height.has_percent();
+        self.intrinsic_cb_used = saved_used || reads_outer;
+        let cacheable = !reads_outer;
+        result = self.finish_intrinsic(&style, result, adj);
+        if cacheable {
+            b.intrinsic_cache = Some(result);
+        }
+        result
+    }
+
+    /// (min, max) of a box's contents by formatting context.
+    fn intrinsic_contents(&mut self, b: &mut LayoutBox) -> (f32, f32) {
+        {
             match b.formatting {
                 Formatting::Inline => self.inline_intrinsic(b),
                 Formatting::Block | Formatting::TableRow => {
@@ -104,7 +167,11 @@ impl<'a> Layouter<'a> {
                 }
                 Formatting::None => (0.0, 0.0),
             }
-        };
+        }
+    }
+
+    /// Apply min/max-width to intrinsic sizes.
+    fn finish_intrinsic(&self, style: &rabbithole_style::ComputedStyle, mut result: (f32, f32), adj: impl Fn(f32) -> f32) -> (f32, f32) {
         if let Length::Px(m) = style.max_width {
             let m = adj(m);
             result.0 = result.0.min(m);
@@ -115,9 +182,7 @@ impl<'a> Layouter<'a> {
             result.0 = result.0.max(m);
             result.1 = result.1.max(m);
         }
-        let result = (result.0.max(0.0), result.1.max(result.0.max(0.0)));
-        b.intrinsic_cache = Some(result);
-        result
+        (result.0.max(0.0), result.1.max(result.0.max(0.0)))
     }
 
     fn inline_intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
