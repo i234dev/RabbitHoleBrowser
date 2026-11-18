@@ -403,15 +403,22 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
         }
         "aspect-ratio" => {
-            if values::is_ident(c0, "auto") {
+            // `auto || <ratio>`.
+            let auto = comps.iter().any(|c| values::is_ident(c, "auto"));
+            if auto && comps.len() == 1 {
                 style.aspect_ratio = None;
+                style.aspect_ratio_auto = false;
                 return true;
             }
             let nums: Vec<f32> = comps.iter().filter_map(|c| values::number(c)).collect();
-            match nums.len() {
-                1 if nums[0] > 0.0 => style.aspect_ratio = Some(nums[0]),
-                2 if nums[1] > 0.0 => style.aspect_ratio = Some(nums[0] / nums[1]),
-                _ => {}
+            let ratio = match nums.len() {
+                1 if nums[0] > 0.0 => Some(nums[0]),
+                2 if nums[1] > 0.0 && nums[0] > 0.0 => Some(nums[0] / nums[1]),
+                _ => None,
+            };
+            if let Some(r) = ratio {
+                style.aspect_ratio = Some(r);
+                style.aspect_ratio_auto = auto;
             }
         }
         "inset-inline" | "inset-block" => {

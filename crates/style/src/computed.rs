@@ -79,6 +79,10 @@ pub enum MathNode {
     Max(Vec<MathNode>),
     /// `clamp(min, value, max)`.
     Clamp(Box<[MathNode; 3]>),
+    /// `fit-content(<length-percentage>)` as a width: layout clamps the
+    /// argument between the min- and max-content sizes; elsewhere it
+    /// evaluates to the argument.
+    FitContent(Box<MathNode>),
 }
 
 impl MathNode {
@@ -93,6 +97,7 @@ impl MathNode {
                 let (lo, v, hi) = (a[0].eval(base), a[1].eval(base), a[2].eval(base));
                 v.min(hi).max(lo)
             }
+            MathNode::FitContent(a) => a.eval(base),
         }
     }
     /// Does any term depend on the base?
@@ -102,6 +107,7 @@ impl MathNode {
             MathNode::Sum(v) | MathNode::Min(v) | MathNode::Max(v) => v.iter().any(|n| n.has_percent()),
             MathNode::Scale(n, _) => n.has_percent(),
             MathNode::Clamp(a) => a.iter().any(|n| n.has_percent()),
+            MathNode::FitContent(a) => a.has_percent(),
         }
     }
     /// CSS serialisation (`min(100%, 500px)`, `calc(100% - 20px)`).
@@ -125,6 +131,7 @@ impl MathNode {
             MathNode::Min(v) => format!("min({})", list(v)),
             MathNode::Max(v) => format!("max({})", list(v)),
             MathNode::Clamp(a) => format!("clamp({})", list(&a[..])),
+            MathNode::FitContent(a) => format!("fit-content({})", a.to_css()),
             MathNode::Leaf(px, p) if *p == 0.0 => format!("{}px", num(*px)),
             MathNode::Leaf(px, p) if *px == 0.0 => format!("{}%", num(*p)),
             other => format!("calc({})", inner(other)),
@@ -159,6 +166,15 @@ pub fn intern_math(n: MathNode) -> u32 {
 /// The interned expression `id`.
 pub fn math_node(id: u32) -> Option<std::sync::Arc<MathNode>> {
     MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get(id as usize).cloned()
+}
+
+/// The argument of a `fit-content(<length-percentage>)` length.
+pub fn fit_content_arg(l: Length) -> Option<std::sync::Arc<MathNode>> {
+    let Length::Math(id) = l else { return None };
+    match &*math_node(id)? {
+        MathNode::FitContent(a) => Some(std::sync::Arc::new((**a).clone())),
+        _ => None,
+    }
 }
 
 /// Evaluate the interned expression `id` against `base`.
@@ -1263,6 +1279,9 @@ pub struct ComputedStyle {
     pub object_fit: ObjectFit,
     pub object_position: (Length, Length),
     pub aspect_ratio: Option<f32>,
+    /// `aspect-ratio: auto <ratio>`: a replaced element's natural ratio
+    /// wins, and the ratio relates content boxes.
+    pub aspect_ratio_auto: bool,
     /// `image-rendering: pixelated | crisp-edges` (nearest-neighbour
     /// scaling). Inherited.
     pub image_rendering_pixelated: bool,
@@ -1454,6 +1473,7 @@ impl ComputedStyle {
             object_fit: ObjectFit::Fill,
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
             aspect_ratio: None,
+            aspect_ratio_auto: false,
             image_rendering_pixelated: false,
             accent_color: None,
             color_scheme_dark: false,

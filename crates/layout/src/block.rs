@@ -51,6 +51,9 @@ pub(crate) struct Layouter<'a> {
     /// block of the box being measured (percentage heights of replaced
     /// elements and aspect-ratio boxes resolve against it).
     pub(crate) intrinsic_cb_h: Option<f32>,
+    /// The (min, max)-content widths of the box whose width is being
+    /// computed, when its min/max-width uses intrinsic sizes.
+    pub(crate) width_intrinsic: Option<(f32, f32)>,
     /// Intrinsic sizing: a measured box read `intrinsic_cb_h` (or a forced
     /// height); such results are not cached.
     pub(crate) intrinsic_cb_used: bool,
@@ -242,6 +245,7 @@ impl<'a> Layouter<'a> {
             flex_limits: None,
             forced_height_indefinite: false,
             intrinsic_cb_h: None,
+            width_intrinsic: None,
             intrinsic_cb_used: false,
             intrinsic_forced_h: None,
             font_ext: crate::paint::font_ext_available(ctx.fonts),
@@ -563,7 +567,7 @@ impl<'a> Layouter<'a> {
         // `aspect-ratio` with an auto height derives it from the width.
         if explicit_h.is_none() && b.kind != BoxKind::Image {
             if let Some(ratio) = style.aspect_ratio.filter(|r| *r > 0.0) {
-                let (w, h_extra) = if style.box_sizing == BoxSizing::BorderBox { (content_w + pb_h, pb_v) } else { (content_w, 0.0) };
+                let (w, h_extra) = if style.box_sizing == BoxSizing::BorderBox && !style.aspect_ratio_auto { (content_w + pb_h, pb_v) } else { (content_w, 0.0) };
                 explicit_h = Some((w / ratio - h_extra).max(0.0));
             }
         }
@@ -756,7 +760,9 @@ impl<'a> Layouter<'a> {
         // Single-line form controls clip their contents internally but keep
         // the baseline of their text (Blink, Gecko).
         let control_baseline = b.pseudo.is_none() && b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("input" | "select" | "button")));
-        b.baseline = if b.clips && !control_baseline {
+        // A scroll container's baseline is synthesized from its margin box,
+        // except for flex and grid containers (CSS Align §9.1).
+        b.baseline = if b.clips && !control_baseline && !matches!(b.formatting, Formatting::Flex | Formatting::Grid) {
             None
         } else if b.ruby == 1 {
             // A ruby pair aligns by its base.
@@ -944,11 +950,44 @@ impl<'a> Layouter<'a> {
     /// (content width, margin-left, margin-right).
     #[allow(clippy::too_many_arguments)]
     fn compute_width(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
+        let intrinsic_limit = |l: Length| l.is_intrinsic() || (matches!(l, Length::Math(_)) && rabbithole_style::fit_content_arg(l).is_some());
+        // (Multi-column containers have no column-aware intrinsic sizes yet.)
+        if b.style.multicol || (!intrinsic_limit(b.style.min_width) && !intrinsic_limit(b.style.max_width) && rabbithole_style::fit_content_arg(b.style.width).is_none()) {
+            return self.compute_width_inner(b, cbw, cb_h, pb_h, ml, mr, mode);
+        }
+        let sizes = self.intrinsic_in(b, cb_h);
+        let saved = self.width_intrinsic.replace(sizes);
+        let r = self.compute_width_inner(b, cbw, cb_h, pb_h, ml, mr, mode);
+        self.width_intrinsic = saved;
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute_width_inner(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
         let style = b.style.clone();
+        // `width: fit-content(<length-percentage>)`.
+        if let (Some(arg), Some((mn, mx))) = (rabbithole_style::fit_content_arg(style.width), self.width_intrinsic) {
+            let a = arg.eval(cbw);
+            let a = if style.box_sizing == BoxSizing::BorderBox { (a - pb_h).max(0.0) } else { a.max(0.0) };
+            let w = self.clamp_width(&style, mx.min(a.max(mn)), cbw, pb_h);
+            return match mode {
+                WidthMode::Fixed(f) => (self.clamp_width(&style, f.max(0.0), cbw, pb_h), ml.unwrap_or(0.0), mr.unwrap_or(0.0)),
+                _ => {
+                    let rem = cbw - w - pb_h;
+                    match (ml, mr) {
+                        (None, None) if matches!(mode, WidthMode::Fill) && rem > 0.0 => (w, rem / 2.0, rem / 2.0),
+                        (None, Some(r)) if matches!(mode, WidthMode::Fill) => (w, (rem - r).max(0.0), r),
+                        (l, r) => (w, l.unwrap_or(0.0), r.unwrap_or(0.0)),
+                    }
+                }
+            };
+        }
         let mut specified = style.width.resolve(cbw).map(|w| {
             let w = if style.box_sizing == BoxSizing::BorderBox { w - pb_h } else { w };
             self.clamp_width(&style, w.max(0.0), cbw, pb_h)
         });
+        // Widths transferred from min/max-height through `aspect-ratio`.
+        let mut ratio_limits: Option<(f32, f32)> = None;
         // Intrinsic sizing keywords.
         if style.width.is_intrinsic() {
             let (min, max) = self.intrinsic_in(b, cb_h);
@@ -962,10 +1001,24 @@ impl<'a> Layouter<'a> {
             };
             specified = Some(self.clamp_width(&style, w, cbw, pb_h));
         } else if style.width.is_auto() && b.kind != BoxKind::Image {
-            // `aspect-ratio` with a definite height and auto width.
-            if let (Some(ratio), Length::Px(h)) = (style.aspect_ratio.filter(|r| *r > 0.0), style.height) {
-                let w = if style.box_sizing == BoxSizing::BorderBox { h * ratio - pb_h } else { h * ratio };
-                specified = Some(self.clamp_width(&style, w.max(0.0), cbw, pb_h));
+            if let Some(ratio) = style.aspect_ratio.filter(|r| *r > 0.0) {
+                let pad = resolve_edges(&style.padding, cbw);
+                let pb_v = pad.top + pad.bottom + style.border_width.top + style.border_width.bottom;
+                let to_w = |h: f32| if style.box_sizing == BoxSizing::BorderBox && !style.aspect_ratio_auto { ((h + pb_v) * ratio - pb_h).max(0.0) } else { h * ratio };
+                let (h_min, h_max) = self.height_limits(&style, cb_h, pb_v);
+                if let Some(h) = self.resolve_height(&style, cb_h, pb_v) {
+                    // A definite height (clamped by min/max-height)
+                    // transfers to the width; the automatic minimum width
+                    // keeps the contents' min-content width.
+                    let mut w = to_w(h.clamp(h_min, h_max));
+                    if style.min_width.is_auto() && !crate::flex::is_scroll_container(&style) {
+                        w = w.max(self.intrinsic_in(b, cb_h).0);
+                    }
+                    specified = Some(self.clamp_width(&style, w, cbw, pb_h));
+                } else {
+                    // min/max-height transfer to an automatic width.
+                    ratio_limits = Some((if h_min > 0.0 { to_w(h_min) } else { 0.0 }, if h_max.is_finite() { to_w(h_max) } else { f32::INFINITY }));
+                }
             }
         }
         // An auto-width block aligned by `justify-self` is fit-content
@@ -987,7 +1040,9 @@ impl<'a> Layouter<'a> {
                     None => {
                         let (min, max) = self.intrinsic_in(b, cb_h);
                         let avail = (cbw - ml - mr - pb_h).max(0.0);
-                        self.clamp_width(&style, shrink_to_fit(min, max, avail), cbw, pb_h)
+                        let w = shrink_to_fit(min, max, avail);
+                        let w = ratio_limits.map(|(lo, hi)| w.min(hi).max(lo)).unwrap_or(w);
+                        self.clamp_width(&style, w, cbw, pb_h)
                     }
                 };
                 (w, ml, mr)
@@ -997,7 +1052,8 @@ impl<'a> Layouter<'a> {
                 // the result is used as the specified width so `auto`
                 // margins share the remaining space (CSS 2.1 §10.4).
                 let w = (cbw - ml.unwrap_or(0.0) - mr.unwrap_or(0.0) - pb_h).max(0.0);
-                let clamped = self.clamp_width(&style, w, cbw, pb_h);
+                let limited = ratio_limits.map(|(lo, hi)| w.min(hi).max(lo)).unwrap_or(w);
+                let clamped = self.clamp_width(&style, limited, cbw, pb_h);
                 if (clamped - w).abs() > 0.01 {
                     Some(clamped)
                 } else {
@@ -1051,11 +1107,23 @@ impl<'a> Layouter<'a> {
     pub(crate) fn clamp_width(&self, style: &ComputedStyle, w: f32, cbw: f32, pb_h: f32) -> f32 {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
         let mut w = w;
-        if let Some(max) = style.max_width.resolve(cbw) {
-            w = w.min(adj(max));
+        // Intrinsic keywords and fit-content() need the box's min/max-content
+        // widths, which `compute_width` provides.
+        let intrinsic = |l: Length| -> Option<f32> {
+            let (mn, mx) = self.width_intrinsic?;
+            match l {
+                Length::MinContent => Some(mn),
+                Length::MaxContent => Some(mx),
+                Length::FitContent => Some(mx.min((cbw - pb_h).max(mn))),
+                Length::Math(_) => rabbithole_style::fit_content_arg(l).map(|a| mx.min(adj(a.eval(cbw)).max(mn))),
+                _ => None,
+            }
+        };
+        if let Some(max) = intrinsic(style.max_width).or_else(|| style.max_width.resolve(cbw).map(adj)) {
+            w = w.min(max);
         }
-        if let Some(min) = style.min_width.resolve(cbw) {
-            w = w.max(adj(min));
+        if let Some(min) = intrinsic(style.min_width).or_else(|| style.min_width.resolve(cbw).map(adj)) {
+            w = w.max(min);
         }
         w.max(0.0)
     }
@@ -1122,7 +1190,10 @@ impl<'a> Layouter<'a> {
         // Only decoded dimensions, a pair of attributes or explicit CSS may
         // couple the axes; height:40px must not stretch the label's width.
         let ratio_size = if b.image.as_ref().is_some_and(|i| i.no_ratio) { (0.0, 0.0) } else { natural.unwrap_or((b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0))) };
-        let ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()).or(if ratio_size.0 > 0.0 && ratio_size.1 > 0.0 { Some(ratio_size.0 / ratio_size.1) } else { None });
+        let natural_ratio = if ratio_size.0 > 0.0 && ratio_size.1 > 0.0 { Some(ratio_size.0 / ratio_size.1) } else { None };
+        let css_ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite());
+        // `auto <ratio>` prefers the natural ratio.
+        let ratio = if style.aspect_ratio_auto { natural_ratio.or(css_ratio) } else { css_ratio.or(natural_ratio) };
         let adj_w = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
         // `width`/`height` attributes arrive as presentational hints in the
         // computed style; an explicit `auto` (e.g. `height: auto`) must
@@ -1159,22 +1230,34 @@ impl<'a> Layouter<'a> {
             (None, None) => (iw, ih),
         };
         let cbw_v = cbw.unwrap_or(0.0);
+        // Intrinsic keywords of min/max-width: the width transferred from
+        // a definite height, else the natural width (CSS Sizing §5.1).
+        let content_w = match (sh, ratio) {
+            (Some(h), Some(r)) => h * r,
+            _ => iw,
+        };
+        let h_auto = sh.is_none();
         if let Some(max) = match style.max_width {
             Length::Px(v) => Some(adj_w(v)),
             Length::Percent(p) => cbw.map(|c| adj_w(c * p / 100.0)),
             l @ (Length::Calc(..) | Length::Math(_)) => cbw.map(|c| adj_w(l.resolve_or_zero(c))),
-            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
+            Length::MinContent | Length::MaxContent | Length::FitContent => Some(content_w),
+            Length::Auto => None,
         } {
             if w > max {
-                if w > 0.0 {
+                if w > 0.0 && (h_auto || sw.is_none()) {
                     h *= max / w;
                 }
                 w = max;
             }
         }
-        if let Some(min) = style.min_width.resolve(cbw_v) {
-            if w < min && cbw.is_some() {
-                if w > 0.0 {
+        let min_w = match style.min_width {
+            Length::MinContent | Length::MaxContent | Length::FitContent => Some(content_w),
+            l => l.resolve(cbw_v).filter(|_| cbw.is_some()),
+        };
+        if let Some(min) = min_w {
+            if w < min {
+                if w > 0.0 && (h_auto || sw.is_none()) {
                     h *= min / w;
                 }
                 w = min;
@@ -1345,7 +1428,7 @@ impl<'a> Layouter<'a> {
             avail = cb.w;
             if style.width.is_auto() {
                 let from_height = |height: f32| {
-                    if style.box_sizing == BoxSizing::BorderBox { ((height + pb_v) * ratio - pb_h).max(0.0) } else { height * ratio }
+                    if style.box_sizing == BoxSizing::BorderBox && !style.aspect_ratio_auto { ((height + pb_v) * ratio - pb_h).max(0.0) } else { height * ratio }
                 };
                 let definite_h = self.resolve_height(&style, Some(cb.h), pb_v);
                 let stretched_h = match (t, btm, l, r) {

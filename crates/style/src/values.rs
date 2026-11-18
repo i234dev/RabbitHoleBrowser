@@ -496,6 +496,15 @@ pub fn is_ident(c: &[Token], name: &str) -> bool {
 pub fn number(c: &[Token]) -> Option<f32> {
     match c {
         [Token::Number(n)] => Some(*n),
+        // A unitless `calc()` (with the `infinity` constant).
+        [Token::Function(f), ..] if f.eq_ignore_ascii_case("calc") => {
+            let comps = components(strip_function(c));
+            match comps.as_slice() {
+                [[Token::Ident(k)]] if k.eq_ignore_ascii_case("infinity") => Some(f32::INFINITY),
+                [[Token::Ident(k)]] if k.eq_ignore_ascii_case("-infinity") => Some(f32::NEG_INFINITY),
+                _ => eval_sum(&comps).filter(|l| l.is_number).map(|l| l.num),
+            }
+        }
         _ => None,
     }
 }

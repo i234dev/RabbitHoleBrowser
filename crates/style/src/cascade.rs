@@ -1766,7 +1766,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "font-variation-settings" => to.font_variation_settings = from.font_variation_settings.clone(),
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
-        "aspect-ratio" => to.aspect_ratio = from.aspect_ratio,
+        "aspect-ratio" => { to.aspect_ratio = from.aspect_ratio; to.aspect_ratio_auto = from.aspect_ratio_auto; }
         "image-rendering" => to.image_rendering_pixelated = from.image_rendering_pixelated,
         "accent-color" => to.accent_color = from.accent_color,
         "color-scheme" => to.color_scheme_dark = from.color_scheme_dark,
@@ -1834,6 +1834,25 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
             _ => {}
         }
     }
+}
+
+/// `fit-content(<length-percentage>)` of a width property (heights keep
+/// the keyword behaviour).
+fn fit_content_fn(c: &[Token], ctx: &LengthContext, width: bool) -> Option<Length> {
+    if !width {
+        return None;
+    }
+    let args = props::fn_args(c);
+    let [arg] = args.as_slice() else { return None };
+    let [arg] = arg.as_slice() else { return None };
+    let node = match resolve_len_no_auto(arg, ctx)? {
+        Length::Px(v) if v >= 0.0 => MathNode::Leaf(v, 0.0),
+        Length::Percent(p) if p >= 0.0 => MathNode::Leaf(0.0, p),
+        Length::Calc(px, p) => MathNode::Leaf(px, p),
+        Length::Math(id) => (*math_node(id)?).clone(),
+        _ => return None,
+    };
+    Some(Length::Math(intern_math(MathNode::FitContent(Box::new(node)))))
 }
 
 fn resolve_len(c: &[Token], ctx: &LengthContext) -> Option<Length> {
@@ -2515,7 +2534,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     _ => return,
                 }
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
-                Length::FitContent
+                fit_content_fn(c0, ctx, name.ends_with("width")).unwrap_or(Length::FitContent)
             } else {
                 match resolve_len(c0, ctx) {
                     Some(l) => l,
@@ -2525,8 +2544,10 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             match name {
                 "width" => style.width = l,
                 "height" => style.height = l,
-                "min-width" => style.min_width = if l.is_auto() { Length::ZERO } else { l },
-                _ => style.min_height = if l.is_auto() { Length::ZERO } else { l },
+                // `auto` minimum sizes are the automatic minimum of flex
+                // and grid items (0 elsewhere).
+                "min-width" => style.min_width = l,
+                _ => style.min_height = l,
             }
         }
         "max-width" | "max-height" => {
@@ -2542,7 +2563,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     _ => return,
                 }
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
-                Length::FitContent
+                fit_content_fn(c0, ctx, name == "max-width").unwrap_or(Length::FitContent)
             } else {
                 match resolve_len_no_auto(c0, ctx) {
                     Some(l) => l,

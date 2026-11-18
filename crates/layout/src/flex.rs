@@ -473,8 +473,10 @@ impl<'a> Layouter<'a> {
                                 } else {
                                     line_ascent[li] - it.ascent
                                 }
-                            } else if it.last_baseline {
+                            } else if it.last_baseline && axis == Axis::Row {
                                 // Fallback alignment of `last baseline`: end.
+                                // (Column items keep the start until
+                                // orthogonal baselines are supported.)
                                 free_cross
                             } else {
                                 0.0
@@ -578,7 +580,7 @@ impl<'a> Layouter<'a> {
         let is_replaced = b.children[idx].kind == BoxKind::Image;
         // The ratio relates content boxes for natural ratios and the
         // box-sizing boxes for `aspect-ratio`.
-        let ratio_border_box = bb && child_style.aspect_ratio.is_some();
+        let ratio_border_box = bb && child_style.aspect_ratio.is_some() && !child_style.aspect_ratio_auto && item_ratio_is_css(&b.children[idx]);
         let transfer = |cross: f32| -> Option<f32> {
             let r = ratio?;
             let main_per_cross = match axis {
@@ -966,6 +968,19 @@ impl<'a> Layouter<'a> {
         let style = b.style.clone();
         let row = matches!(style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
         let wraps = is_multi_line(&style);
+        if !row && wraps {
+            // Column wrap: the lines' widths depend on how the items break
+            // at the container's (maximum) height.
+            let pb_v = crate::block::vertical_extras(&style);
+            let max_h = match style.max_height {
+                Length::Px(v) => Some(if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v }),
+                _ => None,
+            };
+            if let Some(limit) = self.intrinsic_cb_h.or(max_h) {
+                self.intrinsic_cb_used |= self.intrinsic_cb_h.is_some();
+                return self.column_wrap_intrinsic(b, limit);
+            }
+        }
         let gap = if row { px_or_zero(style.column_gap) } else { 0.0 };
         let mut min: f32 = 0.0;
         let mut max: f32 = 0.0;
@@ -1003,7 +1018,8 @@ impl<'a> Layouter<'a> {
                     let pb = crate::block::horizontal_extras(&c.style, 0.0);
                     let inner = if c.style.box_sizing == BoxSizing::BorderBox { (basis - pb).max(0.0) } else { basis };
                     cmax = cmax.max(inner);
-                    cmin = cmin.min(inner);
+                    // An item that cannot shrink keeps its flex basis.
+                    cmin = if c.style.flex_shrink == 0.0 { cmin.max(inner) } else { cmin.min(inner) };
                 }
             }
             if balanced_count.is_some() {
@@ -1031,6 +1047,88 @@ impl<'a> Layouter<'a> {
         }
         if balanced_count.is_some() && contributions.len() > 1 {
             max = balanced_width(&contributions, gap, f32::INFINITY, balanced_count).max(min);
+        }
+        (min, max)
+    }
+}
+
+impl<'a> Layouter<'a> {
+    /// Intrinsic widths of a column-wrap container whose lines break at
+    /// `limit` (its definite or maximum content height): the sum of its
+    /// lines' widths after the items are broken into lines and flexed.
+    fn column_wrap_intrinsic(&mut self, b: &mut LayoutBox, limit: f32) -> (f32, f32) {
+        let style = b.style.clone();
+        let gap_main = px_or_zero(style.row_gap);
+        let gap_cross = px_or_zero(style.column_gap);
+        let mut order: Vec<(i32, usize)> = b.children.iter().enumerate().filter(|(_, c)| c.is_in_flow()).map(|(i, c)| (c.style.order, i)).collect();
+        order.sort();
+        // (outer main, grow, outer min/max widths, ratio data)
+        struct Col {
+            main: f32,
+            extra_main: f32,
+            grow: f32,
+            min_w: f32,
+            max_w: f32,
+            ratio: Option<(f32, f32)>,
+        }
+        let mut cols: Vec<Col> = Vec::with_capacity(order.len());
+        for &(_, i) in &order {
+            let c = &mut b.children[i];
+            let cs = c.style.clone();
+            let ex = crate::intrinsic::extras_px(&cs);
+            let (cmin, cmax) = self.intrinsic(c);
+            let bb = cs.box_sizing == BoxSizing::BorderBox;
+            let pb_v = crate::block::vertical_extras(&cs);
+            let extra_main = pb_v + px_or_zero(cs.margin.top) + px_or_zero(cs.margin.bottom);
+            let px_inner = |l: Length| match l {
+                Length::Px(v) => Some(if bb { (v - pb_v).max(0.0) } else { v.max(0.0) }),
+                _ => None,
+            };
+            let basis = if cs.flex_basis == Length::Auto && !cs.flex_basis_content { cs.height } else { cs.flex_basis };
+            let mut main = match px_inner(basis) {
+                Some(v) => v,
+                None => {
+                    // Content height at the item's max-content width.
+                    let cb = Cb { x: 0.0, width: cmax + ex, height: None };
+                    let mut bfc = Bfc::new();
+                    self.layout_block(c, &cb, 0.0, &mut bfc, WidthMode::Fixed(cmax));
+                    c.content_rect.h
+                }
+            };
+            if let Some(max) = px_inner(cs.max_height) {
+                main = main.min(max);
+            }
+            if let Some(min) = px_inner(cs.min_height) {
+                main = main.max(min);
+            }
+            let ratio = item_ratio(c).filter(|_| cs.width.is_auto()).map(|r| (r, crate::block::horizontal_extras(&cs, 0.0)));
+            cols.push(Col { main, extra_main, grow: cs.flex_grow.max(0.0), min_w: cmin + ex, max_w: cmax + ex, ratio });
+        }
+        let outers: Vec<f32> = cols.iter().map(|c| c.main + c.extra_main).collect();
+        let lines = break_lines(&outers, gap_main, limit);
+        let (mut min, mut max) = (0.0f32, 0.0f32);
+        for (li, line) in lines.iter().enumerate() {
+            let used: f32 = line.iter().map(|&k| outers[k]).sum::<f32>() + gap_main * line.len().saturating_sub(1) as f32;
+            let free = (limit - used).max(0.0);
+            let grow: f32 = line.iter().map(|&k| cols[k].grow).sum();
+            let (mut lmin, mut lmax) = (0.0f32, 0.0f32);
+            for &k in line {
+                let c = &cols[k];
+                let main = c.main + if grow > 0.0 { free * c.grow / grow } else { 0.0 };
+                let (wmin, wmax) = match c.ratio {
+                    // A ratio item's width follows its flexed height.
+                    Some((r, pb_h)) => {
+                        let w = main * r + pb_h;
+                        (w, w)
+                    }
+                    None => (c.min_w, c.max_w),
+                };
+                lmin = lmin.max(wmin);
+                lmax = lmax.max(wmax);
+            }
+            let gap = if li > 0 { gap_cross } else { 0.0 };
+            min += lmin + gap;
+            max += lmax + gap;
         }
         (min, max)
     }
@@ -1114,9 +1212,20 @@ fn stretches_in_cross(c: &LayoutBox, container: &ComputedStyle) -> bool {
 /// The preferred aspect ratio (width / height) of a flex item: its
 /// `aspect-ratio`, else a replaced element's natural ratio.
 pub(crate) fn item_ratio(b: &LayoutBox) -> Option<f32> {
-    if let Some(r) = b.style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()) {
-        return Some(r);
+    let css = b.style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite());
+    if b.style.aspect_ratio_auto && b.kind == BoxKind::Image {
+        return natural_ratio(b).or(css);
     }
+    css.or_else(|| natural_ratio(b))
+}
+
+/// Whether [`item_ratio`] comes from the `aspect-ratio` property.
+fn item_ratio_is_css(b: &LayoutBox) -> bool {
+    !(b.style.aspect_ratio_auto && b.kind == BoxKind::Image && natural_ratio(b).is_some())
+}
+
+/// A replaced element's natural aspect ratio.
+fn natural_ratio(b: &LayoutBox) -> Option<f32> {
     if b.kind != BoxKind::Image {
         return None;
     }

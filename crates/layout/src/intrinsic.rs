@@ -88,13 +88,25 @@ impl<'a> Layouter<'a> {
                 _ => self.replaced_size(b, None, if pct { outer_h } else { None }, pb),
             };
             (w, w)
-        } else if let (Some(ratio), Some(h), true) = (style.aspect_ratio.filter(|r| *r > 0.0), own_h, style.width.is_auto()) {
-            // A definite height transfers through `aspect-ratio`; the
-            // contents still set a minimum.
-            reads_outer |= style.height.has_percent();
-            let w = if style.box_sizing == BoxSizing::BorderBox { ((h + pb_v) * ratio - pb).max(0.0) } else { h * ratio };
-            let (cmin, _) = self.intrinsic_contents(b);
-            (w.max(cmin), w.max(cmin))
+        } else if let (Some(ratio), true) = (style.aspect_ratio.filter(|r| *r > 0.0), style.width.is_auto() && b.kind != BoxKind::Image) {
+            // A definite height (clamped by min/max-height) transfers
+            // through `aspect-ratio`; the contents still set a minimum.
+            // Without one, min/max-height transfer as limits.
+            reads_outer |= style.height.has_percent() || style.min_height.has_percent() || style.max_height.has_percent();
+            let to_w = |h: f32| if style.box_sizing == BoxSizing::BorderBox && !style.aspect_ratio_auto { ((h + pb_v) * ratio - pb).max(0.0) } else { h * ratio };
+            let h_min = style.min_height.resolve_definite(outer_h).map(adj_v).unwrap_or(0.0);
+            let h_max = style.max_height.resolve_definite(outer_h).map(adj_v).unwrap_or(f32::INFINITY).max(h_min);
+            let (cmin, cmax) = self.intrinsic_contents(b);
+            match own_h {
+                Some(h) => {
+                    let w = to_w(h.clamp(h_min, h_max)).max(cmin);
+                    (w, w)
+                }
+                None => {
+                    let (lo, hi) = (if h_min > 0.0 { to_w(h_min) } else { 0.0 }, if h_max.is_finite() { to_w(h_max) } else { f32::INFINITY });
+                    (cmin.min(hi).max(lo), cmax.min(hi).max(lo))
+                }
+            }
         } else {
             self.intrinsic_contents(b)
         };
