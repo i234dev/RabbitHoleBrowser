@@ -100,6 +100,8 @@ pub(crate) struct FaceSlot {
     pub family_lower: String,
     pub weight: u16,
     pub italic: bool,
+    /// `font-stretch` range in percent (min, max); 100 for host faces.
+    pub stretch: (u16, u16),
     /// Generic family for bundled faces (used for fallback preference).
     pub generic: Option<Family>,
     pub source: FaceSource,
@@ -286,6 +288,7 @@ impl FontContext {
                 family_lower: family.to_ascii_lowercase(),
                 weight,
                 italic,
+                stretch: (100, 100),
                 generic: Some(generic),
                 source: FaceSource::Bytes(Rc::new(bytes.to_vec())),
                 font: RefCell::new(None),
@@ -813,6 +816,13 @@ impl FontContext {
     /// Among candidate faces, the one best matching weight/style (CSS font
     /// matching).
     pub(crate) fn best_of(&self, ids: &[usize], weight: u16, italic: bool) -> Option<usize> {
+        self.best_of_stretch(ids, weight, italic, 100)
+    }
+
+    /// CSS Fonts 4 §5.2 matching: width first (narrower faces first for a
+    /// desired width at or below 100%, wider ones above), then style, then
+    /// weight.
+    pub(crate) fn best_of_stretch(&self, ids: &[usize], weight: u16, italic: bool, stretch: u16) -> Option<usize> {
         let faces = self.faces.borrow();
         let mut best: Option<(i32, usize)> = None;
         for &idx in ids {
@@ -837,7 +847,18 @@ impl FontContext {
                     1000 + (d - w)
                 }
             };
-            let score = style_penalty + weight_penalty;
+            let (lo, hi) = (s.stretch.0 as i32, s.stretch.1 as i32);
+            let want = stretch as i32;
+            let stretch_penalty = if want >= lo && want <= hi {
+                0
+            } else if want <= 100 {
+                if hi < want { want - hi } else { 1000 + (lo - want) }
+            } else if lo > want {
+                lo - want
+            } else {
+                1000 + (want - hi)
+            };
+            let score = stretch_penalty * 100_000 + style_penalty + weight_penalty;
             if best.map(|(b, _)| score < b).unwrap_or(true) {
                 best = Some((score, idx));
             }

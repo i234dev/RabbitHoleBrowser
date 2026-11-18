@@ -500,6 +500,32 @@ pub fn number(c: &[Token]) -> Option<f32> {
     }
 }
 
+/// A `font-stretch` (`font-width`) keyword in percent.
+pub fn font_stretch_keyword(name: &str) -> Option<u16> {
+    Some(match name {
+        "ultra-condensed" => 50,
+        "extra-condensed" => 62,
+        "condensed" => 75,
+        "semi-condensed" => 87,
+        "normal" => 100,
+        "semi-expanded" => 112,
+        "expanded" => 125,
+        "extra-expanded" => 150,
+        "ultra-expanded" => 200,
+        _ => return None,
+    })
+}
+
+/// A single `font-stretch` value (keyword or non-negative percentage) in
+/// percent, clamped to the representable range.
+pub fn font_stretch(c: &[Token]) -> Option<u16> {
+    match c {
+        [Token::Ident(s)] => font_stretch_keyword(&s.to_ascii_lowercase()),
+        [Token::Percentage(p)] if *p >= 0.0 => Some(p.round().clamp(1.0, 1000.0) as u16),
+        _ => None,
+    }
+}
+
 /// Arguments of a function component, split on commas, whitespace removed.
 fn function_args(c: &[Token]) -> Vec<Vec<&[Token]>> {
     if c.len() < 2 {

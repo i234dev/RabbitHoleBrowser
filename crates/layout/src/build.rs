@@ -757,7 +757,7 @@ impl<'a> Builder<'a> {
                 return (rows, None);
             }
             // Wide enough for the longest option and a scroll bar.
-            let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             let widest = options.iter().map(|&o| self.ctx.fonts.measure(font, style.font_size, &label(o))).fold(0.0f32, f32::max);
             let mut w = widest.ceil() + 4.0 + 16.0;
             if style.box_sizing == rabbithole_style::BoxSizing::BorderBox {
@@ -772,7 +772,7 @@ impl<'a> Builder<'a> {
         if !style.width.is_auto() {
             return (vec![t], None);
         }
-        let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+        let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
         let widest = options.iter().map(|&o| self.ctx.fonts.measure(font, style.font_size, &label(o))).fold(0.0f32, f32::max);
         let arrow = if style.appearance == rabbithole_style::Appearance::None { 0.0 } else { SELECT_ARROW_WIDTH };
         let mut w = widest.ceil() + arrow;

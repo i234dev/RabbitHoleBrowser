@@ -1031,6 +1031,8 @@ pub struct ComputedStyle {
     pub font_size: f32,
     /// 100..=900
     pub font_weight: u16,
+    /// `font-stretch` (`font-width`) in percent; `normal` is 100.
+    pub font_stretch: u16,
     pub font_style: FontStyle,
     /// px; None = `normal`
     pub line_height: Option<f32>,
@@ -1296,6 +1298,7 @@ impl ComputedStyle {
             font_family: Family::Sans,
             font_size: 16.0,
             font_weight: 400,
+            font_stretch: 100,
             font_style: FontStyle::Normal,
             line_height: None,
             line_height_number: None,
@@ -1437,6 +1440,7 @@ impl ComputedStyle {
             font_family: parent.font_family,
             font_size: parent.font_size,
             font_weight: parent.font_weight,
+            font_stretch: parent.font_stretch,
             font_style: parent.font_style,
             line_height: parent.line_height,
             line_height_number: parent.line_height_number,
@@ -1497,6 +1501,7 @@ impl ComputedStyle {
             && self.font_family == o.font_family
             && self.font_size == o.font_size
             && self.font_weight == o.font_weight
+            && self.font_stretch == o.font_stretch
             && self.font_style == o.font_style
             && self.line_height == o.line_height
             && self.line_height_number == o.line_height_number

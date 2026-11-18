@@ -42,7 +42,7 @@ pub(crate) struct Layouter<'a> {
     /// Whether `FontContext::select_family` & co. are implemented.
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
-    font_cache: HashMap<(String, u16, bool), FontId>,
+    font_cache: HashMap<(String, u16, bool, u16), FontId>,
     /// Containing blocks of absolutely positioned grid children placed by
     /// grid lines (their grid area), set by the grid layout.
     pub(crate) abs_cb: HashMap<rabbithole_dom::NodeId, Rect>,
@@ -209,11 +209,11 @@ impl<'a> Layouter<'a> {
     /// (web fonts / system fonts) or the generic fallback.
     pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
         if self.font_ext && !style.font_family_list.is_empty() {
-            let key = (style.font_family_list.join(","), style.font_weight, style.is_italic());
+            let key = (style.font_family_list.join(","), style.font_weight, style.is_italic(), style.font_stretch);
             if let Some(f) = self.font_cache.get(&key) {
                 return *f;
             }
-            let f = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            let f = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             self.font_cache.insert(key, f);
             return f;
         }
@@ -997,7 +997,7 @@ impl<'a> Layouter<'a> {
         // image arrives, so loading causes no layout shift).
         let natural = b.image.as_ref().filter(|i| !i.broken).map(|img| img.natural_size());
         let fallback = if let Some(text) = b.text.as_deref().filter(|_| b.image.is_none()) {
-            let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             let width = self.ctx.fonts.shape(font, style.font_size, text, style.letter_spacing).last().map(|g| g.x + g.advance).unwrap_or(0.0);
             (width, style.line_height_px())
         } else {

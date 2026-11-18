@@ -778,7 +778,7 @@ fn apply_declarations(
     // applied ahead of the other declarations (applied again in order).
     let mut font_probe = style.clone();
     for (name, value, base) in &resolved {
-        if matches!(*name, "font" | "font-family" | "font-weight" | "font-style") {
+        if matches!(*name, "font" | "font-family" | "font-weight" | "font-style" | "font-stretch" | "font-width") {
             let ctx = ApplyCtx { len: parent_ctx, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
             apply_property(name, value, &mut font_probe, parent, &ctx);
         }
@@ -977,6 +977,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
     let mut sources = Vec::new();
     let mut weight = (400u16, 400u16);
     let mut italic = false;
+    let mut stretch = (100u16, 100u16);
     let mut display = "auto".to_string();
     let mut unicode_range = None;
     for d in decls {
@@ -1047,6 +1048,16 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
             "font-style" => {
                 italic = comps.iter().any(|c| matches!(values::ident(c).as_deref(), Some("italic" | "oblique")));
             }
+            "font-stretch" | "font-width" => {
+                let ws: Vec<u16> = comps.iter().filter_map(|c| values::font_stretch(c)).collect();
+                if ws.len() == comps.len() {
+                    match ws[..] {
+                        [w] => stretch = (w, w),
+                        [a, b] => stretch = (a.min(b), a.max(b)),
+                        _ => {}
+                    }
+                }
+            }
             "font-display" => {
                 if let Some(k) = comps.first().and_then(|c| values::ident(c)) {
                     display = k;
@@ -1075,7 +1086,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
             _ => {}
         }
     }
-    Some(FontFace { family: family?, sources, weight, italic, display, unicode_range })
+    Some(FontFace { family: family?, sources, weight, italic, stretch, display, unicode_range })
 }
 
 /// `U+0025-00FF`, `U+4??`, `U+20AC` (also tolerates a missing `+`, which
@@ -1489,7 +1500,7 @@ fn wide_keyword(value: &[Token]) -> Option<Wide> {
 fn is_inherited(name: &str) -> bool {
     matches!(
         name,
-        "color" | "font" | "font-family" | "font-size" | "font-weight" | "font-style" | "line-height" | "letter-spacing"
+        "color" | "font" | "font-family" | "font-size" | "font-weight" | "font-stretch" | "font-width" | "font-style" | "line-height" | "letter-spacing"
             | "word-spacing" | "text-align" | "text-underline-offset" | "text-underline-position" | "text-transform" | "text-indent"
             | "white-space" | "list-style" | "list-style-type" | "list-style-position" | "visibility" | "cursor"
             | "border-collapse" | "border-spacing" | "direction" | "tab-size" | "word-break" | "overflow-wrap" | "word-wrap"
@@ -1561,6 +1572,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.font_family_list = from.font_family_list.clone();
             to.font_size = from.font_size;
             to.font_weight = from.font_weight;
+            to.font_stretch = from.font_stretch;
             to.font_style = from.font_style;
             to.line_height = from.line_height;
             to.line_height_number = from.line_height_number;
@@ -1572,6 +1584,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "font-size" => to.font_size = from.font_size,
         "font-weight" => to.font_weight = from.font_weight,
+        "font-stretch" | "font-width" => to.font_stretch = from.font_stretch,
         "font-style" => to.font_style = from.font_style,
         "line-height" => {
             to.line_height = from.line_height;
@@ -2175,6 +2188,8 @@ struct FontShorthand {
     style: Option<FontStyle>,
     small_caps: bool,
     weight: Option<Vec<Token>>,
+    /// Width keyword (`font-stretch`), in percent.
+    stretch: Option<u16>,
     size: Option<Vec<Token>>,
     line_height: Option<Vec<Token>>,
     family: Vec<Token>,
@@ -2193,7 +2208,7 @@ fn is_size_component(c: &[Token]) -> bool {
 
 fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
     let comps = values::components(value);
-    let mut out = FontShorthand { style: None, small_caps: false, weight: None, size: None, line_height: None, family: Vec::new() };
+    let mut out = FontShorthand { style: None, small_caps: false, weight: None, stretch: None, size: None, line_height: None, family: Vec::new() };
     let mut i = 0;
     while i < comps.len() {
         let c = comps[i];
@@ -2210,6 +2225,10 @@ fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
                 "normal" => {}
                 "bold" | "bolder" | "lighter" if out.weight.is_none() => out.weight = Some(c.to_vec()),
                 "small-caps" if !out.small_caps => out.small_caps = true,
+                // Only the CSS 3 width keywords belong to the shorthand.
+                k if out.stretch.is_none() && k != "normal" && values::font_stretch_keyword(k).is_some() => {
+                    out.stretch = values::font_stretch_keyword(k)
+                }
                 "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar" => return None,
                 _ => return None,
             }
@@ -2716,6 +2735,11 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.font_weight = w;
             }
         }
+        "font-stretch" | "font-width" => {
+            if let Some(w) = values::font_stretch(c0) {
+                style.font_stretch = w;
+            }
+        }
         "font-style" => {
             if let Some(kw) = values::ident(c0) {
                 style.font_style = match kw.as_str() {
@@ -2729,6 +2753,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             if let Some(f) = parse_font_shorthand(value) {
                 // Size was applied in pass 1; reset the rest to initial first.
                 style.font_style = f.style.unwrap_or(FontStyle::Normal);
+                style.font_stretch = f.stretch.unwrap_or(100);
                 style.font_weight = match &f.weight {
                     Some(w) => weight_of(w, parent).unwrap_or(400),
                     None => 400,
