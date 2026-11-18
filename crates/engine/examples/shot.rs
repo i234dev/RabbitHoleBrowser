@@ -69,7 +69,7 @@ fn main() {
                     for j in (0..i).rev() {
                         match &items[j] {
                             D::PopClip | D::PopTransform | D::PopLayer(_) | D::PopFixed => depth += 1,
-                            D::PushClip(_) | D::PushClipRounded(..) | D::PushTransform(_) | D::PushLayer(_) | D::PushFixed => {
+                            D::PushClip(_) | D::PushClipRounded(..) | D::PushClipPath { .. } | D::PushTransform(_) | D::PushLayer(_) | D::PushFixed => {
                                 if depth == 0 {
                                     eprintln!("   open at {j}: {:?}", items[j]);
                                 } else {
@@ -231,7 +231,7 @@ fn main() {
             let name = match it {
                 D::Rect { .. } => "Rect", D::RectRadii { .. } => "RectRadii", D::Border { .. } => "Border", D::BoxShadow { .. } => "BoxShadow",
                 D::Text { .. } => "Text", D::Image { .. } => "Image", D::ImageTiled { .. } => "ImageTiled", D::Line { .. } => "Line",
-                D::PushClip(_) | D::PushClipRounded(..) | D::PopClip => "Clip", D::PushTransform(_) | D::PopTransform => "Transform",
+                D::PushClip(_) | D::PushClipRounded(..) | D::PushClipPath { .. } | D::PopClip => "Clip", D::PushTransform(_) | D::PopTransform => "Transform",
                 D::PushLayer(_) | D::PopLayer(_) | D::LayerMask(_) | D::LayerBlend(_) => "Layer", D::PushFixed | D::PopFixed => "Fixed",
                 D::Filtered { .. } | D::BackdropFilter { .. } => "Filter",
             };

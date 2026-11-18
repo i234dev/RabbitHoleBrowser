@@ -421,7 +421,8 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 }
             }
         }
-        "clip-path" | "clip" | "perspective" | "perspective-origin"
+        "clip-path" | "-webkit-clip-path" => super::clip_path::apply(comps, style, ctx),
+        "clip" | "perspective" | "perspective-origin"
         | "backface-visibility" | "-webkit-backface-visibility" | "transform-style" | "-webkit-transform-style" | "transform-box"
         | "box-reflect" | "-webkit-box-reflect" | "shape-outside" | "shape-margin" => {}
         _ => return false,

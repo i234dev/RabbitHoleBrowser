@@ -393,6 +393,26 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             }
             st.clips.push(true);
         }
+        DisplayItem::PushClipPath { bounds, path, evenodd, anchor } => {
+            if st.ext {
+                let rule = if *evenodd { rabbithole_gfx::FillRule::EvenOdd } else { rabbithole_gfx::FillRule::NonZero };
+                // Follow the box when `snap` moves it to device pixels.
+                let (mut dx, mut dy) = (dx, dy);
+                if rabbithole_gfx::path::is_identity(&canvas.transform()) {
+                    let (ax, ay) = (anchor.x + dx, anchor.y + dy);
+                    dx += ax.round() - ax;
+                    dy += ay.round() - ay;
+                }
+                if dx == 0.0 && dy == 0.0 {
+                    canvas.push_clip_path(path, rule);
+                } else {
+                    canvas.push_clip_path(&rabbithole_style::shapes::translate_path(path, dx, dy), rule);
+                }
+            } else {
+                canvas.push_clip(bounds.translate(dx, dy));
+            }
+            st.clips.push(true);
+        }
         DisplayItem::PopClip => {
             if let Some(true) = st.clips.pop() {
                 canvas.pop_clip();

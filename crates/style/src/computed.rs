@@ -843,6 +843,91 @@ pub enum FilterOp {
     DropShadow { x: f32, y: f32, blur: f32, color: Color },
 }
 
+/// Reference box of a `clip-path` shape (`<geometry-box>`). For boxes
+/// with a CSS layout box, `fill-box` acts as `content-box` and
+/// `stroke-box` / `view-box` as `border-box`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeBox {
+    Margin,
+    Border,
+    Padding,
+    Content,
+    Fill,
+    Stroke,
+    View,
+}
+
+/// `<shape-radius>` of `circle()` / `ellipse()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShapeRadius {
+    Len(Length),
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
+}
+
+/// Where a relative control point of `shape()` is anchored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlAnchor {
+    /// The reference box origin (also absolute `<position>` points).
+    Origin,
+    Start,
+    End,
+}
+
+/// A `shape()` control point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ControlPoint {
+    pub x: Length,
+    pub y: Length,
+    pub anchor: ControlAnchor,
+}
+
+/// A `shape()` command. `by` commands are relative to the current point;
+/// `to` commands hold reference-box coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShapeCommand {
+    Move { by: bool, x: Length, y: Length },
+    Line { by: bool, x: Length, y: Length },
+    HLine { by: bool, x: Length },
+    VLine { by: bool, y: Length },
+    Curve { by: bool, x: Length, y: Length, c1: ControlPoint, c2: Option<ControlPoint> },
+    Smooth { by: bool, x: Length, y: Length, c: Option<ControlPoint> },
+    /// `rx` / `ry` (`ry` = `None` when a single radius was given).
+    Arc { by: bool, x: Length, y: Length, rx: Length, ry: Option<Length>, cw: bool, large: bool, rotation: f32 },
+    Close,
+}
+
+/// A `<basic-shape>` (CSS Shapes 1 §3, CSS Shapes 2 `shape()`).
+/// Lengths resolve against the reference box.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BasicShape {
+    /// Insets (top, right, bottom, left) and corner radii.
+    Inset { insets: [Length; 4], radii: [(Length, Length); 4] },
+    /// `xywh()`.
+    Xywh { x: Length, y: Length, w: Length, h: Length, radii: [(Length, Length); 4] },
+    /// `rect()`: edges (top, right, bottom, left) from the box origin;
+    /// `auto` = the box edge.
+    Rect { edges: [Length; 4], radii: [(Length, Length); 4] },
+    Circle { r: ShapeRadius, at: (Length, Length) },
+    Ellipse { rx: ShapeRadius, ry: ShapeRadius, at: (Length, Length) },
+    Polygon { evenodd: bool, points: Vec<(Length, Length)>, round: f32 },
+    /// `path()`: SVG path data in px from the box origin.
+    Path { evenodd: bool, path: Vec<rabbithole_gfx::PathSeg> },
+    Shape { evenodd: bool, from: (Length, Length), cmds: Vec<ShapeCommand> },
+}
+
+/// Computed `clip-path` (other than `none`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipPath {
+    Shape(BasicShape, ShapeBox),
+    /// A reference box alone: its (rounded) edges clip.
+    Box(ShapeBox),
+    /// `url(#id)`: an SVG `<clipPath>` element of the document.
+    Url(String),
+}
+
 /// `writing-mode` (`sideways-rl` is treated as `vertical-rl`: Latin text
 /// is set sideways in both).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1132,6 +1217,8 @@ pub struct ComputedStyle {
     pub filters: Vec<FilterOp>,
     /// `backdrop-filter` functions.
     pub backdrop_filters: Vec<FilterOp>,
+    /// `clip-path` (`None` = `none`).
+    pub clip_path: Option<std::sync::Arc<ClipPath>>,
     pub clip_overflow_text: bool,
 
     // ---- text
@@ -1360,6 +1447,7 @@ impl ComputedStyle {
             svg_props: Vec::new(),
             filters: Vec::new(),
             backdrop_filters: Vec::new(),
+            clip_path: None,
             clip_overflow_text: false,
             text_overflow: TextOverflow::Clip,
             word_break: WordBreak::Normal,

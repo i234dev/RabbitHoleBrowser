@@ -1685,6 +1685,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.opacity = from.opacity;
             to.creates_stacking_context = from.creates_stacking_context;
         }
+        "clip-path" | "-webkit-clip-path" => {
+            to.clip_path = from.clip_path.clone();
+            to.creates_stacking_context = from.creates_stacking_context;
+        }
         "backdrop-filter" | "-webkit-backdrop-filter" => {
             to.backdrop = from.backdrop;
             to.backdrop_filters = from.backdrop_filters.clone();
@@ -2361,13 +2365,16 @@ const SVG_PROPS: &[&str] = &[
 ];
 
 fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) {
-    if SVG_PROPS.contains(&name) {
+    if SVG_PROPS.contains(&name) || name == "clip-path" {
         let v = value.to_vec();
         match style.svg_props.iter_mut().find(|(n, _)| n == name) {
             Some(slot) => slot.1 = v,
             None => style.svg_props.push((name.to_string(), v)),
         }
-        return;
+        // `clip-path` also applies to CSS boxes.
+        if name != "clip-path" {
+            return;
+        }
     }
     if let Some((start, end, pair)) = logical_pair(name) {
         let comps = values::components(value);

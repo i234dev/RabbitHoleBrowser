@@ -7,7 +7,7 @@ use crate::background::{self, box_radii, BoxGeometry};
 use crate::tree::{BoxKind, DecorationInfo, Flow, FragmentKind, LayoutBox, LayoutTree};
 use crate::LayoutContext;
 use rabbithole_dom::NodeId;
-use rabbithole_gfx::{Color, FontId, Image, Matrix, Paint, Point, Radii, Rect};
+use rabbithole_gfx::{Color, FillRule, FontId, Image, Matrix, Paint, PathSeg, Point, Radii, Rect};
 use rabbithole_style::{BorderStyle, ObjectFit, PointerEvents, Shadow, TextDecorationStyle, Visibility};
 
 #[derive(Debug, Clone)]
@@ -85,6 +85,16 @@ pub enum DisplayItem {
     },
     PushClip(Rect),
     PushClipRounded(Rect, Radii),
+    /// Clip to a path (`clip-path`) in document coordinates; `bounds`
+    /// covers it. Closed by `PopClip`.
+    PushClipPath {
+        bounds: Rect,
+        path: Arc<Vec<PathSeg>>,
+        evenodd: bool,
+        /// The clipped box's origin: the path moves with it when boxes are
+        /// snapped to device pixels.
+        anchor: Point,
+    },
     PopClip,
     PushTransform(Matrix),
     PopTransform,
@@ -181,6 +191,8 @@ pub enum HitScope {
     Transform(Option<Matrix>),
     /// Contents are in viewport coordinates (`position: fixed`).
     Fixed,
+    /// Points outside the clip shape `HitList::shapes[i]` miss.
+    Shape(u32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -202,6 +214,8 @@ pub struct HitEntry {
 pub struct HitList {
     pub scopes: Vec<HitScopeNode>,
     pub entries: Vec<HitEntry>,
+    /// Flattened `clip-path` shapes of [`HitScope::Shape`] scopes.
+    pub shapes: Vec<(rabbithole_gfx::path::Polylines, FillRule)>,
 }
 
 impl HitList {
@@ -253,6 +267,10 @@ impl HitList {
                 }
             }
             HitScope::Transform(m) => m.map(|m| crate::tree::map_point(m, x, y)),
+            HitScope::Shape(i) => {
+                let (poly, rule) = &self.shapes[i as usize];
+                crate::clip_path::contains(poly, *rule, x, y).then_some((x, y))
+            }
         });
         memo[s as usize] = Some(r);
         r
@@ -493,6 +511,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 None => Rect::new(self.bounds.x, self.bounds.y, 0.0, 0.0),
             };
         }
+        // `clip-path`: clips the element's whole painting (after filters,
+        // before masks and opacity) and its hit testing.
+        let clipped = match root.style.clip_path.as_deref() {
+            Some(cp) => self.push_clip_path(root, cp),
+            None => false,
+        };
         let opacity = root.style.opacity.clamp(0.0, 1.0);
         let layer = opacity < 1.0 || root.style.mix_blend_mode != 0;
         if layer && opacity <= 0.0 {
@@ -536,11 +560,32 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if layer {
             self.list.push(DisplayItem::PopLayer(opacity));
         }
+        if clipped {
+            self.list.push(DisplayItem::PopClip);
+        }
         self.pop_wrappers(pushed_matrix, pushed_transform);
         self.scope = saved_scope;
         self.bounds = saved_bounds;
         self.flipped = saved_flip;
         self.wm_bg = saved_wm_bg;
+    }
+
+    /// Push the `clip-path` of `b` (paint clip + hit scope); false when it
+    /// clips nothing (an invalid `url()` reference).
+    fn push_clip_path(&mut self, b: &LayoutBox, cp: &rabbithole_style::ClipPath) -> bool {
+        let geom = match cp {
+            rabbithole_style::ClipPath::Url(id) => crate::clip_path::url_geometry(b, id, self.ctx),
+            _ => crate::clip_path::geometry(b, cp),
+        };
+        let Some(g) = geom else { return false };
+        let poly = rabbithole_gfx::path::flatten(&g.path, &rabbithole_gfx::IDENTITY, 0.25);
+        let bounds = rabbithole_gfx::path::polylines_bounds(&poly).unwrap_or_default();
+        let anchor = Point::new(b.rect.x, b.rect.y);
+        self.list.push(DisplayItem::PushClipPath { bounds, path: Arc::new(g.path), evenodd: g.rule == FillRule::EvenOdd, anchor });
+        self.hits.shapes.push((poly, g.rule));
+        let i = (self.hits.shapes.len() - 1) as u32;
+        self.push_scope(HitScope::Shape(i));
+        true
     }
 
     /// The mask of a box with `mask-image` layers: its mask layers painted

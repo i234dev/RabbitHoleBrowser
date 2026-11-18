@@ -12,3 +12,4 @@ rabbithole-dom.workspace = true
 rabbithole-html.workspace = true
 rabbithole-css.workspace = true
 rabbithole-gfx.workspace = true
+rabbithole-style.workspace = true

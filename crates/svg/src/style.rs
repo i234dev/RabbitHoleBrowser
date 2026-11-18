@@ -5,6 +5,15 @@ use crate::units::{parse_length, parse_number, parse_number_list, Length};
 use rabbithole_css::Token;
 use rabbithole_gfx::{Color, Family, FillRule, LineCap, LineJoin};
 
+/// `clip-path` of an SVG element.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipRef {
+    /// `url(#id)`: a `<clipPath>`.
+    Id(String),
+    /// A CSS `<basic-shape>` / `<geometry-box>`.
+    Css(std::sync::Arc<rabbithole_style::ClipPath>),
+}
+
 /// `fill` / `stroke` value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaintSpec {
@@ -47,7 +56,7 @@ pub struct Specified {
     pub display_none: bool,
     pub paint_order_stroke_first: Option<bool>,
     pub non_scaling_stroke: Option<bool>,
-    pub clip_path: Option<String>,
+    pub clip_path: Option<ClipRef>,
     pub stop_color: Option<ColorSpec>,
     pub stop_opacity: Option<f32>,
     pub overflow_visible: Option<bool>,
@@ -375,10 +384,17 @@ impl Specified {
                 if let Some(rest) = l.strip_prefix("url(") {
                     if let Some(close) = rest.find(')') {
                         let id = rest[..close].trim().trim_matches(|c| c == '"' || c == '\'').trim_start_matches('#');
-                        self.clip_path = Some(id.to_string());
+                        self.clip_path = Some(ClipRef::Id(id.to_string()));
                     }
                 } else if l == "none" {
                     self.clip_path = None;
+                } else {
+                    let toks = rabbithole_css::Tokenizer::tokenize(v);
+                    let comps = rabbithole_style::values::components(&toks);
+                    let ctx = rabbithole_style::values::LengthContext { font_size: 16.0, root_font_size: 16.0, viewport_w: 0.0, viewport_h: 0.0, ch: 0.5, ex: 0.5, ic: 1.0 };
+                    if let Some(Some(cp)) = rabbithole_style::props::clip_path::parse_clip_path(&comps, &ctx) {
+                        self.clip_path = Some(ClipRef::Css(std::sync::Arc::new(cp)));
+                    }
                 }
             }
             "stop-color" => self.stop_color = parse_color(v),

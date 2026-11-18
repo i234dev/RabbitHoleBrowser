@@ -3,6 +3,7 @@
 //! content/counters and miscellaneous properties.
 
 pub mod background;
+pub mod clip_path;
 pub mod content;
 pub mod effects;
 pub mod flex;
