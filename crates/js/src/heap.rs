@@ -517,13 +517,17 @@ impl TypedArrayData {
 /// The storage of an `ArrayBuffer` / `SharedArrayBuffer` object.
 #[derive(Debug)]
 pub struct ArrayBufferData {
-    /// The bytes; hosts (WebAssembly memories) may share the `Rc`.
+    /// The bytes; hosts (WebAssembly memories) may share the `Rc`. For a
+    /// `SharedArrayBuffer` this vector aliases [`ArrayBufferData::block`]
+    /// and never frees it (see the `Drop` impl).
     pub bytes: Rc<std::cell::RefCell<Vec<u8>>>,
     /// `Some(max)` for a resizable (growable, when shared) buffer.
     pub max_byte_length: Option<usize>,
     pub shared: bool,
     pub detached: bool,
     pub immutable: bool,
+    /// Memory of a `SharedArrayBuffer`, shared with other agents (threads).
+    pub block: Option<std::sync::Arc<SharedBlock>>,
 }
 
 impl ArrayBufferData {
@@ -531,7 +535,122 @@ impl ArrayBufferData {
         Self::from_rc(Rc::new(std::cell::RefCell::new(bytes)))
     }
     pub fn from_rc(bytes: Rc<std::cell::RefCell<Vec<u8>>>) -> Box<ArrayBufferData> {
-        Box::new(ArrayBufferData { bytes, max_byte_length: None, shared: false, detached: false, immutable: false })
+        Box::new(ArrayBufferData { bytes, max_byte_length: None, shared: false, detached: false, immutable: false, block: None })
+    }
+    /// A `SharedArrayBuffer` over `block` (growable when `max` is set).
+    pub fn shared(block: std::sync::Arc<SharedBlock>, max: Option<usize>) -> Box<ArrayBufferData> {
+        // SAFETY: the vector aliases the block's allocation (capacity =
+        // the block's capacity, length = its current length, initialised:
+        // the block is zeroed); it is never grown past that capacity and
+        // never deallocated (ArrayBufferData::drop forgets it).
+        let v = unsafe { Vec::from_raw_parts(block.as_ptr(), block.len(), block.capacity()) };
+        let mut d = Self::new(v);
+        d.shared = true;
+        d.max_byte_length = max;
+        d.block = Some(block);
+        d
+    }
+    /// Bring the local view of a shared buffer's length up to date with
+    /// growth by other agents.
+    #[inline]
+    pub fn sync_shared_len(&self) {
+        if let Some(block) = &self.block {
+            let n = block.len();
+            if let Ok(mut b) = self.bytes.try_borrow_mut() {
+                if b.len() < n {
+                    // SAFETY: n <= capacity, and bytes up to n are zeroed or written.
+                    unsafe { b.set_len(n) };
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ArrayBufferData {
+    fn drop(&mut self) {
+        if self.block.is_none() {
+            return;
+        }
+        // The vector does not own the shared allocation: forget it. If the
+        // cell is somehow borrowed, keep the whole Rc alive instead (leak,
+        // never free memory another agent uses).
+        match self.bytes.try_borrow_mut() {
+            Ok(mut b) => std::mem::forget(std::mem::take(&mut *b)),
+            Err(_) => std::mem::forget(self.bytes.clone()),
+        }
+    }
+}
+
+/// The memory of a `SharedArrayBuffer`: one zeroed allocation of the
+/// buffer's maximum size, shared by every agent holding the buffer. Its
+/// current length only grows.
+pub struct SharedBlock {
+    ptr: std::ptr::NonNull<u8>,
+    cap: usize,
+    len: std::sync::atomic::AtomicUsize,
+}
+
+// SAFETY: the block is plain memory; concurrent access goes through
+// atomic operations (Atomics) or racy byte copies, as in any engine.
+unsafe impl Send for SharedBlock {}
+unsafe impl Sync for SharedBlock {}
+
+impl std::fmt::Debug for SharedBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SharedBlock({} of {})", self.len(), self.cap)
+    }
+}
+
+impl SharedBlock {
+    /// A zeroed block of `len` bytes that can grow to `cap`; None when the
+    /// memory is not available.
+    pub fn new(len: usize, cap: usize) -> Option<std::sync::Arc<SharedBlock>> {
+        let cap = cap.max(len);
+        let ptr = if cap == 0 {
+            std::ptr::NonNull::dangling()
+        } else {
+            // 16-byte aligned so every element is aligned for atomics.
+            let layout = std::alloc::Layout::from_size_align(cap, 16).ok()?;
+            // SAFETY: non-zero size.
+            std::ptr::NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) })?
+        };
+        Some(std::sync::Arc::new(SharedBlock { ptr, cap, len: std::sync::atomic::AtomicUsize::new(len) }))
+    }
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+    pub fn len(&self) -> usize {
+        self.len.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+    /// Grow to `new_len` (never shrinks). Err(current) when `new_len` is
+    /// smaller than the current length; false-y on exceeding capacity.
+    pub fn grow_to(&self, new_len: usize) -> Result<(), usize> {
+        use std::sync::atomic::Ordering;
+        let mut cur = self.len.load(Ordering::SeqCst);
+        loop {
+            if new_len < cur || new_len > self.cap {
+                return Err(cur);
+            }
+            match self.len.compare_exchange(cur, new_len, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Ok(()),
+                Err(c) => cur = c,
+            }
+        }
+    }
+}
+
+impl Drop for SharedBlock {
+    fn drop(&mut self) {
+        if self.cap > 0 {
+            // SAFETY: allocated in `new` with this layout.
+            unsafe { std::alloc::dealloc(self.ptr.as_ptr(), std::alloc::Layout::from_size_align(self.cap, 16).unwrap()) };
+        }
     }
 }
 

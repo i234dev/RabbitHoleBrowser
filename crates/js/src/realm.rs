@@ -267,6 +267,11 @@ pub struct Realm {
     /// script is stopped with an uncatchable "Out of memory" RangeError
     /// instead of the process aborting on a failed allocation.
     pub heap_limit: usize,
+    /// AgentCanSuspend(): `Atomics.wait` may block this agent's thread
+    /// (false for a page's main thread).
+    pub can_block: bool,
+    /// Pending `Atomics.waitAsync` promises of this realm.
+    pub(crate) atomics_async_waiters: u32,
     /// Call-site index set by `Op::EvalSite` for the following `CallEval`.
     pub(crate) eval_site: u32,
     /// A generator is being resumed by `return()` (see `Op::ResumeIsReturn`).
@@ -526,6 +531,8 @@ impl Realm {
             max_frames: 12_500,
             max_native_depth: 100_000,
             heap_limit: 60_000_000,
+            can_block: false,
+            atomics_async_waiters: 0,
             eval_site: u32::MAX,
             resume_mode: 0,
             ystar: (0, 0),
@@ -1361,7 +1368,11 @@ impl Realm {
     /// Drain the job (microtask) queue. Errors thrown by jobs are reported
     /// to the console and do not stop the drain.
     pub fn run_jobs(&mut self) {
+        crate::builtins::typed_array::poll_async_waiters(self);
         while let Some(job) = self.jobs.pop_front() {
+            if self.atomics_async_waiters > 0 {
+                crate::builtins::typed_array::poll_async_waiters(self);
+            }
             if self.wall_deadline().is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                 self.jobs.push_front(job);
                 let _ = self.check_watchdog();
@@ -1408,6 +1419,11 @@ impl Realm {
 
     pub fn has_pending_jobs(&self) -> bool {
         !self.jobs.is_empty()
+    }
+
+    /// Are `Atomics.waitAsync` promises of this realm still pending?
+    pub fn has_pending_atomics_waiters(&self) -> bool {
+        self.atomics_async_waiters > 0
     }
 
     /// Best-effort textual form of a thrown value (for logging).

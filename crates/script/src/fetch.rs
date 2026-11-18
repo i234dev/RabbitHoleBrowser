@@ -720,8 +720,12 @@ pub fn make_array_buffer(realm: &mut Realm, bytes: Vec<u8>) -> Value {
     if realm.is_constructor(&ctor) {
         if let Ok(V::Object(ab)) = realm.construct(ctor, &[Value::Number(bytes.len() as f64)], Value::Undefined).as_ref().map(Value::v) {
             if let rabbithole_js::ObjectKind::ArrayBuffer(buf) = &realm.obj(ab).kind {
-                *buf.bytes.borrow_mut() = bytes;
-                return Value::Object(ab);
+                // Never replace the storage of agent-shared memory (a page
+                // may have replaced `ArrayBuffer`).
+                if buf.block.is_none() {
+                    *buf.bytes.borrow_mut() = bytes;
+                    return Value::Object(ab);
+                }
             }
         }
     }

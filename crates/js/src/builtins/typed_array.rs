@@ -12,6 +12,7 @@ use super::iterator::create_array_iterator;
 use super::*;
 use crate::realm::{SYM_ITERATOR, SYM_SPECIES, SYM_TO_STRING_TAG};
 use crate::value::V;
+use crate::heap::SharedBlock;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -35,6 +36,9 @@ const MAX_BYTE_LENGTH: usize = 1 << 32;
 /// Largest `maxByteLength` accepted for a resizable buffer (never reserved
 /// up front; growing past `MAX_BYTE_LENGTH` still fails).
 const MAX_MAX_BYTE_LENGTH: usize = 1 << 40;
+/// Largest SharedArrayBuffer (maximum) size backed by agent-shared memory;
+/// larger ones stay local to their agent.
+const MAX_SHARED_BLOCK: usize = 1 << 30;
 
 fn proto_key(kind: TypedArrayKind) -> &'static str {
     match kind {
@@ -367,7 +371,12 @@ fn is_fixed_length(realm: &Realm, id: ObjectId) -> bool {
 
 /// Current byte length (0 when detached).
 fn byte_len(realm: &Realm, id: ObjectId) -> usize {
-    array_buffer_data(realm, id).map(|b| b.bytes.borrow().len()).unwrap_or(0)
+    array_buffer_data(realm, id)
+        .map(|b| {
+            b.sync_shared_len();
+            b.bytes.borrow().len()
+        })
+        .unwrap_or(0)
 }
 
 /// DetachArrayBuffer (what `$262.detachArrayBuffer` and `transfer` do):
@@ -479,8 +488,32 @@ fn buffer_ctor_impl(realm: &mut Realm, args: &[Value], shared: bool) -> JsResult
             return realm.range_error("Invalid array buffer max length");
         }
     }
+    if shared && len <= MAX_BYTE_LENGTH && max.unwrap_or(len) <= MAX_SHARED_BLOCK {
+        // Memory other agents (threads) can share; a growable buffer
+        // reserves its maximum up front.
+        let Some(block) = SharedBlock::new(len, max.unwrap_or(len)) else {
+            return realm.range_error("Array buffer allocation failed");
+        };
+        let data = ArrayBufferData::shared(block, max);
+        return Ok(Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::ArrayBuffer(data)))));
+    }
     let bytes = alloc_bytes(realm, len)?;
     Ok(Value::Object(new_buffer_object(realm, proto, bytes, max, shared, false)))
+}
+
+/// A `SharedArrayBuffer` object (in this realm) over memory another agent
+/// shares with it.
+pub fn shared_buffer_from_block(realm: &mut Realm, block: std::sync::Arc<SharedBlock>, max: Option<usize>) -> ObjectId {
+    let proto = realm.intrinsics.others["SharedArrayBufferPrototype"];
+    let data = ArrayBufferData::shared(block, max);
+    realm.alloc(Object::new(Some(proto), ObjectKind::ArrayBuffer(data)))
+}
+
+/// The shared memory and maximum length of a `SharedArrayBuffer` object,
+/// to hand to another agent.
+pub fn shared_block_of(realm: &Realm, id: ObjectId) -> Option<(std::sync::Arc<SharedBlock>, Option<usize>)> {
+    let ab = array_buffer_data(realm, id)?;
+    ab.block.clone().map(|b| (b, ab.max_byte_length))
 }
 
 fn array_buffer_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -704,6 +737,13 @@ fn sab_grow(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     if new_len > max {
         return realm.range_error("SharedArrayBuffer.prototype.grow: Invalid length parameter");
     }
+    if let Some(block) = array_buffer_data(realm, id).unwrap().block.clone() {
+        if block.grow_to(new_len).is_err() {
+            return realm.range_error("SharedArrayBuffer.prototype.grow: cannot shrink");
+        }
+        array_buffer_data(realm, id).unwrap().sync_shared_len();
+        return Ok(Value::Undefined);
+    }
     let cur = byte_len(realm, id);
     if new_len < cur {
         return realm.range_error("SharedArrayBuffer.prototype.grow: cannot shrink");
@@ -877,6 +917,7 @@ pub fn to_bigint(realm: &mut Realm, v: Value) -> JsResult<i128> {
 #[inline]
 pub fn view_length(realm: &Realm, t: &TypedArrayData) -> Option<usize> {
     let ab = array_buffer_data(realm, t.buffer)?;
+    ab.sync_shared_len();
     let len = ab.bytes.borrow().len();
     if len == 0 && data_detached(ab) {
         return None;
@@ -893,6 +934,7 @@ pub fn typed_array_length(realm: &Realm, t: &TypedArrayData) -> usize {
 #[inline]
 pub fn get_element(realm: &Realm, t: &TypedArrayData, index: usize) -> Option<Value> {
     let ObjectKind::ArrayBuffer(ab) = &realm.obj(t.buffer).kind else { return None };
+    ab.sync_shared_len();
     let b = ab.bytes.borrow();
     if index >= t.length_in(b.len())? {
         return None;
@@ -910,6 +952,7 @@ pub fn set_element(realm: &Realm, t: &TypedArrayData, index: usize, num: Num) {
     if ab.immutable {
         return;
     }
+    ab.sync_shared_len();
     let mut b = ab.bytes.borrow_mut();
     match t.length_in(b.len()) {
         Some(len) if index < len => {}
@@ -2480,8 +2523,87 @@ fn atomics_operand(realm: &mut Realm, kind: TypedArrayKind, v: Value) -> JsResul
     }
 }
 
+/// Address of element `i` when the view's buffer is agent-shared memory:
+/// Atomics then use real atomic instructions on it.
+fn shared_element_ptr(realm: &Realm, t: &TypedArrayData, i: usize) -> Option<*mut u8> {
+    let ab = array_buffer_data(realm, t.buffer)?;
+    let block = ab.block.as_ref()?;
+    let off = t.byte_offset + i * t.kind.element_size();
+    // SAFETY: callers validated the index against the current length.
+    Some(unsafe { block.as_ptr().add(off) })
+}
+
+/// Atomically replace the `size`-byte element at `p` with `f(old)` and
+/// return the old bits (zero-extended).
+///
+/// # Safety
+/// `p` points to `size` valid bytes aligned to `size`.
+unsafe fn atomic_rmw_at(p: *mut u8, size: usize, f: &dyn Fn(u64) -> u64) -> u64 {
+    use std::sync::atomic::*;
+    macro_rules! rmw {
+        ($a:ty, $t:ty) => {{
+            let a = <$a>::from_ptr(p as *mut $t);
+            let mut cur = a.load(Ordering::SeqCst);
+            loop {
+                let new = f(cur as u64) as $t;
+                match a.compare_exchange_weak(cur, new, Ordering::SeqCst, Ordering::SeqCst) {
+                    Ok(_) => break cur as u64,
+                    Err(c) => cur = c,
+                }
+            }
+        }};
+    }
+    match size {
+        1 => rmw!(AtomicU8, u8),
+        2 => rmw!(AtomicU16, u16),
+        4 => rmw!(AtomicU32, u32),
+        _ => rmw!(AtomicU64, u64),
+    }
+}
+
+/// Atomic compare-and-exchange of the `size`-byte element at `p`; returns
+/// the old bits.
+///
+/// # Safety
+/// As [`atomic_rmw_at`].
+unsafe fn atomic_cas_at(p: *mut u8, size: usize, expected: u64, replacement: u64) -> u64 {
+    use std::sync::atomic::*;
+    macro_rules! cas {
+        ($a:ty, $t:ty) => {{
+            let a = <$a>::from_ptr(p as *mut $t);
+            match a.compare_exchange(expected as $t, replacement as $t, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(v) | Err(v) => v as u64,
+            }
+        }};
+    }
+    match size {
+        1 => cas!(AtomicU8, u8),
+        2 => cas!(AtomicU16, u16),
+        4 => cas!(AtomicU32, u32),
+        _ => cas!(AtomicU64, u64),
+    }
+}
+
+/// Atomic load of the `size`-byte element at `p`.
+///
+/// # Safety
+/// As [`atomic_rmw_at`].
+pub(crate) unsafe fn atomic_load_at(p: *mut u8, size: usize) -> u64 {
+    use std::sync::atomic::*;
+    match size {
+        1 => AtomicU8::from_ptr(p).load(Ordering::SeqCst) as u64,
+        2 => AtomicU16::from_ptr(p as *mut u16).load(Ordering::SeqCst) as u64,
+        4 => AtomicU32::from_ptr(p as *mut u32).load(Ordering::SeqCst) as u64,
+        _ => AtomicU64::from_ptr(p as *mut u64).load(Ordering::SeqCst),
+    }
+}
+
 /// Raw element bits (little-endian, zero-extended) at element `i`.
 fn raw_bits(realm: &Realm, t: &TypedArrayData, i: usize) -> u64 {
+    if let Some(p) = shared_element_ptr(realm, t, i) {
+        // SAFETY: valid, aligned element of shared memory.
+        return unsafe { atomic_load_at(p, t.kind.element_size()) };
+    }
     let size = t.kind.element_size();
     let buf = buffer_of(realm, t.buffer).unwrap();
     let b = buf.borrow();
@@ -2507,8 +2629,14 @@ fn atomics_rmw(realm: &mut Realm, args: &[Value], op: fn(u64, u64) -> u64) -> Js
     let i = atomic_access(realm, len, arg(args, 1))?;
     let v = atomics_operand(realm, t.kind, arg(args, 2))?;
     atomics_revalidate(realm, &t, i)?;
+    let operand = num_bits(t.kind, v);
+    if let Some(p) = shared_element_ptr(realm, &t, i) {
+        // SAFETY: valid, aligned element of shared memory.
+        let old = unsafe { atomic_rmw_at(p, t.kind.element_size(), &|old| op(old, operand)) };
+        return Ok(decode(t.kind, &old.to_le_bytes()));
+    }
     let old = raw_bits(realm, &t, i);
-    let new = op(old, num_bits(t.kind, v));
+    let new = op(old, operand);
     write_bits(realm, &t, i, new);
     Ok(decode(t.kind, &old.to_le_bytes()))
 }
@@ -2540,6 +2668,11 @@ fn atomics_compare_exchange(realm: &mut Realm, _this: Value, args: &[Value]) -> 
     atomics_revalidate(realm, &t, i)?;
     let size = t.kind.element_size();
     let mask = if size == 8 { u64::MAX } else { (1u64 << (size * 8)) - 1 };
+    if let Some(p) = shared_element_ptr(realm, &t, i) {
+        // SAFETY: valid, aligned element of shared memory.
+        let old = unsafe { atomic_cas_at(p, size, num_bits(t.kind, expected) & mask, num_bits(t.kind, replacement) & mask) };
+        return Ok(decode(t.kind, &old.to_le_bytes()));
+    }
     let old = raw_bits(realm, &t, i);
     if old & mask == num_bits(t.kind, expected) & mask {
         write_bits(realm, &t, i, num_bits(t.kind, replacement));
@@ -2551,6 +2684,10 @@ fn atomics_load(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     let (t, len) = atomics_validate(realm, &arg(args, 0), false, false)?;
     let i = atomic_access(realm, len, arg(args, 1))?;
     atomics_revalidate(realm, &t, i)?;
+    if shared_element_ptr(realm, &t, i).is_some() {
+        let bits = raw_bits(realm, &t, i);
+        return Ok(decode(t.kind, &bits.to_le_bytes()));
+    }
     Ok(get_or_undef(realm, &t, i))
 }
 
@@ -2566,6 +2703,12 @@ fn atomics_store(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
         (Num::F(n), Value::Number(n))
     };
     atomics_revalidate(realm, &t, i)?;
+    if let Some(p) = shared_element_ptr(realm, &t, i) {
+        let bits = num_bits(t.kind, num);
+        // SAFETY: valid, aligned element of shared memory.
+        unsafe { atomic_rmw_at(p, t.kind.element_size(), &|_| bits) };
+        return Ok(ret);
+    }
     set_element(realm, &t, i, num);
     Ok(ret)
 }
@@ -2575,9 +2718,60 @@ fn atomics_is_lock_free(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRe
     Ok(Value::Bool(n == 1.0 || n == 2.0 || n == 4.0 || n == 8.0))
 }
 
-/// Shared part of Atomics.wait / waitAsync (DoWait up to the comparison):
-/// (value equal?, timeout in ms, buffer, byte index).
-fn wait_common(realm: &mut Realm, args: &[Value]) -> JsResult<(bool, f64, ObjectId, usize)> {
+// ------------------------------------------------- Atomics.wait / notify
+
+/// A blocked `Atomics.wait` caller: woken through its condition variable.
+#[derive(Default)]
+struct SyncSignal {
+    notified: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+/// Per-thread (agent) inbox of notified `Atomics.waitAsync` tokens.
+#[derive(Default)]
+pub struct AtomicsMailbox {
+    tokens: std::sync::Mutex<Vec<u64>>,
+    cv: std::sync::Condvar,
+}
+
+enum WaiterKind {
+    Sync(std::sync::Arc<SyncSignal>),
+    Async(std::sync::Arc<AtomicsMailbox>, u64),
+}
+
+/// An entry of the WaiterList of a shared memory location.
+struct Waiter {
+    /// (memory identity, byte index).
+    key: (usize, usize),
+    kind: WaiterKind,
+}
+
+/// Every agent's waiters, in arrival order (the spec's critical section).
+static WAITERS: std::sync::Mutex<Vec<Waiter>> = std::sync::Mutex::new(Vec::new());
+static NEXT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+thread_local! {
+    static MAILBOX: std::sync::Arc<AtomicsMailbox> = std::sync::Arc::new(AtomicsMailbox::default());
+}
+
+fn waiters() -> std::sync::MutexGuard<'static, Vec<Waiter>> {
+    WAITERS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Identity of a buffer's memory, valid across agents for shared blocks.
+fn memory_key(realm: &Realm, buffer: ObjectId) -> usize {
+    match array_buffer_data(realm, buffer) {
+        Some(ab) => match &ab.block {
+            Some(b) => b.as_ptr() as usize,
+            None => Rc::as_ptr(&ab.bytes) as usize,
+        },
+        None => 0,
+    }
+}
+
+/// Validated arguments of Atomics.wait / waitAsync (DoWait up to the
+/// comparison): the view, element index, expected bits and timeout (ms).
+fn wait_common(realm: &mut Realm, args: &[Value]) -> JsResult<(TypedArrayData, usize, u64, f64)> {
     let (t, len) = atomics_validate(realm, &arg(args, 0), true, false)?;
     if !is_shared(realm, t.buffer) {
         return realm.type_error("Atomics.wait requires a shared typed array");
@@ -2596,38 +2790,108 @@ fn wait_common(realm: &mut Realm, args: &[Value]) -> JsResult<(bool, f64, Object
     } else {
         q.max(0.0)
     };
-    let cur = raw_bits(realm, &t, i);
     let size = t.kind.element_size();
     let mask = if size == 8 { u64::MAX } else { (1u64 << (size * 8)) - 1 };
-    Ok((cur & mask == num_bits(t.kind, v) & mask, timeout, t.buffer, t.byte_offset + i * size))
+    Ok((t, i, num_bits(t.kind, v) & mask, timeout))
+}
+
+/// Does element `i` still hold `expected`? (Read inside the critical section.)
+fn holds(realm: &Realm, t: &TypedArrayData, i: usize, expected: u64) -> bool {
+    let size = t.kind.element_size();
+    let mask = if size == 8 { u64::MAX } else { (1u64 << (size * 8)) - 1 };
+    raw_bits(realm, t, i) & mask == expected
 }
 
 fn atomics_wait(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    wait_common(realm, args)?;
-    // AgentCanSuspend() is false: the engine runs on the page's main thread.
-    realm.type_error("Atomics.wait cannot be called in this context")
+    let (t, i, expected, timeout) = wait_common(realm, args)?;
+    if !realm.can_block {
+        // AgentCanSuspend() is false: e.g. a page's main thread.
+        return realm.type_error("Atomics.wait cannot be called in this context");
+    }
+    let key = (memory_key(realm, t.buffer), t.byte_offset + i * t.kind.element_size());
+    let signal = std::sync::Arc::new(SyncSignal::default());
+    {
+        let mut w = waiters();
+        if !holds(realm, &t, i, expected) {
+            return Ok(Value::str("not-equal"));
+        }
+        if timeout == 0.0 {
+            return Ok(Value::str("timed-out"));
+        }
+        w.push(Waiter { key, kind: WaiterKind::Sync(signal.clone()) });
+    }
+    let deadline = (timeout.is_finite()).then(|| std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout / 1000.0));
+    let mut notified = signal.notified.lock().unwrap_or_else(|e| e.into_inner());
+    while !*notified {
+        match deadline {
+            Some(d) => {
+                let now = std::time::Instant::now();
+                if now >= d {
+                    break;
+                }
+                notified = signal.cv.wait_timeout(notified, d - now).unwrap_or_else(|e| e.into_inner()).0;
+            }
+            None => notified = signal.cv.wait(notified).unwrap_or_else(|e| e.into_inner()),
+        }
+    }
+    if *notified {
+        return Ok(Value::str("ok"));
+    }
+    drop(notified);
+    // Timed out, unless a notify removed it meanwhile.
+    let mut w = waiters();
+    let pos = w.iter().position(|x| matches!(&x.kind, WaiterKind::Sync(s) if std::sync::Arc::ptr_eq(s, &signal)));
+    match pos {
+        Some(p) => {
+            w.remove(p);
+            Ok(Value::str("timed-out"))
+        }
+        None => Ok(Value::str("ok")),
+    }
 }
 
 fn atomics_wait_async(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let (equal, timeout, buffer, byte_index) = wait_common(realm, args)?;
+    let (t, i, expected, timeout) = wait_common(realm, args)?;
     let o = realm.new_object();
-    if !equal || timeout == 0.0 {
-        realm.define_property(o, "async", Value::Bool(false), ALL);
-        realm.define_property(o, "value", Value::str(if equal { "timed-out" } else { "not-equal" }), ALL);
-        return Ok(Value::Object(o));
+    let byte_index = t.byte_offset + i * t.kind.element_size();
+    let key = (memory_key(realm, t.buffer), byte_index);
+    let token = NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    {
+        let mut w = waiters();
+        let equal = holds(realm, &t, i, expected);
+        if !equal || timeout == 0.0 {
+            drop(w);
+            realm.define_property(o, "async", Value::Bool(false), ALL);
+            realm.define_property(o, "value", Value::str(if equal { "timed-out" } else { "not-equal" }), ALL);
+            return Ok(Value::Object(o));
+        }
+        let mailbox = MAILBOX.with(|m| m.clone());
+        w.push(Waiter { key, kind: WaiterKind::Async(mailbox, token) });
     }
-    // The waiter settles with "ok" when notified. There are no timers
-    // here, so a finite timeout never fires.
     let (p, resolve, _) = realm.new_promise();
-    let entry = realm.new_array_value(vec![Value::Object(buffer), Value::Number(byte_index as f64), Value::Object(resolve)]);
+    let deadline = if timeout.is_finite() { realm_now_ms() + timeout } else { f64::INFINITY };
+    // Local record: [resolve, token, deadline (ms, monotonic)].
+    let entry = realm.new_array_value(vec![Value::Object(resolve), Value::Number(token as f64), Value::Number(deadline)]);
     let list = realm.intrinsics.others["AtomicsWaiterList"];
     if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(list).kind {
         elements.push(entry);
         *length = elements.len() as u32;
     }
+    realm.atomics_async_waiters += 1;
     realm.define_property(o, "async", Value::Bool(true), ALL);
     realm.define_property(o, "value", Value::Object(p), ALL);
     Ok(Value::Object(o))
+}
+
+/// Milliseconds on a process-wide monotonic clock.
+fn realm_now_ms() -> f64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+
+/// Monotonic milliseconds shared by all agents (`$262.agent.monotonicNow`).
+pub fn monotonic_now_ms() -> f64 {
+    realm_now_ms()
 }
 
 fn atomics_notify(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -2638,14 +2902,50 @@ fn atomics_notify(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
     if !is_shared(realm, t.buffer) {
         return Ok(Value::Number(0.0));
     }
-    let byte_index = (t.byte_offset + i * t.kind.element_size()) as f64;
-    let list = realm.intrinsics.others["AtomicsWaiterList"];
+    let key = (memory_key(realm, t.buffer), t.byte_offset + i * t.kind.element_size());
+    let mut n = 0usize;
+    {
+        let mut w = waiters();
+        let mut k = 0;
+        while k < w.len() && (n as f64) < count {
+            if w[k].key != key {
+                k += 1;
+                continue;
+            }
+            let waiter = w.remove(k);
+            n += 1;
+            match waiter.kind {
+                WaiterKind::Sync(s) => {
+                    *s.notified.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                    s.cv.notify_all();
+                }
+                WaiterKind::Async(mb, token) => {
+                    mb.tokens.lock().unwrap_or_else(|e| e.into_inner()).push(token);
+                    mb.cv.notify_all();
+                }
+            }
+        }
+    }
+    // Waiters of this agent settle right away.
+    poll_async_waiters(realm);
+    Ok(Value::Number(n as f64))
+}
+
+/// Settle this realm's `Atomics.waitAsync` promises that were notified (by
+/// any agent) or whose timeout passed. Called at job checkpoints.
+pub fn poll_async_waiters(realm: &mut Realm) {
+    if realm.atomics_async_waiters == 0 {
+        return;
+    }
+    let Some(&list) = realm.intrinsics.others.get("AtomicsWaiterList") else { return };
     let entries: Vec<Value> = match &realm.obj(list).kind {
         ObjectKind::Array { elements, .. } => elements.clone(),
-        _ => Vec::new(),
+        _ => return,
     };
+    let notified: Vec<u64> = MAILBOX.with(|m| m.tokens.lock().map(|t| t.clone()).unwrap_or_default());
+    let now = realm_now_ms();
     let mut keep = Vec::new();
-    let mut woken = Vec::new();
+    let mut settle: Vec<(Value, &'static str, u64)> = Vec::new();
     for e in entries {
         let parts: Vec<Value> = match e.v() {
             V::Object(eid) => match &realm.obj(eid).kind {
@@ -2654,22 +2954,59 @@ fn atomics_notify(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
             },
             _ => Vec::new(),
         };
-        let matches = parts.len() == 3 && parts[0].as_object() == Some(t.buffer) && parts[1].as_number() == Some(byte_index);
-        if matches && (woken.len() as f64) < count {
-            woken.push(parts[2].clone());
+        if parts.len() != 3 {
+            continue;
+        }
+        let token = parts[1].as_number().unwrap_or(0.0) as u64;
+        let deadline = parts[2].as_number().unwrap_or(f64::INFINITY);
+        if notified.contains(&token) {
+            settle.push((parts[0].clone(), "ok", token));
+        } else if now >= deadline {
+            // Still listed: it times out; otherwise a notify just took it.
+            let mut w = waiters();
+            let pos = w.iter().position(|x| matches!(x.kind, WaiterKind::Async(_, tk) if tk == token));
+            match pos {
+                Some(p) => {
+                    w.remove(p);
+                    settle.push((parts[0].clone(), "timed-out", token));
+                }
+                None => keep.push(e),
+            }
         } else {
             keep.push(e);
         }
     }
+    if settle.is_empty() {
+        return;
+    }
+    let done: Vec<u64> = settle.iter().map(|s| s.2).collect();
+    MAILBOX.with(|m| {
+        if let Ok(mut t) = m.tokens.lock() {
+            t.retain(|x| !done.contains(x));
+        }
+    });
+    realm.atomics_async_waiters = keep.len() as u32;
     if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(list).kind {
         *length = keep.len() as u32;
         *elements = keep;
     }
-    let n = woken.len();
-    for resolve in woken {
-        realm.call(resolve, Value::Undefined, &[Value::str("ok")])?;
+    for (resolve, value, _) in settle {
+        let _ = realm.call(resolve, Value::Undefined, &[Value::str(value)]);
     }
-    Ok(Value::Number(n as f64))
+}
+
+/// Block until a pending `Atomics.waitAsync` of this thread is notified or
+/// `max` passes (hosts call it when they have nothing else to run).
+pub fn wait_for_async_waiters(realm: &Realm, max: std::time::Duration) {
+    if realm.atomics_async_waiters == 0 {
+        return;
+    }
+    MAILBOX.with(|m| {
+        let t = m.tokens.lock().unwrap_or_else(|e| e.into_inner());
+        if t.is_empty() {
+            let _ = m.cv.wait_timeout(t, max);
+        }
+    });
 }
 
 fn atomics_pause(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {

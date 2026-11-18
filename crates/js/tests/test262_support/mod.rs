@@ -211,17 +211,15 @@ pub fn parse_meta(src: &str) -> Meta {
 }
 
 /// Why a test is skipped, if it is.
-pub fn skip_reason(meta: &Meta, src: &str) -> Option<String> {
+pub fn skip_reason(meta: &Meta, _src: &str) -> Option<String> {
     for f in &meta.features {
         if UNSUPPORTED_FEATURES.contains(&f.as_str()) {
             return Some(format!("feature {f}"));
         }
     }
-    if meta.has_flag("CanBlockIsTrue") {
-        return Some("flag CanBlockIsTrue".into());
-    }
-    if src.contains("$262.agent") {
-        return Some("feature $262.agent".into());
+    // The main agent can block (Atomics.wait), as in shell hosts.
+    if meta.has_flag("CanBlockIsFalse") {
+        return Some("flag CanBlockIsFalse".into());
     }
     None
 }
@@ -311,7 +309,158 @@ pub fn install_host(realm: &mut Realm) {
     let dda = realm.new_native_function("IsHTMLDDA", 0, native_htmldda);
     realm.make_htmldda(dda);
     realm.define_property(d, "IsHTMLDDA", Value::Object(dda), rabbithole_js::ALL);
+    let agent = realm.new_object();
+    for (name, arity, f) in [
+        ("start", 1, native_agent_start as rabbithole_js::NativeFn),
+        ("broadcast", 2, native_agent_broadcast),
+        ("getReport", 0, native_agent_get_report),
+        ("sleep", 1, native_agent_sleep),
+        ("monotonicNow", 0, native_agent_monotonic_now),
+    ] {
+        let f = realm.new_native_function(name, arity, f);
+        realm.define_property(agent, name, Value::Object(f), rabbithole_js::ALL);
+    }
+    realm.define_property(d, "agent", Value::Object(agent), rabbithole_js::ALL);
     realm.define_property(global, "$262", Value::Object(d), rabbithole_js::WRITABLE | rabbithole_js::CONFIGURABLE);
+}
+
+// ---------------------------------------------------------- $262.agent
+
+/// A SharedArrayBuffer (its memory) plus the number sent with it.
+type Broadcast = (Arc<rabbithole_js::heap::SharedBlock>, Option<usize>, f64);
+
+/// Agent threads of the running test: broadcast channel and pick-up acks.
+struct AgentHandle {
+    tx: mpsc::Sender<Broadcast>,
+    ack: mpsc::Receiver<()>,
+}
+
+/// Reports from agents, process-wide (one test runs at a time).
+static REPORTS: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+thread_local! {
+    static AGENTS: RefCell<Vec<AgentHandle>> = const { RefCell::new(Vec::new()) };
+    /// Inside an agent thread: its broadcast callback and `leaving()` flag.
+    static AGENT_SELF: RefCell<(Option<Value>, bool)> = const { RefCell::new((None, false)) };
+}
+
+/// Stop tracking the agents of the previous test (they exit once their
+/// broadcast channel closes).
+fn reset_agents() {
+    AGENTS.with(|a| a.borrow_mut().clear());
+    REPORTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+fn native_agent_start(realm: &mut Realm, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let src = realm.to_string(arg(args, 0))?.to_rust_string();
+    let (tx, rx) = mpsc::channel::<Broadcast>();
+    let (ack_tx, ack) = mpsc::channel::<()>();
+    let spawned = std::thread::Builder::new().stack_size(32 << 20).spawn(move || agent_main(src, rx, ack_tx));
+    if spawned.is_err() {
+        return Err(realm.new_error("Error", "cannot start agent"));
+    }
+    AGENTS.with(|a| a.borrow_mut().push(AgentHandle { tx, ack }));
+    Ok(Value::Undefined)
+}
+
+fn native_agent_broadcast(realm: &mut Realm, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let Some(buf) = arg(args, 0).as_object() else { return Err(realm.new_error("TypeError", "broadcast needs a SharedArrayBuffer")) };
+    let Some((block, max)) = rabbithole_js::builtins::typed_array::shared_block_of(realm, buf) else {
+        return Err(realm.new_error("TypeError", "broadcast needs a SharedArrayBuffer"));
+    };
+    let n = match arg(args, 1).v() {
+        V::Undefined => 0.0,
+        _ => realm.to_number(arg(args, 1))?,
+    };
+    let agents: Vec<(mpsc::Sender<Broadcast>, usize)> = AGENTS.with(|a| a.borrow().iter().enumerate().map(|(i, h)| (h.tx.clone(), i)).collect());
+    for (tx, _) in &agents {
+        let _ = tx.send((block.clone(), max, n));
+    }
+    // Block until every agent picked the message up.
+    AGENTS.with(|a| {
+        for h in a.borrow().iter() {
+            let _ = h.ack.recv_timeout(Duration::from_secs(10));
+        }
+    });
+    Ok(Value::Undefined)
+}
+
+fn native_agent_get_report(_realm: &mut Realm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    match REPORTS.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
+        Some(r) => Ok(Value::str(&r)),
+        None => Ok(Value::Null),
+    }
+}
+
+fn native_agent_sleep(realm: &mut Realm, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let ms = realm.to_number(arg(args, 0))?;
+    if ms.is_finite() && ms > 0.0 {
+        std::thread::sleep(Duration::from_secs_f64(ms / 1000.0));
+    }
+    Ok(Value::Undefined)
+}
+
+fn native_agent_monotonic_now(_realm: &mut Realm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Number(rabbithole_js::builtins::typed_array::monotonic_now_ms().floor()))
+}
+
+fn native_agent_receive_broadcast(_realm: &mut Realm, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    AGENT_SELF.with(|a| a.borrow_mut().0 = Some(arg(args, 0)));
+    Ok(Value::Undefined)
+}
+
+fn native_agent_report(realm: &mut Realm, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let s = realm.to_string(arg(args, 0))?.to_rust_string();
+    REPORTS.lock().unwrap_or_else(|e| e.into_inner()).push_back(s);
+    Ok(Value::Undefined)
+}
+
+fn native_agent_leaving(_realm: &mut Realm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    AGENT_SELF.with(|a| a.borrow_mut().1 = true);
+    Ok(Value::Undefined)
+}
+
+/// Body of an agent thread: its own realm (which may block in
+/// `Atomics.wait`), running `src`, then each broadcast's callback.
+fn agent_main(src: String, rx: mpsc::Receiver<Broadcast>, ack: mpsc::Sender<()>) {
+    let mut realm = Realm::new();
+    realm.can_block = true;
+    realm.heap_limit = 4_000_000;
+    realm.set_deadline(Some(Instant::now() + Duration::from_secs(20)));
+    let global = realm.global();
+    let print = realm.new_native_function("print", 1, native_print);
+    realm.define_property(global, "print", Value::Object(print), rabbithole_js::WRITABLE | rabbithole_js::CONFIGURABLE);
+    let d = realm.new_object();
+    let agent = realm.new_object();
+    for (name, arity, f) in [
+        ("receiveBroadcast", 1, native_agent_receive_broadcast as rabbithole_js::NativeFn),
+        ("report", 1, native_agent_report),
+        ("leaving", 0, native_agent_leaving),
+        ("sleep", 1, native_agent_sleep),
+        ("monotonicNow", 0, native_agent_monotonic_now),
+    ] {
+        let f = realm.new_native_function(name, arity, f);
+        realm.define_property(agent, name, Value::Object(f), rabbithole_js::ALL);
+    }
+    realm.define_property(d, "agent", Value::Object(agent), rabbithole_js::ALL);
+    realm.define_property(global, "$262", Value::Object(d), rabbithole_js::WRITABLE | rabbithole_js::CONFIGURABLE);
+    if realm.exec(&src, "agent").is_err() {
+        return;
+    }
+    drain_jobs(&mut realm);
+    loop {
+        let Some(cb) = AGENT_SELF.with(|a| a.borrow().0.clone()) else { return };
+        // Keep the callback reachable for the collector.
+        realm.define_property(global, "__agentCallback", cb.clone(), rabbithole_js::WRITABLE | rabbithole_js::CONFIGURABLE);
+        let Ok((block, max, n)) = rx.recv_timeout(Duration::from_secs(20)) else { return };
+        let sab = rabbithole_js::builtins::typed_array::shared_buffer_from_block(&mut realm, block, max);
+        let _ = ack.send(());
+        let _ = realm.call(cb, Value::Undefined, &[Value::Object(sab), Value::Number(n)]);
+        drain_jobs(&mut realm);
+        if AGENT_SELF.with(|a| a.borrow().1) {
+            return;
+        }
+    }
 }
 
 /// Resolve a module specifier against the referrer's directory.
@@ -417,11 +566,20 @@ fn promise_state(realm: &Realm, v: &Value) -> Option<(rabbithole_js::heap::Promi
 }
 
 fn drain_jobs(realm: &mut Realm) {
-    for _ in 0..1000 {
-        if !realm.has_pending_jobs() || realm.timed_out() {
+    for _ in 0..2000 {
+        if realm.timed_out() {
             break;
         }
-        realm.run_jobs();
+        if realm.has_pending_jobs() {
+            realm.run_jobs();
+        } else if realm.has_pending_atomics_waiters() {
+            // Only `Atomics.waitAsync` promises are left: wait for a notify
+            // (from another agent) or a timeout.
+            rabbithole_js::builtins::typed_array::wait_for_async_waiters(realm, Duration::from_millis(5));
+            realm.run_jobs();
+        } else {
+            break;
+        }
     }
 }
 
@@ -429,11 +587,13 @@ fn drain_jobs(realm: &mut Realm) {
 fn run_mode(suite: &Path, abs: &Path, src: &str, meta: &Meta, mode: Mode, deadline: Duration) -> Result<(), String> {
     let mut realm = Realm::new();
     realm.heap_limit = 4_000_000;
+    realm.can_block = true;
     let console: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = console.clone();
     realm.set_console_sink(Box::new(move |level, text| sink.borrow_mut().push(format!("{level}: {text}"))));
     install_host(&mut realm);
     install_loader(&mut realm);
+    reset_agents();
     STATE.with(|s| s.borrow_mut().printed.clear());
     realm.set_deadline(Some(Instant::now() + deadline));
     let r = run_mode_in(&mut realm, suite, abs, src, meta, mode);
