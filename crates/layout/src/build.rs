@@ -120,7 +120,18 @@ impl<'a> Builder<'a> {
                 ContentItem::Url(url) => {
                     flush_text(&mut text, &mut children);
                     if let Some(img) = self.ctx.background_images.get(url) {
-                        let mut b = LayoutBox::new(BoxKind::Image, Some(node), style.clone());
+                        // An image of the content list is an anonymous inline
+                        // replaced box: the pseudo-element's own outer display
+                        // (block when floated or positioned) must not make it
+                        // block-level within the pseudo's lines.
+                        let image_style = if style.display == Display::Inline {
+                            style.clone()
+                        } else {
+                            let mut s = (*style).clone();
+                            s.display = Display::Inline;
+                            Rc::new(s)
+                        };
+                        let mut b = LayoutBox::new(BoxKind::Image, Some(node), image_style);
                         b.image = Some(img.clone());
                         b.bfc_root = true;
                         children.push(b);
