@@ -1,0 +1,122 @@
+{
+  "date": "2026-11-18",
+  "change": "Blurred outset box-shadow masks cached per thread by exact geometry and reused when a box is repainted in place",
+  "base_source": "89f489a + changes of 0.1.23-0.1.27",
+  "candidate": "base + this change (released in 0.1.28)",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fe), 20 default suites, iterationCount=3, served locally",
+  "binaries": {
+    "build": "release + line tables + frame pointers, all functions and branch targets aligned to 64 bytes (same flags for both)",
+    "base_sha256": "692947abb868b8d2652bb42724b7256e48e142e5de7c3cb7d8cf7395b607b3dd",
+    "candidate_sha256": "77d6755c21d3c5eaa43632845610b2de356b5f1483c033f9c54795bd0b12a2a2",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one run at a time",
+    "order": "8 rounds, rotated",
+    "jit": "on (default)",
+    "utc_interval": "2026-11-18 05:54-06:08"
+  },
+  "pairs": [
+    {
+      "round": 1,
+      "base_geomean_ms": 390.3,
+      "candidate_geomean_ms": 321.36,
+      "base_score": 2.56,
+      "candidate_score": 3.11,
+      "ratio_base_over_candidate": 1.2145257654966393
+    },
+    {
+      "round": 2,
+      "base_geomean_ms": 389.76,
+      "candidate_geomean_ms": 321.12,
+      "base_score": 2.57,
+      "candidate_score": 3.11,
+      "ratio_base_over_candidate": 1.2137518684603885
+    },
+    {
+      "round": 3,
+      "base_geomean_ms": 394.66,
+      "candidate_geomean_ms": 319.99,
+      "base_score": 2.53,
+      "candidate_score": 3.13,
+      "ratio_base_over_candidate": 1.2333510422200695
+    },
+    {
+      "round": 4,
+      "base_geomean_ms": 390.57,
+      "candidate_geomean_ms": 320.23,
+      "base_score": 2.56,
+      "candidate_score": 3.12,
+      "ratio_base_over_candidate": 1.2196546232395464
+    },
+    {
+      "round": 5,
+      "base_geomean_ms": 388.99,
+      "candidate_geomean_ms": 319.98,
+      "base_score": 2.57,
+      "candidate_score": 3.13,
+      "ratio_base_over_candidate": 1.215669729358085
+    },
+    {
+      "round": 6,
+      "base_geomean_ms": 394.26,
+      "candidate_geomean_ms": 320.58,
+      "base_score": 2.54,
+      "candidate_score": 3.12,
+      "ratio_base_over_candidate": 1.229833426913719
+    },
+    {
+      "round": 7,
+      "base_geomean_ms": 390.35,
+      "candidate_geomean_ms": 329.33,
+      "base_score": 2.56,
+      "candidate_score": 3.04,
+      "ratio_base_over_candidate": 1.185285276166763
+    },
+    {
+      "round": 8,
+      "base_geomean_ms": 390.15,
+      "candidate_geomean_ms": 319.77,
+      "base_score": 2.56,
+      "candidate_score": 3.13,
+      "ratio_base_over_candidate": 1.2200956937799043
+    }
+  ],
+  "summary": {
+    "median_ratio": 1.2176621762988158,
+    "min": 1.185285276166763,
+    "max": 1.2333510422200695,
+    "rounds_faster": 8,
+    "rounds": 8,
+    "mean_score_base": 2.55625,
+    "mean_score_candidate": 3.11125
+  },
+  "per_suite_median_ratio": {
+    "Charts-chartjs": 0.9985,
+    "Charts-observable-plot": 1.0041,
+    "Editor-CodeMirror": 0.9959,
+    "Editor-TipTap": 1.0122,
+    "NewsSite-Next": 0.9977,
+    "NewsSite-Nuxt": 0.9923,
+    "Perf-Dashboard": 0.9989,
+    "React-Stockcharts-SVG": 0.9988,
+    "TodoMVC-Angular-Complex-DOM": 1.1006,
+    "TodoMVC-Backbone": 1.5553,
+    "TodoMVC-JavaScript-ES5": 1.4772,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 1.1956,
+    "TodoMVC-Lit-Complex-DOM": 1.3824,
+    "TodoMVC-Preact-Complex-DOM": 1.724,
+    "TodoMVC-React-Complex-DOM": 1.1423,
+    "TodoMVC-React-Redux": 1.1779,
+    "TodoMVC-Svelte-Complex-DOM": 1.7495,
+    "TodoMVC-Vue": 1.4863,
+    "TodoMVC-WebComponents": 1.859,
+    "TodoMVC-jQuery": 1.0821
+  },
+  "correctness": "Unit test repeated_box_shadows_match_first_paint (identical repaint; a shadow moved by one pixel equals the original shifted); gfx, engine and layout tests 568/568.",
+  "limitations": [
+    "One Linux x64 host; harness scores, not comparable with other browsers.",
+    "The cache holds up to 32 MiB of masks per thread and is emptied when full."
+  ]
+}

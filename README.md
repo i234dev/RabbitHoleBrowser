@@ -33,6 +33,10 @@ paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
 median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
 See the [JIT design and status](docs/jit-design.md).
 
+Version 0.1.28 makes Speedometer 3.1 21.8 % faster (every TodoMVC suite
+1.08–1.86×): the blur of box shadows is cached instead of being recomputed on
+every repaint ([measurement](docs/benchmarks/speedometer-2026-11-18-shadow-cache.md)).
+
 Version 0.1.27 makes Speedometer 3.1 another 2.0 % faster: frames and canvases
 shown at their own size are copied directly when composited instead of being
 resampled pixel by pixel
