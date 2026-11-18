@@ -141,7 +141,9 @@ pub(super) fn requests(b: &LayoutBox) -> (bool,bool) {
     if b.wm_wrapper {
         return b.children.first().map_or((false,false),|inner| {let (columns,rows)=requests(inner);(rows,columns)});
     }
-    if b.formatting!=Formatting::Grid {return (false,false);}
+    // Layout and paint containment make the grid independent (CSS Contain
+    // §3.2/§3.4): a contained `subgrid` behaves as a standalone grid.
+    if b.formatting!=Formatting::Grid||b.style.contain_layout||b.style.contain_paint {return (false,false);}
     let requested=|list:&[TrackListItem]| matches!(list.first(),Some(TrackListItem::Subgrid{..}));
     (requested(&b.style.grid_template_columns),requested(&b.style.grid_template_rows))
 }
