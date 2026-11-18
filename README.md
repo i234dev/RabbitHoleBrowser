@@ -32,12 +32,13 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
-Versions 0.1.23–0.1.28 made Speedometer 3.1 much faster, each step measured
+Versions 0.1.23–0.1.30 made Speedometer 3.1 much faster, each step measured
 on the complete suite with paired, rotated runs of identically built binaries
 (the records give every pair, the per-suite results and the conditions):
 
 | Version | Change | Speedometer 3.1 (median paired ratio) |
 |---|---|---:|
+| 0.1.30 | Frames repainted by damage instead of whole ([record](docs/benchmarks/speedometer-2026-11-18-frame-damage.md)) | 1.023× |
 | 0.1.28 | Blurred box shadows cached instead of recomputed on every repaint ([record](docs/benchmarks/speedometer-2026-11-18-shadow-cache.md)) | 1.218× (TodoMVC 1.08–1.86×) |
 | 0.1.27 | Frames and canvases at their own size copied directly when composited ([record](docs/benchmarks/speedometer-2026-11-18-image-copy.md)) | 1.020× |
 | 0.1.26 | Layout fingerprints memoized per box ([record](docs/benchmarks/speedometer-2026-11-18-fingerprint-memo.md)) | 1.028× |

@@ -1,0 +1,122 @@
+{
+  "date": "2026-11-18",
+  "change": "Frames painted at device scale 1 keep their canvas and repaint only the regions whose display items changed",
+  "base_source": "ab457586c36090a94a0ab263c4e1fc3993c9318e (0.1.29)",
+  "candidate": "base + this change (released in 0.1.30)",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fe), 20 default suites, iterationCount=3, served locally",
+  "binaries": {
+    "build": "release + line tables + frame pointers, all functions and branch targets aligned to 64 bytes (same flags for both)",
+    "base_sha256": "30a501760f1098005fe5868c0d7898c09252b6b05145f25bf185c591b56e31a2",
+    "candidate_sha256": "aa96555a00797a75d6a0240f21e7946201766ab26b98e4e5990cdda34df90e5f",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one run at a time",
+    "order": "8 rounds, rotated",
+    "jit": "on (default)",
+    "utc_interval": "2026-11-18 13:11-13:25"
+  },
+  "pairs": [
+    {
+      "round": 1,
+      "base_geomean_ms": 332.14,
+      "candidate_geomean_ms": 324.97,
+      "base_score": 3.01,
+      "candidate_score": 3.08,
+      "ratio_base_over_candidate": 1.0220635750992397
+    },
+    {
+      "round": 2,
+      "base_geomean_ms": 331.83,
+      "candidate_geomean_ms": 324.34,
+      "base_score": 3.01,
+      "candidate_score": 3.08,
+      "ratio_base_over_candidate": 1.023093050502559
+    },
+    {
+      "round": 3,
+      "base_geomean_ms": 334.1,
+      "candidate_geomean_ms": 324.94,
+      "base_score": 3.0,
+      "candidate_score": 3.08,
+      "ratio_base_over_candidate": 1.028189819659014
+    },
+    {
+      "round": 4,
+      "base_geomean_ms": 333.37,
+      "candidate_geomean_ms": 326.66,
+      "base_score": 3.0,
+      "candidate_score": 3.06,
+      "ratio_base_over_candidate": 1.020541235535419
+    },
+    {
+      "round": 5,
+      "base_geomean_ms": 333.03,
+      "candidate_geomean_ms": 320.25,
+      "base_score": 3.01,
+      "candidate_score": 3.12,
+      "ratio_base_over_candidate": 1.0399063231850116
+    },
+    {
+      "round": 6,
+      "base_geomean_ms": 328.54,
+      "candidate_geomean_ms": 325.91,
+      "base_score": 3.05,
+      "candidate_score": 3.07,
+      "ratio_base_over_candidate": 1.0080697124973153
+    },
+    {
+      "round": 7,
+      "base_geomean_ms": 330.69,
+      "candidate_geomean_ms": 323.08,
+      "base_score": 3.03,
+      "candidate_score": 3.1,
+      "ratio_base_over_candidate": 1.0235545375758326
+    },
+    {
+      "round": 8,
+      "base_geomean_ms": 331.37,
+      "candidate_geomean_ms": 319.83,
+      "base_score": 3.02,
+      "candidate_score": 3.13,
+      "ratio_base_over_candidate": 1.0360816683863303
+    }
+  ],
+  "summary": {
+    "median_ratio": 1.0233237940391957,
+    "min": 1.0080697124973153,
+    "max": 1.0399063231850116,
+    "rounds_faster": 8,
+    "rounds": 8,
+    "mean_score_base": 3.01625,
+    "mean_score_candidate": 3.09
+  },
+  "per_suite_median_ratio": {
+    "Charts-chartjs": 1.0084,
+    "Charts-observable-plot": 1.0524,
+    "Editor-CodeMirror": 1.0303,
+    "Editor-TipTap": 1.0076,
+    "NewsSite-Next": 1.0445,
+    "NewsSite-Nuxt": 1.0512,
+    "Perf-Dashboard": 1.0075,
+    "React-Stockcharts-SVG": 1.0117,
+    "TodoMVC-Angular-Complex-DOM": 1.0179,
+    "TodoMVC-Backbone": 1.0197,
+    "TodoMVC-JavaScript-ES5": 0.9767,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 1.0114,
+    "TodoMVC-Lit-Complex-DOM": 1.0107,
+    "TodoMVC-Preact-Complex-DOM": 1.0624,
+    "TodoMVC-React-Complex-DOM": 1.0249,
+    "TodoMVC-React-Redux": 1.0224,
+    "TodoMVC-Svelte-Complex-DOM": 1.0603,
+    "TodoMVC-Vue": 1.0052,
+    "TodoMVC-WebComponents": 1.0206,
+    "TodoMVC-jQuery": 1.0255
+  },
+  "correctness": "Test damage_repainted_frames_match_full_paints compares each damage repaint of a frame with a full paint (identical); engine and layout tests 526/526.",
+  "limitations": [
+    "One Linux x64 host; harness scores, not comparable with other browsers.",
+    "Frames at a device scale other than 1 (HiDPI) are still painted whole."
+  ]
+}
