@@ -534,7 +534,7 @@ impl<'a> Layouter<'a> {
                 cacheable
                     && c.inner_h != inner_cb.height
                     && c.alt_h != Some(inner_cb.height)
-                    && c.grid_publication == self.grid_publication.enabled()
+                    && (c.grid_publication || !self.grid_publication.enabled())
                     && c.inner_w == inner_cb.width
                     && c.top_collapsible == top_collapsible
                     && c.bottom_collapsible == bottom_collapsible
@@ -543,7 +543,9 @@ impl<'a> Layouter<'a> {
             .map(|c| (c.inner_h, crate::incremental::contents_fingerprint(b, prev_origin.0, prev_origin.1), c.content_h, c.collapsed_bottom_margin, c.bottom_margins, c.float_extent, c.escaped.clone()));
         let reuse = prev_cache.filter(|c| {
             cacheable
-                && c.grid_publication == self.grid_publication.enabled()
+                // A measuring layout (grid tracks not published) can use one
+                // that also published them: the geometry is the same.
+                && (c.grid_publication || !self.grid_publication.enabled())
                 && c.inner_w == inner_cb.width
                 && (c.inner_h == inner_cb.height || c.alt_h == Some(inner_cb.height))
                 && c.top_collapsible == top_collapsible
