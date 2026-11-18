@@ -55,7 +55,7 @@ pub const HOME_HTML: &str = concat!(
 "#,
     include_str!(concat!(env!("OUT_DIR"), "/home-metrics.html")),
     r#"
-  <p class="measurement-note">JavaScript JIT remains off by default. Experimental WebGL and Service Worker features have focused tests; they are not full conformance scores.</p>
+  <p class="measurement-note">The JavaScript JIT is on by default on x86-64 (Windows and Linux); macOS on Apple silicon uses the interpreter. Experimental WebGL and Service Worker features have focused tests; they are not full conformance scores.</p>
   <h2>Try a few pages</h2>
   <ul class="links">
     <li><a href="https://example.com/">example.com</a> &ndash; the classic</li>
@@ -70,7 +70,7 @@ pub const HOME_HTML: &str = concat!(
   <div class="cards">
     <div class="card"><h3>HTML</h3><p>A WHATWG-style tokenizer and a forgiving tree builder with implied tags and scope handling.</p></div>
     <div class="card"><h3>CSS</h3><p>Tokenizer, selectors with specificity, media queries, cascade and inheritance.</p></div>
-    <div class="card"><h3>Layout &amp; paint</h3><p>Block, inline, float, flex and table layout, painted by a software rasterizer with anti-aliased text.</p></div>
+    <div class="card"><h3>Layout &amp; paint</h3><p>Block, inline, float, flex, grid and table layout, painted by a software rasterizer with anti-aliased text.</p></div>
   </div>
 
   <h2>Keyboard</h2>

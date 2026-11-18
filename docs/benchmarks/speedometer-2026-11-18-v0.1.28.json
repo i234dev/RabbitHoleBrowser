@@ -1,0 +1,181 @@
+{
+  "date": "2026-11-18",
+  "version": "0.1.28",
+  "source": "fb184d8866193af5d4a512d54e9fab5af84201b1",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fe), all 20 default suites, iterationCount=3, served locally",
+  "binary": {
+    "example": "shot",
+    "profile": "release (thin LTO, stripped), features rabbithole-engine/jit",
+    "sha256": "9be66c0899d48ef2c277d6c4810751b2ac80f1399d4e623e56f676e31c07732c",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one run at a time",
+    "modes": "RABBITHOLE_JIT=on (default) and off, threshold 1000, normal GC",
+    "order": "8 blocks, on/off order alternated per block",
+    "utc_interval": "2026-11-18 07:00-07:14"
+  },
+  "summary": {
+    "mean_score_on": 3.141,
+    "mean_score_off": 3.103,
+    "median_ratio_off_over_on": 1.012578069872658,
+    "min": 0.9986335828079873,
+    "max": 1.0271105447594777,
+    "blocks_faster_with_jit": 7,
+    "blocks": 8
+  },
+  "pairs": [
+    {
+      "block": 1,
+      "off_score": 3.1,
+      "on_score": 3.19,
+      "off_geomean_ms": 322.41,
+      "on_geomean_ms": 313.9,
+      "ratio_off_over_on": 1.0271105447594777
+    },
+    {
+      "block": 2,
+      "off_score": 3.09,
+      "on_score": 3.14,
+      "off_geomean_ms": 323.58,
+      "on_geomean_ms": 318.16,
+      "ratio_off_over_on": 1.017035453859693
+    },
+    {
+      "block": 3,
+      "off_score": 3.11,
+      "on_score": 3.13,
+      "off_geomean_ms": 321.38,
+      "on_geomean_ms": 319.7,
+      "ratio_off_over_on": 1.0052549264935877
+    },
+    {
+      "block": 4,
+      "off_score": 3.11,
+      "on_score": 3.11,
+      "off_geomean_ms": 321.57,
+      "on_geomean_ms": 322.01,
+      "ratio_off_over_on": 0.9986335828079873
+    },
+    {
+      "block": 5,
+      "off_score": 3.1,
+      "on_score": 3.12,
+      "off_geomean_ms": 322.77,
+      "on_geomean_ms": 320.17,
+      "ratio_off_over_on": 1.008120685885623
+    },
+    {
+      "block": 6,
+      "off_score": 3.11,
+      "on_score": 3.12,
+      "off_geomean_ms": 321.63,
+      "on_geomean_ms": 320.6,
+      "ratio_off_over_on": 1.0032127261384902
+    },
+    {
+      "block": 7,
+      "off_score": 3.1,
+      "on_score": 3.15,
+      "off_geomean_ms": 323.07,
+      "on_geomean_ms": 317.14,
+      "ratio_off_over_on": 1.0186983666519518
+    },
+    {
+      "block": 8,
+      "off_score": 3.1,
+      "on_score": 3.17,
+      "off_geomean_ms": 322.41,
+      "on_geomean_ms": 315.56,
+      "ratio_off_over_on": 1.0217074407402713
+    }
+  ],
+  "per_suite_median_ms": {
+    "Charts-chartjs": {
+      "on_ms": 1821.1,
+      "off_ms": 1918.4
+    },
+    "Charts-observable-plot": {
+      "on_ms": 395.2,
+      "off_ms": 423.5
+    },
+    "Editor-CodeMirror": {
+      "on_ms": 125.0,
+      "off_ms": 124.2
+    },
+    "Editor-TipTap": {
+      "on_ms": 319.5,
+      "off_ms": 313.6
+    },
+    "NewsSite-Next": {
+      "on_ms": 908.8,
+      "off_ms": 910.1
+    },
+    "NewsSite-Nuxt": {
+      "on_ms": 851.3,
+      "off_ms": 845.8
+    },
+    "Perf-Dashboard": {
+      "on_ms": 702.1,
+      "off_ms": 757.9
+    },
+    "React-Stockcharts-SVG": {
+      "on_ms": 806.8,
+      "off_ms": 834.4
+    },
+    "TodoMVC-Angular-Complex-DOM": {
+      "on_ms": 553.7,
+      "off_ms": 561.1
+    },
+    "TodoMVC-Backbone": {
+      "on_ms": 146.9,
+      "off_ms": 142.9
+    },
+    "TodoMVC-JavaScript-ES5": {
+      "on_ms": 241.9,
+      "off_ms": 241.7
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": {
+      "on_ms": 320.1,
+      "off_ms": 318.7
+    },
+    "TodoMVC-Lit-Complex-DOM": {
+      "on_ms": 122.0,
+      "off_ms": 121.1
+    },
+    "TodoMVC-Preact-Complex-DOM": {
+      "on_ms": 93.5,
+      "off_ms": 92.1
+    },
+    "TodoMVC-React-Complex-DOM": {
+      "on_ms": 462.6,
+      "off_ms": 475.7
+    },
+    "TodoMVC-React-Redux": {
+      "on_ms": 504.9,
+      "off_ms": 523.1
+    },
+    "TodoMVC-Svelte-Complex-DOM": {
+      "on_ms": 73.1,
+      "off_ms": 72.7
+    },
+    "TodoMVC-Vue": {
+      "on_ms": 141.8,
+      "off_ms": 141.0
+    },
+    "TodoMVC-WebComponents": {
+      "on_ms": 69.3,
+      "off_ms": 69.3
+    },
+    "TodoMVC-jQuery": {
+      "on_ms": 887.5,
+      "off_ms": 885.1
+    }
+  },
+  "previous_record": "docs/benchmarks/performance-2026-11-15-v0.1.18.md (0.1.18: JIT off 2.082, on 2.102)",
+  "limitations": [
+    "One Linux x64 host; headless harness scores, not comparable with other browsers.",
+    "Not run on Windows or macOS."
+  ]
+}

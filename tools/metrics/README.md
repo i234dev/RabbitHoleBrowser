@@ -24,15 +24,13 @@ changing the page or its generator.
 The build uses Rust's standard library and embeds only the resulting table,
 not the complete baseline files. It requires no Python or network requests.
 
-The latest accepted performance comparison is the [0.1.18 record](../../docs/benchmarks/performance-2026-11-15-v0.1.18.md)
-on source `dae023e`, measured on 2026-11-15. It reports the eight-run mean
-Speedometer score in each JIT mode separately from the median of eight paired
-ratios. Five pairs improved; the consistency criterion required six, so the JIT
-stayed off by default in 0.1.18–0.1.20. The default changed in 0.1.21 after a
-ten-pair run on source `17d662a` on 2026-11-17 (10/10 faster, median 1.020×;
-[record](../../docs/benchmarks/speedometer-2026-11-17-jit-default.md)). All 27 microbenchmark cases are
-reported individually, including `array_map` at 0.990x; no overall micro speedup
-is aggregated. The directed CSS row is only 33 selected controls, run on bootstrap
+The Speedometer row comes from the [0.1.28 record](../../docs/benchmarks/speedometer-2026-11-18-v0.1.28.md)
+on source `fb184d8`, measured on 2026-11-18: eight runs per JIT mode of the
+release build, mean scores 3.141 with the JIT (the default since 0.1.21) and
+3.103 without. The earlier [0.1.18 record](../../docs/benchmarks/performance-2026-11-15-v0.1.18.md)
+(2.102 / 2.082) stays as measured. The microbenchmark row keeps its 0.1.18
+context: all 27 cases are reported individually, including `array_map` at
+0.990x; no overall micro speedup is aggregated. The directed CSS row is only 33 selected controls, run on bootstrap
 source `37cb93d` with CSS code identical to final 0.1.18; it is not a new global
 CSS/WPT result. These rows retain their measured 0.1.18 context in later builds.
 

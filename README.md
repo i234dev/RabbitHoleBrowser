@@ -25,40 +25,25 @@ Reddit (infinite scroll), BBC, Hacker News, the Svelte playground (WebAssembly
 bundler in a Worker) and Speedometer 3.1 end to end. Everything below is our own
 code unless noted in [Dependencies](#dependencies).
 
-Windows x64 now supports explicitly enabling the JavaScript JIT with
-`rabbithole.exe --jit=on`. Native mappings register unwind metadata and remain
-alive through nested callbacks. From 0.1.21 the JIT is **on by default** on
-x86-64 (`--jit=off` or `RABBITHOLE_JIT=off` selects the interpreter): in a
+The JavaScript JIT is **on by default** on x86-64 (Windows and Linux) since
+0.1.21; `--jit=off` or `RABBITHOLE_JIT=off` selects the interpreter. In a
 paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
 median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
-See the [JIT design and status](docs/jit-design.md).
+macOS on Apple silicon has no native backend yet and uses the interpreter. See
+the [JIT design and status](docs/jit-design.md).
 
-Version 0.1.28 makes Speedometer 3.1 21.8 % faster (every TodoMVC suite
-1.08–1.86×): the blur of box shadows is cached instead of being recomputed on
-every repaint ([measurement](docs/benchmarks/speedometer-2026-11-18-shadow-cache.md)).
+Versions 0.1.23–0.1.28 made Speedometer 3.1 much faster, each step measured
+on the complete suite with paired, rotated runs of identically built binaries
+(the records give every pair, the per-suite results and the conditions):
 
-Version 0.1.27 makes Speedometer 3.1 another 2.0 % faster: frames and canvases
-shown at their own size are copied directly when composited instead of being
-resampled pixel by pixel
-([measurement](docs/benchmarks/speedometer-2026-11-18-image-copy.md)).
-
-Version 0.1.26 makes Speedometer 3.1 another 2.8 % faster (NewsSite 1.26×):
-layout fingerprints are memoized per box
-([measurement](docs/benchmarks/speedometer-2026-11-18-fingerprint-memo.md)).
-
-Version 0.1.25 makes Speedometer 3.1 another 3.9 % faster (NewsSite 1.42×)
-by hashing layout fingerprints with a fast hasher
-([measurement](docs/benchmarks/speedometer-2026-11-18-fingerprint-hash.md)).
-
-Version 0.1.24 makes Speedometer 3.1 another 6.8 % faster (NewsSite 1.56×,
-Editor-TipTap 1.15×): grid items measured before their final layout reuse
-that layout from the cache instead of being laid out again
-([measurement](docs/benchmarks/speedometer-2026-11-18-grid-measure-cache.md)).
-
-Version 0.1.23 makes Speedometer 3.1 5.6 % faster overall and NewsSite
-1.7× faster: flex items measured and then stretched are no longer laid out
-twice on every relayout when their contents do not depend on the height
-([measurement](docs/benchmarks/speedometer-2026-11-18-layout-cache.md)).
+| Version | Change | Speedometer 3.1 (median paired ratio) |
+|---|---|---:|
+| 0.1.28 | Blurred box shadows cached instead of recomputed on every repaint ([record](docs/benchmarks/speedometer-2026-11-18-shadow-cache.md)) | 1.218× (TodoMVC 1.08–1.86×) |
+| 0.1.27 | Frames and canvases at their own size copied directly when composited ([record](docs/benchmarks/speedometer-2026-11-18-image-copy.md)) | 1.020× |
+| 0.1.26 | Layout fingerprints memoized per box ([record](docs/benchmarks/speedometer-2026-11-18-fingerprint-memo.md)) | 1.028× |
+| 0.1.25 | Fast hashing of layout fingerprints ([record](docs/benchmarks/speedometer-2026-11-18-fingerprint-hash.md)) | 1.039× |
+| 0.1.24 | Measured grid items reuse their published layout ([record](docs/benchmarks/speedometer-2026-11-18-grid-measure-cache.md)) | 1.068× |
+| 0.1.23 | Flex items measured and stretched served by the layout cache ([record](docs/benchmarks/speedometer-2026-11-18-layout-cache.md)) | 1.056× (NewsSite 1.7×) |
 
 Version 0.1.22 lowers the agent interface's token cost found by the
 RH-AGENT-002 battery: `find` shows the card or table row around a short match
@@ -100,7 +85,7 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 | Acid2 | **0 pixels** different from the reference | |
 | Acid3 | 96 / 100 | |
 | Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 in both modes | functional DOM/input checks on 2026-11-14 (Europe/Madrid), v0.1.11 source `b88c8ff`, WSL2/Linux x86-64; JIT off/on with threshold 0 and incremental-GC stress, profile ci; [measurement](docs/benchmarks/frameworks-2026-11-14-v0.1.11.json), not a timing benchmark |
-| Speedometer 3.1 | **JIT off 2.082; on 2.102** (mean scores) | 2026-11-15 (Europe/Madrid), v0.1.18 source `dae023e`; 8 runs/mode, 20 workloads × 3 iterations, headless release/Rust 1.99.1, i7-12700H/WSL2 x86-64/CPU 0. Paired on/off median 1.0064×; 5/8 improve, 6 required: no consistent global gain. [Record and scope](docs/benchmarks/performance-2026-11-15-v0.1.18.md) |
+| Speedometer 3.1 | **3.141** with the JIT (default); 3.103 without (mean scores) | 2026-11-18, v0.1.28 source `fb184d8`; 8 runs/mode, 20 workloads × 3 iterations, headless release/Rust 1.99.1, i7-12700H/WSL2 x86-64/CPU 0; on 0.1.18 the same setup gave 2.102 / 2.082. [Record and scope](docs/benchmarks/speedometer-2026-11-18-v0.1.28.md) |
 | JavaScript microbenchmarks | 27 cases, 432 observations | 2026-11-15, same v0.1.18 source and release/CPU conditions; individual medians/ranges, no aggregate speedup. `array_map` is **0.990×**. [All cases](docs/benchmarks/performance-2026-11-15-v0.1.18.md#individual-javascript-microbenchmarks) |
 | Directed CSS pixel controls | 33 / 33 | 2026-11-15, bootstrap source `37cb93d`, profile ci; CSS code identical to final 0.1.18. 31 WPT cases and 2 local controls; no fresh global CSS/WPT percentage. [Scope](docs/benchmarks/performance-2026-11-15-v0.1.18.md#directed-css-controls) |
 
@@ -218,12 +203,12 @@ reports agent-task results supplied by the project owner for v0.1.15 on
 - Complex sign-in screens, including Google Account pages, still have layout
   and interaction gaps; a complete authenticated sign-in has not been validated.
 - No Temporal API; Intl is partial.
-- The JIT gains about 2 % on Speedometer as a whole: most of its time is in
-  style, layout, memory management and painting, not in the JS interpreter.
+- The JIT gains about 2 % on Speedometer as a whole: most browser time is in
+  layout, memory management, painting and DOM work, not in the JS interpreter.
   macOS on Apple silicon has no native JIT backend.
 - A same-machine Speedometer comparison with Chrome has not been measured.
-  The recorded scores cover the documented headless, eight-pair setup with
-  three iterations per run.
+  The recorded scores cover the documented headless setup (eight runs per
+  mode, three iterations per run).
 - H.264/HE-AAC video needs Windows (Media Foundation).
 
 ## Building
@@ -394,8 +379,8 @@ See [the development plan](docs/ROADMAP.md) for the next phases and their
 validation criteria, and [the JIT record](docs/jit-design.md) for implementation
 details and measurements.
 
-- JavaScript speed: make the JIT a net win and turn it on; cheaper calls,
-  closures and generators.
+- JavaScript speed: cheaper calls (native call paths in the JIT), closures,
+  generators and allocation; an ARM64 JIT backend.
 - WPT DOM and CSS pass rates up (CSSOM view, `document.write`, speculative
   parsing, text, masking); Intl and Temporal later.
 - Advance the experimental WebGL1/WebGL2 subsets with pixel regressions,
@@ -403,7 +388,7 @@ details and measurements.
 - Extend Service Worker interception beyond initially controlled GET navigation
   and JavaScript fetches; add persistent storage and restart coverage.
   Temporal and full Intl later.
-- macOS and Linux packaging; JIT enabled on Windows after real-hardware testing.
+- macOS and Linux packaging.
 
 ## License
 
