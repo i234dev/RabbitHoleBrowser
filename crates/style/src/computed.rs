@@ -1219,6 +1219,9 @@ pub struct ComputedStyle {
     pub backdrop_filters: Vec<FilterOp>,
     /// `clip-path` (`None` = `none`).
     pub clip_path: Option<std::sync::Arc<ClipPath>>,
+    /// Names of the properties declared `!important` for the element
+    /// (animations do not override them); `None` when there are none.
+    pub important: Option<std::rc::Rc<Vec<String>>>,
     pub clip_overflow_text: bool,
 
     // ---- text
@@ -1448,6 +1451,7 @@ impl ComputedStyle {
             filters: Vec::new(),
             backdrop_filters: Vec::new(),
             clip_path: None,
+            important: None,
             clip_overflow_text: false,
             text_overflow: TextOverflow::Clip,
             word_break: WordBreak::Normal,

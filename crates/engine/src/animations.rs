@@ -625,6 +625,10 @@ impl Engine {
                 let s = s.clone();
                 let base = page.anim.base.get(&node).cloned().unwrap_or(s);
                 self.sync_animations(page, node, None, &base, now);
+                // The overlay is applied over the base style.
+                if page.anim.has_effects(node) {
+                    page.anim.base.entry(node).or_insert(base);
+                }
                 touched.push(node);
             }
         }
@@ -812,6 +816,10 @@ impl Engine {
         }
         for a in page.anim.animations.iter().filter(|a| a.node == node) {
             for (p, v) in animation_values(a, &base, now) {
+                // `!important` declarations override animations.
+                if base.important.as_ref().is_some_and(|names| names.iter().any(|n| p.covered_by(n))) {
+                    continue;
+                }
                 set(&mut style, p, &v);
             }
         }
