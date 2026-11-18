@@ -1,0 +1,215 @@
+{
+  "date": "2026-11-18",
+  "change": "Custom property map kept shared when an element redeclares the value it inherits; length resolution marked #[inline]",
+  "base_source": "6450efd4b15af103db3f9fe8e2112318e9f45030 (0.1.31)",
+  "candidate": "base + these changes (released in 0.1.32)",
+  "page_load": {
+    "benchmark": "tools/bench/page_load.py, 32 Speedometer 3.1 workload pages, 3 rounds (96 paired loads), fresh shot process per load",
+    "summary": {
+      "wall_ms": {
+        "base_total_ms": 29570,
+        "candidate_total_ms": 25134,
+        "ratio": 1.177
+      },
+      "build_page": {
+        "base_total_ms": 16215,
+        "candidate_total_ms": 15002,
+        "ratio": 1.081
+      },
+      "layout": {
+        "base_total_ms": 23509,
+        "candidate_total_ms": 20214,
+        "ratio": 1.163
+      },
+      "paint": {
+        "base_total_ms": 2624,
+        "candidate_total_ms": 2247,
+        "ratio": 1.168
+      },
+      "loads_faster": 77,
+      "loads": 96
+    },
+    "per_page": {
+      "todomvc/vanilla-examples/javascript-es5/dist/index.html": {
+        "base_median_ms": 136,
+        "candidate_median_ms": 134
+      },
+      "todomvc/vanilla-examples/javascript-es5-complex/dist/index.html": {
+        "base_median_ms": 476,
+        "candidate_median_ms": 377
+      },
+      "todomvc/vanilla-examples/javascript-es6-webpack/dist/index.html": {
+        "base_median_ms": 132,
+        "candidate_median_ms": 128
+      },
+      "todomvc/vanilla-examples/javascript-es6-webpack-complex/dist/index.html": {
+        "base_median_ms": 479,
+        "candidate_median_ms": 368
+      },
+      "todomvc/vanilla-examples/javascript-web-components/dist/index.html": {
+        "base_median_ms": 160,
+        "candidate_median_ms": 160
+      },
+      "todomvc/vanilla-examples/javascript-web-components-complex/dist/index.html": {
+        "base_median_ms": 498,
+        "candidate_median_ms": 401
+      },
+      "todomvc/architecture-examples/react/dist/index.html#/home": {
+        "base_median_ms": 147,
+        "candidate_median_ms": 146
+      },
+      "todomvc/architecture-examples/react-complex/dist/index.html#/home": {
+        "base_median_ms": 487,
+        "candidate_median_ms": 388
+      },
+      "todomvc/architecture-examples/react-redux/dist/index.html": {
+        "base_median_ms": 153,
+        "candidate_median_ms": 152
+      },
+      "todomvc/architecture-examples/react-redux-complex/dist/index.html": {
+        "base_median_ms": 482,
+        "candidate_median_ms": 391
+      },
+      "todomvc/architecture-examples/backbone/dist/index.html": {
+        "base_median_ms": 153,
+        "candidate_median_ms": 152
+      },
+      "todomvc/architecture-examples/backbone-complex/dist/index.html": {
+        "base_median_ms": 849,
+        "candidate_median_ms": 605
+      },
+      "todomvc/architecture-examples/angular/dist/index.html": {
+        "base_median_ms": 177,
+        "candidate_median_ms": 176
+      },
+      "todomvc/architecture-examples/angular-complex/dist/index.html": {
+        "base_median_ms": 521,
+        "candidate_median_ms": 420
+      },
+      "todomvc/architecture-examples/vue/dist/index.html": {
+        "base_median_ms": 150,
+        "candidate_median_ms": 149
+      },
+      "todomvc/architecture-examples/vue-complex/dist/index.html": {
+        "base_median_ms": 485,
+        "candidate_median_ms": 387
+      },
+      "todomvc/architecture-examples/jquery/dist/index.html": {
+        "base_median_ms": 163,
+        "candidate_median_ms": 161
+      },
+      "todomvc/architecture-examples/jquery-complex/dist/index.html": {
+        "base_median_ms": 855,
+        "candidate_median_ms": 626
+      },
+      "todomvc/architecture-examples/preact/dist/index.html#/home": {
+        "base_median_ms": 128,
+        "candidate_median_ms": 127
+      },
+      "todomvc/architecture-examples/preact-complex/dist/index.html#/home": {
+        "base_median_ms": 462,
+        "candidate_median_ms": 367
+      },
+      "todomvc/architecture-examples/svelte/dist/index.html": {
+        "base_median_ms": 128,
+        "candidate_median_ms": 128
+      },
+      "todomvc/architecture-examples/svelte-complex/dist/index.html": {
+        "base_median_ms": 463,
+        "candidate_median_ms": 363
+      },
+      "todomvc/architecture-examples/lit/dist/index.html": {
+        "base_median_ms": 130,
+        "candidate_median_ms": 130
+      },
+      "todomvc/architecture-examples/lit-complex/dist/index.html": {
+        "base_median_ms": 468,
+        "candidate_median_ms": 382
+      },
+      "newssite/news-next/dist/index.html#/home": {
+        "base_median_ms": 333,
+        "candidate_median_ms": 334
+      },
+      "newssite/news-nuxt/dist/index.html": {
+        "base_median_ms": 381,
+        "candidate_median_ms": 383
+      },
+      "editors/dist/codemirror.html": {
+        "base_median_ms": 158,
+        "candidate_median_ms": 156
+      },
+      "editors/dist/tiptap.html": {
+        "base_median_ms": 128,
+        "candidate_median_ms": 126
+      },
+      "charts/dist/observable-plot.html": {
+        "base_median_ms": 125,
+        "candidate_median_ms": 121
+      },
+      "charts/dist/chartjs.html": {
+        "base_median_ms": 123,
+        "candidate_median_ms": 124
+      },
+      "react-stockcharts/build/index.html?type=svg": {
+        "base_median_ms": 176,
+        "candidate_median_ms": 177
+      },
+      "perf.webkit.org/public/v3/#/charts/?since=1678991819934&paneList=((55-1974-null-null-(5-2.5-500)))": {
+        "base_median_ms": 136,
+        "candidate_median_ms": 133
+      }
+    },
+    "binaries": {
+      "base_sha256": "dd3bcdafb1d08a0dcb04011249d9fb90a2ed540dc33f7b7be08d0f1cc52af1f7",
+      "candidate_sha256": "6e3f9f2f0390e8301b98accb808bf941d6f89c4da3ca37009e6edfc36f69ad49",
+      "note": "candidate built from an equivalent tree (same source files)"
+    }
+  },
+  "speedometer": {
+    "benchmark": "Speedometer 3.1 complete, 8 rounds rotated, JIT on",
+    "median_ratio": 0.9919102508612597,
+    "min": 0.9728555917480999,
+    "max": 1.0085258152173915,
+    "rounds_faster": 2,
+    "rounds": 8,
+    "per_suite_median_ratio": {
+      "Charts-chartjs": 0.9906,
+      "Charts-observable-plot": 0.9976,
+      "Editor-CodeMirror": 0.9999,
+      "Editor-TipTap": 0.9766,
+      "NewsSite-Next": 0.9835,
+      "NewsSite-Nuxt": 0.9781,
+      "Perf-Dashboard": 1.0028,
+      "React-Stockcharts-SVG": 0.9931,
+      "TodoMVC-Angular-Complex-DOM": 1.0015,
+      "TodoMVC-Backbone": 0.9989,
+      "TodoMVC-JavaScript-ES5": 0.9925,
+      "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 1.0911,
+      "TodoMVC-Lit-Complex-DOM": 0.9594,
+      "TodoMVC-Preact-Complex-DOM": 0.9915,
+      "TodoMVC-React-Complex-DOM": 0.9989,
+      "TodoMVC-React-Redux": 1.0079,
+      "TodoMVC-Svelte-Complex-DOM": 0.9544,
+      "TodoMVC-Vue": 0.9883,
+      "TodoMVC-WebComponents": 0.9957,
+      "TodoMVC-jQuery": 0.9833
+    },
+    "binaries": {
+      "base_sha256": "dd3bcdafb1d08a0dcb04011249d9fb90a2ed540dc33f7b7be08d0f1cc52af1f7",
+      "candidate_sha256": "d0ddeb30648c442b03045effe5000c42e48e9b4e56dfc424f8fe3bd5dfc51c7d"
+    }
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one process at a time",
+    "build": "release + line tables + frame pointers, 64-byte alignment, same flags for both",
+    "utc_interval": "2026-11-18 15:57-16:25"
+  },
+  "notes": [
+    "Speedometer is 0.8 % slower (2 of 8 rounds faster); TodoMVC-Svelte-Complex-DOM and Editor-TipTap lose most. Page loads are 18 % faster. Published for the page-load gain; the Speedometer loss is recorded, not hidden.",
+    "A fast hasher for the same map was also measured: no further page-load gain and a larger Speedometer loss; not included."
+  ],
+  "limitations": [
+    "One Linux x64 host; local pages."
+  ]
+}
