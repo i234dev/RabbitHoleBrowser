@@ -69,7 +69,6 @@ pub const UNSUPPORTED_FEATURES: &[&str] = &[
     // Stage 3 proposals.
     "Intl.Era-monthcode",
     "Intl.Locale-info",
-    "Intl.NumberFormat-v3",
     "ShadowRealm",
     "decorators",
     "source-phase-imports",

@@ -374,7 +374,8 @@ fn partition(realm: &mut Realm, o: &DurationOptions, r: &DurationRecord) -> JsRe
     let negative = r.iter().any(|v| *v < 0.0);
     for (i, (_, nf_unit)) in UNITS.iter().enumerate() {
         let (style, display) = (&o.units[i].0, &o.units[i].1);
-        let mut value = Value::Number(r[i]);
+        // Duration record fields are mathematical values: no negative zero.
+        let mut value = Value::Number(if r[i] == 0.0 { 0.0 } else { r[i] });
         let mut nf: Vec<(&str, Value)> = Vec::new();
         let mut done = false;
         if (6..=8).contains(&i) && matches!(o.units[i + 1].0.as_str(), "numeric" | "fractional") {
@@ -412,8 +413,8 @@ fn partition(realm: &mut Realm, o: &DurationOptions, r: &DurationRecord) -> JsRe
                 realm.define_property(opts, k, v, ALL);
             }
             let nfo = read_nf_options(realm, Value::str(&o.locale.tag), Value::Object(opts))?;
-            let n = number_arg(realm, value)?;
-            let parts = format_number_parts(n, &nfo);
+            let x = number_format::to_intl_mv(realm, value)?;
+            let parts = number_format::format_value_parts(&x, &nfo);
             let mut list: Vec<Part> = if need_separator { result.pop().unwrap_or_default() } else { Vec::new() };
             if need_separator {
                 list.push(("literal", ":".to_string(), None));
