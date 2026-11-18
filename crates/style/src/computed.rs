@@ -1221,8 +1221,8 @@ pub struct ComputedStyle {
     pub backdrop_filters: Vec<FilterOp>,
     /// `clip-path` (`None` = `none`).
     pub clip_path: Option<std::sync::Arc<ClipPath>>,
-    /// Names of the properties declared `!important` for the element
-    /// (animations do not override them); `None` when there are none.
+    /// Names of the properties declared `!important` for an element with
+    /// animations (they do not override them); `None` otherwise.
     pub important: Option<std::rc::Rc<Vec<String>>>,
     /// Legacy `clip: rect(top, right, bottom, left)` offsets from the
     /// border box origin (`Length::Auto` = the box edge); `None` = `auto`.

@@ -730,12 +730,6 @@ fn apply_declarations(
     pseudo: bool,
 ) -> ComputedStyle {
     let mut style = ComputedStyle::inherit_from(parent);
-    // Properties declared `!important` win over animations (CSS Cascade 4
-    // §6.1): remembered for the animation overlay.
-    if local.iter().any(|m| m.rank >= Rank::AuthorImportant) {
-        let names: Vec<String> = local.iter().filter(|m| m.rank >= Rank::AuthorImportant).map(|m| m.decl.name.clone()).collect();
-        style.important = Some(Rc::new(names));
-    }
     style.author_widget_style = local.iter().any(|m| {
         !matches!(m.rank, Rank::UaNormal | Rank::UaImportant) && disables_native_appearance(&m.decl.name)
     });
@@ -886,6 +880,12 @@ fn apply_declarations(
     // positioned outline drawn over it.
     if in_flex_or_grid && style.z_index.is_some() && !matches!(style.position, Position::Absolute | Position::Fixed) {
         style.creates_stacking_context = true;
+    }
+    // Properties declared `!important` win over animations (CSS Cascade 4
+    // §6.1): remembered for the animation overlay of animated elements.
+    if !style.animations.is_empty() && local.iter().any(|m| m.rank >= Rank::AuthorImportant) {
+        let names: Vec<String> = local.iter().filter(|m| m.rank >= Rank::AuthorImportant).map(|m| m.decl.name.clone()).collect();
+        style.important = Some(Rc::new(names));
     }
     style
 }

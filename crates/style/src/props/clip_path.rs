@@ -65,7 +65,14 @@ pub fn parse_clip_rect(comps: &[&[Token]], ctx: &LengthContext) -> Option<Option
     if super::fn_name(c)? != "rect" {
         return None;
     }
-    let args: Vec<&[Token]> = inner_comps(c).into_iter().filter(|a| !matches!(a, [Token::Comma])).collect();
+    // Either all four offsets separated by commas or none of them.
+    let comps = inner_comps(c);
+    let groups = values::split_commas(&comps);
+    let args: Vec<&[Token]> = match groups.as_slice() {
+        [all] => all.clone(),
+        [_, _, _, _] if groups.iter().all(|g| g.len() == 1) => groups.iter().map(|g| g[0]).collect(),
+        _ => return None,
+    };
     let [t, r, b, l] = args.as_slice() else { return None };
     let one = |a: &[Token]| -> Option<Length> {
         if values::is_ident(a, "auto") {

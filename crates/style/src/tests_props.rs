@@ -762,3 +762,14 @@ fn basic_shape_geometry() {
     assert_eq!(p[1], rabbithole_gfx::PathSeg::LineTo(rabbithole_gfx::Point::new(120.0, 30.0)));
     assert_eq!(p[2], rabbithole_gfx::PathSeg::LineTo(rabbithole_gfx::Point::new(120.0, 120.0)));
 }
+
+#[test]
+fn legacy_clip_rect() {
+    let px = Length::Px;
+    assert_eq!(one("clip: rect(1px, auto, 3px, 4px)").clip_rect, Some([px(1.0), Length::Auto, px(3.0), px(4.0)]));
+    assert_eq!(one("clip: rect(1px auto 3px -4px)").clip_rect, Some([px(1.0), Length::Auto, px(3.0), px(-4.0)]));
+    assert_eq!(one("clip: auto").clip_rect, None);
+    // Mixed separators and percentages are invalid.
+    assert_eq!(one("clip: rect(1px 2px, 3px, 4px)").clip_rect, None);
+    assert_eq!(one("clip: rect(1px, 2px, 3px, 10%)").clip_rect, None);
+}
