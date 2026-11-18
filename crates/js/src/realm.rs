@@ -841,6 +841,20 @@ impl Realm {
         let id = self.alloc(Object::new(Some(proto), ObjectKind::Error));
         self.define_property(id, "message", Value::str(message), HIDDEN);
         let stack = self.build_stack_string(kind, message);
+        if error_log_enabled() {
+            let snippet = self.frames.last().and_then(|f| {
+                let code = f.code();
+                let src = code.source.as_ref()?;
+                let pos = code.position_at(f.pc.saturating_sub(1));
+                let line = src.lines().nth(pos.line.saturating_sub(1) as usize)?;
+                let chars: Vec<char> = line.chars().collect();
+                let c = (pos.column as usize).min(chars.len());
+                let a = c.saturating_sub(160);
+                let b = (c + 80).min(chars.len());
+                Some(format!("{}<<HERE>>{}", chars[a..c].iter().collect::<String>(), chars[c..b].iter().collect::<String>()))
+            });
+            log_engine_error(&stack, snippet.as_deref());
+        }
         self.define_property(id, "stack", Value::String(JsStr::new(&stack)), HIDDEN);
         Value::Object(id)
     }
@@ -1525,5 +1539,36 @@ mod console_watchdog_tests {
         assert_eq!(remaining_cpu_allowance(deadline, now, Duration::from_millis(150)), Duration::from_millis(50));
         assert_eq!(remaining_cpu_allowance(now, deadline, Duration::from_millis(10)), Duration::from_millis(110));
         assert_eq!(remaining_cpu_allowance(deadline, now, Duration::MAX), Duration::ZERO);
+    }
+}
+
+/// `RH_JS_ERRORS=<file>`: append every error the engine raises (including
+/// those the page catches and never reports to the console) with its stack.
+/// A diagnostic for sites that swallow their own startup failures.
+static ERROR_LOG: std::sync::OnceLock<Option<std::sync::Mutex<(std::fs::File, usize)>>> = std::sync::OnceLock::new();
+
+fn error_log() -> Option<&'static std::sync::Mutex<(std::fs::File, usize)>> {
+    ERROR_LOG
+        .get_or_init(|| {
+            let path = std::env::var_os("RH_JS_ERRORS")?;
+            std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(|f| std::sync::Mutex::new((f, 0)))
+        })
+        .as_ref()
+}
+
+fn error_log_enabled() -> bool {
+    error_log().is_some()
+}
+
+fn log_engine_error(stack: &str, snippet: Option<&str>) {
+    use std::io::Write;
+    let Some(log) = error_log() else {
+        return;
+    };
+    if let Ok(mut g) = log.lock() {
+        if g.1 < 5000 {
+            g.1 += 1;
+            let _ = writeln!(g.0, "{}\n  code: {}\n", stack, snippet.unwrap_or("-"));
+        }
     }
 }
