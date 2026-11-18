@@ -238,14 +238,6 @@ fn opt_str(realm: &mut Realm, opts: Option<ObjectId>, name: &str) -> JsResult<Op
     Ok(Some(realm.to_rust_string(v)?))
 }
 
-fn opt_bool(realm: &mut Realm, opts: Option<ObjectId>, name: &str) -> JsResult<Option<bool>> {
-    let Some(o) = opts else { return Ok(None) };
-    let v = realm.get_str(Value::Object(o), name)?;
-    if v.is_undefined() {
-        return Ok(None);
-    }
-    Ok(Some(v.truthy()))
-}
 
 fn opt_num(realm: &mut Realm, opts: Option<ObjectId>, name: &str, min: f64, max: f64) -> JsResult<Option<usize>> {
     let Some(o) = opts else { return Ok(None) };
