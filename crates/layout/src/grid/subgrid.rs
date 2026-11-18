@@ -439,12 +439,20 @@ pub(super) fn automatic_contributions(budget:&mut WorkBudget,items:Vec<Contribut
 }
 
 /// Grid2 §9 accounts for an edge with empty adjacent tracks using a
-/// hypothetical item spanning those tracks. An entirely empty subgrid
-/// contributes nothing. Real items touching the edge already carry its layer.
+/// hypothetical item spanning those tracks. An entirely empty subgrid is a
+/// hypothetical empty item spanning all of its tracks, so its accumulated
+/// margin, border and padding still size them. Real items touching the edge
+/// already carry its layer.
 pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,gap:f32,items:&mut Vec<Contribution>) {
     compact_contributions(items);
     let Some(axis)=shared(b,rows) else {return;};
-    let Some(first)=items.iter().map(|c|c.start).min() else {return;};
+    let Some(first)=items.iter().map(|c|c.start).min() else {
+        let size=(axis.inset_start+axis.inset_end).max(0.);
+        if !axis.sizes.is_empty()&&size>0. {
+            items.push(Contribution{start:0,end:axis.sizes.len(),min:size,max:size});
+        }
+        return;
+    };
     let last=items.iter().map(|c|c.end).max().unwrap();
     let count=items.len();
     let internal=(gap-axis.gap)*0.5;
@@ -768,10 +776,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_subgrids_do_not_synthesize_padding_contributions() {
+    fn empty_subgrids_contribute_their_edges_across_all_tracks() {
         let parent=parent();let mut b=child();let mut saved=Vec::new();
         install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
-        let mut items=vec![];empty_edge_contributions(&b,false,50.,&mut items);assert!(items.is_empty());
+        let mut items=vec![];empty_edge_contributions(&b,false,50.,&mut items);
+        assert_eq!(items,[Contribution{start:0,end:2,min:20.,max:20.}]);
     }
 
     #[test]
