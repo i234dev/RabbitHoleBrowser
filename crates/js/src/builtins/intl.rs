@@ -19,6 +19,7 @@ mod list_format;
 mod relative_time;
 mod segmenter;
 mod display_names;
+mod case_mapping;
 pub use list_format::{format_list, ListOptions};
 use list_format::list_parts;
 
@@ -1165,6 +1166,8 @@ pub struct CollatorOptions {
     numeric: bool,
     ignore_punctuation: bool,
     usage: String,
+    collation: String,
+    case_first: String,
 }
 
 /// Strip diacritics from Latin letters; returns (base, had_accent).
@@ -1225,6 +1228,10 @@ fn collation_key(s: &str, o: &CollatorOptions) -> Vec<(u32, u8, u8)> {
         // Letters sort after punctuation/digits; keep Unicode order within letters.
         let primary = lower as u32;
         out.push((primary, if accented { c as u32 as u8 | 1 } else { 0 }, if is_upper { 1 } else { 0 }));
+        // German phonebook collation: ä, ö, ü sort as ae, oe, ue.
+        if o.collation == "phonebk" && matches!(c, 'ä' | 'ö' | 'ü' | 'Ä' | 'Ö' | 'Ü') {
+            out.push(('e' as u32, 0, 0));
+        }
     }
     out
 }
@@ -1261,9 +1268,11 @@ pub fn collator_compare(a: &str, b: &str, o: &CollatorOptions) -> std::cmp::Orde
         }
     }
     if sens == "case" || sens == "variant" {
+        // Key 1 marks an upper-case letter: lower case sorts first unless
+        // caseFirst is "upper".
         let case = ka.iter().map(|k| k.2).cmp(kb.iter().map(|k| k.2));
         if case != Ordering::Equal {
-            return case;
+            return if o.case_first == "upper" { case.reverse() } else { case };
         }
     }
     if sens == "variant" {
@@ -1272,21 +1281,82 @@ pub fn collator_compare(a: &str, b: &str, o: &CollatorOptions) -> std::cmp::Orde
     Ordering::Equal
 }
 
+/// InitializeCollator: options in specification order, the `co`, `kf`
+/// and `kn` keys resolved against the locale's Unicode extension.
 fn read_collator_options(realm: &mut Realm, locales: Value, options: Value) -> JsResult<CollatorOptions> {
-    let locale = resolve_locale(realm, locales)?;
-    let opts = options_object(realm, options)?;
-    let usage = opt_str(realm, opts, "usage")?.unwrap_or_else(|| "sort".into());
-    let sensitivity = opt_str(realm, opts, "sensitivity")?.unwrap_or_else(|| if usage == "search" { "variant".into() } else { "variant".into() });
-    if !matches!(sensitivity.as_str(), "base" | "accent" | "case" | "variant") {
-        return realm.range_error("Value out of range for Intl.Collator options property sensitivity");
+    let mut locale = lookup_locale(realm, locales)?;
+    let opts = if options.is_undefined() { None } else { Some(realm.to_object(options)?) };
+    let usage = duration::get_string_option(realm, opts, "usage", &["sort", "search"], Some("sort"))?.unwrap();
+    duration::get_string_option(realm, opts, "localeMatcher", &["lookup", "best fit"], Some("best fit"))?;
+    let collation_opt = duration::get_string_option(realm, opts, "collation", &[], None)?;
+    if let Some(c) = &collation_opt {
+        if !duration::is_unicode_type(c) {
+            return realm.range_error(&format!("Invalid collation: {}", c));
+        }
     }
+    let numeric_opt = match opts {
+        Some(o) => {
+            let v = realm.get_str(Value::Object(o), "numeric")?;
+            if v.is_undefined() { None } else { Some(if realm.to_boolean(&v) { "true" } else { "false" }.to_string()) }
+        }
+        None => None,
+    };
+    let case_first_opt = duration::get_string_option(realm, opts, "caseFirst", &["upper", "lower", "false"], None)?;
+    // ResolveLocale for the relevant extension keys.
+    let ext: Vec<(String, String)> = locale_id::parse(&locale_full_requested(&locale)).map(|id| id.u_keywords).unwrap_or_default();
+    let ext_value = |k: &str| ext.iter().find(|(key, _)| key == k).map(|(_, v)| if v.is_empty() { "true".to_string() } else { v.clone() });
+    let supported_co = |c: &str| matches!((locale.lang.as_str(), c), ("de", "phonebk") | ("de", "eor") | ("es", "trad") | ("zh", "pinyin") | ("zh", "stroke") | (_, "emoji") | (_, "eor"));
+    let mut used: Vec<(&str, String)> = Vec::new();
+    let mut resolve = |key: &'static str, opt: &Option<String>, ok: &dyn Fn(&str) -> bool| -> Option<String> {
+        let from_ext = ext_value(key).filter(|v| ok(v));
+        match (opt, &from_ext) {
+            (Some(o), Some(e)) if o == e => {
+                used.push((key, e.clone()));
+                Some(o.clone())
+            }
+            (Some(o), _) if ok(o) => Some(o.clone()),
+            (Some(_), Some(e)) => {
+                used.push((key, e.clone()));
+                Some(e.clone())
+            }
+            (Some(_), None) => None,
+            (None, Some(e)) => {
+                used.push((key, e.clone()));
+                Some(e.clone())
+            }
+            (None, None) => None,
+        }
+    };
+    let collation = if usage == "search" { None } else { resolve("co", &collation_opt, &|c| supported_co(c)) };
+    let numeric = resolve("kn", &numeric_opt, &|v| matches!(v, "true" | "false"));
+    let case_first = resolve("kf", &case_first_opt, &|v| matches!(v, "upper" | "lower" | "false"));
+    if !used.is_empty() {
+        used.sort_by(|a, b| a.0.cmp(b.0));
+        let kw: Vec<String> = used.iter().map(|(k, v)| if v == "true" { k.to_string() } else { format!("{}-{}", k, v) }).collect();
+        locale.tag = format!("{}-u-{}", locale.tag, kw.join("-"));
+    }
+    let sensitivity = duration::get_string_option(realm, opts, "sensitivity", &["base", "accent", "case", "variant"], Some("variant"))?.unwrap();
+    let ignore_punctuation = match opts {
+        Some(o) => {
+            let v = realm.get_str(Value::Object(o), "ignorePunctuation")?;
+            if v.is_undefined() { locale.lang == "th" } else { realm.to_boolean(&v) }
+        }
+        None => locale.lang == "th",
+    };
     Ok(CollatorOptions {
-        numeric: opt_bool(realm, opts, "numeric")?.unwrap_or(locale.tag.contains("-u-kn")),
-        ignore_punctuation: opt_bool(realm, opts, "ignorePunctuation")?.unwrap_or(false),
+        numeric: numeric.as_deref() == Some("true"),
+        ignore_punctuation,
         locale,
         sensitivity,
         usage,
+        collation: collation.unwrap_or_else(|| "default".into()),
+        case_first: case_first.unwrap_or_else(|| "false".into()),
     })
+}
+
+/// The requested tag (with extensions) a lookup resolved to.
+fn locale_full_requested(l: &Locale) -> String {
+    l.full.clone()
 }
 
 /// `String.prototype.localeCompare(that, locales, options)`.
@@ -1468,6 +1538,8 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(bp, "toLocaleString", 0, bigint_to_locale);
     let sp = realm.intrinsics.string_proto;
     realm.define_method(sp, "localeCompare", 1, string_locale_compare);
+    realm.define_method(sp, "toLocaleLowerCase", 0, case_mapping::to_locale_lower_case);
+    realm.define_method(sp, "toLocaleUpperCase", 0, case_mapping::to_locale_upper_case);
 }
 
 fn supported_locales_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1498,7 +1570,7 @@ fn supported_values_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
     let key = realm.to_rust_string(arg(args, 0))?;
     let vals: Vec<&str> = match key.as_str() {
         "calendar" => vec!["gregory"],
-        "collation" => vec!["default"],
+        "collation" => vec!["emoji", "eor", "phonebk", "pinyin", "stroke", "trad"],
         "currency" => vec!["AUD", "BRL", "CAD", "CHF", "CNY", "EUR", "GBP", "HKD", "INR", "JPY", "KRW", "MXN", "NZD", "RUB", "USD"],
         "numberingSystem" => {
             let mut v: Vec<&str> = NUMBERING_SYSTEMS.iter().map(|(n, _)| *n).collect();
@@ -1827,11 +1899,16 @@ fn string_locale_compare(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
 // Collator
 fn collator_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let o = read_collator_options(realm, arg(args, 0), arg(args, 1))?;
+    // (Intl.Collator called as a function also constructs one.)
     Ok(Value::Object(new_intl_object(realm, "Intl.Collator", o)?))
 }
 
 fn collator_compare_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    bound_getter(realm, this, "compare", collator_compare_bound, "get Intl.Collator.prototype.compare")
+    if !matches!(this.v(), V::Object(id) if realm.host_data::<CollatorOptions>(id).is_some()) {
+        return realm.type_error("Method get Intl.Collator.prototype.compare called on incompatible receiver");
+    }
+    let b = realm.new_native_function_full("", 2, collator_compare_bound, None, vec![this], false);
+    Ok(Value::Object(b))
 }
 
 fn collator_compare_bound(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1853,9 +1930,9 @@ fn collator_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) ->
     realm.define_property(obj, "usage", Value::str(&o.usage), ALL);
     realm.define_property(obj, "sensitivity", Value::str(&o.sensitivity), ALL);
     realm.define_property(obj, "ignorePunctuation", Value::Bool(o.ignore_punctuation), ALL);
-    realm.define_property(obj, "collation", Value::str("default"), ALL);
+    realm.define_property(obj, "collation", Value::str(&o.collation), ALL);
     realm.define_property(obj, "numeric", Value::Bool(o.numeric), ALL);
-    realm.define_property(obj, "caseFirst", Value::str("false"), ALL);
+    realm.define_property(obj, "caseFirst", Value::str(&o.case_first), ALL);
     Ok(Value::Object(obj))
 }
 

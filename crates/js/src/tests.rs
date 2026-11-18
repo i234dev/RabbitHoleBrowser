@@ -1054,13 +1054,14 @@ fn intl_collation_plural_relative_list() {
     eq("new Intl.PluralRules('fr').select(0) + ',' + new Intl.PluralRules('ru').select(5) + ',' + new Intl.PluralRules('ja').select(1)", "one,many,other");
     eq("var rtf = new Intl.RelativeTimeFormat('en'); [rtf.format(3, 'day'), rtf.format(-1, 'day'), rtf.format(1, 'hour'), rtf.format(-2.5, 'hours')].join('|')", "in 3 days|1 day ago|in 1 hour|2.5 hours ago");
     eq("var rtf = new Intl.RelativeTimeFormat('en', {numeric: 'auto'}); [rtf.format(-1, 'day'), rtf.format(1, 'day'), rtf.format(0, 'day'), rtf.format(-1, 'week'), rtf.format(0, 'second'), rtf.format(2, 'day')].join('|')", "yesterday|tomorrow|today|last week|now|in 2 days");
-    eq("var rtf = new Intl.RelativeTimeFormat('es', {numeric: 'auto'}); [rtf.format(-3, 'day'), rtf.format(1, 'month'), rtf.format(-1, 'day')].join('|')", "hace 3 días|dentro de 1 mes|ayer");
+    eq("var rtf = new Intl.RelativeTimeFormat('es', {numeric: 'auto'}); [rtf.format(-3, 'day'), rtf.format(1, 'month'), rtf.format(-1, 'day')].join('|')", "hace 3 días|el próximo mes|ayer");
     eq("new Intl.RelativeTimeFormat('en', {style: 'short'}).format(-5, 'minute')", "5 min. ago");
     throws("new Intl.RelativeTimeFormat('en').format(1, 'fortnight')", "RangeError");
     eq("new Intl.ListFormat('en').format(['a', 'b', 'c']) + '|' + new Intl.ListFormat('en').format(['a', 'b']) + '|' + new Intl.ListFormat('en', {type: 'disjunction'}).format(['a', 'b', 'c']) + '|' + new Intl.ListFormat('en', {type: 'unit'}).format(['a', 'b', 'c']) + '|' + new Intl.ListFormat('en').format(['solo']) + '|' + new Intl.ListFormat('en').format([])", "a, b, and c|a and b|a, b, or c|a, b, c|solo|");
     eq("new Intl.ListFormat('es').format(['a', 'b', 'c']) + '|' + new Intl.ListFormat('es', {type: 'disjunction'}).format(['a', 'b'])", "a, b y c|a o b");
     eq("new Intl.ListFormat('en').formatToParts(['a', 'b']).map(p => p.type).join()", "element,literal,element");
-    eq("Intl.getCanonicalLocales(['EN-us', 'es_es', 'zh-hant-tw']).join()", "en-US,es-ES,zh-Hant-TW");
+    eq("Intl.getCanonicalLocales(['EN-us', 'es-es', 'zh-hant-tw']).join()", "en-US,es-ES,zh-Hant-TW");
+    throws("Intl.getCanonicalLocales('es_es')", "RangeError");
     throws("Intl.getCanonicalLocales('en-US-')", "RangeError");
     eq("new Intl.Locale('en-US').language + ',' + new Intl.Locale('en-US').region + ',' + String(new Intl.Locale('es'))", "en,US,es");
     eq("new Intl.DisplayNames(['en'], {type: 'region'}).of('ES') + ',' + new Intl.DisplayNames('es', {type: 'language'}).of('en')", "Spain,inglés");
