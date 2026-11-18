@@ -143,6 +143,9 @@ pub struct ChildFrame {
     /// The child must be repainted into `image`.
     dirty: bool,
     image: Option<Arc<Image>>,
+    /// The child painted at device scale 1, kept to repaint only what
+    /// changed (like the top-level page) instead of everything.
+    canvas: Option<Canvas>,
 }
 
 /// Child frames of a page.
@@ -541,7 +544,7 @@ impl Engine {
                     changed = true;
                 }
                 None => {
-                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, stale: false, size: attr_size(&page.doc, node), dirty: true, image: None });
+                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, stale: false, size: attr_size(&page.doc, node), dirty: true, image: None, canvas: None });
                     changed = true;
                 }
             }
@@ -697,7 +700,7 @@ impl Engine {
         }
         // Source Blank: a `src` attribute shows up as a change on the next
         // sync and starts the real load.
-        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, stale: false, size, dirty: true, image: None });
+        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, stale: false, size, dirty: true, image: None, canvas: None });
         Some(id)
     }
 
@@ -736,11 +739,17 @@ impl Engine {
             if !c.dirty {
                 continue;
             }
-            let Some(child) = c.page.as_ref() else { continue };
+            let Some(child) = c.page.as_mut() else { continue };
             c.dirty = false;
             any = true;
             let natural = attr_size(&page.doc, c.node);
-            let img = Arc::new(self.render_frame(child, c.size).with_natural_size(natural.0.round() as u32, natural.1.round() as u32));
+            let raster = if self.device_pixel_ratio.max(1.0) == 1.0 {
+                self.render_frame_damage(child, c.size, &mut c.canvas)
+            } else {
+                c.canvas = None;
+                self.render_frame(child, c.size)
+            };
+            let img = Arc::new(raster.with_natural_size(natural.0.round() as u32, natural.1.round() as u32));
             let old = c.image.replace(img.clone());
             let node = c.node;
             page.images.insert(node, img.clone());
@@ -781,6 +790,21 @@ impl Engine {
             self.rebuild_display_list(page);
         }
         any
+    }
+
+    /// [`Engine::render_frame`] at device scale 1 into the frame's kept
+    /// canvas, repainting only the regions whose display items changed
+    /// since the last paint (the same pixels as a full repaint).
+    fn render_frame_damage(&self, child: &mut Page, size: (f32, f32), kept: &mut Option<Canvas>) -> Image {
+        let pw = size.0.ceil().clamp(1.0, MAX_RASTER) as u32;
+        let ph = size.1.ceil().clamp(1.0, MAX_RASTER) as u32;
+        if kept.as_ref().is_none_or(|c| c.width != pw || c.height != ph) {
+            *kept = Some(Canvas::new(pw, ph));
+            child.incr.forget_canvas();
+        }
+        let canvas = kept.as_mut().expect("kept frame canvas");
+        self.render_damage(child, canvas);
+        Image::new(pw, ph, canvas.to_rgba8())
     }
 
     /// Paint a child page at its scroll position into an image of the

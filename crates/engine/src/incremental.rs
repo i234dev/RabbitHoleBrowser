@@ -182,6 +182,13 @@ impl IncrementalState {
         }
     }
 
+    /// The canvas the page was painted into is gone: the next damage-based
+    /// paint repaints everything.
+    pub(crate) fn forget_canvas(&mut self) {
+        self.painted_dl = None;
+        self.canvas = CanvasSync::Unknown;
+    }
+
     pub(crate) fn mark_display_list_clean(&mut self) {
         self.dl_dirty = false;
         self.stats.display_lists += 1;

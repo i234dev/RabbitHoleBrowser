@@ -457,3 +457,40 @@ fn removed_frame_realm_leaves_the_parent_ranges_alone() {
     let r = eval(&e, &mut page, "var out; try { out = String(kept.firstChild && kept.firstChild.nodeName); } catch (err) { out = 'threw'; } out + ',' + document.getElementById('x').textContent");
     assert!(r.ends_with(",hello"), "{r}");
 }
+
+/// A frame repainted after small changes (text, colors, a shadowed card
+/// moving) keeps its canvas and repaints only the changed regions; every
+/// result must equal painting the child from scratch.
+#[test]
+fn damage_repainted_frames_match_full_paints() {
+    let mut e = engine();
+    let mut items = String::new();
+    for i in 0..12 {
+        items.push_str(&format!(r#"<li id="i{i}" style="padding:3px;box-shadow:0 2px 6px rgba(0,0,0,.4);margin:6px">item {i}</li>"#));
+    }
+    let inner = format!(r#"<!doctype html><body style="margin:4px;font:14px sans-serif"><ul>{items}</ul><script>
+        function step(n) {{
+            document.getElementById('i' + (n % 12)).textContent = 'changed ' + n;
+            document.getElementById('i' + ((n * 5) % 12)).style.background = n % 2 ? '#fe8' : '#8ef';
+            document.getElementById('i' + ((n * 7) % 12)).style.marginLeft = (n % 3) * 9 + 'px';
+            return n;
+        }}
+    </script></body>"#);
+    let mut page = load(
+        &mut e,
+        &format!(r#"<!doctype html><body style="margin:0"><script>
+            function stepFrame(n) {{ return document.getElementById('f').contentWindow.step(n); }}
+        </script><iframe id="f" style="display:block;border:0;width:300px;height:420px" srcdoc="{}"></iframe></body>"#, escape_attr(&inner)),
+    );
+    let node = page.doc.element_by_id("f").unwrap();
+    for n in 1..8 {
+        assert_eq!(eval(&e, &mut page, &format!("stepFrame({n})")), n.to_string());
+        settle(&e, &mut page);
+        let shown = page.images.get(&node).expect("frame image").clone();
+        let c = child(&mut page, 0);
+        let mut full = rabbithole_engine::gfx::Canvas::new(shown.width, shown.height);
+        let (sx, sy) = c.page_scroll;
+        e.render(c, &mut full, sx, sy);
+        assert!(full.to_rgba8() == shown.pixels(), "step {n}: damage repaint differs from a full paint");
+    }
+}
