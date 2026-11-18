@@ -33,6 +33,10 @@ paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
 median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
 See the [JIT design and status](docs/jit-design.md).
 
+Version 0.1.25 makes Speedometer 3.1 another 3.9 % faster (NewsSite 1.42×)
+by hashing layout fingerprints with a fast hasher
+([measurement](docs/benchmarks/speedometer-2026-11-18-fingerprint-hash.md)).
+
 Version 0.1.24 makes Speedometer 3.1 another 6.8 % faster (NewsSite 1.56×,
 Editor-TipTap 1.15×): grid items measured before their final layout reuse
 that layout from the cache instead of being laid out again

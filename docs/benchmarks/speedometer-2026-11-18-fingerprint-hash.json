@@ -1,0 +1,125 @@
+{
+  "date": "2026-11-18",
+  "change": "Layout content fingerprints hashed with a multiply-rotate hasher instead of SipHash",
+  "base_source": "89f489a + the layout cache changes released in 0.1.23 and 0.1.24",
+  "candidate": "base + this change (released in 0.1.25)",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fe), 20 default suites, iterationCount=3, served locally",
+  "binaries": {
+    "build": "release + line tables + frame pointers, all functions and branch targets aligned to 64 bytes (same flags for both)",
+    "base_sha256": "fec2c848c73c7dcc8816c9e856d45bd9050e449ae9077bd554ee8f7567d8de59",
+    "candidate_sha256": "0b2051d88764403d7da6a7053b6499988499dd33bf28eb6584ee42cd382e8e26",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one run at a time",
+    "order": "8 rounds, rotated",
+    "jit": "on (default)",
+    "utc_interval": "2026-11-18 03:59-04:16"
+  },
+  "pairs": [
+    {
+      "round": 1,
+      "base_geomean_ms": 429.87,
+      "candidate_geomean_ms": 412.6,
+      "base_score": 2.33,
+      "candidate_score": 2.42,
+      "ratio_base_over_candidate": 1.0418565196316043
+    },
+    {
+      "round": 2,
+      "base_geomean_ms": 429.35,
+      "candidate_geomean_ms": 418.67,
+      "base_score": 2.33,
+      "candidate_score": 2.39,
+      "ratio_base_over_candidate": 1.0255093510401987
+    },
+    {
+      "round": 3,
+      "base_geomean_ms": 424,
+      "candidate_geomean_ms": 422.06,
+      "base_score": 2.36,
+      "candidate_score": 2.37,
+      "ratio_base_over_candidate": 1.004596502866891
+    },
+    {
+      "round": 4,
+      "base_geomean_ms": 422.17,
+      "candidate_geomean_ms": 404.18,
+      "base_score": 2.37,
+      "candidate_score": 2.47,
+      "ratio_base_over_candidate": 1.0445098718392796
+    },
+    {
+      "round": 5,
+      "base_geomean_ms": 423.01,
+      "candidate_geomean_ms": 408.68,
+      "base_score": 2.36,
+      "candidate_score": 2.45,
+      "ratio_base_over_candidate": 1.0350641088382109
+    },
+    {
+      "round": 6,
+      "base_geomean_ms": 420.26,
+      "candidate_geomean_ms": 407.72,
+      "base_score": 2.38,
+      "candidate_score": 2.45,
+      "ratio_base_over_candidate": 1.0307564014519768
+    },
+    {
+      "round": 7,
+      "base_geomean_ms": 421.73,
+      "candidate_geomean_ms": 399.78,
+      "base_score": 2.37,
+      "candidate_score": 2.5,
+      "ratio_base_over_candidate": 1.0549051978588224
+    },
+    {
+      "round": 8,
+      "base_geomean_ms": 423.55,
+      "candidate_geomean_ms": 404.53,
+      "base_score": 2.36,
+      "candidate_score": 2.47,
+      "ratio_base_over_candidate": 1.0470175265122488
+    }
+  ],
+  "summary": {
+    "median_ratio": 1.0384603142349076,
+    "min": 1.004596502866891,
+    "max": 1.0549051978588224,
+    "rounds_faster": 8,
+    "rounds": 8,
+    "mean_score_base": 2.3575,
+    "mean_score_candidate": 2.44
+  },
+  "per_suite_median_ratio": {
+    "Charts-chartjs": 0.9938,
+    "Charts-observable-plot": 0.9993,
+    "Editor-CodeMirror": 1.0283,
+    "Editor-TipTap": 0.999,
+    "NewsSite-Next": 1.424,
+    "NewsSite-Nuxt": 1.4321,
+    "Perf-Dashboard": 1.0041,
+    "React-Stockcharts-SVG": 1.0028,
+    "TodoMVC-Angular-Complex-DOM": 1.0085,
+    "TodoMVC-Backbone": 0.9996,
+    "TodoMVC-JavaScript-ES5": 0.9965,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 1.0107,
+    "TodoMVC-Lit-Complex-DOM": 1.0165,
+    "TodoMVC-Preact-Complex-DOM": 1.0025,
+    "TodoMVC-React-Complex-DOM": 0.9953,
+    "TodoMVC-React-Redux": 0.9905,
+    "TodoMVC-Svelte-Complex-DOM": 1.0146,
+    "TodoMVC-Vue": 1.0026,
+    "TodoMVC-WebComponents": 0.9911,
+    "TodoMVC-jQuery": 0.9977
+  },
+  "correctness": "Full Speedometer run with RH_VERIFY_INCREMENTAL=1: 0 differences.",
+  "notes": [
+    "After the 0.1.24 change, fingerprinting took 41 % of NewsSite-Next samples (SipHash).",
+    "A variant that also remembered failed comparisons was slower (median 0.989x, NewsSite 0.88x) and was discarded."
+  ],
+  "limitations": [
+    "One Linux x64 host; harness scores, not comparable with other browsers."
+  ]
+}
