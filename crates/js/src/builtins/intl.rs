@@ -1210,7 +1210,7 @@ fn supported_values_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
             v
         }
         "timeZone" => vec!["UTC"],
-        "unit" => vec!["byte", "celsius", "centimeter", "day", "gram", "hour", "kilogram", "kilometer", "liter", "meter", "mile", "minute", "month", "percent", "pound", "second", "week", "year"],
+        "unit" => number_format::SIMPLE_UNITS.to_vec(),
         _ => return realm.range_error(&format!("Invalid key : {}", key)),
     };
     let vals = vals.into_iter().map(Value::str).collect();

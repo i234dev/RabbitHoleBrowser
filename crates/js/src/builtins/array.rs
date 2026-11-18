@@ -1039,8 +1039,11 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
     object::to_string(realm, Value::Object(id), &[])
 }
 
-fn to_locale_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+/// Array.prototype.toLocaleString as ECMA-402 §19.5.1 redefines it: each
+/// element's toLocaleString receives (locales, options).
+fn to_locale_string(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
+    let locale_args = [arg(args, 0), arg(args, 1)];
     if realm.join_stack.contains(&id) {
         return Ok(Value::str(""));
     }
@@ -1053,7 +1056,7 @@ fn to_locale_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult
             }
             let v = get_i(realm, id, i)?;
             if !v.is_nullish() {
-                let s = realm.invoke(v, "toLocaleString", &[])?;
+                let s = realm.invoke(v, "toLocaleString", &locale_args)?;
                 let s = realm.to_string(s)?;
                 out.extend_from_slice(s.as_units());
             }

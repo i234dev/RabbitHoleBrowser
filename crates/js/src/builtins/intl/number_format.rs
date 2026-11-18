@@ -503,7 +503,7 @@ fn get_value(realm: &mut Realm, opts: Option<ObjectId>, name: &str) -> JsResult<
 }
 
 /// The sanctioned single units (ECMA-402 table 2).
-const SIMPLE_UNITS: &[&str] = &[
+pub(super) const SIMPLE_UNITS: &[&str] = &[
     "acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "fluid-ounce", "foot", "gallon", "gigabit", "gigabyte", "gram", "hectare",
     "hour", "inch", "kilobit", "kilobyte", "kilogram", "kilometer", "liter", "megabit", "megabyte", "meter", "microsecond", "mile", "mile-scandinavian",
     "milliliter", "millimeter", "millisecond", "minute", "month", "nanosecond", "ounce", "percent", "petabyte", "pound", "second", "stone", "terabit",
@@ -908,7 +908,7 @@ fn currency_symbol(code: &str, lang: &str) -> String {
         .into(),
         "EUR" => "€".into(),
         "GBP" => "£".into(),
-        "JPY" => if lang == "ja" { "￥" } else { "¥" }.into(),
+        "JPY" => "¥".into(),
         "CNY" => if lang == "zh" { "¥" } else { "CN¥" }.into(),
         "INR" => "₹".into(),
         "KRW" => "₩".into(),
@@ -1814,6 +1814,16 @@ fn bigint_to_locale(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
     Ok(Value::str(&format_bigint_parts(n.to_string_radix(10).trim_start_matches('-'), n.is_negative(), &o).to_string()))
 }
 
+struct FallbackSymbol(SymbolId);
+
+/// The realm's %Intl%.[[FallbackSymbol]] (ChainDateTimeFormat and
+/// ChainNumberFormat define it on legacy-constructed receivers).
+#[allow(dead_code)]
+pub(super) fn fallback_symbol(realm: &Realm) -> Option<SymbolId> {
+    let holder = *realm.intrinsics.others.get("Intl.FallbackSymbol")?;
+    realm.host_data::<FallbackSymbol>(holder).map(|f| f.0)
+}
+
 /// Install `Intl.NumberFormat` on `intl` and the numeric `toLocaleString`s.
 pub(super) fn register(realm: &mut Realm, intl: ObjectId) {
     let op = realm.intrinsics.object_proto;
@@ -1825,6 +1835,10 @@ pub(super) fn register(realm: &mut Realm, intl: ObjectId) {
     realm.intrinsics.others.insert("Intl.NumberFormat", proto);
 
     let fallback = realm.new_symbol(Some(JsStr::new("IntlLegacyConstructedSymbol")));
+    // %Intl%.[[FallbackSymbol]], shared with the other legacy constructors.
+    let holder = realm.new_object_with_proto(None);
+    realm.set_host_data(holder, Box::new(FallbackSymbol(fallback)));
+    realm.intrinsics.others.insert("Intl.FallbackSymbol", holder);
     let slot = realm.new_private_symbol(JsStr::new("BoundFormat"));
     let caps = vec![Value::Object(c), Value::Symbol(fallback), Value::Symbol(slot)];
     if let ObjectKind::Native(n) = &mut realm.obj_mut(c).kind {
