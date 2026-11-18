@@ -91,6 +91,9 @@ pub(crate) struct SharedTracks {
     edge_after: Vec<f32>,
     pub(super) inset_start: f32,
     pub(super) inset_end: f32,
+    /// Columns reversed for an RTL subgrid of a left-to-right geometry: its
+    /// line 1 is the parent's last line; it lays out mirrored.
+    pub(super) flipped: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +210,7 @@ pub(super) fn section(list:&TrackList, positions:&[f32], start:usize, end:usize,
         edge_after:(start..end).map(|i|if i+1==end {0.} else {after(i)}).collect(),
         inset_start:if start<end {before(start)} else {0.},
         inset_end:if start<end {after(end-1)} else {0.},
+        flipped:false,
     };
     AxisInheritance::Tracks(Arc::new(tracks))
 }
@@ -523,6 +527,15 @@ impl<'a> Layouter<'a> {
         let (column_request,row_request)=requests(b);
         if (!column_request||columns.is_none())&&(!row_request||rows.is_none()) {return body(self,b);}
         let reference=scope_reference(&columns,reference);
+        // An RTL subgrid numbers the shared columns from the right (§7.1);
+        // one that shares columns further does not flip them.
+        let columns=match columns {
+            Some(AxisInheritance::Tracks(tracks)) if column_request&&!b.wm_wrapper&&b.style.direction==rabbithole_style::Direction::Rtl&&!tracks.flipped&&!tracks.crossed_axes&&!b.children.iter().any(|c|requests(c).0) => {
+                let mut flipped=tracks.reversed();flipped.flipped=true;
+                Some(AxisInheritance::Tracks(Arc::new(flipped)))
+            }
+            other=>other,
+        };
         let mut layers=1usize;let mut node=&*b;
         while node.wm_wrapper {let Some(inner)=node.children.first() else {break;};layers=layers.saturating_add(1);node=inner;}
         self.grid_work.charge(source_work(&columns).saturating_add(source_work(&rows)).saturating_mul(layers.saturating_mul(2)));
@@ -555,6 +568,7 @@ impl<'a> Layouter<'a> {
         let block=known_block_size(b,inline_size.unwrap_or(0.));
         let geometry=GridGeometry{inline:inline_size,block};
         let (items,mut cols,row_tracks)=self.place_items(b,&style,inline_size,block,col_gap,row_gap,0.,0.);
+        let flipped=(!rows).then(||shared(b,false)).flatten().filter(|t|t.flipped).map(|t|t.sizes.len());
         let mut result=if !rows {
             self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase)
         } else {
@@ -567,6 +581,8 @@ impl<'a> Layouter<'a> {
             self.projected_rows(b,&items,&row_tracks,&cols,&positions,col_gap,row_gap,inline_size.unwrap_or(0.),block,phase)
         };
         empty_edge_contributions(b,rows,if rows {row_gap} else {col_gap},&mut result);
+        // Back into the parent's line order.
+        if let Some(count)=flipped {for c in &mut result {let start=c.start;c.start=count.saturating_sub(c.end);c.end=count.saturating_sub(start);}}
         result
     }
 }

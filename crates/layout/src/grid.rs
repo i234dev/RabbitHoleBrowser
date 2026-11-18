@@ -1023,7 +1023,7 @@ fn static_align_factor(value: ItemAlign, flags: rabbithole_style::AlignFlags, it
 /// Laid out left to right and then mirrored as a whole; grids sharing
 /// columns with a subgrid keep the unmirrored geometry.
 fn mirrored(b: &LayoutBox, cols: &TrackList) -> bool {
-    b.style.direction == rabbithole_style::Direction::Rtl && cols.inherited.is_none() && !b.children.iter().any(|c| subgrid::requests(c).0)
+    b.style.direction == rabbithole_style::Direction::Rtl && cols.inherited.as_ref().is_none_or(|shared| shared.flipped) && !b.children.iter().any(|c| subgrid::requests(c).0)
 }
 
 /// Inline-axis self-alignment for the left-to-right pass of a grid whose
@@ -1787,7 +1787,7 @@ impl<'a> Layouter<'a> {
                 self.grid_work.charge(nested.len());
                 out.extend(nested);
             } else if row_request&&row_source.is_some() {
-                let contribution=self.with_subgrid(child,None,row_source,reference,|this,child|this.column_contribution(child,it,reference,ItemBases::default()));
+                let contribution=self.with_subgrid(child,None,row_source,reference,|this,child|this.column_contribution(child,it,reference,ItemBases::new(it,Some((cols,col_gap)),None)));
                 out.push(contribution);
             } else {
                 out.extend(self.column_contributions(b,std::slice::from_ref(it),cbw,Some((cols,col_gap)),rows.map(|r|(r,row_gap))));
@@ -1824,7 +1824,7 @@ impl<'a> Layouter<'a> {
             Length::Px(m) if child.kind!=BoxKind::Image=>if bb {(m-it.edges.pb_h).max(0.).min(min)} else {m.min(min)},
             Length::Auto if child.kind!=BoxKind::Image&&crate::flex::is_scroll_container(&child.style)=>0.,
             // The automatic minimum fits an area of fixed maximum tracks.
-            Length::Auto if child.style.width.is_auto()=>match bases.min_limit {Some(limit)=>min.min((limit-extras).max(0.)),None=>min},
+            Length::Auto if child.style.width.is_auto()||pct(child.style.width)=>match bases.min_limit {Some(limit)=>min.min((limit-extras).max(0.)),None=>min},
             _=>min,
         };
         Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras}
