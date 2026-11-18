@@ -848,7 +848,7 @@ impl Realm {
                 let pos = code.position_at(f.pc.saturating_sub(1));
                 let line = src.lines().nth(pos.line.saturating_sub(1) as usize)?;
                 let chars: Vec<char> = line.chars().collect();
-                let c = (pos.column as usize).min(chars.len());
+                let c = (pos.column as usize).saturating_sub(1).min(chars.len());
                 let a = c.saturating_sub(160);
                 let b = (c + 80).min(chars.len());
                 Some(format!("{}<<HERE>>{}", chars[a..c].iter().collect::<String>(), chars[c..b].iter().collect::<String>()))
