@@ -452,6 +452,7 @@ impl Parser<'_> {
     /// caller checks for `of`).
     pub(super) fn parse_using_declaration(&mut self, hint: f64, in_for_head: bool) -> PResult<VarDecl> {
         if hint == HINT_ASYNC {
+            self.note_await();
             self.advance()?; // await
         }
         self.advance()?; // using

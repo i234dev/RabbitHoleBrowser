@@ -117,10 +117,25 @@ pub struct ModuleRecord {
     namespace: Option<ObjectId>,
     meta: Option<ObjectId>,
     error: Option<Value>,
-    /// Settles when the module (and its dependencies) finished evaluating.
+    /// `[[TopLevelCapability]]`: the promise `Evaluate()` returns when this
+    /// module is the evaluation entry point (or the root of its cycle).
     completion: Option<ObjectId>,
-    /// Async dependencies still pending before the body may run.
+    /// `[[PendingAsyncDependencies]]`.
     pending_deps: usize,
+    /// `[[HasTLA]]`.
+    has_tla: bool,
+    /// `[[DFSIndex]]` / `[[DFSAncestorIndex]]`.
+    dfs_index: u32,
+    dfs_ancestor: u32,
+    /// `[[CycleRoot]]`.
+    cycle_root: Option<ModuleId>,
+    /// `[[AsyncEvaluation]]` while the asynchronous evaluation is pending
+    /// (cleared when it completes, the spec's DONE order).
+    async_evaluation: bool,
+    /// `[[AsyncEvaluationOrder]]`.
+    async_order: u64,
+    /// `[[AsyncParentModules]]`.
+    async_parents: Vec<ModuleId>,
 }
 
 impl ModuleRecord {
@@ -143,6 +158,13 @@ impl ModuleRecord {
             error: None,
             completion: None,
             pending_deps: 0,
+            has_tla: false,
+            dfs_index: 0,
+            dfs_ancestor: 0,
+            cycle_root: None,
+            async_evaluation: false,
+            async_order: 0,
+            async_parents: Vec::new(),
         }
     }
 
@@ -242,6 +264,8 @@ pub struct ModuleRegistry {
     meta_hook: Option<ImportMetaHook>,
     /// Nesting depth of loads performed on behalf of `import()`.
     dynamic_loads: u32,
+    /// Source of `[[AsyncEvaluationOrder]]` values.
+    async_counter: u64,
 }
 
 impl ModuleRegistry {
@@ -333,6 +357,7 @@ impl Realm {
         let mut rec = ModuleRecord::new(url);
         rec.code = Some(code);
         rec.slots = slots;
+        rec.has_tla = program.has_top_level_await;
         rec.collect_entries(&program);
         self.modules.records.push(rec);
         Ok(id)
@@ -705,25 +730,49 @@ impl Realm {
 
     // --------------------------------------------------------- evaluation
 
-    /// Evaluate a linked module graph. Returns a promise that settles when
-    /// the module and all its dependencies finished (top-level `await`
-    /// included); it is rejected with the evaluation error on failure.
+    /// Evaluate() (§16.2.1.5.3.1) of a linked module graph. Returns a
+    /// promise that settles when the module and all its dependencies
+    /// finished (top-level `await` included); it is rejected with the
+    /// evaluation error on failure.
     pub fn evaluate_module(&mut self, id: ModuleId) -> JsResult<Value> {
+        let mut m = id;
         match self.rec(id).status {
             ModuleStatus::Unlinked | ModuleStatus::Linking => {
                 let url = self.rec(id).url.clone();
                 return Err(self.new_error("TypeError", &format!("Module '{url}' must be linked before evaluation")));
             }
+            ModuleStatus::EvaluatingAsync | ModuleStatus::Evaluated | ModuleStatus::Errored => {
+                if let Some(root) = self.rec(id).cycle_root {
+                    m = root;
+                }
+            }
             _ => {}
         }
-        // Errors are recorded on the module and its completion promise.
-        let _ = self.evaluate_inner(id);
-        let p = self.completion_promise(id);
-        Ok(Value::Object(p))
+        if let Some(p) = self.rec(m).completion {
+            return Ok(Value::Object(p));
+        }
+        let cap = self.completion_promise(m);
+        let mut stack = Vec::new();
+        match self.inner_module_evaluation(m, &mut stack, 0) {
+            Err(e) => {
+                for s in stack {
+                    let rec = self.rec_mut(s);
+                    rec.status = ModuleStatus::Errored;
+                    rec.error = Some(e.clone());
+                }
+                self.reject_promise(cap, e);
+            }
+            Ok(_) => {
+                if !self.rec(m).async_evaluation {
+                    self.resolve_promise(cap, Value::Undefined);
+                }
+            }
+        }
+        Ok(Value::Object(cap))
     }
 
-    /// The completion promise, created on demand (marked handled: hosts
-    /// report module errors themselves).
+    /// The `[[TopLevelCapability]]` promise, created on demand (marked
+    /// handled: hosts report module errors themselves).
     fn completion_promise(&mut self, id: ModuleId) -> ObjectId {
         if let Some(p) = self.rec(id).completion {
             return p;
@@ -736,97 +785,185 @@ impl Realm {
         p
     }
 
-    fn evaluate_inner(&mut self, id: ModuleId) -> JsResult<()> {
+    /// InnerModuleEvaluation (§16.2.1.5.3.2): depth-first, with Tarjan's
+    /// strongly connected components so a cycle completes as one unit.
+    fn inner_module_evaluation(&mut self, id: ModuleId, stack: &mut Vec<ModuleId>, mut index: u32) -> Result<u32, Value> {
         match self.rec(id).status {
-            ModuleStatus::Evaluating | ModuleStatus::EvaluatingAsync | ModuleStatus::Evaluated => return Ok(()),
+            ModuleStatus::EvaluatingAsync | ModuleStatus::Evaluated | ModuleStatus::Evaluating => return Ok(index),
             ModuleStatus::Errored => return Err(self.rec(id).error.clone().unwrap_or(Value::Undefined)),
-            _ => {}
+            ModuleStatus::Unlinked | ModuleStatus::Linking | ModuleStatus::Linked => {}
         }
-        self.rec_mut(id).status = ModuleStatus::Evaluating;
-        self.completion_promise(id);
-        let mut deps: Vec<ModuleId> = Vec::new();
-        for spec in &self.rec(id).requested {
-            if let Some(&d) = self.rec(id).resolved.get(spec) {
-                if !deps.contains(&d) {
-                    deps.push(d);
+        {
+            let rec = self.rec_mut(id);
+            rec.status = ModuleStatus::Evaluating;
+            rec.dfs_index = index;
+            rec.dfs_ancestor = index;
+            rec.pending_deps = 0;
+        }
+        index += 1;
+        stack.push(id);
+        let deps: Vec<ModuleId> = self.rec(id).requested.iter().filter_map(|spec| self.rec(id).resolved.get(spec).copied()).collect();
+        for dep in deps {
+            index = self.inner_module_evaluation(dep, stack, index)?;
+            let mut required = dep;
+            if self.rec(dep).status == ModuleStatus::Evaluating {
+                let a = self.rec(dep).dfs_ancestor;
+                let rec = self.rec_mut(id);
+                rec.dfs_ancestor = rec.dfs_ancestor.min(a);
+            } else {
+                required = self.rec(dep).cycle_root.unwrap_or(dep);
+                if self.rec(required).status == ModuleStatus::Errored {
+                    return Err(self.rec(required).error.clone().unwrap_or(Value::Undefined));
+                }
+            }
+            // Step 11.c.v: also for a module still on the stack.
+            if self.rec(required).async_evaluation {
+                self.rec_mut(id).pending_deps += 1;
+                self.rec_mut(required).async_parents.push(id);
+            }
+        }
+        if self.rec(id).pending_deps > 0 || self.rec(id).has_tla {
+            self.modules.async_counter += 1;
+            let order = self.modules.async_counter;
+            let rec = self.rec_mut(id);
+            rec.async_evaluation = true;
+            rec.async_order = order;
+            if rec.pending_deps == 0 {
+                self.execute_async_module(id);
+            }
+        } else {
+            self.execute_module_sync(id)?;
+        }
+        if self.rec(id).dfs_ancestor == self.rec(id).dfs_index {
+            while let Some(r) = stack.pop() {
+                let rec = self.rec_mut(r);
+                rec.status = if rec.async_evaluation { ModuleStatus::EvaluatingAsync } else { ModuleStatus::Evaluated };
+                rec.cycle_root = Some(id);
+                if r == id {
+                    break;
                 }
             }
         }
-        for &dep in &deps {
-            if let Err(e) = self.evaluate_inner(dep) {
-                self.fail_module(id, e.clone());
-                return Err(e);
-            }
-        }
-        let pending: Vec<ModuleId> = deps.into_iter().filter(|d| self.rec(*d).status == ModuleStatus::EvaluatingAsync).collect();
-        if pending.is_empty() {
-            return self.run_module_body(id);
-        }
-        let rec = self.rec_mut(id);
-        rec.status = ModuleStatus::EvaluatingAsync;
-        rec.pending_deps = pending.len();
-        for dep in pending {
-            let p = self.completion_promise(dep);
-            perform_then_native(self, p, on_dependency_fulfilled, on_dependency_rejected, Value::Number(id.0 as f64));
-        }
-        Ok(())
+        Ok(index)
     }
 
-    /// Execute the module body (dependencies are done).
-    fn run_module_body(&mut self, id: ModuleId) -> JsResult<()> {
-        let Some(body) = self.rec(id).body else {
-            self.finish_module(id);
-            return Ok(());
-        };
-        let promise = match self.call(Value::Object(body), Value::Undefined, &[]).as_ref().map(Value::v) {
-            Ok(V::Object(p)) => p,
-            Ok(_) => {
-                self.finish_module(id);
-                return Ok(());
-            }
-            Err(e) => {
-                let e = e.clone();
-                self.fail_module(id, e.clone());
-                return Err(e);
-            }
+    /// ExecuteModule() of a module without top-level `await`: its body
+    /// settles synchronously.
+    fn execute_module_sync(&mut self, id: ModuleId) -> Result<(), Value> {
+        let Some(body) = self.rec(id).body else { return Ok(()) };
+        let promise = match self.call(Value::Object(body), Value::Undefined, &[]) {
+            Ok(v) => match v.as_object() {
+                Some(p) => p,
+                None => return Ok(()),
+            },
+            Err(e) => return Err(e),
         };
         let (state, value) = match &self.obj(promise).kind {
             ObjectKind::Promise(pd) => (pd.state, pd.value.clone()),
             _ => (PromiseState::Fulfilled, Value::Undefined),
         };
         match state {
-            PromiseState::Fulfilled => {
-                self.finish_module(id);
-                Ok(())
-            }
             PromiseState::Rejected => {
                 self.forget_unhandled(&value);
-                self.fail_module(id, value.clone());
                 Err(value)
             }
+            PromiseState::Fulfilled => Ok(()),
             PromiseState::Pending => {
-                self.rec_mut(id).status = ModuleStatus::EvaluatingAsync;
-                perform_then_native(self, promise, on_body_fulfilled, on_body_rejected, Value::Number(id.0 as f64));
+                // Not expected without [[HasTLA]]; keep the error visible.
+                perform_then_native(self, promise, ignore_settlement, on_async_rejected, Value::Number(id.0 as f64));
                 Ok(())
             }
         }
     }
 
-    fn finish_module(&mut self, id: ModuleId) {
-        self.rec_mut(id).status = ModuleStatus::Evaluated;
-        let p = self.completion_promise(id);
-        self.resolve_promise(p, Value::Undefined);
+    /// ExecuteAsyncModule (§16.2.1.5.3.3).
+    fn execute_async_module(&mut self, id: ModuleId) {
+        let Some(body) = self.rec(id).body else {
+            self.async_module_fulfilled(id);
+            return;
+        };
+        match self.call(Value::Object(body), Value::Undefined, &[]) {
+            Ok(v) => match v.as_object() {
+                Some(p) => perform_then_native(self, p, on_async_fulfilled, on_async_rejected, Value::Number(id.0 as f64)),
+                None => self.async_module_fulfilled(id),
+            },
+            Err(e) => self.async_module_rejected(id, e),
+        }
     }
 
-    fn fail_module(&mut self, id: ModuleId, error: Value) {
+    /// GatherAvailableAncestors (§16.2.1.5.3.4).
+    fn gather_available_ancestors(&mut self, id: ModuleId, exec: &mut Vec<ModuleId>) {
+        for m in self.rec(id).async_parents.clone() {
+            let root = self.rec(m).cycle_root.unwrap_or(m);
+            if exec.contains(&m) || self.rec(root).status == ModuleStatus::Errored {
+                continue;
+            }
+            let rec = self.rec_mut(m);
+            if rec.pending_deps == 0 {
+                continue;
+            }
+            rec.pending_deps -= 1;
+            if rec.pending_deps == 0 {
+                exec.push(m);
+                if !self.rec(m).has_tla {
+                    self.gather_available_ancestors(m, exec);
+                }
+            }
+        }
+    }
+
+    /// AsyncModuleExecutionFulfilled (§16.2.1.5.3.5).
+    fn async_module_fulfilled(&mut self, id: ModuleId) {
         if self.rec(id).status == ModuleStatus::Errored {
             return;
         }
+        self.finish_module(id);
+        let mut exec = Vec::new();
+        self.gather_available_ancestors(id, &mut exec);
+        exec.sort_by_key(|m| self.rec(*m).async_order);
+        for m in exec {
+            if self.rec(m).status == ModuleStatus::Errored {
+                continue;
+            }
+            if self.rec(m).has_tla {
+                self.execute_async_module(m);
+            } else {
+                match self.execute_module_sync(m) {
+                    Err(e) => self.async_module_rejected(m, e),
+                    Ok(()) => self.finish_module(m),
+                }
+            }
+        }
+    }
+
+    /// AsyncModuleExecutionRejected (§16.2.1.5.3.6).
+    fn async_module_rejected(&mut self, id: ModuleId, error: Value) {
+        if self.rec(id).status == ModuleStatus::Errored {
+            return;
+        }
+        {
+            let rec = self.rec_mut(id);
+            rec.status = ModuleStatus::Errored;
+            rec.error = Some(error.clone());
+            rec.async_evaluation = false;
+        }
+        if let Some(p) = self.rec(id).completion {
+            self.reject_promise(p, error.clone());
+        }
+        for m in self.rec(id).async_parents.clone() {
+            self.async_module_rejected(m, error.clone());
+        }
+    }
+
+    /// An asynchronously evaluated module completed: EVALUATED, and its
+    /// top-level capability (if any) is fulfilled.
+    fn finish_module(&mut self, id: ModuleId) {
         let rec = self.rec_mut(id);
-        rec.status = ModuleStatus::Errored;
-        rec.error = Some(error.clone());
-        let p = self.completion_promise(id);
-        self.reject_promise(p, error);
+        rec.status = ModuleStatus::Evaluated;
+        rec.async_evaluation = false;
+        if let Some(p) = rec.completion {
+            self.resolve_promise(p, Value::Undefined);
+        }
     }
 
     /// Drop a rejection the module machinery handles from the unhandled list.
@@ -908,7 +1045,7 @@ impl Realm {
         self.modules.dynamic_loads -= 1;
         let id = r?;
         let p = self.evaluate_module(id)?;
-        Ok((id, p.as_object().unwrap_or_else(|| self.completion_promise(id))))
+        Ok((id, p.as_object().expect("Evaluate() returns a promise")))
     }
 }
 
@@ -920,37 +1057,15 @@ fn namespace_get(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<V
     realm.read_import_slot(target)
 }
 
-fn on_dependency_fulfilled(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+fn on_async_fulfilled(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
     let id = captured_module(realm);
-    let rec = realm.rec_mut(id);
-    if rec.status != ModuleStatus::EvaluatingAsync || rec.pending_deps == 0 {
-        return Ok(Value::Undefined);
-    }
-    rec.pending_deps -= 1;
-    if rec.pending_deps == 0 {
-        // Errors are recorded on the module's completion promise.
-        let _ = realm.run_module_body(id);
-    }
+    realm.async_module_fulfilled(id);
     Ok(Value::Undefined)
 }
 
-fn on_dependency_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+fn on_async_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = captured_module(realm);
-    realm.fail_module(id, first_arg(args));
-    Ok(Value::Undefined)
-}
-
-fn on_body_fulfilled(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    let id = captured_module(realm);
-    if realm.rec(id).status == ModuleStatus::EvaluatingAsync {
-        realm.finish_module(id);
-    }
-    Ok(Value::Undefined)
-}
-
-fn on_body_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = captured_module(realm);
-    realm.fail_module(id, first_arg(args));
+    realm.async_module_rejected(id, first_arg(args));
     Ok(Value::Undefined)
 }
 

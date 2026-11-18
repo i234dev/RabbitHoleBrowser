@@ -179,6 +179,7 @@ fn parse_lazy_body_with(f: &Function, lb: &LazyBody, validation: Option<std::syn
         },
         no_in: false,
         not_arrow: std::collections::HashSet::default(),
+        top_level_await: false,
         lazy: lazy_parse_enabled(),
         skipped: false,
         lazy_src: Some(lb.source.clone()),
@@ -259,6 +260,9 @@ pub struct Parser<'a> {
     /// parameters. Without this, nested `(a=(b=(c=...` retries every level
     /// as an arrow head and parsing becomes exponential in the depth.
     not_arrow: std::collections::HashSet<usize, crate::value::FxBuild>,
+    /// The module body itself awaits (`await`, `for await`, `await using`
+    /// outside any function): its [[HasTLA]].
+    top_level_await: bool,
     /// Skip function bodies with the pre-parser (lazy parsing).
     lazy: bool,
     /// Some body was skipped.
@@ -435,6 +439,7 @@ impl<'a> Parser<'a> {
             },
             no_in: false,
             not_arrow: std::collections::HashSet::default(),
+            top_level_await: false,
             lazy: lazy_parse_enabled(),
             skipped: false,
             lazy_src: None,
@@ -688,6 +693,13 @@ impl<'a> Parser<'a> {
 
     // ------------------------------------------------------------ program
 
+    /// An `await` at the current position: module top level marks [[HasTLA]].
+    pub(super) fn note_await(&mut self) {
+        if self.ctx.is_module && !self.ctx.in_function {
+            self.top_level_await = true;
+        }
+    }
+
     pub fn parse_program(&mut self) -> PResult<Program> {
         let mut body = Vec::new();
         let strict = self.parse_directives(&mut body)?;
@@ -702,6 +714,7 @@ impl<'a> Parser<'a> {
             body,
             is_module: self.ctx.is_module,
             strict: self.ctx.strict,
+            has_top_level_await: self.top_level_await,
         })
     }
 
@@ -1086,6 +1099,7 @@ impl<'a> Parser<'a> {
             if !self.ctx.in_async {
                 return Err(self.error("for await is only valid in async functions"));
             }
+            self.note_await();
             self.advance()?;
             true
         } else {
@@ -2209,6 +2223,7 @@ impl<'a> Parser<'a> {
             });
         }
         if self.is_ident("await") && (self.ctx.in_async || (self.ctx.is_module && !self.ctx.in_function)) {
+            self.note_await();
             self.advance()?;
             let operand = self.parse_unary_impl(false)?;
             if self.is_punct("**") {

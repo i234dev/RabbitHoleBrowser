@@ -123,6 +123,8 @@ pub struct Program {
     pub is_module: bool,
     /// `"use strict"` directive at the top.
     pub strict: bool,
+    /// A module whose body itself awaits ([[HasTLA]]).
+    pub has_top_level_await: bool,
 }
 
 // ------------------------------------------------------------------ statements
