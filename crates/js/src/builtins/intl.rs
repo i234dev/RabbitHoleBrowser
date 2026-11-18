@@ -13,16 +13,20 @@ use super::*;
 use crate::realm::SYM_TO_STRING_TAG;
 
 mod duration;
+pub mod locale_id;
 
 // ------------------------------------------------------------- locales
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Locale {
+    /// The base name (language-script-region-variants), canonical.
     pub tag: String,
     pub lang: String,
     pub region: Option<String>,
     /// The `-u-nu-` (numbering system) extension value, if any.
     pub nu: Option<String>,
+    /// The whole canonical tag, extensions included.
+    pub full: String,
 }
 
 impl Locale {
@@ -30,60 +34,33 @@ impl Locale {
         Locale::parse("en-US").unwrap()
     }
 
-    /// Canonicalize a BCP 47 tag (`en_us` → `en-US`); None if malformed.
+    /// A structurally valid BCP 47 tag, canonicalized (UTS #35); None if
+    /// malformed.
     pub fn parse(tag: &str) -> Option<Locale> {
-        let tag = tag.trim();
-        if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            return None;
-        }
-        let mut parts = tag.split(|c| c == '-' || c == '_');
-        let lang = parts.next()?.to_ascii_lowercase();
-        if !(2..=8).contains(&lang.len()) || !lang.chars().all(|c| c.is_ascii_alphabetic()) {
-            return None;
-        }
-        let mut out = lang.clone();
-        let mut region = None;
-        let mut nu = None;
-        let mut parts = parts.peekable();
-        while let Some(p) = parts.next() {
-            if p.is_empty() {
-                return None;
-            }
-            if p.len() == 1 {
-                // Extensions are dropped from the tag; `-u-nu-` is kept aside.
-                if p.eq_ignore_ascii_case("u") {
-                    while let Some(k) = parts.next() {
-                        if k.len() == 1 {
-                            break;
-                        }
-                        if k.eq_ignore_ascii_case("nu") {
-                            if let Some(v) = parts.peek() {
-                                if v.len() > 2 {
-                                    nu = Some(v.to_ascii_lowercase());
-                                }
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-            if p.len() == 4 && p.chars().all(|c| c.is_ascii_alphabetic()) {
-                let mut s = p[..1].to_ascii_uppercase();
-                s.push_str(&p[1..].to_ascii_lowercase());
-                out.push('-');
-                out.push_str(&s);
-            } else if (p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic())) || (p.len() == 3 && p.chars().all(|c| c.is_ascii_digit())) {
-                let r = p.to_ascii_uppercase();
-                out.push('-');
-                out.push_str(&r);
-                region = Some(r);
-            } else {
-                out.push('-');
-                out.push_str(&p.to_ascii_lowercase());
-            }
-        }
-        Some(Locale { tag: out, lang, region, nu })
+        let mut id = locale_id::parse(tag)?;
+        locale_id::canonicalize_id(&mut id);
+        let nu = id.u_keywords.iter().find(|(k, _)| k == "nu").map(|(_, v)| v.clone()).filter(|v| !v.is_empty());
+        Some(Locale {
+            tag: locale_id::base_name(&id),
+            lang: id.language.clone(),
+            region: id.region.as_ref().map(|r| r.to_ascii_uppercase()),
+            nu,
+            full: locale_id::to_string(&id),
+        })
     }
+}
+
+/// Languages with locale data here (LookupSupportedLocales' available set).
+const AVAILABLE_LANGUAGES: &[&str] = &[
+    "af", "am", "ar", "az", "be", "bg", "bn", "bs", "ca", "cs", "cy", "da", "de", "el", "en", "es", "et", "eu", "fa", "fi", "fil", "fr", "ga", "gl", "gu",
+    "he", "hi", "hr", "hu", "hy", "id", "is", "it", "ja", "ka", "kk", "km", "kn", "ko", "ky", "lo", "lt", "lv", "mk", "ml", "mn", "mr", "ms", "my", "nb",
+    "ne", "nl", "nn", "no", "pa", "pl", "pt", "ro", "ru", "si", "sk", "sl", "sq", "sr", "sv", "sw", "ta", "te", "th", "tr", "uk", "ur", "uz", "vi", "zh", "zu",
+];
+
+/// BestAvailableLocale: the requested locale (or a prefix of it) we have.
+fn is_available(tag: &str) -> bool {
+    let lang = tag.split('-').next().unwrap_or("");
+    AVAILABLE_LANGUAGES.contains(&lang)
 }
 
 /// Resolve the `locales` argument (string, array of strings or undefined).
@@ -119,31 +96,50 @@ pub fn resolve_locale(realm: &mut Realm, v: Value) -> JsResult<Locale> {
     }
 }
 
+/// CanonicalizeLocaleList.
 fn canonical_locale_list(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
-    match v.v() {
-        V::Undefined => Ok(Vec::new()),
-        V::String(s) => match Locale::parse(&s.to_rust_string()) {
-            Some(l) => Ok(vec![l.tag]),
-            None => realm.range_error(&format!("Incorrect locale information provided: {}", s)),
-        },
-        other => {
-            let o = realm.to_object(other.to_value())?;
-            let items = realm.create_list_from_array_like(Value::Object(o))?;
-            let mut out = Vec::new();
-            for it in items {
-                let s = realm.to_rust_string(it)?;
-                match Locale::parse(&s) {
-                    Some(l) => {
-                        if !out.contains(&l.tag) {
-                            out.push(l.tag)
-                        }
-                    }
-                    None => return realm.range_error(&format!("Incorrect locale information provided: {}", s)),
+    let mut out = Vec::new();
+    let add = |realm: &mut Realm, item: Value, out: &mut Vec<String>| -> JsResult<()> {
+        let tag = match item.v() {
+            V::Object(id) => match realm.host_data::<Locale>(id) {
+                Some(l) => l.full.clone(),
+                _ => realm.to_rust_string(item.clone())?,
+            },
+            V::String(s) => s.to_rust_string(),
+            _ => return realm.type_error("Language ID should be string or object."),
+        };
+        match Locale::parse(&tag) {
+            Some(l) => {
+                if !out.contains(&l.full) {
+                    out.push(l.full);
                 }
+                Ok(())
             }
-            Ok(out)
+            None => realm.range_error(&format!("Incorrect locale information provided: {}", tag)),
+        }
+    };
+    match v.v() {
+        V::Undefined => return Ok(out),
+        V::String(_) => {
+            add(realm, v, &mut out)?;
+            return Ok(out);
+        }
+        V::Object(id) if realm.host_data::<Locale>(id).is_some() => {
+            add(realm, v, &mut out)?;
+            return Ok(out);
+        }
+        _ => {}
+    }
+    let o = realm.to_object(v)?;
+    let len = realm.length_of(Value::Object(o))?;
+    for k in 0..len {
+        let key = PropertyKey::index(k as u32);
+        if realm.has_property(o, &key)? {
+            let item = realm.get(Value::Object(o), key)?;
+            add(realm, item, &mut out)?;
         }
     }
+    Ok(out)
 }
 
 // ---------------------------------------------------- numbering systems
@@ -1608,12 +1604,26 @@ pub fn register(realm: &mut Realm) {
 
 fn supported_locales_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let list = canonical_locale_list(realm, arg(args, 0))?;
-    let vals = list.into_iter().map(|s| Value::str(&s)).collect();
+    // SupportedLocales: validate the options (localeMatcher) after the list.
+    let opts = arg(args, 1);
+    if !opts.is_undefined() {
+        let o = realm.to_object(opts)?;
+        let m = realm.get_str(Value::Object(o), "localeMatcher")?;
+        if !m.is_undefined() {
+            let m = realm.to_rust_string(m)?;
+            if m != "lookup" && m != "best fit" {
+                return realm.range_error(&format!("Value {} out of range for localeMatcher", m));
+            }
+        }
+    }
+    let vals = list.into_iter().filter(|t| is_available(t)).map(|s| Value::str(&s)).collect();
     Ok(realm.new_array_value(vals))
 }
 
 fn get_canonical_locales(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    supported_locales_of(realm, Value::Undefined, args)
+    let list = canonical_locale_list(realm, arg(args, 0))?;
+    let vals = list.into_iter().map(|s| Value::str(&s)).collect();
+    Ok(realm.new_array_value(vals))
 }
 
 fn supported_values_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -2124,8 +2134,8 @@ fn locale_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let tag = match (arg(args, 0)).v() {
         V::String(s) => s.to_rust_string(),
         V::Object(id) => match realm.host_data::<Locale>(id) {
-            Some(l) => l.tag.clone(),
-            None => return realm.type_error("First argument to Intl.Locale constructor can't be empty or missing"),
+            Some(l) => l.full.clone(),
+            None => realm.to_rust_string(arg(args, 0))?,
         },
         _ => return realm.type_error("First argument to Intl.Locale constructor can't be empty or missing"),
     };
@@ -2135,7 +2145,7 @@ fn locale_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 
 fn locale_to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let l: Locale = host(realm, &this, "Intl.Locale.prototype.toString")?;
-    Ok(Value::str(&l.tag))
+    Ok(Value::str(&l.full))
 }
 fn locale_language(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let l: Locale = host(realm, &this, "Intl.Locale.prototype.language")?;
