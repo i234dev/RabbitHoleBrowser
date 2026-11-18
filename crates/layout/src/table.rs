@@ -633,6 +633,7 @@ impl<'a> Layouter<'a> {
         for c in b.children.iter_mut() {
             if c.flow == Flow::Absolute {
                 c.static_pos = (content_x, content_y);
+                c.static_align = None;
             }
         }
         content_h

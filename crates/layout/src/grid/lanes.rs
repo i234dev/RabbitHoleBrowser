@@ -207,14 +207,58 @@ impl<'a> Layouter<'a> {
     }
 
     /// Build the grid-axis tracks and collect the items.
+    #[allow(clippy::too_many_arguments)]
     fn lanes_setup(&mut self, b: &mut LayoutBox, style: &ComputedStyle, rows: bool, avail: Option<f32>, gap: f32, cbw: f32, origin: (f32, f32)) -> (TrackList, Vec<LaneItem>) {
+        let list = if rows { &style.grid_template_rows } else { &style.grid_template_columns };
+        if avail.is_none() || subgrid::shared(b, rows).is_some() || !intrinsic_auto_repeat(list) {
+            let (tl, items, _) = self.lanes_setup_with(b, style, rows, avail, gap, cbw, origin, None, None);
+            return (tl, items);
+        }
+        // Grid3 §3.2.1: an automatic repetition of intrinsic tracks is
+        // counted from the sizes those tracks take when every item
+        // contributes to each position it could occupy, with enough
+        // repetitions for the largest span.
+        let (before, per_rep) = auto_repeat_shape(list);
+        let (_, items, _) = self.lanes_setup_with(b, style, rows, avail, gap, cbw, origin, None, Some(1));
+        let span = items.iter().map(|it| it.span).max().unwrap_or(1);
+        let provisional = span.div_ceil(per_rep.max(1)).clamp(1, 64);
+        let (mut tl, items, lead) = self.lanes_setup_with(b, style, rows, avail, gap, cbw, origin, None, Some(provisional));
+        let template = expand_tracks_sized(list, avail, gap, None, Some(provisional)).tracks.len();
+        if rows {
+            let widths = self.row_lane_widths(b, &tl, &items, gap, None, cbw, Some(cbw), MeasurePhase::Initial);
+            self.size_row_lanes(b, &mut tl, &items, &widths, None, gap, cbw, false);
+        } else {
+            self.size_column_lanes(b, &mut tl, &items, GridSpace::MaxContent, gap, cbw, false);
+        }
+        let used: Vec<f32> = tl.tracks.iter().skip(lead).take(template).map(|t| t.base).collect();
+        // The single-repetition sizes: the largest of each repeated track.
+        let after = template.saturating_sub(before + per_rep * provisional);
+        let mut sizes: Vec<f32> = used.iter().take(before).copied().collect();
+        for j in 0..per_rep {
+            sizes.push((0..provisional).filter_map(|r| used.get(before + r * per_rep + j)).copied().fold(0.0, f32::max));
+        }
+        sizes.extend(used.iter().skip(before + per_rep * provisional).take(after));
+        let (tl, items, _) = self.lanes_setup_with(b, style, rows, avail, gap, cbw, origin, Some(&sizes), None);
+        (tl, items)
+    }
+
+    /// [`Self::lanes_setup`] with the single-repetition `sizes` of an
+    /// intrinsic automatic repetition; also returns the number of leading
+    /// implicit tracks.
+    #[allow(clippy::too_many_arguments)]
+    fn lanes_setup_with(&mut self, b: &mut LayoutBox, style: &ComputedStyle, rows: bool, avail: Option<f32>, gap: f32, cbw: f32, origin: (f32, f32), sizes: Option<&[f32]>, reps: Option<usize>) -> (TrackList, Vec<LaneItem>, usize) {
         let (list, auto_list) = if rows { (&style.grid_template_rows, &style.grid_auto_rows) } else { (&style.grid_template_columns, &style.grid_auto_columns) };
-        let mut tl = if subgrid::shared(b,rows).is_some() {subgrid::tracks(b,rows,avail,gap)} else {expand_tracks(list,avail,gap)};
+        let mut tl = if subgrid::shared(b,rows).is_some() {subgrid::tracks(b,rows,avail,gap)} else {expand_tracks_sized(list,avail,gap,sizes,reps)};
         let n_lines = tl.tracks.len() as i32 + 1;
+        // Column lanes of an RTL container are mirrored after layout.
+        let mirror = !rows && mirrored(b, &tl);
         let mut order: Vec<(i32, usize)> = Vec::new();
         for (i, c) in b.children.iter_mut().enumerate() {
             match c.flow {
-                Flow::Absolute => c.static_pos = origin,
+                Flow::Absolute => {
+                    c.static_pos = origin;
+                    c.static_align = None;
+                }
                 _ => order.push((c.style.order, i)),
             }
         }
@@ -293,12 +337,16 @@ impl<'a> Layouter<'a> {
                     span,
                     fixed,
                     edges: ItemEdges::new(&cs, cbw),
-                    justify: if cs.justify_self == ItemAlign::Auto { style.justify_items } else { cs.justify_self },
+                    justify: if cs.justify_self == ItemAlign::Auto {
+                        justify_for_pass(style.justify_items, style.justify_items_flags, cs.direction == rabbithole_style::Direction::Rtl, mirror)
+                    } else {
+                        justify_for_pass(cs.justify_self, cs.justify_self_flags, cs.direction == rabbithole_style::Direction::Rtl, mirror)
+                    },
                     align: if cs.align_self == ItemAlign::Auto { style.align_items } else { cs.align_self },
                 }
             })
             .collect();
-        (tl, items)
+        (tl, items, (-min_line) as usize)
     }
 
     /// Every position an item may take in the grid axis (§3.4): its
@@ -458,9 +506,10 @@ impl<'a> Layouter<'a> {
         if !rows {
             let avail = Some(cbw);
             let (mut tl, items) = self.lanes_setup(b, &style, false, avail, col_gap, cbw, (cx, cy));
-            let stretch = matches!(style.justify_content, ContentDistribution::Stretch | ContentDistribution::FlexStart);
+            let stretch = stretches_tracks(&style, false);
             self.size_column_lanes(b, &mut tl, &items, GridSpace::Definite(cbw), col_gap, cbw, stretch);
             let (col_pos, _) = subgrid::positions(&tl, col_gap, avail, style.justify_content);
+            let mirror = mirrored(b, &tl);
             let tol = tolerance(&style, avail);
             let tracks = tl.tracks.clone();
             let mut placed: Vec<(f32, f32)> = vec![(0.0, 0.0); items.len()];
@@ -513,6 +562,10 @@ impl<'a> Layouter<'a> {
                 let child = &mut b.children[it.idx];
                 let (nx, ny) = (cx + x, cy + y + child.margin.top);
                 child.translate(nx - child.rect.x, ny - child.rect.y);
+                if mirror {
+                    let (x, w, m) = (child.rect.x, child.rect.w, child.margin);
+                    child.translate(2.0 * cx + cbw - 2.0 * x - w - m.right + m.left, 0.0);
+                }
             }
             if self.grid_publication.enabled() {
                 b.used_grid_tracks[0] = resolved::capture(b, false, &tl, GridSpace::Definite(cbw), &mut self.grid_work);
@@ -524,7 +577,7 @@ impl<'a> Layouter<'a> {
         let avail = cb.height;
         let (mut tl, items) = self.lanes_setup(b, &style, true, avail, row_gap, cbw, (cx, cy));
         let mut widths=self.row_lane_widths(b,&tl,&items,row_gap,avail,cbw,Some(cbw),MeasurePhase::Initial);
-        let stretch = matches!(style.align_content, ContentDistribution::Stretch | ContentDistribution::FlexStart);
+        let stretch = stretches_tracks(&style, true);
         self.size_row_lanes(b, &mut tl, &items, &widths, avail, row_gap, cbw, stretch);
         if items.iter().any(|it|subgrid::requests(&b.children[it.idx]).1) {
             let adjusted=self.row_lane_widths(b,&tl,&items,row_gap,avail,cbw,Some(cbw),MeasurePhase::Adjusted);

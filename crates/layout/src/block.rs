@@ -803,6 +803,7 @@ impl<'a> Layouter<'a> {
                     let block = !b.children[i].style.display_before_blockification.is_inline_level();
                     let x = content_x + if block && b.style.direction == rabbithole_style::Direction::Rtl { cb.width } else { 0.0 };
                     b.children[i].static_pos = (x, cursor + off);
+                    b.children[i].static_align = None;
                 }
                 Flow::FloatLeft | Flow::FloatRight => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
@@ -964,7 +965,7 @@ impl<'a> Layouter<'a> {
         }
     }
 
-    fn clamp_height(&self, style: &ComputedStyle, h: f32, cb_h: Option<f32>, pb_v: f32) -> f32 {
+    pub(crate) fn clamp_height(&self, style: &ComputedStyle, h: f32, cb_h: Option<f32>, pb_v: f32) -> f32 {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
         let mut h = h;
         let max = match style.max_height {
@@ -1291,6 +1292,8 @@ impl<'a> Layouter<'a> {
             cb.x + l + ml
         } else if let Some(r) = r {
             cb.right() - r - mr - c.rect.w
+        } else if let Some(a) = c.static_align {
+            c.static_pos.0 + ml + a.factor.0 * (a.size.0 - c.rect.w - ml - mr)
         } else {
             if static_right { c.static_pos.0 - mr - c.rect.w } else { c.static_pos.0 + ml }
         };
@@ -1305,6 +1308,8 @@ impl<'a> Layouter<'a> {
             cb.y + t + mt
         } else if let Some(bt) = btm {
             cb.bottom() - bt - mb - c.rect.h
+        } else if let Some(a) = c.static_align {
+            c.static_pos.1 + mt + a.factor.1 * (a.size.1 - c.rect.h - mt - mb)
         } else {
             c.static_pos.1 + mt
         };

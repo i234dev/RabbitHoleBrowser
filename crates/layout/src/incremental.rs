@@ -157,6 +157,11 @@ pub(crate) fn contents_fingerprint(b: &LayoutBox, ox: f32, oy: f32) -> u64 {
             rect(h, &c.content_rect, ox, oy);
             (c.static_pos.0 - ox).to_bits().hash(h);
             (c.static_pos.1 - oy).to_bits().hash(h);
+            if let Some(a) = c.static_align {
+                for v in [a.size.0, a.size.1, a.factor.0, a.factor.1] {
+                    v.to_bits().hash(h);
+                }
+            }
             c.scroll_width.to_bits().hash(h);
             c.scroll_height.to_bits().hash(h);
             c.collapsed_bottom_margin.to_bits().hash(h);

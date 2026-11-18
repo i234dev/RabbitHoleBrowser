@@ -798,6 +798,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     let y = self.cur.y;
                     let (rx, ry) = self.rel_kids.get(*c).copied().unwrap_or((0.0, 0.0));
                     self.children[*c].static_pos = (x + rx, y + ry);
+                    self.children[*c].static_align = None;
                 }
                 Piece::Break => self.finish_line(true),
                 Piece::Gap(w) => {
