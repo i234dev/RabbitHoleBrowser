@@ -48,6 +48,9 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(console, "timeEnd", 1, console_noop);
     realm.define_method(console, "timeLog", 1, console_noop);
     realm.define_method(console, "clear", 0, console_noop);
+    for name in ["countReset", "timeStamp", "profile", "profileEnd", "dirxml"] {
+        realm.define_method(console, name, 0, console_noop);
+    }
 }
 
 fn is_nan(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {

@@ -587,7 +587,7 @@ fn screen_depth(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
 }
 
 fn make_screen(realm: &mut Realm) -> ObjectId {
-    let p = define_class(realm, "Screen", None, illegal_ctor);
+    let p = define_class(realm, "Screen", Some("EventTarget"), illegal_ctor);
     let o = realm.new_object_with_proto(Some(p));
     realm.set_host_data(o, Box::new(ScreenData));
     realm.set_class_name(o, "Screen");
@@ -601,14 +601,17 @@ fn make_screen(realm: &mut Realm) -> ObjectId {
     realm.define_accessor(p, "pixelDepth", Some(screen_depth), None, ACC);
     realm.define_property(o, "availLeft", Value::Number(0.0), ACC);
     realm.define_property(o, "availTop", Value::Number(0.0), ACC);
-    let orient = object_from(realm, vec![("type", Value::str("landscape-primary")), ("angle", Value::Number(0.0)), ("onchange", Value::Null)]);
-    if let V::Object(oo) = orient.v() {
-        realm.define_method(oo, "addEventListener", 2, noop);
-        realm.define_method(oo, "removeEventListener", 2, noop);
-        realm.define_method(oo, "lock", 1, rejected_not_supported);
-        realm.define_method(oo, "unlock", 0, noop);
-    }
-    realm.define_property(o, "orientation", orient, ACC);
+    realm.define_property(o, "onchange", Value::Null, ALL);
+    // ScreenOrientation: an EventTarget ("change") with a fixed landscape type.
+    let op = define_class(realm, "ScreenOrientation", Some("EventTarget"), illegal_ctor);
+    realm.define_method(op, "lock", 1, rejected_not_supported);
+    realm.define_method(op, "unlock", 0, noop);
+    let oo = realm.new_object_with_proto(Some(op));
+    realm.set_class_name(oo, "ScreenOrientation");
+    realm.define_property(oo, "type", Value::str("landscape-primary"), ACC);
+    realm.define_property(oo, "angle", Value::Number(0.0), ACC);
+    realm.define_property(oo, "onchange", Value::Null, ALL);
+    realm.define_property(o, "orientation", Value::Object(oo), ACC);
     realm.extra_roots.push(Value::Object(o));
     o
 }
