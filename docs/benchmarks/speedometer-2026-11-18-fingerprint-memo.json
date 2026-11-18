@@ -1,0 +1,120 @@
+{
+  "date": "2026-11-18",
+  "change": "Per-box memoized content fingerprints (each subtree hashed once per layout instead of once per nesting level)",
+  "base_source": "89f489a + layout cache changes of 0.1.23-0.1.25",
+  "candidate": "base + this change (released in 0.1.26)",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fe), 20 default suites, iterationCount=3, served locally",
+  "binaries": {
+    "build": "release + line tables + frame pointers, all functions and branch targets aligned to 64 bytes (same flags for both)",
+    "base_sha256": "0b2051d88764403d7da6a7053b6499988499dd33bf28eb6584ee42cd382e8e26",
+    "candidate_sha256": "4f6297d91dd407c79389c5c5aef0725c602302e28cedbb0e7135477ccdc44a9e",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one run at a time",
+    "order": "8 rounds, rotated",
+    "jit": "on (default)"
+  },
+  "pairs": [
+    {
+      "round": 1,
+      "base_geomean_ms": 410.05,
+      "candidate_geomean_ms": 399.21,
+      "base_score": 2.44,
+      "candidate_score": 2.51,
+      "ratio_base_over_candidate": 1.027153628416122
+    },
+    {
+      "round": 2,
+      "base_geomean_ms": 407.33,
+      "candidate_geomean_ms": 396.09,
+      "base_score": 2.46,
+      "candidate_score": 2.53,
+      "ratio_base_over_candidate": 1.0283773889772527
+    },
+    {
+      "round": 3,
+      "base_geomean_ms": 408.65,
+      "candidate_geomean_ms": 399.96,
+      "base_score": 2.45,
+      "candidate_score": 2.5,
+      "ratio_base_over_candidate": 1.0217271727172716
+    },
+    {
+      "round": 4,
+      "base_geomean_ms": 408.34,
+      "candidate_geomean_ms": 394.03,
+      "base_score": 2.45,
+      "candidate_score": 2.54,
+      "ratio_base_over_candidate": 1.036317031698094
+    },
+    {
+      "round": 5,
+      "base_geomean_ms": 410.36,
+      "candidate_geomean_ms": 400.34,
+      "base_score": 2.44,
+      "candidate_score": 2.5,
+      "ratio_base_over_candidate": 1.0250287255832544
+    },
+    {
+      "round": 6,
+      "base_geomean_ms": 408.53,
+      "candidate_geomean_ms": 397.18,
+      "base_score": 2.45,
+      "candidate_score": 2.52,
+      "ratio_base_over_candidate": 1.0285764640717054
+    },
+    {
+      "round": 7,
+      "base_geomean_ms": 408.79,
+      "candidate_geomean_ms": 401.51,
+      "base_score": 2.45,
+      "candidate_score": 2.49,
+      "ratio_base_over_candidate": 1.018131553385968
+    },
+    {
+      "round": 8,
+      "base_geomean_ms": 408.18,
+      "candidate_geomean_ms": 393.95,
+      "base_score": 2.45,
+      "candidate_score": 2.54,
+      "ratio_base_over_candidate": 1.0361213351948217
+    }
+  ],
+  "summary": {
+    "median_ratio": 1.0277655086966875,
+    "min": 1.018131553385968,
+    "max": 1.036317031698094,
+    "rounds_faster": 8,
+    "rounds": 8,
+    "mean_score_base": 2.44875,
+    "mean_score_candidate": 2.51625
+  },
+  "per_suite_median_ratio": {
+    "Charts-chartjs": 1.0016,
+    "Charts-observable-plot": 1.0035,
+    "Editor-CodeMirror": 1.0045,
+    "Editor-TipTap": 1.0042,
+    "NewsSite-Next": 1.2552,
+    "NewsSite-Nuxt": 1.2608,
+    "Perf-Dashboard": 1.0041,
+    "React-Stockcharts-SVG": 1.0039,
+    "TodoMVC-Angular-Complex-DOM": 0.9941,
+    "TodoMVC-Backbone": 1.0103,
+    "TodoMVC-JavaScript-ES5": 1.0086,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 1.002,
+    "TodoMVC-Lit-Complex-DOM": 1.0101,
+    "TodoMVC-Preact-Complex-DOM": 1.0092,
+    "TodoMVC-React-Complex-DOM": 1.0035,
+    "TodoMVC-React-Redux": 0.999,
+    "TodoMVC-Svelte-Complex-DOM": 1.0025,
+    "TodoMVC-Vue": 0.9979,
+    "TodoMVC-WebComponents": 1.0037,
+    "TodoMVC-jQuery": 0.9999
+  },
+  "correctness": "Full Speedometer run with RH_VERIFY_INCREMENTAL=1: 0 differences; layout, engine and style tests 604/604.",
+  "limitations": [
+    "One Linux x64 host; harness scores, not comparable with other browsers."
+  ]
+}
