@@ -573,7 +573,7 @@ impl<'a> Layouter<'a> {
         }
         // The base of the contents' percentage heights. Anonymous block
         // boxes are transparent to it (CSS 2.1 §10.5).
-        let anonymous = b.node.is_none() && b.pseudo.is_none() && b.kind == BoxKind::Block && matches!(b.formatting, Formatting::Block | Formatting::Inline);
+        let anonymous = b.kind == BoxKind::AnonymousBlock && matches!(b.formatting, Formatting::Block | Formatting::Inline);
         let inner_cb = Cb {
             x: b.content_rect.x,
             width: content_w,
@@ -1173,6 +1173,12 @@ impl<'a> Layouter<'a> {
     /// Size of a replaced box's content area. `cbw == None` means
     /// percentages are treated as auto (intrinsic sizing).
     pub(crate) fn replaced_size(&self, b: &LayoutBox, cbw: Option<f32>, cb_h: Option<f32>, pb_h: f32) -> (f32, f32) {
+        self.replaced_size_with(b, cbw, cb_h, pb_h, true)
+    }
+
+    /// [`Self::replaced_size`]; `width_limits: false` ignores min/max-width
+    /// (a flex item's content size).
+    pub(crate) fn replaced_size_with(&self, b: &LayoutBox, cbw: Option<f32>, cb_h: Option<f32>, pb_h: f32, width_limits: bool) -> (f32, f32) {
         let style = &b.style;
         // Natural size: the decoded image (in CSS px), else the `width` /
         // `height` attributes (which also give the aspect ratio before the
@@ -1237,13 +1243,13 @@ impl<'a> Layouter<'a> {
             _ => iw,
         };
         let h_auto = sh.is_none();
-        if let Some(max) = match style.max_width {
+        if let Some(max) = if !width_limits { None } else { match style.max_width {
             Length::Px(v) => Some(adj_w(v)),
             Length::Percent(p) => cbw.map(|c| adj_w(c * p / 100.0)),
             l @ (Length::Calc(..) | Length::Math(_)) => cbw.map(|c| adj_w(l.resolve_or_zero(c))),
             Length::MinContent | Length::MaxContent | Length::FitContent => Some(content_w),
             Length::Auto => None,
-        } {
+        } } {
             if w > max {
                 if w > 0.0 && (h_auto || sw.is_none()) {
                     h *= max / w;
@@ -1251,10 +1257,10 @@ impl<'a> Layouter<'a> {
                 w = max;
             }
         }
-        let min_w = match style.min_width {
+        let min_w = if !width_limits { None } else { match style.min_width {
             Length::MinContent | Length::MaxContent | Length::FitContent => Some(content_w),
             l => l.resolve(cbw_v).filter(|_| cbw.is_some()),
-        };
+        } };
         if let Some(min) = min_w {
             if w < min {
                 if w > 0.0 && (h_auto || sw.is_none()) {

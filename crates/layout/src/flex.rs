@@ -566,6 +566,13 @@ impl<'a> Layouter<'a> {
             (AlignPos::SelfEnd, _) => if wrap_reverse ^ flip_self { ItemAlign::FlexStart } else { ItemAlign::FlexEnd },
             (AlignPos::Flex, a) => a,
         };
+        // Lay out in physical terms: wrap-reverse puts cross-start at the
+        // bottom (right).
+        let align = match align {
+            ItemAlign::FlexStart if wrap_reverse => ItemAlign::FlexEnd,
+            ItemAlign::FlexEnd if wrap_reverse => ItemAlign::FlexStart,
+            a => a,
+        };
 
         // Items with a preferred aspect ratio and a definite cross size
         // (specified, or stretched in a single-line container with a
@@ -725,7 +732,8 @@ impl<'a> Layouter<'a> {
             Axis::Row => {
                 if child.kind == BoxKind::Image {
                     let pb = child.style.padding.left.resolve_or_zero(cbw) + child.style.padding.right.resolve_or_zero(cbw) + child.style.border_width.left + child.style.border_width.right;
-                    let (w, _) = self.replaced_size(child, Some(cbw), cbh, pb);
+                    // The content size ignores the item's own min/max-width.
+                    let (w, _) = self.replaced_size_with(child, Some(cbw), cbh, pb, false);
                     (w, w)
                 } else {
                     // Measured with its stretched height when that can matter.
