@@ -1,0 +1,116 @@
+{
+  "date": "2026-11-18",
+  "change": "An element reuses its previous custom property map when its parent map is the same object and its own custom property declarations are unchanged",
+  "base_source": "8838d1c4f2d3e0d253b1e86b95c8771855035a5f (0.1.32)",
+  "candidate": "f044821 (base + this change)",
+  "binaries_sha256": {
+    "base": "d0ddeb30648c442b03045effe5000c42e48e9b4e56dfc424f8fe3bd5dfc51c7d",
+    "candidate": "267da810615b1e97c78359f15ed504aa14a30907b570b62287ad0949a11914a6"
+  },
+  "page_load": {
+    "benchmark": "32 Speedometer 3.1 workload pages, 16 rounds (512 paired loads), alternating order, fresh shot process per load, 1280x900",
+    "window": "17:10-17:15 UTC",
+    "summary": {
+      "wall_ms": {
+        "base_total_ms": 134902,
+        "candidate_total_ms": 130341,
+        "ratio": 1.035,
+        "pairs_faster": 272
+      },
+      "build_page": {
+        "base_total_ms": 80270,
+        "candidate_total_ms": 77746,
+        "ratio": 1.032,
+        "pairs_faster": 282
+      },
+      "fonts": {
+        "base_total_ms": 1528,
+        "candidate_total_ms": 1510,
+        "ratio": 1.012,
+        "pairs_faster": 305
+      },
+      "layout": {
+        "base_total_ms": 108256,
+        "candidate_total_ms": 106112,
+        "ratio": 1.02,
+        "pairs_faster": 263
+      },
+      "paint": {
+        "base_total_ms": 12001,
+        "candidate_total_ms": 9652,
+        "ratio": 1.243,
+        "pairs_faster": 236
+      }
+    },
+    "median_pair_ratio_wall": 1.001,
+    "per_page_median_ratio_wall": {
+      "charts/dist/chartjs.html": 0.986,
+      "charts/dist/observable-plot.html": 0.993,
+      "editors/dist/codemirror.html": 1.004,
+      "editors/dist/tiptap.html": 1.01,
+      "newssite/news-next/dist/index.html#/home": 1.009,
+      "newssite/news-nuxt/dist/index.html": 1.004,
+      "perf.webkit.org/public/v3/#/charts/?since=1678991819934&paneList=((55-1974-null-null-(5-2.5-500)))": 1.006,
+      "react-stockcharts/build/index.html?type=svg": 1.001,
+      "todomvc/architecture-examples/angular-complex/dist/index.html": 0.993,
+      "todomvc/architecture-examples/angular/dist/index.html": 1.009,
+      "todomvc/architecture-examples/backbone-complex/dist/index.html": 1.341,
+      "todomvc/architecture-examples/backbone/dist/index.html": 1.005,
+      "todomvc/architecture-examples/jquery-complex/dist/index.html": 1.328,
+      "todomvc/architecture-examples/jquery/dist/index.html": 1.001,
+      "todomvc/architecture-examples/lit-complex/dist/index.html": 0.994,
+      "todomvc/architecture-examples/lit/dist/index.html": 1.01,
+      "todomvc/architecture-examples/preact-complex/dist/index.html#/home": 0.986,
+      "todomvc/architecture-examples/preact/dist/index.html#/home": 1.0,
+      "todomvc/architecture-examples/react-complex/dist/index.html#/home": 0.995,
+      "todomvc/architecture-examples/react-redux-complex/dist/index.html": 0.997,
+      "todomvc/architecture-examples/react-redux/dist/index.html": 1.001,
+      "todomvc/architecture-examples/react/dist/index.html#/home": 1.005,
+      "todomvc/architecture-examples/svelte-complex/dist/index.html": 0.995,
+      "todomvc/architecture-examples/svelte/dist/index.html": 1.009,
+      "todomvc/architecture-examples/vue-complex/dist/index.html": 1.0,
+      "todomvc/architecture-examples/vue/dist/index.html": 1.005,
+      "todomvc/vanilla-examples/javascript-es5-complex/dist/index.html": 0.989,
+      "todomvc/vanilla-examples/javascript-es5/dist/index.html": 1.004,
+      "todomvc/vanilla-examples/javascript-es6-webpack-complex/dist/index.html": 0.995,
+      "todomvc/vanilla-examples/javascript-es6-webpack/dist/index.html": 1.008,
+      "todomvc/vanilla-examples/javascript-web-components-complex/dist/index.html": 0.988,
+      "todomvc/vanilla-examples/javascript-web-components/dist/index.html": 1.004
+    }
+  },
+  "speedometer": {
+    "benchmark": "Speedometer 3.1 complete, 8 rounds rotated, JIT on",
+    "window": "17:15-17:26 UTC",
+    "median_ratio": 1.0034,
+    "min": 0.9943,
+    "max": 1.0127,
+    "rounds_faster": 5,
+    "rounds": 8,
+    "per_suite_median_ratio": {
+      "Charts-chartjs": 0.9854,
+      "Charts-observable-plot": 0.997,
+      "Editor-CodeMirror": 0.9943,
+      "Editor-TipTap": 0.9957,
+      "NewsSite-Next": 1.0053,
+      "NewsSite-Nuxt": 1.0075,
+      "Perf-Dashboard": 0.9971,
+      "React-Stockcharts-SVG": 0.9949,
+      "TodoMVC-Angular-Complex-DOM": 0.9976,
+      "TodoMVC-Backbone": 0.9974,
+      "TodoMVC-JavaScript-ES5": 0.9892,
+      "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 0.9832,
+      "TodoMVC-Lit-Complex-DOM": 1.1726,
+      "TodoMVC-Preact-Complex-DOM": 0.9875,
+      "TodoMVC-React-Complex-DOM": 0.9937,
+      "TodoMVC-React-Redux": 0.9953,
+      "TodoMVC-Svelte-Complex-DOM": 0.9862,
+      "TodoMVC-Vue": 0.9899,
+      "TodoMVC-WebComponents": 0.9853,
+      "TodoMVC-jQuery": 0.9995
+    },
+    "note": "Scores of these instrumented builds are not official release scores"
+  },
+  "conditions": "Identically built binaries (release, line tables, frame pointers, 64-byte function and block alignment), Linux x86-64 under WSL2 on an Intel Core i7-12700H, CPU 0, one process at a time",
+  "tests": "rabbithole-style and rabbithole-engine test suites: 292 passed, 0 failed",
+  "limitations": "The gain is concentrated in two pages; the other 30 pages are within +-1.5% (noise level)."
+}
