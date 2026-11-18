@@ -633,7 +633,10 @@ fn cascade_matched(
     let mut vars: Rc<Vars> = parent_vars.clone();
     for m in &local {
         if m.decl.name.starts_with("--") {
-            Rc::make_mut(&mut vars).insert(m.decl.name.clone(), m.decl.value.clone());
+            // Redeclaring the inherited value keeps sharing the parent's map.
+            if vars.get(&m.decl.name) != Some(&m.decl.value) {
+                Rc::make_mut(&mut vars).insert(m.decl.name.clone(), m.decl.value.clone());
+            }
         }
     }
 
