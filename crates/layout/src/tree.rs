@@ -236,6 +236,14 @@ pub struct LayoutBox {
     /// A flex container's (first, last) baselines as offsets from
     /// `rect.y`, set by its layout (CSS Flexbox §8.5).
     pub(crate) flex_baselines: Option<(Option<f32>, Option<f32>)>,
+    /// A stretched row flex item's measuring layout, kept while the box is
+    /// reused: (main size, container width and height, cross size,
+    /// ascent). The item is laid out again stretched anyway, so the
+    /// measure need not run.
+    pub(crate) flex_measure: Option<(f32, f32, Option<f32>, f32, f32)>,
+    /// Memo of `flex::depends_on_definite_height` (0 unknown, 1 no,
+    /// 2 yes), valid while the box is reused.
+    pub(crate) pct_dependent: std::cell::Cell<u8>,
     /// Resolved margins (px) after layout.
     pub margin: Edges<f32>,
     /// Effective bottom margin after collapsing with descendants.
@@ -344,6 +352,8 @@ impl LayoutBox {
             marker_text: None,
             baseline: None,
             flex_baselines: None,
+            flex_measure: None,
+            pct_dependent: std::cell::Cell::new(0),
             margin: Edges::all(0.0),
             collapsed_bottom_margin: 0.0,
             bottom_margins: (0.0, 0.0),

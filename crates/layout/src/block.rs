@@ -47,6 +47,9 @@ pub(crate) struct Layouter<'a> {
     /// height but not a definite base for its children's percentages (a
     /// column item flexed in a container with an indefinite height).
     pub(crate) forced_height_indefinite: bool,
+    /// Flex: same-size relayouts of stretched items (for definite
+    /// percentage bases) in progress.
+    pub(crate) definite_relayouts: u32,
     /// Intrinsic sizing: the definite content height of the containing
     /// block of the box being measured (percentage heights of replaced
     /// elements and aspect-ratio boxes resolve against it).
@@ -253,6 +256,7 @@ impl<'a> Layouter<'a> {
             forced_content_height: None,
             flex_limits: None,
             forced_height_indefinite: false,
+            definite_relayouts: 0,
             intrinsic_cb_h: None,
             width_intrinsic: None,
             intrinsic_cb_used: false,
@@ -582,7 +586,11 @@ impl<'a> Layouter<'a> {
         }
         // The base of the contents' percentage heights. Anonymous block
         // boxes are transparent to it (CSS 2.1 §10.5).
-        let anonymous = b.kind == BoxKind::AnonymousBlock && matches!(b.formatting, Formatting::Block | Formatting::Inline);
+        // (Only when a child uses it, so the box's layout cache stays keyed
+        // on an indefinite height otherwise.)
+        let anonymous = b.kind == BoxKind::AnonymousBlock
+            && matches!(b.formatting, Formatting::Block | Formatting::Inline)
+            && b.children.iter().any(|c| c.style.height.has_percent() || c.style.min_height.has_percent() || c.style.max_height.has_percent());
         let inner_cb = Cb {
             x: b.content_rect.x,
             width: content_w,

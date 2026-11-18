@@ -148,6 +148,11 @@ struct FlexItem {
     main_definite: bool,
     /// Whether the cross size property is `auto` (stretchable).
     cross_auto: bool,
+    /// The item is stretched to its line (stretch alignment, auto cross
+    /// size, no auto cross margins).
+    stretches: bool,
+    /// The measuring layout was skipped: lay out in the stretch step.
+    must_relayout: bool,
     /// Resolved `align-self` (flex-relative: `start`/`end`/`self-*` are
     /// mapped to `FlexStart`/`FlexEnd`).
     align: ItemAlign,
@@ -303,8 +308,27 @@ impl<'a> Layouter<'a> {
         }
 
         // §9.4 cross size: lay out every item with its used main size.
+        // A stretched row item whose contents depend on a definite height
+        // is laid out again with its line's height, so its measured height
+        // is remembered from the previous layout instead of measuring the
+        // subtree again (nested containers would otherwise be laid out
+        // twice per level on every layout).
         for it in items.iter_mut() {
-            self.layout_flex_item(b, it, axis, cbw, cb.height, None);
+            let child = &b.children[it.idx];
+            if axis == Axis::Row && it.stretches && child.kind != BoxKind::Image && self.definite_relayouts == 0 && depends_on_definite_height(child) {
+                if let Some((main, w, h, cross, ascent)) = child.flex_measure {
+                    if main == it.main && w == cbw && h == cb.height {
+                        it.cross_hyp = cross;
+                        it.ascent = ascent;
+                        it.must_relayout = true;
+                        continue;
+                    }
+                }
+                self.layout_flex_item(b, it, axis, cbw, cb.height, None);
+                b.children[it.idx].flex_measure = Some((it.main, cbw, cb.height, it.cross_hyp, it.ascent));
+            } else {
+                self.layout_flex_item(b, it, axis, cbw, cb.height, None);
+            }
         }
 
         // Line cross sizes.
@@ -488,9 +512,19 @@ impl<'a> Layouter<'a> {
                     // The stretched size is definite (§9.4 step 11): lay
                     // out again when it differs, or when the contents
                     // resolve percentages against it.
-                    if (inner - it.cross_hyp).abs() > 0.01 || (axis == Axis::Row && depends_on_definite_height(&b.children[it.idx])) {
+                    // A same-size relayout only for definiteness is not
+                    // repeated inside another one: nested containers would
+                    // otherwise be laid out exponentially often.
+                    let for_definiteness = (inner - it.cross_hyp).abs() <= 0.01
+                        && !it.must_relayout
+                        && axis == Axis::Row
+                        && self.definite_relayouts == 0
+                        && depends_on_definite_height(&b.children[it.idx]);
+                    if it.must_relayout || (inner - it.cross_hyp).abs() > 0.01 || for_definiteness {
                         let b_ptr: &mut LayoutBox = b;
+                        self.definite_relayouts += for_definiteness as u32;
                         self.layout_flex_item(b_ptr, it, axis, cbw, cb.height, Some(inner));
+                        self.definite_relayouts -= for_definiteness as u32;
                     }
                 }
                 it.cross_pos = line_start + offset;
@@ -687,6 +721,8 @@ impl<'a> Layouter<'a> {
             max,
             main: hyp,
             cross_hyp: 0.0,
+            stretches: stretch_like,
+            must_relayout: false,
             main_definite: basis.is_some() || transferred.is_some() || !matches!(b.children[idx].formatting, crate::tree::Formatting::Block | crate::tree::Formatting::Inline),
             cross_auto,
             align,
@@ -1282,19 +1318,34 @@ fn overflow_fallback(dist: ContentDistribution, mods: AlignMods, free: f32, reve
 }
 
 /// Whether laying out `b` with a definite content height (rather than an
-/// auto one that comes out the same) can change its contents: flex and
-/// grid containers, and children sized by percentages of that height.
+/// auto one that comes out the same) can change its contents: children
+/// sized by percentages of that height, also through nested flex and grid
+/// containers (whose stretched or flexed items become definite).
 fn depends_on_definite_height(b: &LayoutBox) -> bool {
     use crate::tree::Formatting;
-    match b.formatting {
-        Formatting::Grid => return true,
-        Formatting::Flex if matches!(b.style.flex_direction, FlexDirection::Column | FlexDirection::ColumnReverse) || b.style.flex_wrap != FlexWrap::NoWrap => return true,
+    match b.pct_dependent.get() {
+        1 => return false,
+        2 => return true,
         _ => {}
     }
-    b.children.iter().any(|c| {
-        let s = &c.style;
-        c.is_in_flow() && (s.height.has_percent() || s.min_height.has_percent() || s.max_height.has_percent())
-    })
+    let pct = |c: &LayoutBox| c.style.height.has_percent() || c.style.min_height.has_percent() || c.style.max_height.has_percent();
+    let dep = if matches!(b.formatting, Formatting::Flex | Formatting::Grid) {
+        // Items with percentage sizes or flex bases, and items whose
+        // contents resolve percentages against them.
+        b.children.iter().any(|c| {
+            c.is_in_flow()
+                && (pct(c) || c.style.flex_basis.has_percent()
+                    || match c.formatting {
+                    Formatting::Flex | Formatting::Grid => depends_on_definite_height(c),
+                    Formatting::Block | Formatting::Inline => c.children.iter().any(|g| g.is_in_flow() && pct(g)),
+                    _ => false,
+                })
+        })
+    } else {
+        b.children.iter().any(|c| c.is_in_flow() && (pct(c) || (matches!(c.formatting, Formatting::Flex | Formatting::Grid) && depends_on_definite_height(c))))
+    };
+    b.pct_dependent.set(if dep { 2 } else { 1 });
+    dep
 }
 
 pub(crate) fn px_or_zero(l: Length) -> f32 {
