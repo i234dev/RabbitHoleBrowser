@@ -427,6 +427,7 @@ pub(crate) fn compute_element<'a>(
     share: Option<&mut ShareCache>,
     candidates: &mut Vec<usize>,
     matched: &mut Vec<Matched<'a>>,
+    memo: Option<&mut Option<VarsMemo>>,
 ) -> ElementOut {
     let (env, opts, scopes) = (cx.env, cx.opts, cx.scopes);
     let mut rules: Vec<(usize, u32)> = Vec::new();
@@ -520,7 +521,7 @@ pub(crate) fn compute_element<'a>(
             return out;
         }
     }
-    let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root, slot);
+    let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root, slot, memo);
     if let (Some(cache), Some(k)) = (share, key) {
         if cache.map.len() > 200_000 {
             cache.map.clear();
@@ -588,6 +589,50 @@ pub(crate) fn control_pseudo_slot(doc: &Document, node: NodeId) -> Option<Pseudo
     }
 }
 
+/// The custom properties an element computed last time, with the inputs
+/// that produced them: the parent's map (kept alive, so pointer identity is
+/// meaningful) and the element's own custom declarations in cascade order.
+pub(crate) struct VarsMemo {
+    parent: Rc<Vars>,
+    own: Vec<(String, Vec<Token>)>,
+    vars: Rc<Vars>,
+}
+
+/// The element's custom-property map: the parent's map with the element's
+/// own `--*` declarations applied. When neither input changed since the
+/// previous restyle the previous map is returned as is, so neither a copy
+/// of the map nor a deep comparison with the old one is needed.
+fn custom_properties(local: &[Matched], parent_vars: &Rc<Vars>, memo: Option<&mut Option<VarsMemo>>) -> Rc<Vars> {
+    let mut own = local.iter().filter(|m| m.decl.name.starts_with("--")).peekable();
+    if own.peek().is_none() {
+        return parent_vars.clone();
+    }
+    if let Some(Some(prev)) = memo.as_deref() {
+        if Rc::ptr_eq(&prev.parent, parent_vars) {
+            let mut it = prev.own.iter();
+            let same = own.clone().all(|m| it.next().map(|(n, v)| *n == m.decl.name && *v == m.decl.value).unwrap_or(false)) && it.next().is_none();
+            if same {
+                return prev.vars.clone();
+            }
+        }
+    }
+    let mut vars: Rc<Vars> = parent_vars.clone();
+    for m in own.clone() {
+        // Redeclaring the inherited value keeps sharing the parent's map.
+        if vars.get(&m.decl.name) != Some(&m.decl.value) {
+            Rc::make_mut(&mut vars).insert(m.decl.name.clone(), m.decl.value.clone());
+        }
+    }
+    if let Some(slot) = memo {
+        *slot = Some(VarsMemo {
+            parent: parent_vars.clone(),
+            own: own.map(|m| (m.decl.name.clone(), m.decl.value.clone())).collect(),
+            vars: vars.clone(),
+        });
+    }
+    vars
+}
+
 /// The cascade proper for one element whose matching declarations are
 /// known.
 #[allow(clippy::too_many_arguments)]
@@ -602,6 +647,7 @@ fn cascade_matched(
     opts: &StyleOptions,
     is_root: bool,
     slot: Option<PseudoElement>,
+    memo: Option<&mut Option<VarsMemo>>,
 ) -> ElementOut {
 
     let mut local: Vec<Matched> = Vec::with_capacity(matched.len() + presentational.len() + style_attr.len());
@@ -630,15 +676,7 @@ fn cascade_matched(
     local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
 
     // Custom properties.
-    let mut vars: Rc<Vars> = parent_vars.clone();
-    for m in &local {
-        if m.decl.name.starts_with("--") {
-            // Redeclaring the inherited value keeps sharing the parent's map.
-            if vars.get(&m.decl.name) != Some(&m.decl.value) {
-                Rc::make_mut(&mut vars).insert(m.decl.name.clone(), m.decl.value.clone());
-            }
-        }
-    }
+    let vars = custom_properties(&local, parent_vars, memo);
 
     let style = Rc::new(apply_declarations(&local, &vars, parent, root_font_size, env, opts, is_root, false));
 

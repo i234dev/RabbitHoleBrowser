@@ -200,6 +200,17 @@ fn hover_inherit_vars_and_rem() {
     let html = page.doc.html_element().unwrap();
     page.doc.set_attr(html, "style", Some("font-size: 20px; --gap: 9px"));
     check(&engine, &mut page, "root font size");
+    // Custom properties reused from the previous restyle must follow both
+    // the element's own declarations and its parent's map.
+    page.doc.set_attr(o, "style", Some("--c: purple; --c: orange"));
+    check(&engine, &mut page, "own vars change");
+    page.doc.set_attr(html, "style", Some("--gap: 3px"));
+    check(&engine, &mut page, "parent vars change");
+    page.doc.set_attr(o, "style", Some("--c: purple; --c: orange"));
+    page.doc.set_attr(html, "style", Some("--gap: 3px; --c: teal"));
+    check(&engine, &mut page, "parent vars change, own unchanged");
+    page.doc.set_attr(o, "style", None);
+    check(&engine, &mut page, "own vars removed");
 }
 
 #[test]

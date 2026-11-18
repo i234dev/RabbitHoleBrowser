@@ -575,6 +575,8 @@ pub struct StyleEngine {
     env: MediaEnv,
     /// Custom properties per element (inherited by children).
     vars: Vec<Option<Rc<Vars>>>,
+    /// Inputs and result of each element's last custom-property cascade.
+    vars_memo: Vec<Option<crate::cascade::VarsMemo>>,
     /// Element uses `inherit` on a non-inherited property.
     inherit_dep: Vec<bool>,
     need: Vec<u8>,
@@ -632,6 +634,7 @@ impl StyleEngine {
             inval,
             env: *env,
             vars: Vec::new(),
+            vars_memo: Vec::new(),
             inherit_dep: Vec::new(),
             need: Vec::new(),
             decls: DeclCache::default(),
@@ -668,6 +671,7 @@ impl StyleEngine {
         tree.after = vec![None; n];
         tree.marker = vec![None; n];
         self.vars = vec![None; n];
+        self.vars_memo = (0..n).map(|_| None).collect();
         self.inherit_dep = vec![false; n];
         self.need = vec![0; n];
         self.state = opts.state.clone();
@@ -751,6 +755,7 @@ impl StyleEngine {
         }
         if self.vars.len() < n {
             self.vars.resize(n, None);
+            self.vars_memo.resize_with(n, || None);
             self.inherit_dep.resize(n, false);
         }
         self.need.clear();
@@ -1104,7 +1109,7 @@ impl StyleEngine {
             let (style, vars) = if recompute {
                 recomputed += 1;
                 let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: Some(&bloom) };
-                let out: ElementOut = compute_element(doc, node, &parent, &pvars, root_fs, &cx, &mut decls, Some(&mut share), &mut candidates, &mut matched);
+                let out: ElementOut = compute_element(doc, node, &parent, &pvars, root_fs, &cx, &mut decls, Some(&mut share), &mut candidates, &mut matched, Some(&mut self.vars_memo[node]));
                 self.inherit_dep[node] = out.inherit_dep;
                 if node == html {
                     if old.as_ref().map(|o| o.font_size != out.style.font_size).unwrap_or(false) {
@@ -1250,7 +1255,7 @@ impl StyleEngine {
         let matcher = SelectorMatcher::new(doc, opts.state);
         let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: None };
         for &node in &chain {
-            let out = compute_element(doc, node, &parent, &vars, root_fs, &cx, &mut decls, None, &mut candidates, &mut matched);
+            let out = compute_element(doc, node, &parent, &vars, root_fs, &cx, &mut decls, None, &mut candidates, &mut matched, None);
             if node == html {
                 root_fs = out.style.font_size;
             }
