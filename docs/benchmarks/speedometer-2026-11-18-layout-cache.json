@@ -1,0 +1,122 @@
+{
+  "date": "2026-11-18",
+  "change": "Layout cache serves both the measuring and the stretched layout of a box when its contents are proven not to depend on the height",
+  "base_source": "89f489af94e236302a0b6d5a69df9198655d6508 (0.1.21)",
+  "candidate": "base + layout cache change (commit on perf-layout-cache-alt, released in 0.1.23)",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fe), 20 default suites, iterationCount=3, served locally",
+  "binaries": {
+    "build": "release + line tables + frame pointers, -Cllvm-args=-align-all-functions=6 -Cllvm-args=-align-all-nofallthru-blocks=6 (same flags for both, to neutralize code-placement effects)",
+    "base_sha256": "b20c523a6cc20d419002e9a10fbc45d5dc5df9e0a8ba1e7ee89b62eb84fcbdc9",
+    "candidate_sha256": "468030d6bb62b2f8419e7cca702bb2fb5ed51ee0def1c5186a15291b930ee342",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one run at a time",
+    "order": "8 rounds, base/candidate order rotated per round",
+    "jit": "on (default)",
+    "utc_interval": "2026-11-18 02:31-02:51"
+  },
+  "pairs": [
+    {
+      "round": 1,
+      "base_geomean_ms": 473.4,
+      "candidate_geomean_ms": 452.05,
+      "base_score": 2.11,
+      "candidate_score": 2.21,
+      "ratio_base_over_candidate": 1.047229288795487
+    },
+    {
+      "round": 2,
+      "base_geomean_ms": 474.42,
+      "candidate_geomean_ms": 447.32,
+      "base_score": 2.11,
+      "candidate_score": 2.24,
+      "ratio_base_over_candidate": 1.060583027810069
+    },
+    {
+      "round": 3,
+      "base_geomean_ms": 472.28,
+      "candidate_geomean_ms": 447.75,
+      "base_score": 2.12,
+      "candidate_score": 2.23,
+      "ratio_base_over_candidate": 1.054785036292574
+    },
+    {
+      "round": 4,
+      "base_geomean_ms": 469.73,
+      "candidate_geomean_ms": 447.13,
+      "base_score": 2.13,
+      "candidate_score": 2.24,
+      "ratio_base_over_candidate": 1.0505445843490708
+    },
+    {
+      "round": 5,
+      "base_geomean_ms": 473.19,
+      "candidate_geomean_ms": 446.68,
+      "base_score": 2.11,
+      "candidate_score": 2.24,
+      "ratio_base_over_candidate": 1.059348974657473
+    },
+    {
+      "round": 6,
+      "base_geomean_ms": 468.03,
+      "candidate_geomean_ms": 448.4,
+      "base_score": 2.14,
+      "candidate_score": 2.23,
+      "ratio_base_over_candidate": 1.043777876895629
+    },
+    {
+      "round": 7,
+      "base_geomean_ms": 470.22,
+      "candidate_geomean_ms": 444.61,
+      "base_score": 2.13,
+      "candidate_score": 2.25,
+      "ratio_base_over_candidate": 1.0576010436112548
+    },
+    {
+      "round": 8,
+      "base_geomean_ms": 474.56,
+      "candidate_geomean_ms": 448.08,
+      "base_score": 2.11,
+      "candidate_score": 2.23,
+      "ratio_base_over_candidate": 1.0590965898946616
+    }
+  ],
+  "summary": {
+    "median_ratio": 1.0561930399519144,
+    "min": 1.043777876895629,
+    "max": 1.060583027810069,
+    "rounds_faster": 8,
+    "rounds": 8,
+    "mean_score_base": 2.12,
+    "mean_score_candidate": 2.23375
+  },
+  "per_suite_median_ratio": {
+    "Charts-chartjs": 1.0016,
+    "Charts-observable-plot": 1.0012,
+    "Editor-CodeMirror": 0.9954,
+    "Editor-TipTap": 0.9991,
+    "NewsSite-Next": 1.7036,
+    "NewsSite-Nuxt": 1.721,
+    "Perf-Dashboard": 0.9942,
+    "React-Stockcharts-SVG": 0.998,
+    "TodoMVC-Angular-Complex-DOM": 0.9872,
+    "TodoMVC-Backbone": 0.997,
+    "TodoMVC-JavaScript-ES5": 1.0063,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 0.9961,
+    "TodoMVC-Lit-Complex-DOM": 0.9964,
+    "TodoMVC-Preact-Complex-DOM": 1.0007,
+    "TodoMVC-React-Complex-DOM": 0.9955,
+    "TodoMVC-React-Redux": 0.9989,
+    "TodoMVC-Svelte-Complex-DOM": 0.9872,
+    "TodoMVC-Vue": 1.0009,
+    "TodoMVC-WebComponents": 1.0097,
+    "TodoMVC-jQuery": 1.0032
+  },
+  "correctness": "Full Speedometer run with RH_VERIFY_INCREMENTAL=1 (every incremental layout compared with a full layout): 0 differences. Layout cache over that run: 6.39 M hits, 3.62 M misses.",
+  "limitations": [
+    "One Linux x64 host; harness scores, not comparable with other browsers.",
+    "A ratio above 1 means the candidate was faster."
+  ]
+}

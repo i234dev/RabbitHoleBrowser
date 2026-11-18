@@ -590,3 +590,40 @@ fn line_clamp_removal_from_script_after_measuring_layout() {
     assert_eq!(page.doc.attr(container, "style"), Some("line-clamp: none;"));
     assert!(page.rect_of(container).unwrap().h >= 95.0);
 }
+
+/// Flex items are laid out once to measure them and again stretched to the
+/// line's height. When their contents do not depend on that height, the
+/// layout cache serves both passes when the row is laid out again instead
+/// of laying every card out twice; contents that do depend on it (a
+/// percentage height) are laid out again, and the result equals a full
+/// layout.
+#[test]
+fn stretched_flex_items_are_reused_from_the_layout_cache() {
+    let mut html = String::from("<html><head><style>.row{display:flex} .card{flex:1;padding:4px} .tall{height:80px} .tall.alt{color:red} .pct{height:50%}</style></head><body>");
+    for i in 0..40 {
+        html.push_str(&format!("<div class=\"row\"><div class=\"card\"><p>Card {i} with a few words to wrap</p></div><div class=\"card tall\" id=\"t{i}\">side</div><div class=\"card\"><div class=\"pct\">half</div></div></div>"));
+    }
+    html.push_str("</body></html>");
+    let (engine, mut page) = load(&html);
+    let talls: Vec<NodeId> = (0..40).map(|i| id(&page, &format!("t{i}"))).collect();
+    let mut last = (0, 0, 0);
+    for round in 0..3 {
+        // A color change rebuilds the tall card, so every row is laid out
+        // again while its cards keep their widths and heights.
+        for &t in &talls {
+            page.doc.set_attr(t, "class", Some(if round % 2 == 0 { "card tall alt" } else { "card tall" }));
+        }
+        check(&engine, &mut page, "row relayout");
+        let _ = rabbithole_engine::layout::take_cache_stats();
+        for &t in &talls {
+            page.doc.set_attr(t, "class", Some(if round % 2 == 0 { "card tall" } else { "card tall alt" }));
+        }
+        engine.restyle(&mut page);
+        last = rabbithole_engine::layout::take_cache_stats();
+    }
+    let (hits, misses, _) = last;
+    // Per row: the text card hits in both passes; the percentage-height
+    // card is laid out again in both.
+    assert!(hits >= 80, "hits {hits}, misses {misses}");
+    assert!(misses <= 100, "hits {hits}, misses {misses}");
+}
