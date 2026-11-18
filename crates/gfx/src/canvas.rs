@@ -550,12 +550,11 @@ impl Canvas {
 
     /// Copy of the pixels as tightly packed RGBA8 (for PNG export).
     pub fn to_rgba8(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.data.len() * 4);
-        for &p in &self.data {
-            out.push(((p >> 16) & 0xff) as u8);
-            out.push(((p >> 8) & 0xff) as u8);
-            out.push((p & 0xff) as u8);
-            out.push(255);
+        let mut out = vec![255u8; self.data.len() * 4];
+        for (o, &p) in out.chunks_exact_mut(4).zip(&self.data) {
+            o[0] = (p >> 16) as u8;
+            o[1] = (p >> 8) as u8;
+            o[2] = p as u8;
         }
         out
     }
@@ -791,6 +790,37 @@ mod tests {
         assert!(dark > 20, "dark pixels: {dark}");
         // Nothing painted below the baseline+descent area far right
         assert_eq!(px(&c, 99, 29), Color::WHITE);
+    }
+
+    /// An image drawn at its own size at a whole-pixel offset takes a direct
+    /// copy path; it must give exactly what sampling each pixel centre gives.
+    #[test]
+    fn unscaled_image_copy_matches_sampling() {
+        let (iw, ih) = (7u32, 5u32);
+        let rgba: Vec<u8> = (0..iw * ih)
+            .flat_map(|i| {
+                let a = [0u8, 1, 37, 128, 200, 254, 255][(i % 7) as usize];
+                [(i * 37 % 256) as u8, (i * 91 % 256) as u8, (i * 13 % 256) as u8, a]
+            })
+            .collect();
+        let img = Image::new(iw, ih, rgba);
+        let bg = Color::rgb(30, 160, 90);
+        let mut c = Canvas::new(12, 10);
+        c.clear(bg);
+        c.draw_image(&img, Rect::new(2.0, 3.0, iw as f32, ih as f32), 0.7);
+        for y in 0..10u32 {
+            for x in 0..12u32 {
+                let inside = (2..2 + iw).contains(&x) && (3..3 + ih).contains(&y);
+                let want = if inside {
+                    let [r, g, b, a] = sample_bilinear(&img, (x - 2) as f32, (y - 3) as f32);
+                    let alpha = (a * 0.7 + 0.5) as u32;
+                    if alpha == 0 { bg.to_u32() } else { blend_image(bg.to_u32(), [r, g, b], alpha) }
+                } else {
+                    bg.to_u32()
+                };
+                assert_eq!(c.data[(y * 12 + x) as usize], want, "pixel {x},{y}");
+            }
+        }
     }
 
     #[test]

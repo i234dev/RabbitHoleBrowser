@@ -654,6 +654,38 @@ impl Canvas {
             let sx = src.w / d.w;
             let sy = src.h / d.h;
             let downscale = sx > 1.0 || sy > 1.0;
+            // Unscaled at whole-pixel offsets (a canvas or image shown at its
+            // own size): every device pixel is exactly one source pixel, so
+            // sampling (bilinear or nearest, at the pixel centre) returns it
+            // unchanged and the coverage is 1. Copy it directly: same result.
+            let whole = |v: f32| v == v.trunc();
+            let inside = src.x >= 0.0 && src.y >= 0.0 && src.right() <= image.width as f32 && src.bottom() <= image.height as f32;
+            if inside && sx == 1.0 && sy == 1.0 && whole(d.x) && whole(d.y) && whole(src.x) && whole(src.y) {
+                let px_data = image.pixels();
+                let iw = image.width as i64;
+                let (ox, oy) = (src.x as i64 - d.x as i64, src.y as i64 - d.y as i64);
+                for py in b.y0..b.y1 {
+                    let drow = py as usize * w;
+                    let srow = (py as i64 + oy) * iw;
+                    for px in b.x0..b.x1 {
+                        let i = ((srow + px as i64 + ox) * 4) as usize;
+                        let a = px_data[i + 3];
+                        if a == 0 {
+                            continue;
+                        }
+                        let mut alpha = (a as f32 * op + 0.5) as u32;
+                        if let Some(mk) = &mask {
+                            alpha = (alpha * mk.get(px, py) as u32 + 127) / 255;
+                        }
+                        if alpha == 0 {
+                            continue;
+                        }
+                        let idx = drow + px as usize;
+                        self.data[idx] = blend_image(self.data[idx], [px_data[i] as f32, px_data[i + 1] as f32, px_data[i + 2] as f32], alpha);
+                    }
+                }
+                return;
+            }
             for py in b.y0..b.y1 {
                 let drow = py as usize * w;
                 let v0 = src.y + (py as f32 - d.y) * sy;
