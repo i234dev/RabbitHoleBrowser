@@ -944,6 +944,29 @@ mod tests {
         }
     }
 
+    /// Faces of one family differing only in width are kept apart and
+    /// ranked by `font-stretch` (narrower first at or below 100%).
+    #[test]
+    fn web_faces_match_font_stretch() {
+        let fc = FontContext::new();
+        let sans = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+        let serif = include_bytes!("../../../assets/fonts/DejaVuSerif.ttf");
+        let mono = include_bytes!("../../../assets/fonts/DejaVuSansMono.ttf");
+        let normal = fc.add_font_data_stretch("W", 400, false, (100, 100), sans).unwrap();
+        let condensed = fc.add_font_data_stretch("W", 400, false, (75, 75), serif).unwrap();
+        let expanded = fc.add_font_data_stretch("W", 400, false, (125, 150), mono).unwrap();
+        let family = ["W".to_string()];
+        let pick = |stretch| fc.select_family_stretch(&family, Family::Sans, 400, false, stretch);
+        assert_eq!(pick(100), normal);
+        assert_eq!(pick(75), condensed);
+        assert_eq!(pick(50), condensed, "narrower first, then wider");
+        assert_eq!(pick(87), condensed);
+        assert_eq!(pick(112), expanded, "wider first above 100%");
+        assert_eq!(pick(140), expanded, "inside a range");
+        assert_eq!(pick(200), expanded);
+        assert_eq!(fc.select_family(&family, Family::Sans, 400, false), normal);
+    }
+
     #[test]
     fn shaping_and_fallback() {
         let fc = FontContext::new();
