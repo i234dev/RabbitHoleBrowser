@@ -571,10 +571,16 @@ impl<'a> Layouter<'a> {
                 if it.align == ItemAlign::Stretch && free > 0.01 {
                     outer = b.children[it.idx].rect.h + b.children[it.idx].margin.top + b.children[it.idx].margin.bottom;
                 }
-                let mut y = pl.pos[i] + shift + off;
-                if dir.fill_reverse {
-                    y = extent - y - outer;
-                }
+                // A reversed fill mirrors the alignment container; the
+                // self-alignment inside it keeps its physical start.
+                let y = if dir.fill_reverse && matches!(it.align, ItemAlign::FlexStart | ItemAlign::FlexEnd) {
+                    let rest = (limits[i] - pl.pos[i] - outer).max(0.0);
+                    extent - (pl.pos[i] + shift) - outer - rest + off
+                } else if dir.fill_reverse {
+                    extent - (pl.pos[i] + shift + off) - outer
+                } else {
+                    pl.pos[i] + shift + off
+                };
                 let child = &mut b.children[it.idx];
                 let (nx, ny) = (cx + x, cy + y + child.margin.top);
                 child.translate(nx - child.rect.x, ny - child.rect.y);
@@ -607,7 +613,18 @@ impl<'a> Layouter<'a> {
                 widths=adjusted;
             }
         }
-        let (row_pos, rows_extent) = subgrid::positions(&tl, row_gap, row_avail, style.align_content);
+        let (mut row_pos, rows_extent) = subgrid::positions(&tl, row_gap, row_avail, style.align_content);
+        // A percentage row gap of an indefinite height is zero for sizing,
+        // then resolves against the resulting height (CSS Align 3 §8.1).
+        let row_gap = if avail.is_none() && tl.inherited.is_none() && !style.row_gap_normal && matches!(style.row_gap, Length::Percent(_) | Length::Calc(..) | Length::Math(_)) {
+            let used = style.row_gap.resolve_or_zero(rows_extent).max(0.0);
+            if used != row_gap {
+                row_pos = subgrid::positions(&tl, used, row_avail, style.align_content).0;
+            }
+            used
+        } else {
+            row_gap
+        };
         let tol = tolerance(&style, avail);
         let tracks = tl.tracks.clone();
         let mut placed: Vec<(f32, f32)> = vec![(0.0, 0.0); items.len()];
@@ -661,10 +678,17 @@ impl<'a> Layouter<'a> {
             if it.justify == ItemAlign::Stretch && free > 0.01 {
                 outer = b.children[it.idx].rect.w + b.children[it.idx].margin.left + b.children[it.idx].margin.right;
             }
-            let mut x = pl.pos[i] + shift + off;
-            if dir.fill_reverse != rtl {
-                x = extent - x - outer;
-            }
+            // The alignment container is mirrored by a reversed fill or RTL;
+            // the self-alignment start is the right side only in RTL.
+            let rest = (limits[i] - pl.pos[i] - outer).max(0.0);
+            let x = if matches!(it.justify, ItemAlign::FlexStart | ItemAlign::FlexEnd) {
+                let left = if dir.fill_reverse != rtl { extent - (pl.pos[i] + shift) - outer - rest } else { pl.pos[i] + shift };
+                left + if rtl { rest - off } else { off }
+            } else if dir.fill_reverse != rtl {
+                extent - (pl.pos[i] + shift + off) - outer
+            } else {
+                pl.pos[i] + shift + off
+            };
             let child = &mut b.children[it.idx];
             let (nx, ny) = (cx + x + child.margin.left, cy + y);
             child.translate(nx - child.rect.x, ny - child.rect.y);

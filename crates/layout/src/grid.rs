@@ -801,6 +801,9 @@ fn track_positions(tracks: &[Track], gap: f32, avail: Option<f32>, dist: Content
     let n_vis = tracks.iter().filter(|t| !t.collapsed).count();
     let sum: f32 = tracks.iter().map(|t| t.base).sum::<f32>() + gap * n_vis.saturating_sub(1) as f32;
     let (lead, spacing) = match avail {
+        // The fallback of space-around/space-evenly is `safe center`
+        // (CSS Align 3 §5.1): overflowing tracks start at the start edge.
+        Some(a) if a < sum && matches!(dist, ContentDistribution::SpaceAround | ContentDistribution::SpaceEvenly) => (0.0, 0.0),
         Some(a) if !matches!(dist, ContentDistribution::FlexStart | ContentDistribution::Stretch) => distribute(dist, a - sum, n_vis),
         _ => (0.0, 0.0),
     };
@@ -1063,7 +1066,18 @@ impl<'a> Layouter<'a> {
                 }
             }
         }
-        let (row_pos, rows_extent) = subgrid::positions(&rows, row_gap, row_avail, style.align_content);
+        let (mut row_pos, rows_extent) = subgrid::positions(&rows, row_gap, row_avail, style.align_content);
+        // A percentage row gap of an indefinite height is zero for sizing,
+        // then resolves against the resulting height for layout (CSS Align 3 §8.1).
+        let row_gap = if cb.height.is_none() && rows.inherited.is_none() && !style.row_gap_normal && matches!(style.row_gap, Length::Percent(_) | Length::Calc(..) | Length::Math(_)) {
+            let used = style.row_gap.resolve_or_zero(rows_extent).max(0.0);
+            if used != row_gap {
+                row_pos = subgrid::positions(&rows, used, row_avail, style.align_content).0;
+            }
+            used
+        } else {
+            row_gap
+        };
 
         // Final item layout and alignment (§10).
         for it in items.iter_mut() {
