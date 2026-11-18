@@ -33,6 +33,11 @@ paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
 median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
 See the [JIT design and status](docs/jit-design.md).
 
+Version 0.1.27 makes Speedometer 3.1 another 2.0 % faster: frames and canvases
+shown at their own size are copied directly when composited instead of being
+resampled pixel by pixel
+([measurement](docs/benchmarks/speedometer-2026-11-18-image-copy.md)).
+
 Version 0.1.26 makes Speedometer 3.1 another 2.8 % faster (NewsSite 1.26×):
 layout fingerprints are memoized per box
 ([measurement](docs/benchmarks/speedometer-2026-11-18-fingerprint-memo.md)).

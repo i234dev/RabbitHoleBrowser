@@ -1,0 +1,120 @@
+{
+  "date": "2026-11-18",
+  "change": "Unscaled images drawn at whole-pixel offsets (iframe and canvas compositing) are copied directly instead of being resampled per pixel; RGBA export written in place",
+  "base_source": "89f489a + layout changes of 0.1.23-0.1.26",
+  "candidate": "base + this change (released in 0.1.27)",
+  "benchmark": "Speedometer 3.1 (suite commit 1386415be8fe), 20 default suites, iterationCount=3, served locally",
+  "binaries": {
+    "build": "release + line tables + frame pointers, all functions and branch targets aligned to 64 bytes (same flags for both)",
+    "base_sha256": "4f6297d91dd407c79389c5c5aef0725c602302e28cedbb0e7135477ccdc44a9e",
+    "candidate_sha256": "692947abb868b8d2652bb42724b7256e48e142e5de7c3cb7d8cf7395b607b3dd",
+    "rustc": "1.99.1"
+  },
+  "conditions": {
+    "host": "Intel Core i7-12700H, Linux 6.18.58.1-microsoft-standard-WSL2",
+    "affinity": "CPU 0, one run at a time",
+    "order": "8 rounds, rotated",
+    "jit": "on (default)"
+  },
+  "pairs": [
+    {
+      "round": 1,
+      "base_geomean_ms": 400.42,
+      "candidate_geomean_ms": 389.77,
+      "base_score": 2.5,
+      "candidate_score": 2.57,
+      "ratio_base_over_candidate": 1.0273238063473331
+    },
+    {
+      "round": 2,
+      "base_geomean_ms": 397.86,
+      "candidate_geomean_ms": 390.32,
+      "base_score": 2.51,
+      "candidate_score": 2.56,
+      "ratio_base_over_candidate": 1.0193174830907974
+    },
+    {
+      "round": 3,
+      "base_geomean_ms": 400.42,
+      "candidate_geomean_ms": 388.6,
+      "base_score": 2.5,
+      "candidate_score": 2.57,
+      "ratio_base_over_candidate": 1.030416881111683
+    },
+    {
+      "round": 4,
+      "base_geomean_ms": 398.05,
+      "candidate_geomean_ms": 387.32,
+      "base_score": 2.51,
+      "candidate_score": 2.58,
+      "ratio_base_over_candidate": 1.0277031911597645
+    },
+    {
+      "round": 5,
+      "base_geomean_ms": 396.66,
+      "candidate_geomean_ms": 391.18,
+      "base_score": 2.52,
+      "candidate_score": 2.56,
+      "ratio_base_over_candidate": 1.0140088961603355
+    },
+    {
+      "round": 6,
+      "base_geomean_ms": 389.83,
+      "candidate_geomean_ms": 388.61,
+      "base_score": 2.57,
+      "candidate_score": 2.57,
+      "ratio_base_over_candidate": 1.0031393942513058
+    },
+    {
+      "round": 7,
+      "base_geomean_ms": 398.9,
+      "candidate_geomean_ms": 391.5,
+      "base_score": 2.51,
+      "candidate_score": 2.55,
+      "ratio_base_over_candidate": 1.0189016602809706
+    },
+    {
+      "round": 8,
+      "base_geomean_ms": 397.47,
+      "candidate_geomean_ms": 389.2,
+      "base_score": 2.52,
+      "candidate_score": 2.57,
+      "ratio_base_over_candidate": 1.0212487153134635
+    }
+  ],
+  "summary": {
+    "median_ratio": 1.0202830992021306,
+    "min": 1.0031393942513058,
+    "max": 1.030416881111683,
+    "rounds_faster": 8,
+    "rounds": 8,
+    "mean_score_base": 2.5175,
+    "mean_score_candidate": 2.56625
+  },
+  "per_suite_median_ratio": {
+    "Charts-chartjs": 1.0264,
+    "Charts-observable-plot": 1.0056,
+    "Editor-CodeMirror": 1.0389,
+    "Editor-TipTap": 1.0079,
+    "NewsSite-Next": 1.0366,
+    "NewsSite-Nuxt": 1.0392,
+    "Perf-Dashboard": 1.0291,
+    "React-Stockcharts-SVG": 1.0454,
+    "TodoMVC-Angular-Complex-DOM": 1.0179,
+    "TodoMVC-Backbone": 1.0143,
+    "TodoMVC-JavaScript-ES5": 1.0227,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 1.0234,
+    "TodoMVC-Lit-Complex-DOM": 1.0202,
+    "TodoMVC-Preact-Complex-DOM": 1.0334,
+    "TodoMVC-React-Complex-DOM": 1.0162,
+    "TodoMVC-React-Redux": 1.0092,
+    "TodoMVC-Svelte-Complex-DOM": 1.0155,
+    "TodoMVC-Vue": 1.0131,
+    "TodoMVC-WebComponents": 1.0329,
+    "TodoMVC-jQuery": 0.9999
+  },
+  "correctness": "Unit test unscaled_image_copy_matches_sampling compares every pixel with per-pixel sampling (identical); gfx, engine and layout tests 567/567.",
+  "limitations": [
+    "One Linux x64 host; harness scores, not comparable with other browsers."
+  ]
+}
