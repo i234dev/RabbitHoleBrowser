@@ -556,7 +556,11 @@ impl<'a> Layouter<'a> {
         b.reused_layout = reuse.is_some();
         let (content_h, float_extent) = if let Some(c) = reuse {
             // Same constraints as last time: move the old contents.
+            // The contents follow their origin: their relative geometry (and
+            // its memoized fingerprint) is unchanged.
+            let fp = b.contents_fp.get();
             crate::table::translate_contents(b, b.content_rect.x - prev_origin.0, content_y - prev_origin.1);
+            b.contents_fp.set(fp);
             b.collapsed_bottom_margin = c.collapsed_bottom_margin;
             b.bottom_margins = c.bottom_margins;
             // Floats inside that belong to the parent BFC are placed again.
@@ -566,6 +570,7 @@ impl<'a> Layouter<'a> {
             out
         } else {
             let floats_before = bfc.len();
+            b.contents_fp.set(None);
             let content_h = if b.bfc_root {
                 self.layout_contents(b, &inner_cb, &mut local_bfc, top_collapsible, bottom_collapsible)
             } else {

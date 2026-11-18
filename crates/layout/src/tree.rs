@@ -265,6 +265,11 @@ pub struct LayoutBox {
     /// Inputs and results of the box's last content layout, so a box kept
     /// from the previous frame can be translated instead of laid out.
     pub(crate) layout_cache: Option<crate::incremental::LayoutCache>,
+    /// Memoized fingerprint of the contents' geometry relative to the
+    /// unscrolled content origin (see `incremental::contents_fingerprint`).
+    /// Cleared whenever the contents are laid out again or moved relative
+    /// to the box.
+    pub(crate) contents_fp: std::cell::Cell<Option<u64>>,
     /// Used per-axis subgrid inputs. Computed styles retain the CSS request.
     pub(crate) grid_columns: Option<crate::grid::subgrid::AxisInheritance>,
     pub(crate) grid_rows: Option<crate::grid::subgrid::AxisInheritance>,
@@ -351,6 +356,7 @@ impl LayoutBox {
             pieces: None,
             intrinsic_cache: None,
             layout_cache: None,
+            contents_fp: std::cell::Cell::new(None),
             grid_columns: None,
             grid_rows: None,
             used_grid_tracks: [None, None],

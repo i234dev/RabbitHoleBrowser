@@ -876,6 +876,8 @@ fn hidden_cell_style(s: &ComputedStyle) -> ComputedStyle {
 
 /// Translate the contents of a box without moving the box itself.
 pub(crate) fn translate_contents(b: &mut LayoutBox, dx: f32, dy: f32) {
+    // The contents move relative to the box.
+    b.contents_fp.set(None);
     for line in &mut b.lines {
         line.rect = line.rect.translate(dx, dy);
         line.baseline += dy;

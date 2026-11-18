@@ -124,7 +124,7 @@ pub(crate) fn contents_fingerprint(b: &LayoutBox, ox: f32, oy: f32) -> u64 {
             v.to_bits().hash(h);
         }
     }
-    fn walk(h: &mut impl Hasher, b: &LayoutBox, ox: f32, oy: f32) {
+    fn walk_contents(h: &mut impl Hasher, b: &LayoutBox, ox: f32, oy: f32) {
         b.lines.len().hash(h);
         for line in &b.lines {
             rect(h, &line.rect, ox, oy);
@@ -142,12 +142,26 @@ pub(crate) fn contents_fingerprint(b: &LayoutBox, ox: f32, oy: f32) -> u64 {
         b.children.len().hash(h);
         for c in &b.children {
             rect(h, &c.rect, ox, oy);
+            // A child's own contents: its memoized fingerprint (relative to
+            // its unscrolled content origin), computed once per layout.
+            let child_fp = |c: &LayoutBox| -> u64 {
+                if let Some(v) = c.contents_fp.get() {
+                    return v;
+                }
+                let mut ch = FastHasher::default();
+                walk_contents(&mut ch, c, c.content_rect.x - c.scroll_offset.0, c.content_rect.y - c.scroll_offset.1);
+                let v = ch.finish();
+                c.contents_fp.set(Some(v));
+                v
+            };
             rect(h, &c.content_rect, ox, oy);
             (c.static_pos.0 - ox).to_bits().hash(h);
             (c.static_pos.1 - oy).to_bits().hash(h);
             c.scroll_width.to_bits().hash(h);
             c.scroll_height.to_bits().hash(h);
             c.collapsed_bottom_margin.to_bits().hash(h);
+            c.scroll_offset.0.to_bits().hash(h);
+            c.scroll_offset.1.to_bits().hash(h);
             match &c.wm_transform {
                 // Contents in their own logical space: hash them as they are.
                 Some(m) => {
@@ -155,15 +169,27 @@ pub(crate) fn contents_fingerprint(b: &LayoutBox, ox: f32, oy: f32) -> u64 {
                         let v = if i == 4 { v - ox } else if i == 5 { v - oy } else { *v };
                         v.to_bits().hash(h);
                     }
-                    walk(h, c, 0.0, 0.0);
+                    walk_contents(h, c, 0.0, 0.0);
                 }
-                None => walk(h, c, ox, oy),
+                None => child_fp(c).hash(h),
             }
         }
     }
+    // Measured from the box's own unscrolled content origin: the memo
+    // applies (and is filled).
+    let own = ox == b.content_rect.x - b.scroll_offset.0 && oy == b.content_rect.y - b.scroll_offset.1;
+    if own {
+        if let Some(v) = b.contents_fp.get() {
+            return v;
+        }
+    }
     let mut h = FastHasher::default();
-    walk(&mut h, b, ox, oy);
-    h.finish()
+    walk_contents(&mut h, b, ox, oy);
+    let v = h.finish();
+    if own {
+        b.contents_fp.set(Some(v));
+    }
+    v
 }
 
 /// Old boxes available for reuse while building the new tree.
