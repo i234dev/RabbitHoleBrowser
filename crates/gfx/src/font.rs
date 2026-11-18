@@ -276,8 +276,10 @@ impl FontContext {
             shaping: Default::default(),
             color_cache: Rc::new(RefCell::new(HashMap::new())),
         };
+        // Bundled faces are parsed on first use (`try_face`): fontdue builds
+        // every glyph outline when parsing, and a page usually needs one or
+        // two of the seven.
         for (name, family, weight, italic, generic, bytes) in sources {
-            let font = fontdue::Font::from_bytes(bytes, fontdue_settings()).expect("bundled font is valid");
             ctx.register(FaceSlot {
                 name: name.to_string(),
                 family: family.to_string(),
@@ -286,7 +288,7 @@ impl FontContext {
                 italic,
                 generic: Some(generic),
                 source: FaceSource::Bytes(Rc::new(bytes.to_vec())),
-                font: RefCell::new(Some(Rc::new(font))),
+                font: RefCell::new(None),
                 failed: Cell::new(false),
             });
         }
@@ -885,6 +887,16 @@ mod tests {
         assert_eq!(fc.face_name(f), "DejaVu Sans");
         // Bold should be wider.
         assert!(fc.measure(fc.select(Family::Sans, 700, false), 16.0, "Hello") > w);
+    }
+
+    /// Bundled faces load on first use, and every one of them is valid.
+    #[test]
+    fn bundled_faces_load_lazily_and_parse() {
+        let fc = FontContext::new();
+        assert!(fc.faces.borrow().iter().all(|s| s.font.borrow().is_none()), "nothing parsed up front");
+        for i in 0..BUNDLED_COUNT {
+            assert!(fc.try_face(i).is_some(), "bundled face {i} parses");
+        }
     }
 
     /// Fallback candidates are screened by their character map before being
