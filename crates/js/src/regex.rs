@@ -545,6 +545,27 @@ fn general_category(value: &str) -> Option<Ranges> {
     Some(decode(lookup(tables::GC, short)?))
 }
 
+/// Is `c` in the general category or binary property `name` (cached,
+/// for segmentation and similar library code)?
+pub(crate) fn has_property(c: u32, name: &'static str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Vec<(&'static str, &'static Ranges)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let ranges: &'static Ranges = {
+        let mut g = cache.lock().unwrap_or_else(|e| e.into_inner());
+        match g.iter().find(|(n, _)| *n == name) {
+            Some((_, r)) => r,
+            None => {
+                let r = general_category(name).or_else(|| binary_property(name)).unwrap_or_default();
+                let r: &'static Ranges = Box::leak(Box::new(r));
+                g.push((name, r));
+                r
+            }
+        }
+    };
+    ranges.binary_search_by(|&(a, b)| if c < a { std::cmp::Ordering::Greater } else if c > b { std::cmp::Ordering::Less } else { std::cmp::Ordering::Equal }).is_ok()
+}
+
 fn binary_property(name: &str) -> Option<Ranges> {
     let canonical = lookup(tables::BINARY_ALIASES, name)?;
     Some(decode(lookup(tables::BINARY, canonical)?))

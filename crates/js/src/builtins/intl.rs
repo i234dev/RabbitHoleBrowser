@@ -17,6 +17,8 @@ pub mod locale_id;
 mod locale_obj;
 mod list_format;
 mod relative_time;
+mod segmenter;
+mod display_names;
 pub use list_format::{format_list, ListOptions};
 use list_format::list_parts;
 
@@ -1445,18 +1447,19 @@ pub fn register(realm: &mut Realm) {
         realm.define_accessor(loc, name, Some(f), None, CONFIGURABLE);
     }
 
-    let (_, dn) = mk(realm, "DisplayNames", "Intl.DisplayNames", display_names_ctor, 2);
-    realm.define_method(dn, "of", 1, display_names_of);
-    realm.define_method(dn, "resolvedOptions", 0, display_names_resolved_options);
+    let (_, dn) = mk(realm, "DisplayNames", "Intl.DisplayNames", display_names::ctor, 2);
+    realm.define_method(dn, "of", 1, display_names::of);
+    realm.define_method(dn, "resolvedOptions", 0, display_names::resolved_options);
 
     let (_, df) = mk(realm, "DurationFormat", "Intl.DurationFormat", duration::ctor, 0);
     realm.define_method(df, "format", 1, duration::format);
     realm.define_method(df, "formatToParts", 1, duration::format_to_parts);
     realm.define_method(df, "resolvedOptions", 0, duration::resolved_options);
 
-    let (_, seg) = mk(realm, "Segmenter", "Intl.Segmenter", segmenter_ctor, 0);
-    realm.define_method(seg, "segment", 1, segmenter_segment);
-    realm.define_method(seg, "resolvedOptions", 0, segmenter_resolved_options);
+    let (_, seg) = mk(realm, "Segmenter", "Intl.Segmenter", segmenter::ctor, 0);
+    realm.define_method(seg, "segment", 1, segmenter::segment);
+    realm.define_method(seg, "resolvedOptions", 0, segmenter::resolved_options);
+    segmenter::register_prototypes(realm);
 
     // Locale-sensitive methods on the primitives route through Intl.
     let np = realm.intrinsics.number_proto;
@@ -1887,134 +1890,4 @@ fn plural_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> J
     Ok(Value::Object(obj))
 }
 
-#[derive(Debug, Clone)]
-struct DisplayNamesOptions {
-    locale: Locale,
-    kind: String,
-}
 
-fn display_names_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let locale = resolve_locale(realm, arg(args, 0))?;
-    let opts = options_object(realm, arg(args, 1))?;
-    let Some(kind) = opt_str(realm, opts, "type")? else { return realm.type_error("Required option 'type' is missing") };
-    Ok(Value::Object(new_intl_object(realm, "Intl.DisplayNames", DisplayNamesOptions { locale, kind })?))
-}
-
-fn display_names_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let o: DisplayNamesOptions = host(realm, &this, "Intl.DisplayNames.prototype.of")?;
-    let code = realm.to_rust_string(arg(args, 0))?;
-    let es = o.locale.lang == "es";
-    let name: Option<&str> = match (o.kind.as_str(), code.to_ascii_uppercase().as_str()) {
-        ("region", "US") => Some(if es { "Estados Unidos" } else { "United States" }),
-        ("region", "ES") => Some(if es { "España" } else { "Spain" }),
-        ("region", "GB") => Some(if es { "Reino Unido" } else { "United Kingdom" }),
-        ("region", "DE") => Some(if es { "Alemania" } else { "Germany" }),
-        ("region", "FR") => Some(if es { "Francia" } else { "France" }),
-        ("region", "MX") => Some(if es { "México" } else { "Mexico" }),
-        ("region", "JP") => Some(if es { "Japón" } else { "Japan" }),
-        ("language", "EN") => Some(if es { "inglés" } else { "English" }),
-        ("language", "ES") => Some(if es { "español" } else { "Spanish" }),
-        ("language", "DE") => Some(if es { "alemán" } else { "German" }),
-        ("language", "FR") => Some(if es { "francés" } else { "French" }),
-        ("currency", "USD") => Some(if es { "dólar estadounidense" } else { "US Dollar" }),
-        ("currency", "EUR") => Some(if es { "euro" } else { "Euro" }),
-        _ => None,
-    };
-    Ok(Value::str(name.unwrap_or(&code)))
-}
-
-fn display_names_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let o: DisplayNamesOptions = host(realm, &this, "Intl.DisplayNames.prototype.resolvedOptions")?;
-    let obj = realm.new_object();
-    realm.define_property(obj, "locale", Value::str(&o.locale.tag), ALL);
-    realm.define_property(obj, "type", Value::str(&o.kind), ALL);
-    realm.define_property(obj, "style", Value::str("long"), ALL);
-    Ok(Value::Object(obj))
-}
-
-// Segmenter
-#[derive(Debug, Clone)]
-struct SegmenterOptions {
-    locale: Locale,
-    granularity: String,
-}
-
-fn segmenter_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let locale = resolve_locale(realm, arg(args, 0))?;
-    let opts = options_object(realm, arg(args, 1))?;
-    let granularity = opt_str(realm, opts, "granularity")?.unwrap_or_else(|| "grapheme".into());
-    Ok(Value::Object(new_intl_object(realm, "Intl.Segmenter", SegmenterOptions { locale, granularity })?))
-}
-
-/// `segment()` returns an array-like iterable of `{segment, index, input, isWordLike}`.
-fn segmenter_segment(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let o: SegmenterOptions = host(realm, &this, "Intl.Segmenter.prototype.segment")?;
-    let input = realm.to_string(arg(args, 0))?;
-    let s = input.to_rust_string();
-    let mut segs: Vec<(String, usize, bool)> = Vec::new();
-    match o.granularity.as_str() {
-        "word" => {
-            let mut cur = String::new();
-            let mut start = 0;
-            let mut cur_word: Option<bool> = None;
-            for (i, c) in s.char_indices() {
-                let is_word = c.is_alphanumeric() || c == '_' || c == '\'';
-                if cur_word.map(|w| w != is_word || !is_word && !c.is_whitespace()).unwrap_or(false) || (cur_word == Some(false) && is_word) {
-                    segs.push((std::mem::take(&mut cur), start, cur_word.unwrap_or(false)));
-                    start = i;
-                }
-                if cur.is_empty() {
-                    start = i;
-                }
-                cur.push(c);
-                cur_word = Some(is_word);
-            }
-            if !cur.is_empty() {
-                segs.push((cur, start, cur_word.unwrap_or(false)));
-            }
-        }
-        "sentence" => {
-            let mut cur = String::new();
-            let mut start = 0;
-            for (i, c) in s.char_indices() {
-                if cur.is_empty() {
-                    start = i;
-                }
-                cur.push(c);
-                if matches!(c, '.' | '!' | '?') {
-                    segs.push((std::mem::take(&mut cur), start, false));
-                }
-            }
-            if !cur.is_empty() {
-                segs.push((cur, start, false));
-            }
-        }
-        _ => {
-            for (i, c) in s.char_indices() {
-                segs.push((c.to_string(), i, false));
-            }
-        }
-    }
-    // Convert byte offsets to UTF-16 indices.
-    let mut out = Vec::new();
-    for (seg, byte_start, word) in segs {
-        let idx = s[..byte_start].encode_utf16().count();
-        let obj = realm.new_object();
-        realm.define_property(obj, "segment", Value::str(&seg), ALL);
-        realm.define_property(obj, "index", Value::Number(idx as f64), ALL);
-        realm.define_property(obj, "input", Value::String(input.clone()), ALL);
-        if o.granularity == "word" {
-            realm.define_property(obj, "isWordLike", Value::Bool(word), ALL);
-        }
-        out.push(Value::Object(obj));
-    }
-    Ok(realm.new_array_value(out))
-}
-
-fn segmenter_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let o: SegmenterOptions = host(realm, &this, "Intl.Segmenter.prototype.resolvedOptions")?;
-    let obj = realm.new_object();
-    realm.define_property(obj, "locale", Value::str(&o.locale.tag), ALL);
-    realm.define_property(obj, "granularity", Value::str(&o.granularity), ALL);
-    Ok(Value::Object(obj))
-}
