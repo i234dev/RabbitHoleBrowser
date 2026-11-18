@@ -1197,6 +1197,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_for_in_of(&mut self, left: ForHead, is_of: bool, is_await: bool) -> PResult<StmtKind> {
+        if is_await && !is_of {
+            return Err(self.error("for await requires an of clause"));
+        }
         self.advance()?; // of / in
         let right = if is_of { self.parse_assignment()? } else { self.parse_expression()? };
         self.expect_punct(")")?;
@@ -1787,6 +1790,7 @@ impl<'a> Parser<'a> {
     /// Detect and parse an arrow function at the current position.
     fn try_parse_arrow(&mut self) -> PResult<Option<Expr>> {
         let pos = self.tok.pos;
+        let span_start = self.tok.start as u32;
         let is_async;
         match &self.tok.kind {
             TokenKind::Ident(n) if n == "async" && self.tok.is_ident("async") => {
@@ -1806,7 +1810,7 @@ impl<'a> Parser<'a> {
                             pattern: Pattern::Identifier(name),
                             rest: false,
                         }];
-                        return Ok(Some(self.parse_arrow_body(pos, params, true)?));
+                        return Ok(Some(self.parse_arrow_body(pos, span_start, params, true)?));
                     }
                     self.restore(snap2);
                 }
@@ -1817,7 +1821,7 @@ impl<'a> Parser<'a> {
                 is_async = true;
                 // fall through to parenthesized params attempt with snap
                 match self.try_parse_arrow_params()? {
-                    Some(params) => return Ok(Some(self.parse_arrow_body(pos, params, is_async)?)),
+                    Some(params) => return Ok(Some(self.parse_arrow_body(pos, span_start, params, is_async)?)),
                     None => {
                         self.restore(snap);
                         return Ok(None);
@@ -1840,7 +1844,7 @@ impl<'a> Parser<'a> {
                         pattern: Pattern::Identifier(name),
                         rest: false,
                     }];
-                    return Ok(Some(self.parse_arrow_body(pos, params, false)?));
+                    return Ok(Some(self.parse_arrow_body(pos, span_start, params, false)?));
                 }
                 self.restore(snap);
                 Ok(None)
@@ -1856,7 +1860,7 @@ impl<'a> Parser<'a> {
                 }
                 let snap = self.snapshot();
                 match self.try_parse_arrow_params()? {
-                    Some(params) => Ok(Some(self.parse_arrow_body(pos, params, false)?)),
+                    Some(params) => Ok(Some(self.parse_arrow_body(pos, span_start, params, false)?)),
                     None => {
                         self.restore(snap);
                         Ok(None)
@@ -2022,7 +2026,7 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
-    fn parse_arrow_body(&mut self, pos: Pos, params: Vec<Param>, is_async: bool) -> PResult<Expr> {
+    fn parse_arrow_body(&mut self, pos: Pos, span_start: u32, params: Vec<Param>, is_async: bool) -> PResult<Expr> {
         let ctx = Context {
             in_function: true,
             in_generator: false,
@@ -2056,7 +2060,7 @@ impl<'a> Parser<'a> {
             is_generator: false,
             strict,
             pos,
-            span: (0, 0),
+            span: (span_start, self.prev_end as u32),
             self_binding: false,
         };
         self.submit_skipped(&f);

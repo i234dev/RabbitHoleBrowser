@@ -421,10 +421,32 @@ impl JsStr {
     }
     /// Upper-case using Rust's Unicode tables.
     pub fn to_upper(&self) -> JsStr {
-        JsStr::new(&self.to_rust_string().to_uppercase())
+        self.case_map(true)
     }
     pub fn to_lower(&self) -> JsStr {
-        JsStr::new(&self.to_rust_string().to_lowercase())
+        self.case_map(false)
+    }
+    /// Full Unicode case mapping; lone surrogates are kept as they are.
+    fn case_map(&self, upper: bool) -> JsStr {
+        let map = |s: &str| if upper { s.to_uppercase() } else { s.to_lowercase() };
+        let units = self.as_units();
+        if !units.iter().any(|u| (0xD800..0xE000).contains(u)) {
+            return JsStr::new(&map(&self.to_rust_string()));
+        }
+        let mut out: Vec<u16> = Vec::with_capacity(units.len());
+        let mut run = String::new();
+        for r in char::decode_utf16(units.iter().copied()) {
+            match r {
+                Ok(c) => run.push(c),
+                Err(e) => {
+                    out.extend(map(&run).encode_utf16());
+                    run.clear();
+                    out.push(e.unpaired_surrogate());
+                }
+            }
+        }
+        out.extend(map(&run).encode_utf16());
+        JsStr::from_units(out)
     }
     pub fn chars_lossy(&self) -> std::char::DecodeUtf16<std::iter::Copied<std::slice::Iter<'_, u16>>> {
         char::decode_utf16(self.as_units().iter().copied())

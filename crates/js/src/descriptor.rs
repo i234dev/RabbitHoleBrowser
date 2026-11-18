@@ -120,16 +120,16 @@ impl Realm {
         let mut d = PropDesc::default();
         let o = Value::Object(id);
         if self.has_property(id, &PropertyKey::str("enumerable"))? {
-            d.enumerable = Some(self.get_str(o.clone(), "enumerable")?.truthy());
+            d.enumerable = Some(self.get_str(o.clone(), "enumerable").map(|v| self.to_boolean(&v))?);
         }
         if self.has_property(id, &PropertyKey::str("configurable"))? {
-            d.configurable = Some(self.get_str(o.clone(), "configurable")?.truthy());
+            d.configurable = Some(self.get_str(o.clone(), "configurable").map(|v| self.to_boolean(&v))?);
         }
         if self.has_property(id, &crate::value::names::value())? {
             d.value = Some(self.get(o.clone(), crate::value::names::value())?);
         }
         if self.has_property(id, &PropertyKey::str("writable"))? {
-            d.writable = Some(self.get_str(o.clone(), "writable")?.truthy());
+            d.writable = Some(self.get_str(o.clone(), "writable").map(|v| self.to_boolean(&v))?);
         }
         if self.has_property(id, &PropertyKey::str("get"))? {
             let g = self.get_str(o.clone(), "get")?;
@@ -397,7 +397,7 @@ impl Realm {
         if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
             let (target, handler, trap) = self.proxy_parts(id, "isExtensible")?;
             let Some(trap) = trap else { return self.is_extensible_any(target) };
-            let r = self.call(trap, Value::Object(handler), &[Value::Object(target)])?.truthy();
+            let r = self.call(trap, Value::Object(handler), &[Value::Object(target)]).map(|v| self.to_boolean(&v))?;
             if r != self.is_extensible_any(target)? {
                 return self.type_error("'isExtensible' on proxy: trap result does not reflect extensibility of proxy target");
             }
@@ -411,7 +411,7 @@ impl Realm {
         if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
             let (target, handler, trap) = self.proxy_parts(id, "preventExtensions")?;
             let Some(trap) = trap else { return self.prevent_extensions_any(target) };
-            let r = self.call(trap, Value::Object(handler), &[Value::Object(target)])?.truthy();
+            let r = self.call(trap, Value::Object(handler), &[Value::Object(target)]).map(|v| self.to_boolean(&v))?;
             if r && self.is_extensible_any(target)? {
                 return self.type_error("'preventExtensions' on proxy: trap returned truish but the proxy target is extensible");
             }
@@ -427,7 +427,7 @@ impl Realm {
             let (target, handler, trap) = self.proxy_parts(id, "setPrototypeOf")?;
             let Some(trap) = trap else { return self.set_prototype_of_any(target, proto) };
             let pv = proto.map_or(Value::Null, Value::Object);
-            if !self.call(trap, Value::Object(handler), &[Value::Object(target), pv])?.truthy() {
+            if !self.call(trap, Value::Object(handler), &[Value::Object(target), pv]).map(|v| self.to_boolean(&v))? {
                 return Ok(false);
             }
             if self.is_extensible_any(target)? {
@@ -522,7 +522,7 @@ impl Realm {
     pub(crate) fn proxy_set(&mut self, id: ObjectId, key: PropertyKey, value: Value, receiver: Value) -> JsResult<bool> {
         let (target, handler, trap) = self.proxy_parts(id, "set")?;
         let Some(trap) = trap else { return self.set_on_object(target, key, value, receiver) };
-        if !self.call(trap, Value::Object(handler), &[Value::Object(target), key.to_value(), value.clone(), receiver])?.truthy() {
+        if !self.call(trap, Value::Object(handler), &[Value::Object(target), key.to_value(), value.clone(), receiver]).map(|v| self.to_boolean(&v))? {
             return Ok(false);
         }
         if let Some(td) = self.get_own_property_any(target, &key)? {
@@ -541,7 +541,7 @@ impl Realm {
     pub(crate) fn proxy_has(&mut self, id: ObjectId, key: &PropertyKey) -> JsResult<bool> {
         let (target, handler, trap) = self.proxy_parts(id, "has")?;
         let Some(trap) = trap else { return self.has_property(target, key) };
-        let r = self.call(trap, Value::Object(handler), &[Value::Object(target), key.to_value()])?.truthy();
+        let r = self.call(trap, Value::Object(handler), &[Value::Object(target), key.to_value()]).map(|v| self.to_boolean(&v))?;
         if !r {
             if let Some(td) = self.get_own_property_any(target, key)? {
                 if !td.configurable() {
@@ -558,7 +558,7 @@ impl Realm {
     pub(crate) fn proxy_delete(&mut self, id: ObjectId, key: &PropertyKey) -> JsResult<bool> {
         let (target, handler, trap) = self.proxy_parts(id, "deleteProperty")?;
         let Some(trap) = trap else { return self.delete_property(target, key) };
-        if !self.call(trap, Value::Object(handler), &[Value::Object(target), key.to_value()])?.truthy() {
+        if !self.call(trap, Value::Object(handler), &[Value::Object(target), key.to_value()]).map(|v| self.to_boolean(&v))? {
             return Ok(false);
         }
         if let Some(td) = self.get_own_property_any(target, key)? {
@@ -680,7 +680,7 @@ impl Realm {
         let (target, handler, trap) = self.proxy_parts(id, "defineProperty")?;
         let Some(trap) = trap else { return self.define_own_desc(target, key, desc) };
         let desc_obj = self.from_prop_desc(&desc);
-        if !self.call(trap, Value::Object(handler), &[Value::Object(target), key.to_value(), desc_obj])?.truthy() {
+        if !self.call(trap, Value::Object(handler), &[Value::Object(target), key.to_value(), desc_obj]).map(|v| self.to_boolean(&v))? {
             return Ok(false);
         }
         let target_desc = self.get_own_property_any(target, &key)?;

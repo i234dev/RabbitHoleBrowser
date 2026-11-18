@@ -2123,6 +2123,12 @@ impl Compiler {
             self.emit(Op::Callee);
             self.emit_init_loc(loc);
         }
+        // A base class constructor initialises its fields at [[Construct]],
+        // before FunctionDeclarationInstantiation evaluates parameter
+        // defaults.
+        if self.fs_ref().flags.is_class_constructor && !self.fs_ref().flags.is_derived {
+            self.emit(Op::InitFields);
+        }
         // Parameter destructuring / defaults.
         self.fs().in_params = true;
         for (loc, p) in complex {
@@ -2144,9 +2150,6 @@ impl Compiler {
                 self.emit_init_var(n)?;
             }
             self.fs().var_scope = self.fs_ref().scopes.len() - 1;
-        }
-        if self.fs_ref().flags.is_class_constructor && !self.fs_ref().flags.is_derived {
-            self.emit(Op::InitFields);
         }
         self.hoist_functions(body_stmts)?;
         if f.is_generator {

@@ -179,7 +179,19 @@ pub fn create_dynamic_function(realm: &mut Realm, args: &[Value], kind: &str) ->
         }
         body = realm.to_string(args[args.len() - 1].clone())?.to_source_string();
     }
-    let src = format!("({} anonymous({}\n) {{\n{}\n}})", kind, params.join(","), body);
+    let params = params.join(",");
+    let src = format!("({} anonymous({}\n) {{\n{}\n}})", kind, params, body);
+    // CreateDynamicFunction parses the parameters and the body on their
+    // own: neither may close or reopen the other (`/*` in the parameters,
+    // `}); x(); (function(){` in the body).
+    let standalone = |s: &str| crate::parser::parse_program(s, false).map(|p| p.body.len() == 1).unwrap_or(false);
+    let params_ok = params.is_empty() || standalone(&format!("({} anonymous({}\n) {{}})", kind, params));
+    let body_ok = standalone(&format!("({} anonymous(\n) {{\n{}\n}})", kind, body));
+    // (A plain syntax error in the whole source is reported by compile.)
+    let whole_ok = crate::parser::parse_program(&src, false).map(|p| p.body.len() == 1).unwrap_or(true);
+    if !params_ok || !body_ok || !whole_ok {
+        return Err(realm.new_error("SyntaxError", "Invalid function parameters or body"));
+    }
     let code = realm.compile_escaped(&src, "Function", false, true)?;
     let nt = realm.new_target();
     let proto = if nt.is_object() {

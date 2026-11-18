@@ -640,10 +640,10 @@ impl Realm {
         };
         let has = |r: &mut Realm, k: &str| r.has_property(id, &PropertyKey::str(k));
         let mut flags = 0u8;
-        if has(self, "enumerable")? && self.get_str(Value::Object(id), "enumerable")?.truthy() {
+        if has(self, "enumerable")? && self.get_str(Value::Object(id), "enumerable").map(|v| self.to_boolean(&v))? {
             flags |= ENUMERABLE;
         }
-        if has(self, "configurable")? && self.get_str(Value::Object(id), "configurable")?.truthy() {
+        if has(self, "configurable")? && self.get_str(Value::Object(id), "configurable").map(|v| self.to_boolean(&v))? {
             flags |= CONFIGURABLE;
         }
         let has_get = has(self, "get")?;
@@ -664,7 +664,7 @@ impl Realm {
             let s = if s.is_undefined() { None } else { Some(s) };
             return Ok(Property::accessor(g, s, flags));
         }
-        if has(self, "writable")? && self.get_str(Value::Object(id), "writable")?.truthy() {
+        if has(self, "writable")? && self.get_str(Value::Object(id), "writable").map(|v| self.to_boolean(&v))? {
             flags |= WRITABLE;
         }
         let value = if has(self, "value")? { self.get_str(Value::Object(id), "value")? } else { Value::Undefined };
@@ -1003,7 +1003,7 @@ impl Realm {
         }
         if let Some(h) = self.get_method(target.clone(), PropertyKey::Symbol(SYM_HAS_INSTANCE))? {
             let r = self.call(h, target, &[v])?;
-            return Ok(r.truthy());
+            return Ok(self.to_boolean(&r));
         }
         if !self.is_callable(&target) {
             return self.type_error("Right-hand side of 'instanceof' is not callable");
@@ -1112,7 +1112,7 @@ impl Realm {
         if !r.is_object() {
             return self.type_error("Iterator result is not an object");
         }
-        let done = self.get_str(r.clone(), "done")?.truthy();
+        let done = self.get_str(r.clone(), "done").map(|v| self.to_boolean(&v))?;
         if done {
             return Ok(None);
         }

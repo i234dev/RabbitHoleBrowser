@@ -40,7 +40,7 @@ pub fn register(realm: &mut Realm) {
     unary!("asin", f64::asin);
     unary!("asinh", f64::asinh);
     unary!("atan", f64::atan);
-    unary!("atanh", f64::atanh);
+    unary!("atanh", atanh);
     unary!("cbrt", f64::cbrt);
     unary!("ceil", f64::ceil);
     unary!("cos", f64::cos);
@@ -328,4 +328,23 @@ fn random(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> 
         (x >> 11) as f64 / (1u64 << 53) as f64
     });
     Ok(Value::Number(v))
+}
+
+/// atanh as in fdlibm: computed on |x| (so 1 - |x| is exact near ±1) with
+/// log1p, then given x's sign; std's formula loses precision for x near -1.
+fn atanh(x: f64) -> f64 {
+    let a = x.abs();
+    if a.is_nan() || a > 1.0 {
+        return f64::NAN;
+    }
+    if a == 1.0 {
+        return f64::INFINITY.copysign(x);
+    }
+    let t = if a < 0.5 {
+        let t = a + a;
+        0.5 * (t + t * a / (1.0 - a)).ln_1p()
+    } else {
+        0.5 * ((a + a) / (1.0 - a)).ln_1p()
+    };
+    t.copysign(x)
 }

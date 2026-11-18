@@ -1005,8 +1005,10 @@ pub fn ta_immutable(realm: &Realm, t: &TypedArrayData) -> bool {
 
 /// Can the typed array be made non-extensible (fixed length over a
 /// fixed-length buffer)?
+/// IsTypedArrayFixedLength: a fixed-length view over a buffer that can
+/// not shrink (fixed-length, or a growable SharedArrayBuffer).
 pub fn ta_fixed_length(realm: &Realm, t: &TypedArrayData) -> bool {
-    t.fixed_length.is_some() && is_fixed_length(realm, t.buffer)
+    t.fixed_length.is_some() && (is_fixed_length(realm, t.buffer) || is_shared(realm, t.buffer))
 }
 
 /// CanonicalNumericIndexString (ECMA-262 §7.1.21): Some(n) when the key
@@ -3030,6 +3032,9 @@ pub fn check_integrity(realm: &mut Realm, id: ObjectId, seal_or_freeze: bool) ->
         return Ok(false);
     }
     if seal_or_freeze && typed_array_length(realm, &t) > 0 {
+        // SetIntegrityLevel prevents extensions first; making the elements
+        // non-configurable is what fails.
+        realm.obj_mut(id).extensible = false;
         return realm.type_error("Cannot freeze or seal a typed array with elements");
     }
     Ok(true)
