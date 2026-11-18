@@ -148,6 +148,8 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
     ws.flex_shrink = phys.flex_shrink;
     ws.align_self = phys.align_self;
     ws.justify_self = phys.justify_self;
+    ws.align_self_mods = phys.align_self_mods;
+    ws.justify_self_mods = phys.justify_self_mods;
     ws.grid_row_start = phys.grid_row_start.clone();
     ws.grid_row_end = phys.grid_row_end.clone();
     ws.grid_column_start = phys.grid_column_start.clone();

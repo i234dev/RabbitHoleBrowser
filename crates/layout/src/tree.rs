@@ -233,6 +233,9 @@ pub struct LayoutBox {
     pub marker_text: Option<Rc<str>>,
     /// Baseline offset from `rect.y` (for inline-block alignment), if known.
     pub baseline: Option<f32>,
+    /// A flex container's (first, last) baselines as offsets from
+    /// `rect.y`, set by its layout (CSS Flexbox §8.5).
+    pub(crate) flex_baselines: Option<(Option<f32>, Option<f32>)>,
     /// Resolved margins (px) after layout.
     pub margin: Edges<f32>,
     /// Effective bottom margin after collapsing with descendants.
@@ -340,6 +343,7 @@ impl LayoutBox {
             marker: None,
             marker_text: None,
             baseline: None,
+            flex_baselines: None,
             margin: Edges::all(0.0),
             collapsed_bottom_margin: 0.0,
             bottom_margins: (0.0, 0.0),
@@ -551,6 +555,9 @@ impl LayoutBox {
 
     /// Baseline of the box's first line (absolute y), searching descendants.
     pub fn first_baseline(&self) -> Option<f32> {
+        if let Some((first, _)) = self.flex_baselines.filter(|_| self.formatting == Formatting::Flex) {
+            return first.map(|v| self.rect.y + v);
+        }
         if let Some(l) = self.lines.first() {
             return Some(l.baseline);
         }
@@ -562,6 +569,9 @@ impl LayoutBox {
 
     /// Baseline of the last line (absolute y).
     pub fn last_baseline(&self) -> Option<f32> {
+        if let Some((_, last)) = self.flex_baselines.filter(|_| self.formatting == Formatting::Flex) {
+            return last.map(|v| self.rect.y + v);
+        }
         if let Some(l) = self.lines.last() {
             return Some(l.baseline);
         }

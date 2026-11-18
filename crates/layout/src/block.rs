@@ -39,6 +39,10 @@ pub(crate) struct Layouter<'a> {
     /// content-box height as the box's definite height (stretched flex
     /// items, grid items, definite flex main sizes in column flex).
     pub forced_content_height: Option<f32>,
+    /// Flex hook: the content-box (min, max) heights of the flex container
+    /// whose contents are about to be laid out with an indefinite height
+    /// (single-line cross-size clamping, column main size).
+    pub(crate) flex_limits: Option<(f32, f32)>,
     /// Whether `FontContext::select_family` & co. are implemented.
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
@@ -182,6 +186,7 @@ impl<'a> Layouter<'a> {
             ctx,
             measurer: Measurer::new(ctx.fonts),
             forced_content_height: None,
+            flex_limits: None,
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
             abs_cb: HashMap::new(),
@@ -485,7 +490,9 @@ impl<'a> Layouter<'a> {
         b.rect = Rect::new(x, y, content_w + pb_h, 0.0);
         b.content_rect = Rect::new(x + bw.left + pad.left, y + bw.top + pad.top, content_w, 0.0);
 
-        let mut explicit_h = forced_h.or(replaced_h).or_else(|| self.resolve_height(&style, cb.height, pb_v)); // grid/flex hook
+        // A definite `height` is clamped by `min-height`/`max-height` before
+        // the contents resolve percentages against it.
+        let mut explicit_h = forced_h.or(replaced_h).or_else(|| self.resolve_height(&style, cb.height, pb_v).map(|h| self.clamp_height(&style, h, cb.height, pb_v))); // grid/flex hook
         // A `<textarea>` with an auto height is `rows` lines tall (2 by
         // default), whatever its value.
         if explicit_h.is_none() && b.pseudo.is_none() {
@@ -524,7 +531,11 @@ impl<'a> Layouter<'a> {
         let float_env = if b.bfc_root { Vec::new() } else { bfc.relative_from(origin, content_y) };
         // Table cells are adjusted after layout (vertical-align), so their
         // contents are not where the cache expects them.
-        let cacheable = b.kind != BoxKind::TableCell && self.clamp.is_none() && b.style.line_clamp.is_none();
+        let flex_limits = (b.formatting == Formatting::Flex && explicit_h.is_none()).then(|| self.height_limits(&style, cb.height, pb_v));
+        let cacheable = b.kind != BoxKind::TableCell && self.clamp.is_none() && b.style.line_clamp.is_none()
+            // Percentage min/max heights of a flex container depend on its
+            // containing block, which the cache entry does not record.
+            && !(flex_limits.is_some() && (style.min_height.has_percent() || style.max_height.has_percent()));
         let had_cache = prev_cache.is_some();
         // Laid out last with only another definite height: remember what the
         // contents were, to prove below whether the height changes them.
@@ -571,6 +582,7 @@ impl<'a> Layouter<'a> {
         } else {
             let floats_before = bfc.len();
             b.contents_fp.set(None);
+            self.flex_limits = flex_limits;
             let content_h = if b.bfc_root {
                 self.layout_contents(b, &inner_cb, &mut local_bfc, top_collapsible, bottom_collapsible)
             } else {
@@ -616,7 +628,7 @@ impl<'a> Layouter<'a> {
         };
         // The ratio-dependent automatic block size still has a content
         // minimum, unless the author requested another minimum or scrolling.
-        if b.flow == Flow::Absolute && forced_h.is_none() && style.height.is_auto() && style.min_height.is_auto()
+        if forced_h.is_none() && b.kind != BoxKind::Image && style.height.is_auto() && style.min_height.is_auto()
             && style.aspect_ratio.is_some_and(|ratio| ratio > 0.0)
             && !matches!(style.overflow_y, rabbithole_style::Overflow::Hidden | rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto)
         {
@@ -682,7 +694,8 @@ impl<'a> Layouter<'a> {
             // A ruby pair aligns by its base.
             b.children.iter().find(|c| c.ruby == 2).and_then(|c| c.last_baseline()).map(|bl| bl - b.rect.y)
         } else {
-            b.last_baseline().map(|bl| bl - b.rect.y)
+            // An inline-level flex container aligns by its first baseline.
+            if b.formatting == Formatting::Flex { b.first_baseline() } else { b.last_baseline() }.map(|bl| bl - b.rect.y)
         };
         // An empty one-line control has the baseline its text would have.
         if control_baseline && b.lines.iter().all(|l| l.fragments.is_empty()) && b.node.is_some_and(|n| self.is_line_control(n)) {
@@ -964,6 +977,14 @@ impl<'a> Layouter<'a> {
         }
     }
 
+    /// Content-box (min, max) heights (`max` is infinite for `none`).
+    pub(crate) fn height_limits(&self, style: &ComputedStyle, cb_h: Option<f32>, pb_v: f32) -> (f32, f32) {
+        let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v.max(0.0) };
+        let max = style.max_height.resolve_definite(cb_h).map(adj).unwrap_or(f32::INFINITY);
+        let min = style.min_height.resolve_definite(cb_h).map(adj).unwrap_or(0.0);
+        (min, max.max(min))
+    }
+
     fn clamp_height(&self, style: &ComputedStyle, h: f32, cb_h: Option<f32>, pb_v: f32) -> f32 {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
         let mut h = h;
@@ -1007,7 +1028,7 @@ impl<'a> Layouter<'a> {
         // The shape of an alternative label is not an image aspect ratio.
         // Only decoded dimensions, a pair of attributes or explicit CSS may
         // couple the axes; height:40px must not stretch the label's width.
-        let ratio_size = natural.unwrap_or((b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0)));
+        let ratio_size = if b.image.as_ref().is_some_and(|i| i.no_ratio) { (0.0, 0.0) } else { natural.unwrap_or((b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0))) };
         let ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()).or(if ratio_size.0 > 0.0 && ratio_size.1 > 0.0 { Some(ratio_size.0 / ratio_size.1) } else { None });
         let adj_w = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
         // `width`/`height` attributes arrive as presentational hints in the
