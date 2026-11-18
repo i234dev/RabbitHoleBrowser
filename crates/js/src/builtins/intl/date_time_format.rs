@@ -318,6 +318,30 @@ fn zone_table() -> &'static std::collections::HashMap<String, (String, String)> 
     })
 }
 
+/// Primary time zone identifiers for `Intl.supportedValuesOf("timeZone")`:
+/// the tzdata Zone entries (`UTC` for `Etc/UTC`), sorted.
+pub(super) fn time_zone_ids() -> Vec<String> {
+    let mut out = vec!["UTC".to_string()];
+    for dir in ZONEINFO_DIRS {
+        let Ok(zi) = std::fs::read_to_string(std::path::Path::new(dir).join("tzdata.zi")) else { continue };
+        for line in zi.lines() {
+            let mut it = line.split_whitespace();
+            if it.next() != Some("Z") {
+                continue;
+            }
+            let Some(name) = it.next() else { continue };
+            if matches!(name, "Etc/UTC" | "Etc/GMT" | "Factory") || !zone_table().contains_key(&name.to_ascii_lowercase()) {
+                continue;
+            }
+            out.push(name.to_string());
+        }
+        break;
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn is_utc_id(id: &str) -> bool {
     matches!(id, "UTC" | "Etc/UTC" | "Etc/UCT" | "UCT" | "Etc/Universal" | "Universal" | "Etc/Zulu" | "Zulu")
 }

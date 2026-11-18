@@ -1184,7 +1184,10 @@ fn supported_values_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
             v.sort_unstable();
             v
         }
-        "timeZone" => vec!["UTC"],
+        "timeZone" => {
+            let vals = date_time_format::time_zone_ids().iter().map(|z| Value::str(z)).collect();
+            return Ok(realm.new_array_value(vals));
+        }
         "unit" => vec!["byte", "celsius", "centimeter", "day", "gram", "hour", "kilogram", "kilometer", "liter", "meter", "mile", "minute", "month", "percent", "pound", "second", "week", "year"],
         _ => return realm.range_error(&format!("Invalid key : {}", key)),
     };
