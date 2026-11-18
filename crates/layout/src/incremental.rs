@@ -90,6 +90,30 @@ pub(crate) struct LayoutCache {
     pub alt_h: Option<Option<f32>>,
 }
 
+/// A fast non-cryptographic hasher for fingerprints (multiply-rotate).
+#[derive(Default)]
+struct FastHasher(u64);
+
+impl std::hash::Hasher for FastHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(v as u64);
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
 /// Geometry of everything laid out inside `b`, relative to its content
 /// origin `(ox, oy)`: two layouts with the same fingerprint placed every
 /// descendant box, line, fragment and marker at the same place.
@@ -137,7 +161,7 @@ pub(crate) fn contents_fingerprint(b: &LayoutBox, ox: f32, oy: f32) -> u64 {
             }
         }
     }
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = FastHasher::default();
     walk(&mut h, b, ox, oy);
     h.finish()
 }
