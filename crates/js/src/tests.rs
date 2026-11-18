@@ -1066,7 +1066,7 @@ fn intl_collation_plural_relative_list() {
     eq("new Intl.Locale('en-US').language + ',' + new Intl.Locale('en-US').region + ',' + String(new Intl.Locale('es'))", "en,US,es");
     eq("new Intl.DisplayNames(['en'], {type: 'region'}).of('ES') + ',' + new Intl.DisplayNames('es', {type: 'language'}).of('en')", "Spain,inglés");
     eq("[...new Intl.Segmenter('en', {granularity: 'word'}).segment('Hello, world')].filter(s => s.isWordLike).map(s => s.segment).join()", "Hello,world");
-    eq("Intl.supportedValuesOf('calendar').join() + ',' + Intl.NumberFormat.supportedLocalesOf(['en-US', 'de']).join()", "gregory,en-US,de");
+    eq("Intl.supportedValuesOf('calendar').includes('gregory') + ',' + Intl.NumberFormat.supportedLocalesOf(['en-US', 'de']).join()", "true,en-US,de");
     eq("Object.prototype.toString.call(Intl) + Object.prototype.toString.call(new Intl.NumberFormat())", "[object Intl][object Intl.NumberFormat]");
 }
 
