@@ -1762,11 +1762,15 @@ impl<'a> Layouter<'a> {
     fn layout_grid_item_with_inline(&mut self,child:&mut LayoutBox,it:&mut GridItem,ax:f32,ay:f32,aw:f32,ah:f32,inner_w:f32) {
         // Intrinsic block sizes also lack a numeric resolution, but only an
         // automatic preferred size is eligible for stretch (§6.2).
+        // `normal` behaves as `start` for an item whose aspect ratio
+        // transfers a definite width (CSS Align 3 §6.1).
+        let ratio_sized = child.style.aspect_ratio.is_some() && !child.style.width.is_auto() && it.align != ItemAlign::Stretch;
         let stretch_h = matches!(it.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto)
             && !it.edges.auto.top
             && !it.edges.auto.bottom
             && child.style.height.is_auto()
-            && child.kind != BoxKind::Image;
+            && child.kind != BoxKind::Image
+            && !ratio_sized;
         let forced = if stretch_h { Some((ah - it.edges.pb_v - it.edges.margin_sum(Axis::Column)).max(0.0)) } else { None };
         let cb = Cb {
             x: 0.0,
