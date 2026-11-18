@@ -1218,7 +1218,9 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
         v.parse::<f32>().ok().map(|n| format!("{n}px"))
     };
     match tag {
-        "img" | "td" | "th" | "table" | "iframe" | "video" | "canvas" | "embed" | "object" | "hr" | "col" | "colgroup" | "svg" | "input" | "select" => {
+        // A canvas's width/height attributes set its bitmap (natural) size,
+        // not its CSS size (HTML §15.4.3 maps them only for the others).
+        "img" | "td" | "th" | "table" | "iframe" | "video" | "embed" | "object" | "hr" | "col" | "colgroup" | "svg" | "input" | "select" => {
             if let Some(w) = el.attr("width").and_then(dim) {
                 css.push_str(&format!("width:{w};"));
             }
@@ -1658,6 +1660,18 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "justify-items" => { to.justify_items = from.justify_items; to.justify_items_flags = from.justify_items_flags; }
         "justify-self" => { to.justify_self = from.justify_self; to.justify_self_flags = from.justify_self_flags; }
         "order" => to.order = from.order,
+        "place-content" => {
+            copy_property("align-content", from, to);
+            copy_property("justify-content", from, to);
+        }
+        "place-items" => {
+            copy_property("align-items", from, to);
+            copy_property("justify-items", from, to);
+        }
+        "place-self" => {
+            copy_property("align-self", from, to);
+            copy_property("justify-self", from, to);
+        }
         "gap" | "grid-gap" => {
             to.row_gap = from.row_gap;
             to.column_gap = from.column_gap;
