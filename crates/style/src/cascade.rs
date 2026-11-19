@@ -1558,6 +1558,44 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.border_color = from.border_color;
         }
         "border-width" => to.border_width = from.border_width,
+        "border-top" | "border-right" | "border-bottom" | "border-left" | "border-top-width" | "border-right-width" | "border-bottom-width"
+        | "border-left-width" | "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" | "border-top-color"
+        | "border-right-color" | "border-bottom-color" | "border-left-color" => {
+            let side = match prop.split('-').nth(1) {
+                Some("top") => 0,
+                Some("right") => 1,
+                Some("bottom") => 2,
+                _ => 3,
+            };
+            let get = |e: &Edges<f32>| match side {
+                0 => e.top,
+                1 => e.right,
+                2 => e.bottom,
+                _ => e.left,
+            };
+            let all = prop.matches('-').count() == 1;
+            if all || prop.ends_with("-width") {
+                set_side(&mut to.border_width, side, get(&from.border_width));
+            }
+            if all || prop.ends_with("-style") {
+                let st = match side {
+                    0 => from.border_style.top,
+                    1 => from.border_style.right,
+                    2 => from.border_style.bottom,
+                    _ => from.border_style.left,
+                };
+                set_side(&mut to.border_style, side, st);
+            }
+            if all || prop.ends_with("-color") {
+                let c = match side {
+                    0 => from.border_color.top,
+                    1 => from.border_color.right,
+                    2 => from.border_color.bottom,
+                    _ => from.border_color.left,
+                };
+                set_side(&mut to.border_color, side, c);
+            }
+        }
         "border-style" => to.border_style = from.border_style,
         "border-color" => to.border_color = from.border_color,
         "border-radius" => {
@@ -2591,6 +2629,8 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 fit_content_fn(c0, ctx, name.ends_with("width")).unwrap_or(Length::FitContent)
             } else {
                 match resolve_len(c0, ctx) {
+                    // Negative sizes are invalid.
+                    Some(Length::Px(v)) | Some(Length::Percent(v)) if v < 0.0 => return,
                     Some(l) => l,
                     None => return,
                 }
@@ -2621,6 +2661,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 fit_content_fn(c0, ctx, name == "max-width").unwrap_or(Length::FitContent)
             } else {
                 match resolve_len_no_auto(c0, ctx) {
+                    Some(Length::Px(v)) | Some(Length::Percent(v)) if v < 0.0 => return,
                     Some(l) => l,
                     None => return,
                 }
