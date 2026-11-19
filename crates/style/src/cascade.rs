@@ -764,13 +764,21 @@ fn apply_declarations(
         ex: pex,
         ic: pic,
     };
+    // (Whether a font size is declared, and the size of an absolute
+    // keyword: both depend on the final family, see below.)
+    let mut size_declared = false;
+    let mut size_keyword = None;
     for (name, value, _) in &resolved {
         match *name {
-            "font-size" => apply_font_size(value, &mut style, parent, &parent_ctx),
+            "font-size" => {
+                size_declared = true;
+                size_keyword = apply_font_size(value, &mut style, parent, &parent_ctx);
+            }
             "font" => {
                 if let Some(parsed) = parse_font_shorthand(value) {
                     if let Some(size) = parsed.size {
-                        apply_font_size(&size, &mut style, parent, &parent_ctx);
+                        size_declared = true;
+                        size_keyword = apply_font_size(&size, &mut style, parent, &parent_ctx);
                     }
                 }
             }
@@ -785,6 +793,23 @@ fn apply_declarations(
             let ctx = ApplyCtx { len: parent_ctx, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
             apply_property(name, value, &mut font_probe, parent, &ctx);
         }
+    }
+    // The generic `monospace` alone has a 13px `medium` (as in browsers):
+    // keyword sizes use it, and an inherited size scales when the family
+    // switches to or from it.
+    const MONO_SCALE: f32 = 13.0 / 16.0;
+    let mono = font_probe.font_monospace_only;
+    if size_declared {
+        style.font_size_keyword = size_keyword.is_some();
+    }
+    if let Some(px) = size_keyword {
+        if mono {
+            style.font_size = px * MONO_SCALE;
+            font_probe.font_size = style.font_size;
+        }
+    } else if !size_declared && style.font_size_keyword && mono != parent.font_monospace_only {
+        style.font_size = if mono { parent.font_size * MONO_SCALE } else { parent.font_size / MONO_SCALE };
+        font_probe.font_size = style.font_size;
     }
     let (ch, ex, ic) = crate::values::font_units(&font_probe);
     drop(font_probe);
@@ -1618,8 +1643,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "opacity" => to.opacity = from.opacity,
         "font" => {
             to.font_family = from.font_family;
+            to.font_monospace_only = from.font_monospace_only;
             to.font_family_list = from.font_family_list.clone();
             to.font_size = from.font_size;
+            to.font_size_keyword = from.font_size_keyword;
             to.font_weight = from.font_weight;
             to.font_stretch = from.font_stretch;
             to.font_style = from.font_style;
@@ -1629,9 +1656,13 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "font-family" => {
             to.font_family = from.font_family;
+            to.font_monospace_only = from.font_monospace_only;
             to.font_family_list = from.font_family_list.clone();
         }
-        "font-size" => to.font_size = from.font_size,
+        "font-size" => {
+            to.font_size = from.font_size;
+            to.font_size_keyword = from.font_size_keyword;
+        }
         "font-weight" => to.font_weight = from.font_weight,
         "font-stretch" | "font-width" => to.font_stretch = from.font_stretch,
         "font-style" => to.font_style = from.font_style,
@@ -1881,17 +1912,22 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
     }
 }
 
-fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &LengthContext) {
+/// Apply a `font-size` value. Returns the size of an absolute keyword
+/// (`medium` = 16px), which depends on the final font family.
+fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &LengthContext) -> Option<f32> {
     if let Some(w) = wide_keyword(value) {
         match w {
-            Wide::Initial => style.font_size = 16.0,
+            Wide::Initial => {
+                style.font_size = 16.0;
+                return Some(16.0);
+            }
             _ => style.font_size = parent.font_size,
         }
-        return;
+        return None;
     }
     let comps = values::components(value);
     if comps.len() != 1 {
-        return;
+        return None;
     }
     if let Some(kw) = values::ident(comps[0]) {
         let px = match kw.as_str() {
@@ -1903,12 +1939,18 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
             "x-large" => 24.0,
             "xx-large" => 32.0,
             "xxx-large" => 48.0,
-            "smaller" => parent.font_size / 1.2,
-            "larger" => parent.font_size * 1.2,
-            _ => return,
+            "smaller" => {
+                style.font_size = parent.font_size / 1.2;
+                return None;
+            }
+            "larger" => {
+                style.font_size = parent.font_size * 1.2;
+                return None;
+            }
+            _ => return None,
         };
         style.font_size = px;
-        return;
+        return Some(px);
     }
     if let Some(lv) = values::parse_length(comps[0]) {
         match lv.resolve(ctx) {
@@ -1917,6 +1959,7 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
             _ => {}
         }
     }
+    None
 }
 
 /// `fit-content(<length-percentage>)` of a width property (heights keep
@@ -2881,6 +2924,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     if let Some(fam) = family_of(&fam_comps) {
                         style.font_family = fam;
                     }
+                    style.font_monospace_only = props::text::monospace_only(&fam_comps);
                     style.font_family_list = props::text::family_names(&fam_comps);
                 }
                 style.font_variant_small_caps = f.small_caps;

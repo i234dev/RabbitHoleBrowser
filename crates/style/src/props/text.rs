@@ -7,6 +7,12 @@ use rabbithole_css::Token;
 
 /// Family names (as written, generic keywords excluded) from a
 /// comma-separated `font-family` component list.
+/// Is the family list exactly the generic `monospace`?
+pub fn monospace_only(comps: &[&[Token]]) -> bool {
+    let fams = values::split_commas(comps);
+    fams.len() == 1 && matches!(fams[0].as_slice(), [[Token::Ident(s)]] if s.eq_ignore_ascii_case("monospace"))
+}
+
 pub fn family_names(comps: &[&[Token]]) -> Vec<String> {
     let mut out = Vec::new();
     for fam in values::split_commas(comps) {
@@ -330,6 +336,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             }
         }
         "font-family" => {
+            style.font_monospace_only = monospace_only(comps);
             style.font_family_list = family_names(comps);
             if let Some(f) = crate::cascade::family_of(comps) {
                 style.font_family = f;

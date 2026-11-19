@@ -1485,6 +1485,13 @@ pub struct ComputedStyle {
     /// matched against `@font-face` and system fonts before the generic
     /// `font_family` fallback.
     pub font_family_list: Vec<String>,
+    /// The `font-family` list is the generic `monospace` alone: its
+    /// `medium` size is 13px, as in browsers (inherited).
+    pub font_monospace_only: bool,
+    /// The font size comes from an absolute keyword (`medium`, the initial
+    /// value, ...) through inheritance: it follows the family's own
+    /// `medium` (inherited).
+    pub font_size_keyword: bool,
     pub font_variant_small_caps: bool,
     /// `font-variation-settings` (inherited): axis tag and value.
     pub font_variation_settings: Vec<([u8; 4], f32)>,
@@ -1688,6 +1695,8 @@ impl ComputedStyle {
             line_clamp_prefixed: false,
             webkit_box: false,
             font_family_list: Vec::new(),
+            font_monospace_only: false,
+            font_size_keyword: true,
             font_variant_small_caps: false,
             font_variation_settings: Vec::new(),
             object_fit: ObjectFit::Fill,
@@ -1763,6 +1772,8 @@ impl ComputedStyle {
             writing_mode: parent.writing_mode,
             tab_size: parent.tab_size,
             font_family_list: parent.font_family_list.clone(),
+            font_monospace_only: parent.font_monospace_only,
+            font_size_keyword: parent.font_size_keyword,
             font_variant_small_caps: parent.font_variant_small_caps,
             font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
@@ -1785,6 +1796,8 @@ impl ComputedStyle {
     pub fn inherited_eq(&self, o: &ComputedStyle) -> bool {
         self.color == o.color
             && self.font_family == o.font_family
+            && self.font_monospace_only == o.font_monospace_only
+            && self.font_size_keyword == o.font_size_keyword
             && self.font_size == o.font_size
             && self.font_weight == o.font_weight
             && self.font_stretch == o.font_stretch

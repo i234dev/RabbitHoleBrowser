@@ -838,3 +838,22 @@ fn first_letter_style_is_computed() {
     assert_eq!(fl.font_size, 30.0);
     assert_eq!(fl.float, Float::Left);
 }
+
+#[test]
+fn monospace_alone_has_a_13px_medium() {
+    let (doc, t) = styled(
+        "<div><pre>a</pre><code>b</code><p>c</p><span>d</span></div><section><pre>e</pre></section>",
+        "div { font-family: monospace } p { font-family: monospace, monospace } span { font-family: serif } section { font-size: 12px } code { font-size: 2em }",
+    );
+    assert_eq!(style_of(&doc, &t, "div").font_size, 13.0);
+    assert_eq!(style_of(&doc, &t, "pre").font_size, 13.0);
+    // A relative size follows the parent's used size.
+    assert_eq!(style_of(&doc, &t, "code").font_size, 26.0);
+    // Not the generic alone: the ordinary medium.
+    assert_eq!(style_of(&doc, &t, "p").font_size, 16.0);
+    assert_eq!(style_of(&doc, &t, "span").font_size, 16.0);
+    // An explicit size is kept whatever the family.
+    let n = doc.find_element("section").unwrap();
+    let pre = doc.children(n).find(|&c| doc.is_element(c, "pre")).unwrap();
+    assert_eq!(t.get(pre).unwrap().font_size, 12.0);
+}
