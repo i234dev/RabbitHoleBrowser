@@ -24,11 +24,39 @@ pub(crate) enum Seg {
 pub(crate) struct Collapser {
     /// Whether the previous emitted thing was a space (or a line start).
     pub prev_space: bool,
+    /// The last character other than white space and default ignorables
+    /// (for the segment break transformation).
+    pub last: Option<char>,
 }
 
 impl Collapser {
     pub fn new() -> Self {
-        Collapser { prev_space: true }
+        Collapser { prev_space: true, last: None }
+    }
+}
+
+/// Default ignorable code points skipped by the segment break
+/// transformation (U+200B is significant).
+fn ignorable(c: char) -> bool {
+    matches!(c as u32, 0xAD | 0x34F | 0x61C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F | 0x200C..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0 | 0xE0000..=0xE0FFF)
+}
+
+/// East Asian Width F, W or H, Hangul excluded.
+fn ea_wide_not_hangul(c: char) -> bool {
+    let u = c as u32;
+    let hangul = matches!(u, 0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7FF | 0xFFA0..=0xFFDC);
+    !hangul
+        && matches!(u, 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xF900..=0xFAFF | 0xFE10..=0xFE19 | 0xFE30..=0xFE6F | 0xFF00..=0xFFDC | 0xFFE0..=0xFFEE | 0x1F200..=0x1F2FF | 0x20000..=0x3FFFD)
+}
+
+/// Is a collapsible segment break between `prev` and `next` removed
+/// (CSS Text 3 §4.1.2)? Next to a zero-width space, or between two East
+/// Asian wide characters (not Hangul).
+fn segment_break_removed(prev: Option<char>, next: Option<char>) -> bool {
+    match (prev, next) {
+        (Some('\u{200b}'), _) | (_, Some('\u{200b}')) => true,
+        (Some(a), Some(b)) => ea_wide_not_hangul(a) && ea_wide_not_hangul(b),
+        _ => false,
     }
 }
 
@@ -79,7 +107,7 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
     };
     let preserve_spaces = matches!(ws, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces);
     let preserve_newlines = ws.preserves_newlines();
-    for ch in text.chars() {
+    for (i, ch) in text.char_indices() {
         match ch {
             '\u{ad}' => {
                 if keep_shy {
@@ -93,10 +121,12 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
                 if !preserve_spaces {
                     st.prev_space = true;
                 }
+                st.last = Some(ch);
             }
             '\u{a0}' => {
                 word.push(' ');
                 st.prev_space = false;
+                st.last = Some(ch);
             }
             '\r' => {}
             '\n' if preserve_newlines => {
@@ -119,13 +149,24 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
             c if is_collapsible_ws(c) => {
                 flush(&mut word, out);
                 if !st.prev_space {
-                    out.push(Seg::Space);
+                    // A white space run with a segment break may vanish.
+                    let rest = &text[i..];
+                    let run = rest.find(|c: char| !is_collapsible_ws(c)).unwrap_or(rest.len());
+                    let removed = !preserve_newlines
+                        && rest[..run].contains('\n')
+                        && segment_break_removed(st.last, rest[run..].chars().find(|c| !ignorable(*c)));
+                    if !removed {
+                        out.push(Seg::Space);
+                    }
                     st.prev_space = true;
                 }
             }
             c => {
                 word.push(c);
                 st.prev_space = false;
+                if !ignorable(c) {
+                    st.last = Some(c);
+                }
             }
         }
     }
@@ -198,6 +239,14 @@ mod tests {
                 Seg::Word("c".into())
             ]
         );
+    }
+
+    #[test]
+    fn segment_breaks_between_wide_characters_vanish() {
+        let mut st = Collapser::new();
+        let mut out = Vec::new();
+        segment("中\n文 a\nb", WhiteSpace::Normal, &mut st, &mut out);
+        assert_eq!(out, vec![Seg::Word("中".into()), Seg::Word("文".into()), Seg::Space, Seg::Word("a".into()), Seg::Space, Seg::Word("b".into())]);
     }
 
     #[test]
