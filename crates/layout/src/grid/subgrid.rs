@@ -480,7 +480,7 @@ struct Saved {
     style:Rc<ComputedStyle>,columns:Option<AxisInheritance>,rows:Option<AxisInheritance>,
 }
 pub(super) fn invalidate(b:&mut LayoutBox) {
-    b.intrinsic_cache=None;b.layout_cache=None;b.reused_layout=false;
+    b.intrinsic_cache=None;b.flex_content_cache=None;b.layout_cache=None;b.reused_layout=false;
     for child in &mut b.children {invalidate(child);}
 }
 fn inset(source:Option<AxisInheritance>,before:f32,after:f32)->Option<AxisInheritance> {
