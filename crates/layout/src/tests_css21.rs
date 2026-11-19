@@ -495,3 +495,16 @@ fn tables_and_atomics_beside_floats() {
     let s = fx.rect(&tree, "s");
     assert!(close(s.x, 100.0) && close(s.y, 50.0), "{s:?}");
 }
+
+/// An absolutely positioned table between two insets keeps its
+/// shrink-to-fit width.
+#[test]
+fn absolute_table_between_insets_shrinks_to_fit() {
+    let fx = Fx::new(
+        "<div style='position:relative;width:400px;height:100px'><table id=t style='position:absolute;left:1px;right:1px;border-spacing:0'><tr><td style='padding:0'><div style='width:50px;height:10px'></div></td></tr></table></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    let t = fx.rect(&tree, "t");
+    assert!(close(t.x, 1.0) && close(t.w, 50.0), "{t:?}");
+}

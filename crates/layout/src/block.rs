@@ -1757,7 +1757,10 @@ impl<'a> Layouter<'a> {
         let pb_v = p.top + p.bottom + style.border_width.top + style.border_width.bottom;
         let ratio = style.aspect_ratio.filter(|r| *r > 0.0 && c.kind != BoxKind::Image);
         let mut ratio_stretched_height = None;
+        // A table's auto width is shrink-to-fit, even between two insets.
+        let table = matches!(c.formatting, Formatting::Table | Formatting::TableWrapper);
         let (mut mode, mut avail) = match (l, r, style.width.is_auto()) {
+            (Some(l), Some(r), true) if table => (WidthMode::ShrinkToFit, (cb.w - l - r).max(0.0)),
             (Some(l), Some(r), true) => (WidthMode::Fixed((cb.w - l - r - ml - mr - pb_h).max(0.0)), cb.w),
             _ => {
                 // With both insets auto the box starts at its static
