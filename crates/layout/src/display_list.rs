@@ -490,7 +490,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 self.list.sticky.push(StickyPatch {
                     item: start,
                     scope: (self.hits.scopes.len() - 1) as u32,
-                    margin_rect: root.margin_rect(),
+                    margin_rect: root.sticky_margin_rect(),
                     border_rect: root.rect,
                     cb,
                     inset: root.style.inset,

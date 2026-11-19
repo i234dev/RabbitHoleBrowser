@@ -439,6 +439,15 @@ impl LayoutBox {
         )
     }
 
+    /// The margin box a sticky box keeps within its containing block:
+    /// auto margins (resolved to absorb free space) count as zero.
+    pub fn sticky_margin_rect(&self) -> Rect {
+        let m = &self.style.margin;
+        let side = |l: &rabbithole_style::Length, used: f32| if l.is_auto() { 0.0 } else { used };
+        let (t, r, b, l) = (side(&m.top, self.margin.top), side(&m.right, self.margin.right), side(&m.bottom, self.margin.bottom), side(&m.left, self.margin.left));
+        Rect::new(self.rect.x - l, self.rect.y - t, self.rect.w + l + r, self.rect.h + t + b)
+    }
+
     /// Padding box rectangle.
     pub fn padding_rect(&self) -> Rect {
         let b = &self.style.border_width;
@@ -509,7 +518,7 @@ impl LayoutBox {
         if self.style.position != Position::Sticky {
             return (0.0, 0.0);
         }
-        sticky_offset_for(&self.style.inset, self.rect, self.margin_rect(), scrollport, cb)
+        sticky_offset_for(&self.style.inset, self.rect, self.sticky_margin_rect(), scrollport, cb)
     }
 }
 

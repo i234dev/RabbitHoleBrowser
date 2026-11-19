@@ -1746,6 +1746,14 @@ impl<'a> Layouter<'a> {
         } else {
             cb
         };
+        // A box in the top layer is laid out as a child of the initial
+        // containing block: its static position is the ICB's origin.
+        let mut static_right = static_right;
+        if !self.ctx.doc.top_layer.is_empty() && c.abs_node().is_some_and(|n| self.ctx.doc.top_layer.contains(&n)) {
+            c.static_pos = (0.0, 0.0);
+            c.static_align = None;
+            static_right = false;
+        }
         let style = c.style.clone();
         let l = style.inset.left.resolve(cb.w);
         let r = style.inset.right.resolve(cb.w);
