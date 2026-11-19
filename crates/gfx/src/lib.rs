@@ -15,7 +15,7 @@ pub mod raster;
 pub mod stroke;
 mod shaping;
 pub mod color_glyph;
-pub use shaping::{DecorationMetrics, ShapeFeatures};
+pub use shaping::{DecorationMetrics, FontFeature, ShapeFeatures, LANGUAGE_TAG};
 
 #[cfg(test)]
 mod tests_v02;

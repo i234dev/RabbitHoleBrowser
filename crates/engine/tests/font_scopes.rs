@@ -20,7 +20,7 @@ fn make_engine() -> Engine {
 fn page(engine: &Engine, html: &str, family: &str, data: &[u8]) -> Page {
     let mut loaded = engine.loader.load_html(html, Url::parse("https://example.test/font-scope").unwrap(), VIEWPORT);
     loaded.fonts.push(LoadedFont {
-        face: FontFace { family: family.into(), sources: vec![], weight: (400, 400), italic: false, stretch: (100, 100), display: "auto".into(), unicode_range: None },
+        face: FontFace { family: family.into(), sources: vec![], weight: (400, 400), italic: false, stretch: (100, 100), display: "auto".into(), unicode_range: None, feature_settings: vec![] },
         data: Arc::new(data.to_vec()),
     });
     engine.build_page_unscripted(loaded, VIEWPORT)

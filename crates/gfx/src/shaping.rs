@@ -6,7 +6,7 @@
 //! Results are cached per (face, text, features) in font units, so they
 //! serve every font size.
 
-use crate::font::FontContext;
+use crate::font::{FontContext, FontId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -44,7 +44,22 @@ pub(crate) struct ShapingState {
     /// has layout tables worth shaping with (GSUB / GPOS / kern).
     data: RefCell<HashMap<usize, Option<(Rc<Vec<u8>>, bool, bool)>>>,
     cache: RefCell<HashMap<(usize, Box<str>, u8), Rc<UnitRun>>>,
+    /// Faces that are another face shaped with OpenType features (CSS
+    /// `font-feature-settings` / `font-variant-*`): face → (base, features).
+    pub(crate) variants: RefCell<HashMap<usize, (usize, Rc<[FontFeature]>)>>,
+    /// (base face, features) → variant face.
+    pub(crate) variant_ids: RefCell<HashMap<(usize, Rc<[FontFeature]>), usize>>,
+    /// Default features of a face (`@font-face { font-feature-settings }`).
+    pub(crate) face_features: RefCell<HashMap<usize, Rc<[FontFeature]>>>,
 }
+
+/// An OpenType feature setting: tag and value (0 = off, 1 = on, or an
+/// alternate index).
+pub type FontFeature = ([u8; 4], u32);
+
+/// A pseudo feature carrying an OpenType language system tag (the value,
+/// big-endian) for the shaper.
+pub const LANGUAGE_TAG: &[u8; 4] = b"\0lng";
 
 /// Font features requested for a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -63,8 +78,64 @@ impl ShapeFeatures {
 }
 
 impl FontContext {
+    /// The face a feature variant shapes with (the face itself otherwise).
+    pub(crate) fn variant_base(&self, idx: usize) -> usize {
+        self.shaping.variants.borrow().get(&idx).map(|v| v.0).unwrap_or(idx)
+    }
+
+    /// `font` shaped with OpenType `features` (an unbound copy of the
+    /// face; the same id for the same request). Features apply to the runs
+    /// this face renders, not to fallback faces.
+    /// Default OpenType features of a face (the `font-feature-settings`
+    /// descriptor of its `@font-face` rule).
+    pub fn set_face_features(&self, font: FontId, features: &[FontFeature]) {
+        self.shaping.face_features.borrow_mut().insert(font.0, Rc::from(features));
+    }
+
+    pub fn with_features(&self, font: FontId, features: &[FontFeature]) -> FontId {
+        if features.is_empty() {
+            return font;
+        }
+        let base = self.variant_base(font.0);
+        // The face's own defaults come first; the element's settings win.
+        let mut merged: Vec<FontFeature> = self.shaping.face_features.borrow().get(&base).map(|f| f.to_vec()).unwrap_or_default();
+        for f in features {
+            merged.retain(|g| g.0 != f.0);
+            merged.push(*f);
+        }
+        let feats: Rc<[FontFeature]> = Rc::from(merged);
+        if let Some(&id) = self.shaping.variant_ids.borrow().get(&(base, feats.clone())) {
+            return FontId(id);
+        }
+        let idx = {
+            let mut faces = self.faces.borrow_mut();
+            let Some(slot) = faces.get(base) else { return font };
+            let copy = crate::font::FaceSlot {
+                name: slot.name.clone(),
+                family: slot.family.clone(),
+                family_lower: slot.family_lower.clone(),
+                weight: slot.weight,
+                italic: slot.italic,
+                stretch: slot.stretch,
+                generic: slot.generic,
+                source: match &slot.source {
+                    crate::font::FaceSource::Bytes(b) => crate::font::FaceSource::Bytes(Rc::clone(b)),
+                    crate::font::FaceSource::Path(p, i) => crate::font::FaceSource::Path(p.clone(), *i),
+                },
+                font: RefCell::new(slot.font.borrow().clone()),
+                failed: std::cell::Cell::new(slot.failed.get()),
+            };
+            faces.push(copy);
+            faces.len() - 1
+        };
+        self.shaping.variants.borrow_mut().insert(idx, (base, feats.clone()));
+        self.shaping.variant_ids.borrow_mut().insert((base, feats), idx);
+        FontId(idx)
+    }
+
     /// SFNT bytes of a face and whether it has OpenType layout tables.
     fn shaping_data(&self, idx: usize) -> Option<(Rc<Vec<u8>>, bool, bool)> {
+        let idx = self.variant_base(idx);
         if let Some(d) = self.shaping.data.borrow().get(&idx) {
             return d.clone();
         }
@@ -188,6 +259,24 @@ impl FontContext {
             buf.set_direction(if r { rustybuzz::Direction::RightToLeft } else { rustybuzz::Direction::LeftToRight });
         }
         let mut feats = Vec::new();
+        let extra: Option<Rc<[FontFeature]>> = self.shaping.variants.borrow().get(&idx).map(|v| v.1.clone()).or_else(|| self.shaping.face_features.borrow().get(&idx).cloned());
+        if let Some(extra) = extra {
+            for (tag, value) in extra.iter() {
+                if tag == LANGUAGE_TAG {
+                    // An OpenType language system (`font-language-override`);
+                    // registered tags are upper case, others match nothing.
+                    if value.to_be_bytes().iter().any(|b| b.is_ascii_lowercase()) {
+                        continue;
+                    }
+                    let ot: String = value.to_be_bytes().iter().filter(|b| **b != b' ' && **b != 0).map(|b| b.to_ascii_lowercase() as char).collect();
+                    if let Ok(lang) = format!("x-hbot{ot}").parse::<rustybuzz::Language>() {
+                        buf.set_language(lang);
+                    }
+                    continue;
+                }
+                feats.push(rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), *value, ..));
+            }
+        }
         if features.no_ligatures {
             for tag in [b"liga", b"clig", b"dlig", b"hlig", b"calt"] {
                 feats.push(rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..));

@@ -397,6 +397,15 @@ impl<'a> Layouter<'a> {
     /// Font for a style: the first available family of `font-family`
     /// (web fonts / system fonts) or the generic fallback.
     pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
+        let font = self.font_for_family(style);
+        match &style.font_features {
+            // OpenType features (font-feature-settings, font-variant-*).
+            Some(f) if self.font_ext => self.ctx.fonts.with_features(font, &f.resolved()),
+            _ => font,
+        }
+    }
+
+    fn font_for_family(&mut self, style: &ComputedStyle) -> FontId {
         if self.font_ext && !style.font_family_list.is_empty() {
             let key = (style.font_family_list.join(","), style.font_weight, style.is_italic(), style.font_stretch);
             if let Some(f) = self.font_cache.get(&key) {

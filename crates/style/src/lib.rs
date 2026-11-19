@@ -48,6 +48,9 @@ pub struct FontFace {
     pub display: String,
     /// `unicode-range` as inclusive code point ranges.
     pub unicode_range: Option<Vec<(u32, u32)>>,
+    /// The `font-feature-settings` descriptor (default features of the
+    /// face, before the element's own).
+    pub feature_settings: Vec<rabbithole_gfx::FontFeature>,
 }
 
 /// Styles indexed by `NodeId`. Non-element nodes and `display: none`

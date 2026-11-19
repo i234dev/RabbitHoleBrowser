@@ -1232,7 +1232,10 @@ impl Engine {
         for f in &loaded.fonts {
             let key = (f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic, f.face.stretch);
             if registered.insert(key) {
-                fonts.add_font_data_stretch(&f.face.family, f.face.weight.0, f.face.italic, f.face.stretch, &f.data);
+                let id = fonts.add_font_data_stretch(&f.face.family, f.face.weight.0, f.face.italic, f.face.stretch, &f.data);
+                if let (Some(id), false) = (id, f.face.feature_settings.is_empty()) {
+                    fonts.set_face_features(id, &f.face.feature_settings);
+                }
             }
         }
         let has_dynamic_rules = loaded.sheets.iter().any(sheet_has_dynamic_rules);

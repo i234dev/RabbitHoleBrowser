@@ -854,6 +854,42 @@ pub enum BackgroundImage {
     },
 }
 
+/// The inherited font feature properties (CSS Fonts 4 §6-7), each as the
+/// OpenType features it turns on or off.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FontFeatureProps {
+    pub ligatures: Vec<rabbithole_gfx::FontFeature>,
+    pub position: Vec<rabbithole_gfx::FontFeature>,
+    pub numeric: Vec<rabbithole_gfx::FontFeature>,
+    pub east_asian: Vec<rabbithole_gfx::FontFeature>,
+    pub alternates: Vec<rabbithole_gfx::FontFeature>,
+    /// `font-kerning`: None = auto.
+    pub kerning: Option<bool>,
+    /// `font-feature-settings` (applied last).
+    pub settings: Vec<rabbithole_gfx::FontFeature>,
+    /// `font-language-override`: an OpenType language system tag.
+    pub language: Option<[u8; 4]>,
+    /// `font-variant-alternates` functions by name (`styleset(fancy)`):
+    /// (function, names), resolved per font family through
+    /// `@font-feature-values` into `alternates_resolved`.
+    pub alternates_named: Vec<(String, Vec<String>)>,
+    pub alternates_resolved: Vec<rabbithole_gfx::FontFeature>,
+}
+
+impl FontFeatureProps {
+    /// All features in application order; a later setting of a tag wins.
+    pub fn resolved(&self) -> Vec<rabbithole_gfx::FontFeature> {
+        let mut out: Vec<rabbithole_gfx::FontFeature> = Vec::new();
+        let kern = self.kerning.map(|k| (*b"kern", k as u32));
+        let lang = self.language.map(|t| (*rabbithole_gfx::LANGUAGE_TAG, u32::from_be_bytes(t)));
+        for f in lang.iter().chain(kern.iter()).chain(&self.ligatures).chain(&self.position).chain(&self.numeric).chain(&self.east_asian).chain(&self.alternates).chain(&self.alternates_resolved).chain(&self.settings) {
+            out.retain(|g| g.0 != f.0);
+            out.push(*f);
+        }
+        out
+    }
+}
+
 /// A `border-image-width` / `border-image-outset` value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BorderImageWidth {
@@ -1556,6 +1592,9 @@ pub struct ComputedStyle {
     /// `font_family` fallback.
     pub font_family_list: Vec<String>,
     pub font_variant_small_caps: bool,
+    /// OpenType features from `font-feature-settings`, `font-kerning` and
+    /// the `font-variant-*` longhands (None: all `normal`).
+    pub font_features: Option<std::rc::Rc<FontFeatureProps>>,
     /// `font-variation-settings` (inherited): axis tag and value.
     pub font_variation_settings: Vec<([u8; 4], f32)>,
 
@@ -1765,6 +1804,7 @@ impl ComputedStyle {
             webkit_box: false,
             font_family_list: Vec::new(),
             font_variant_small_caps: false,
+            font_features: None,
             font_variation_settings: Vec::new(),
             object_fit: ObjectFit::Fill,
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
@@ -1842,6 +1882,7 @@ impl ComputedStyle {
             tab_size: parent.tab_size,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
+            font_features: parent.font_features.clone(),
             font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
             image_orientation_none: parent.image_orientation_none,
@@ -1903,6 +1944,7 @@ impl ComputedStyle {
             && self.tab_size == o.tab_size
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
+            && self.font_features == o.font_features
             && self.font_variation_settings == o.font_variation_settings
             && self.image_rendering_pixelated == o.image_rendering_pixelated
             && self.image_orientation_none == o.image_orientation_none

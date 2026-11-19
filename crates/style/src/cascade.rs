@@ -866,6 +866,8 @@ fn apply_declarations(
             style.line_clamp = None;
         }
     }
+    // Named font-variant-alternates follow the element's font families.
+    crate::props::text::resolve_alternates(&mut style);
     // A unitless line height scales with this element's font size (also
     // when inherited).
     if let Some(n) = style.line_height_number {
@@ -1003,6 +1005,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
     let mut stretch = (100u16, 100u16);
     let mut display = "auto".to_string();
     let mut unicode_range = None;
+    let mut feature_settings = Vec::new();
     for d in decls {
         let comps = values::components(&d.value);
         match d.name.as_str() {
@@ -1106,10 +1109,16 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
                     unicode_range = Some(ranges);
                 }
             }
+            "font-feature-settings" => {
+                let comps = values::components(&d.value);
+                if let Some(f) = crate::props::text::parse_feature_settings(&comps) {
+                    feature_settings = f;
+                }
+            }
             _ => {}
         }
     }
-    Some(FontFace { family: family?, sources, weight, italic, stretch, display, unicode_range })
+    Some(FontFace { family: family?, sources, weight, italic, stretch, display, unicode_range, feature_settings })
 }
 
 /// `U+0025-00FF`, `U+4??`, `U+20AC` (also tolerates a missing `+`, which
@@ -1840,7 +1849,31 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.line_clamp_auto = from.line_clamp_auto;
             to.block_ellipsis = from.block_ellipsis.clone();
         }
-        "font-variant" | "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
+        "font-variant" => {
+            to.font_variant_small_caps = from.font_variant_small_caps;
+            to.font_features = from.font_features.clone();
+        }
+        "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
+        "font-feature-settings" | "font-kerning" | "font-variant-ligatures" | "font-variant-position" | "font-variant-numeric"
+        | "font-variant-east-asian" | "font-variant-alternates" | "font-language-override" => {
+            let src = from.font_features.as_deref().cloned().unwrap_or_default();
+            let mut f = to.font_features.as_deref().cloned().unwrap_or_default();
+            match prop {
+                "font-feature-settings" => f.settings = src.settings,
+                "font-kerning" => f.kerning = src.kerning,
+                "font-variant-ligatures" => f.ligatures = src.ligatures,
+                "font-variant-position" => f.position = src.position,
+                "font-variant-numeric" => f.numeric = src.numeric,
+                "font-variant-east-asian" => f.east_asian = src.east_asian,
+                "font-language-override" => f.language = src.language,
+                _ => {
+                    f.alternates = src.alternates;
+                    f.alternates_named = src.alternates_named;
+                    f.alternates_resolved = src.alternates_resolved;
+                }
+            }
+            to.font_features = if f == FontFeatureProps::default() { None } else { Some(std::rc::Rc::new(f)) };
+        }
         "font-variation-settings" => to.font_variation_settings = from.font_variation_settings.clone(),
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
