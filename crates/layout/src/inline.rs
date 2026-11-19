@@ -688,17 +688,20 @@ impl<'a> Layouter<'a> {
         let (rel, rel_kids) = relative_offsets(&items, b.children.len(), cb.width, cb.height);
         let parent_open = open_parents(&items, &cstyle);
         let bidi_items = items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal));
-        // `text-wrap: balance` (CSS Text 4 §6.1.2): the narrowest wrap
-        // width that keeps the line count, found by bisection over trial
-        // layouts (paragraphs of at most 6 lines without floats).
+        // `text-wrap: balance` (CSS Text 4 §6.1.2): per group of lines
+        // between forced breaks, the narrowest wrap width that keeps its
+        // line count, found by bisection over trial layouts (groups of at
+        // most 6 lines; not with floats, which trial layouts would place
+        // repeatedly).
         let balance = cstyle.text_wrap_balance && cstyle.white_space.wraps() && !items.iter().any(|it| matches!(it, InlineItem::Float(_)));
-        let mut wrap_limit: Option<f32> = None;
+        let mut wrap_limits: Vec<Option<f32>> = Vec::new();
         let mut passes = if balance { 14 } else { 0 };
-        let (mut lo, mut hi, mut want) = (0.0f32, cb.width, 0usize);
+        // Per group: (lo, hi, wanted lines, balanced).
+        let mut groups: Vec<(f32, f32, usize, bool)> = Vec::new();
         let mut first_pass = true;
         loop {
         let mut lines = Vec::new();
-        let max_used;
+        let group_stats;
         let clamped;
         let height = {
             let mut il = InlineLayout {
@@ -730,42 +733,43 @@ impl<'a> Layouter<'a> {
                 inset_seen: std::collections::HashSet::new(),
                 inset_fixups: Vec::new(),
                 inset_total: std::collections::HashMap::new(),
-                wrap_limit,
-                max_used: 0.0,
+                wrap_limits: wrap_limits.clone(),
+                group: 0,
+                group_stats: Vec::new(),
             };
             let h = il.run(&pieces);
             il.resolve_insets();
-            max_used = il.max_used;
+            group_stats = std::mem::take(&mut il.group_stats);
             clamped = il.done;
             h
         };
         if passes > 0 {
-            let n = lines.len();
             if first_pass {
                 first_pass = false;
-                if (2..=6).contains(&n) && !clamped {
-                    want = n;
-                    hi = max_used.min(cb.width);
-                    lo = 0.0;
-                } else {
+                groups = group_stats.iter().map(|&(n, used)| (0.0, used.min(cb.width), n, (2..=6).contains(&n))).collect();
+                if clamped || !groups.iter().any(|g| g.3) {
                     passes = 0;
                 }
             } else {
                 passes -= 1;
-                let fits = !clamped && n <= want && max_used <= wrap_limit.unwrap_or(f32::MAX) + 0.01;
-                if fits {
-                    hi = wrap_limit.unwrap_or(hi);
-                } else {
-                    lo = wrap_limit.unwrap_or(lo);
+                for (g, st) in groups.iter_mut().enumerate().filter(|(_, st)| st.3) {
+                    let limit = wrap_limits.get(g).copied().flatten().unwrap_or(f32::MAX);
+                    let (n, used) = group_stats.get(g).copied().unwrap_or((usize::MAX, f32::MAX));
+                    if !clamped && n <= st.2 && used <= limit + 0.01 {
+                        st.1 = limit.min(st.1);
+                    } else {
+                        st.0 = limit;
+                    }
                 }
             }
-            if passes > 1 && hi - lo > 0.5 {
-                wrap_limit = Some((lo + hi) / 2.0);
+            if passes > 1 && groups.iter().any(|g| g.3 && g.1 - g.0 > 0.5) {
+                wrap_limits = groups.iter().map(|g| g.3.then_some(if g.1 - g.0 > 0.5 { (g.0 + g.1) / 2.0 } else { g.1 })).collect();
                 continue;
             }
-            if passes > 0 && wrap_limit != Some(hi) {
-                // The final layout at the narrowest width that fits.
-                wrap_limit = Some(hi);
+            let finals: Vec<Option<f32>> = groups.iter().map(|g| g.3.then_some(g.1)).collect();
+            if passes > 0 && wrap_limits != finals {
+                // The final layout at the narrowest widths that fit.
+                wrap_limits = finals;
                 passes = 0;
                 continue;
             }
@@ -872,9 +876,12 @@ struct InlineLayout<'l, 'a> {
     rel_kids: Vec<(f32, f32)>,
     /// Lines wrap at this width (`text-wrap: balance`) but align in the
     /// full one.
-    wrap_limit: Option<f32>,
-    /// Widest line content (trailing hanging spaces excluded).
-    max_used: f32,
+    wrap_limits: Vec<Option<f32>>,
+    /// The current group of lines (between forced breaks).
+    group: usize,
+    /// Per group: line count and widest line content (trailing hanging
+    /// spaces and justification excluded).
+    group_stats: Vec<(usize, f32)>,
     /// See [`open_parents`].
     parent_open: Vec<Option<usize>>,
     /// Inline elements with decoration insets already met on a line.
@@ -986,8 +993,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.y = y;
         self.cur.left = l;
         self.cur.align_right = r;
-        self.cur.right = match self.wrap_limit {
-            Some(w) => r.min(l + w + if self.indented() { self.indent.max(0.0) } else { 0.0 }),
+        self.cur.right = match self.wrap_limits.get(self.group).copied().flatten() {
+            Some(w) => r.min(l + w),
             None => r,
         };
         self.cur.x = l + if self.indented() { self.indent } else { 0.0 };
@@ -1344,7 +1351,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
         let shift = l - self.cur.left;
         self.cur.left = l;
-        self.cur.right = match self.wrap_limit {
+        self.cur.right = match self.wrap_limits.get(self.group).copied().flatten() {
             Some(w) => r.min(l + w),
             None => r,
         };
@@ -2242,7 +2249,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             }
         }
         let used = self.cur.x - self.cur.left - hang;
-        self.max_used = self.max_used.max(used - self.cur.justified);
+        if self.group_stats.len() <= self.group {
+            self.group_stats.resize(self.group + 1, (0, 0.0));
+        }
+        let gs = &mut self.group_stats[self.group];
+        gs.0 += 1;
+        gs.1 = gs.1.max(used - self.cur.justified);
         let free = (self.cur.align_right - self.cur.left) - used;
         let rtl = self.cstyle.direction == Direction::Rtl;
         let shift_x = if rtl {
@@ -2399,6 +2411,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         });
         self.first_line = false;
         self.after_forced = forced;
+        if forced {
+            self.group += 1;
+        }
         let new_y = y + h;
         for c in std::mem::take(&mut self.pending_abs) {
             let ry = self.rel_kids.get(c).map_or(0.0, |r| r.1);

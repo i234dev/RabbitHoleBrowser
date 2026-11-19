@@ -135,3 +135,48 @@ fn tab_size_length_and_half_ch_threshold() {
     let b = ls[0].iter().find(|f| f.0 == "b").unwrap().1.x;
     assert!((b - 8.0).abs() < 0.5, "{:?}", ls);
 }
+
+#[test]
+fn soft_hyphen_shows_a_hyphen_at_the_break() {
+    // 20px monospace: 12px per character; 6 characters fit.
+    let fx = Fx::new("<div id=d style='width:72px'>abc\u{ad}defgh</div>");
+    let t = fx.layout();
+    let ls = lines(fx.block(&t, "d"));
+    assert_eq!(ls.len(), 2, "{ls:?}");
+    let first: String = ls[0].iter().map(|f| f.0.as_str()).collect();
+    assert!(first == "abc\u{2010}" || first == "abc-", "{ls:?}");
+    let fx = Fx::new("<div id=d style='width:72px;hyphens:none'>abc\u{ad}defgh</div>");
+    let t = fx.layout();
+    assert_eq!(lines(fx.block(&t, "d")).len(), 1);
+}
+
+#[test]
+fn no_break_before_closing_punctuation_after_a_space() {
+    // "aaaa !" does not fit in 5 characters but may not break before "!".
+    let fx = Fx::new("<div id=d style='width:60px'>aaaa !</div>");
+    let t = fx.layout();
+    assert_eq!(lines(fx.block(&t, "d")).len(), 1);
+    let fx = Fx::new("<div id=d style='width:60px'>aaaa bb</div>");
+    let t = fx.layout();
+    assert_eq!(lines(fx.block(&t, "d")).len(), 2);
+}
+
+#[test]
+fn balanced_groups_between_forced_breaks() {
+    let fx = Fx::new("<div id=d style='width:300px;text-wrap:balance'>aa bb cc dd ee ff gg hh ii jj kk ll mm<br>x</div>");
+    let t = fx.layout();
+    let ls = lines(fx.block(&t, "d"));
+    // The first group is balanced (both lines about as wide), the second
+    // keeps its single line.
+    let w = |l: &Vec<(String, Rect)>| l.last().unwrap().1.right() - l[0].1.x;
+    assert_eq!(ls.len(), 3, "{ls:?}");
+    assert!((w(&ls[0]) - w(&ls[1])).abs() <= 40.0, "{ls:?}");
+}
+
+#[test]
+fn letter_spacing_is_not_applied_at_the_line_end() {
+    let fx = Fx::new("<div id=d style='letter-spacing:10px;width:300px;text-align:right'>ab</div>");
+    let t = fx.layout();
+    let ls = lines(fx.block(&t, "d"));
+    assert!((ls[0].last().unwrap().1.right() - 300.0).abs() < 0.5, "{ls:?}");
+}
