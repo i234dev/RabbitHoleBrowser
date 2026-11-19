@@ -1582,6 +1582,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let desc = rect.bottom() - baseline;
         for (i, d) in info.list.iter().enumerate() {
             let (x0, x1) = info.extents.get(i).copied().flatten().map(|(a, b)| (rect.x + a, rect.x + b)).unwrap_or((rect.x, rect.right()));
+            let x0 = if info.skip_spaces.0 > 0.0 { x0.max(rect.x + info.skip_spaces.0) } else { x0 };
+            let x1 = if info.skip_spaces.1 > 0.0 { x1.min(rect.right() - info.skip_spaces.1) } else { x1 };
             let (bo, asc, desc) = info.metrics.get(i).copied().unwrap_or((0.0, asc, desc));
             let baseline = baseline + bo;
             if x1 <= x0 {

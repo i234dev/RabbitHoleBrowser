@@ -1693,7 +1693,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         // An overflow marker isolated in the paragraph's own direction sits
         // where its isolate initiator does (at the paragraph level): the
         // dropped controls must not join it to a run of higher levels.
-        if container_bidi != UnicodeBidi::Plaintext {
+        if base_rtl && container_bidi != UnicodeBidi::Plaintext {
             for (fi, f) in self.cur.frags.iter().enumerate() {
                 if matches!(&f.kind, PFKind::Text { item, text } if *item == MARKER_ITEM && !text.chars().any(|c| matches!(class(c), BidiClass::L | BidiClass::R | BidiClass::AL))) {
                     frag_levels[fi].iter_mut().for_each(|l| *l = base);
@@ -1829,6 +1829,55 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
         // Keep `cur.x` meaning "end of content" for the alignment maths.
         self.cur.x = l + used;
+    }
+
+    /// Per fragment of the current line, the widths of the leading and
+    /// trailing spaces of the line it holds (not decorated); empty when
+    /// there is none or the line is right-to-left.
+    fn decoration_space_skips(&mut self) -> Vec<(f32, f32)> {
+        let is_space = |c: char| c == ' ' || c == '\t' || lb::is_space_separator(c) || matches!(c, '\u{2007}' | '\u{202F}');
+        if self.cstyle.direction == Direction::Rtl || !self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { item, .. } if *item != MARKER_ITEM && !self.style(*item).applied_decorations.is_empty())) {
+            return Vec::new();
+        }
+        let n = self.cur.frags.len();
+        let mut out = vec![(0.0f32, 0.0f32); n];
+        let mut any = false;
+        for from_end in [false, true] {
+            let order: Vec<usize> = if from_end { (0..n).rev().collect() } else { (0..n).collect() };
+            for i in order {
+                let (text, item, w) = match &self.cur.frags[i].kind {
+                    PFKind::Text { text, item } if *item != MARKER_ITEM => (text.clone(), *item, self.cur.frags[i].w),
+                    _ => break,
+                };
+                let count = if from_end { text.chars().rev().take_while(|c| is_space(*c)).count() } else { text.chars().take_while(|c| is_space(*c)).count() };
+                if count == 0 {
+                    break;
+                }
+                let all = count == text.chars().count();
+                let sw = if all {
+                    w
+                } else {
+                    let st = self.style(item).clone();
+                    let font = self.lay.font_for(&st);
+                    let part: String = if from_end { text.chars().rev().take(count).collect() } else { text.chars().take(count).collect() };
+                    (self.lay.measurer.width(font, st.font_size, &part) + st.letter_spacing * count as f32).min(w)
+                };
+                if from_end {
+                    out[i].1 = sw;
+                } else {
+                    out[i].0 = sw;
+                }
+                any = true;
+                if !all {
+                    break;
+                }
+            }
+        }
+        if any {
+            out
+        } else {
+            Vec::new()
+        }
     }
 
     /// The alignment of the current line: `text-align-last` applies to
@@ -2239,8 +2288,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
             }
         }
+        // `text-decoration-skip-spaces: start end`: no decoration under
+        // the spaces starting or ending the line (left-to-right lines).
+        let skip_spaces = self.decoration_space_skips();
         let frags = std::mem::take(&mut self.cur.frags);
-        for (f, fm) in frags.into_iter().zip(fms.into_iter()) {
+        for (fi, (f, fm)) in frags.into_iter().zip(fms.into_iter()).enumerate() {
             match f.kind {
                 PFKind::Text { text, item } => {
                     let tm = fm.tm.expect("text metrics");
@@ -2289,6 +2341,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                                     .collect(),
                                 variations: if style.applied_decorations.is_empty() { Vec::new() } else { style.font_variation_settings.clone() },
                                 skip_ink: style.text_decoration_skip_ink,
+                                skip_spaces: skip_spaces.get(fi).copied().unwrap_or((0.0, 0.0)),
                             },
                             shadows: style.text_shadow.clone(),
                             small_caps: style.font_variant_small_caps,

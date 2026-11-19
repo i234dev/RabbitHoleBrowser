@@ -116,6 +116,9 @@ pub struct DecorationInfo {
     pub variations: Vec<([u8; 4], f32)>,
     /// `text-decoration-skip-ink` of the text: 0 auto, 1 none, 2 all.
     pub skip_ink: u8,
+    /// Widths of the spaces starting and ending the line in this fragment
+    /// (`text-decoration-skip-spaces`): not decorated.
+    pub skip_spaces: (f32, f32),
 }
 
 impl DecorationInfo {
