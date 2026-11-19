@@ -312,3 +312,25 @@ fn right_to_left_numbers_among_spaces_read_right_to_left() {
     let x_of = |d: &str| xs.iter().find(|(t, _)| t.trim() == d).map(|p| p.1);
     assert!(x_of("1").zip(x_of("2")).is_some_and(|(a, b)| a > b), "{xs:?}");
 }
+
+#[test]
+fn top_aligned_inline_text_sits_at_the_line_top() {
+    // The 60px inline-block makes the line tall; the top-aligned span's
+    // text goes to the line's top, the baseline text stays at the bottom.
+    let fx = Fx::new("<div style='font-size:20px;line-height:20px'>A<span style='vertical-align:top;font-size:10px;line-height:10px'>b</span><span style='display:inline-block;height:60px;width:1px'></span></div>", RESET);
+    let t = fx.layout();
+    let mut ys = Vec::new();
+    fn walk(b: &LayoutBox, ys: &mut Vec<(String, f32)>) {
+        for l in &b.lines {
+            for f in &l.fragments {
+                if let crate::tree::FragmentKind::Text { text, .. } = &f.kind {
+                    ys.push((text.to_string(), f.rect.y));
+                }
+            }
+        }
+        b.children.iter().for_each(|c| walk(c, ys));
+    }
+    walk(&t.root, &mut ys);
+    let y_of = |d: &str| ys.iter().find(|(t, _)| t == d).map(|p| p.1).unwrap_or(f32::NAN);
+    assert!(y_of("b") < 5.0 && y_of("A") > 30.0, "{ys:?}");
+}

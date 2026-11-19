@@ -179,6 +179,32 @@ fn has_inset(s: &ComputedStyle) -> bool {
 /// (a block decorating box insets its decorations per paragraph).
 const BLOCK_BOX: usize = usize::MAX - 1;
 
+/// Per item, the inline box (its Open item index) whose `top` /
+/// `bottom` / `text-*` / `middle` alignment moves it: the outermost such
+/// box enclosing it (`usize::MAX` for none). Empty when no inline box
+/// has such an alignment.
+fn inline_nesting(items: &[InlineItem]) -> Vec<usize> {
+    let keyword = |s: &ComputedStyle| matches!(s.vertical_align, VerticalAlign::Top | VerticalAlign::Bottom | VerticalAlign::TextTop | VerticalAlign::TextBottom | VerticalAlign::Middle);
+    if !items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if keyword(style))) {
+        return Vec::new();
+    }
+    let mut out = vec![usize::MAX; items.len()];
+    let mut parents: Vec<usize> = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        match it {
+            InlineItem::Open { .. } => parents.push(i),
+            InlineItem::Close => {
+                parents.pop();
+            }
+            InlineItem::Text { .. } => {
+                out[i] = parents.iter().copied().find(|&o| matches!(&items[o], InlineItem::Open { style, .. } if keyword(style))).unwrap_or(usize::MAX);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn open_parents(items: &[InlineItem], container: &ComputedStyle) -> Vec<Option<usize>> {
     if !has_inset(container) && !items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if has_inset(style))) {
         return Vec::new();
@@ -710,6 +736,7 @@ impl<'a> Layouter<'a> {
         }
         let (rel, rel_kids) = relative_offsets(&items, b.children.len(), cb.width, cb.height);
         let parent_open = open_parents(&items, &cstyle);
+        let in_inline = inline_nesting(&items);
         let bidi_items = items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal));
         // `text-wrap: balance` (CSS Text 4 §6.1.2): per group of lines
         // between forced breaks, the narrowest wrap width that keeps its
@@ -756,6 +783,7 @@ impl<'a> Layouter<'a> {
                 rel: rel.clone(),
                 rel_kids: rel_kids.clone(),
                 parent_open: parent_open.clone(),
+                in_inline: in_inline.clone(),
                 inset_seen: std::collections::HashSet::new(),
                 inset_fixups: Vec::new(),
                 inset_total: std::collections::HashMap::new(),
@@ -926,6 +954,8 @@ struct InlineLayout<'l, 'a> {
     group_stats: Vec<(usize, f32)>,
     /// See [`open_parents`].
     parent_open: Vec<Option<usize>>,
+    /// Per item, the aligned inline box moving it (see `inline_nesting`).
+    in_inline: Vec<usize>,
     /// Inline elements with decoration insets already met on a line.
     inset_seen: std::collections::HashSet<usize>,
     inset_fixups: Vec<InsetFixup>,
@@ -2428,13 +2458,61 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             mode: u8, // 0 baseline, 1 top, 2 bottom
             shift: f32,
             tm: Option<TextMetrics>,
+            // Top / bottom aligned text: its baseline's offset below the
+            // aligned box's, whose extents are `above` / `below`.
+            rel: f32,
         }
-        let mut fms: Vec<FM> = Vec::with_capacity(self.cur.frags.len());
         // Vertical text (not sideways) aligns on the central baseline,
         // halfway between the ascent and descent: each text run's
         // alphabetic baseline sits below it, each atomic inline is centred.
         let central = self.cstyle.central_baseline();
+        let line_over_bottom = self.cstyle.writing_mode == rabbithole_style::WritingMode::VerticalLr;
         let central_shift = |tm: &TextMetrics| if central { (tm.asc - tm.desc) / 2.0 } else { 0.0 };
+        let mut fms: Vec<FM> = Vec::with_capacity(self.cur.frags.len());
+        // Inline boxes aligned by `top` / `bottom` / `text-*` / `middle`
+        // move as a whole: (box, mode, raise of its alphabetic baseline or
+        // its extents above / below it).
+        let mut groups: Vec<(usize, u8, f32, f32, f32)> = Vec::new();
+        if !self.in_inline.is_empty() {
+            for f in &self.cur.frags {
+                let PFKind::Text { item, .. } = &f.kind else { continue };
+                let g = self.in_inline.get(*item).copied().unwrap_or(usize::MAX);
+                if g == usize::MAX || groups.iter().any(|x| x.0 == g) {
+                    continue;
+                }
+                let gstyle = self.style(g).clone();
+                let gtm = self.lay.text_metrics(&gstyle);
+                let cg = central_shift(&gtm);
+                let (mut ga, mut gb) = (gtm.above, gtm.below);
+                for f2 in &self.cur.frags {
+                    if let PFKind::Text { item: i2, .. } = &f2.kind {
+                        if self.in_inline.get(*i2).copied() == Some(g) {
+                            let tm = self.lay.text_metrics(&self.style(*i2).clone());
+                            let rel = central_shift(&tm) - cg;
+                            ga = ga.max(tm.above - rel);
+                            gb = gb.max(tm.below + rel);
+                        }
+                    }
+                }
+                let (asc_p, desc_p, c_p) = (self.strut.asc, self.strut.desc, central_shift(&self.strut));
+                let va = match (gstyle.vertical_align, line_over_bottom) {
+                    (VerticalAlign::Top, true) => VerticalAlign::Bottom,
+                    (VerticalAlign::Bottom, true) => VerticalAlign::Top,
+                    (VerticalAlign::TextTop, true) => VerticalAlign::TextBottom,
+                    (VerticalAlign::TextBottom, true) => VerticalAlign::TextTop,
+                    (v, _) => v,
+                };
+                let (mode, raise) = match va {
+                    VerticalAlign::Top => (1, 0.0),
+                    VerticalAlign::Bottom => (2, 0.0),
+                    VerticalAlign::TextTop => (0, asc_p - c_p - ga),
+                    VerticalAlign::TextBottom => (0, gb - desc_p - c_p),
+                    VerticalAlign::Middle if central => (0, -(ga - gb) / 2.0),
+                    _ => (0, 0.25 * self.strut.size - (ga - gb) / 2.0),
+                };
+                groups.push((g, mode, raise, ga, gb));
+            }
+        }
         let mut a = self.strut.above;
         let mut d = self.strut.below;
         let mut extra_h: f32 = 0.0;
@@ -2447,12 +2525,26 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 PFKind::Text { item, .. } => {
                     let style = self.style(*item).clone();
                     let tm = self.lay.text_metrics(&style);
-                    let shift = match style.vertical_align {
-                        VerticalAlign::Sub => -0.25 * style.font_size,
-                        VerticalAlign::Super => 0.35 * style.font_size,
-                        VerticalAlign::Length(v) => v,
-                        _ => 0.0,
-                    } - central_shift(&tm);
+                    // The raise of the text's alphabetic baseline above the
+                    // line's (CSS 2.1 §10.8.1; `text-*` against the block's
+                    // strut). In vertical-lr the line's over side is the
+                    // logical bottom: the raises flip.
+                    let c = central_shift(&tm);
+                    let flip = |v: f32| if line_over_bottom { -v } else { v };
+                    let group = self.in_inline.get(*item).and_then(|g| groups.iter().find(|x| x.0 == *g)).copied();
+                    let (mut mode, mut rel) = (0, 0.0);
+                    let shift = match (group, style.vertical_align) {
+                        (Some((g, gmode, raise, _, _)), _) => {
+                            let cg = central_shift(&self.lay.text_metrics(&self.style(g).clone()));
+                            mode = gmode;
+                            rel = c - cg;
+                            raise - rel
+                        }
+                        (None, VerticalAlign::Sub) => flip(-0.25 * style.font_size) - c,
+                        (None, VerticalAlign::Super) => flip(0.35 * style.font_size) - c,
+                        (None, VerticalAlign::Length(v)) => flip(v) - c,
+                        _ => -c,
+                    };
                     let (mut above, mut below) = (tm.above + shift, tm.below - shift);
                     // Emphasis marks need room beside the glyphs.
                     if let Some(e) = emphasis_of(&style) {
@@ -2464,12 +2556,20 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             below = below.max(tm.desc - shift + mh);
                         }
                     }
+                    if mode != 0 {
+                        // The aligned box's extents (it sits at the line's
+                        // top or bottom edge).
+                        let g = group.expect("aligned box");
+                        above = g.3;
+                        below = g.4;
+                    }
                     FM {
                         above,
                         below,
-                        mode: 0,
+                        mode,
                         shift,
                         tm: Some(tm),
+                        rel,
                     }
                 }
                 PFKind::Box(c) => {
@@ -2492,6 +2592,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             mode: 1,
                             shift: 0.0,
                             tm: None,
+                            rel: 0.0,
                         },
                         VerticalAlign::Bottom => FM {
                             above: 0.0,
@@ -2499,23 +2600,24 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             mode: 2,
                             shift: 0.0,
                             tm: None,
+                            rel: 0.0,
                         },
                         VerticalAlign::Middle => {
                             let above = h / 2.0 + if central { 0.0 } else { 0.25 * fs };
-                            FM { above, below: h - above, mode: 0, shift: 0.0, tm: None }
+                            FM { above, below: h - above, mode: 0, shift: 0.0, tm: None, rel: 0.0 }
                         }
                         VerticalAlign::TextTop => {
                             let above = self.strut.asc;
-                            FM { above, below: h - above, mode: 0, shift: 0.0, tm: None }
+                            FM { above, below: h - above, mode: 0, shift: 0.0, tm: None, rel: 0.0 }
                         }
                         VerticalAlign::TextBottom => {
                             let below = self.strut.desc;
-                            FM { above: h - below, below, mode: 0, shift: 0.0, tm: None }
+                            FM { above: h - below, below, mode: 0, shift: 0.0, tm: None, rel: 0.0 }
                         }
-                        VerticalAlign::Sub => FM { above: base - 0.25 * fs, below: h - base + 0.25 * fs, mode: 0, shift: 0.0, tm: None },
-                        VerticalAlign::Super => FM { above: base + 0.35 * fs, below: h - base - 0.35 * fs, mode: 0, shift: 0.0, tm: None },
-                        VerticalAlign::Length(v) => FM { above: base + v, below: h - base - v, mode: 0, shift: 0.0, tm: None },
-                        VerticalAlign::Baseline => FM { above: base, below: h - base, mode: 0, shift: 0.0, tm: None },
+                        VerticalAlign::Sub => FM { above: base - 0.25 * fs, below: h - base + 0.25 * fs, mode: 0, shift: 0.0, tm: None, rel: 0.0 },
+                        VerticalAlign::Super => FM { above: base + 0.35 * fs, below: h - base - 0.35 * fs, mode: 0, shift: 0.0, tm: None, rel: 0.0 },
+                        VerticalAlign::Length(v) => FM { above: base + v, below: h - base - v, mode: 0, shift: 0.0, tm: None, rel: 0.0 },
+                        VerticalAlign::Baseline => FM { above: base, below: h - base, mode: 0, shift: 0.0, tm: None, rel: 0.0 },
                     }
                 }
             };
@@ -2527,6 +2629,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 d = d.max(fm.below);
             } else if let PFKind::Box(c) = &f.kind {
                 extra_h = extra_h.max(self.children[*c].margin_rect().h);
+            } else if fm.tm.is_some() {
+                extra_h = extra_h.max(fm.above + fm.below);
             }
             fms.push(fm);
         }
@@ -2647,6 +2751,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     let tm = fm.tm.expect("text metrics");
                     let style = self.style(item).clone();
                     let (rx, ry) = if item == MARKER_ITEM { (0.0, 0.0) } else { self.rel_of(item) };
+                    // `top` / `bottom`: against the line box's edges.
+                    let fm = match fm.mode {
+                        1 => FM { shift: baseline - (y + fm.above + fm.rel), ..fm },
+                        2 => FM { shift: baseline - (y + h - fm.below + fm.rel), ..fm },
+                        _ => fm,
+                    };
                     let bl = baseline - fm.shift + ry;
                     let oblique = self.lay.synthetic_oblique(tm.font, &style);
                     fragments.push(Fragment {
