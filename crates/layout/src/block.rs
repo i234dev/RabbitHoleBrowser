@@ -255,6 +255,26 @@ fn zero_or_auto_height(l: Length, cb_h: Option<f32>) -> bool {
     }
 }
 
+/// Is the height of `b` (a child of a box whose height is definite when
+/// `parent_definite`) definite, as a base for its children's percentage
+/// offsets? Flex and grid items are handled by the caller.
+fn height_definite(b: &LayoutBox, parent_definite: bool) -> bool {
+    if b.kind == BoxKind::AnonymousBlock {
+        return parent_definite;
+    }
+    let s = &b.style;
+    match s.height {
+        Length::Px(_) => true,
+        Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => {
+            b.flow == Flow::Absolute && !s.inset.top.is_auto() && !s.inset.bottom.is_auto()
+                || b.kind == BoxKind::Image
+                || s.aspect_ratio.is_some()
+                || b.wm_wrapper
+        }
+        _ => parent_definite,
+    }
+}
+
 fn is_zero_len(l: Length) -> bool {
     match l {
         Length::Px(v) => v == 0.0,
@@ -411,7 +431,8 @@ impl<'a> Layouter<'a> {
         if root.style.position == Position::Static {
             self.layout_abs_descendants(&mut root, icb);
         }
-        self.apply_relative(&mut root, vp_w, vp_h);
+        let root_definite = height_definite(&root, true);
+        self.apply_relative(&mut root, vp_w, Some(vp_h), root_definite);
         let (max_r, max_b) = bounds(&root);
         doc_h = doc_h.max(max_b);
         if debug {
@@ -1771,12 +1792,33 @@ impl<'a> Layouter<'a> {
         c.static_pos = static_pos;
     }
 
-    /// Apply `position: relative` offsets after layout.
-    fn apply_relative(&mut self, b: &mut LayoutBox, cbw: f32, cbh: f32) {
+    /// Apply `position: relative` offsets after layout. `cbh` is the
+    /// containing block's height when definite (percentage `top`/`bottom`
+    /// against an indefinite height compute to `auto`, CSS 2.1 §9.3.2);
+    /// `definite` says whether `b`'s own height is.
+    fn apply_relative(&mut self, b: &mut LayoutBox, cbw: f32, cbh: Option<f32>, definite: bool) {
         let (iw, ih) = (b.content_rect.w, b.content_rect.h);
         if !b.reused_layout {
-            for c in &mut b.children {
-                self.apply_relative(c, iw, ih);
+            // Flex and grid items are sized by their container: their
+            // heights (and the container's, for them) count as definite.
+            let items = matches!(b.formatting, Formatting::Flex | Formatting::Grid);
+            // Anonymous blocks are transparent to percentages (CSS 2.1 §10.5).
+            // Table parts resolve their children's offsets against their
+            // specified height.
+            let table_part = matches!(b.formatting, Formatting::Table | Formatting::TableRow) || crate::table::is_row_group(b);
+            let inner_h = if b.kind == BoxKind::AnonymousBlock {
+                cbh
+            } else if table_part {
+                match b.style.height {
+                    Length::Px(h) => Some(h),
+                    _ => None,
+                }
+            } else {
+                (definite || items).then_some(ih)
+            };
+            for i in 0..b.children.len() {
+                let d = items || height_definite(&b.children[i], definite);
+                self.apply_relative(&mut b.children[i], iw, inner_h, d);
             }
         }
         let mut want = (0.0, 0.0);
@@ -1788,12 +1830,12 @@ impl<'a> Layouter<'a> {
                 .resolve(cbw)
                 .or_else(|| s.inset.right.resolve(cbw).map(|v| -v))
                 .unwrap_or(0.0);
-            let dy = s
-                .inset
-                .top
-                .resolve(cbh)
-                .or_else(|| s.inset.bottom.resolve(cbh).map(|v| -v))
-                .unwrap_or(0.0);
+            let vertical = |l: Length| match cbh {
+                Some(h) => l.resolve(h),
+                None if l.has_percent() => None,
+                None => l.resolve(0.0),
+            };
+            let dy = vertical(s.inset.top).or_else(|| vertical(s.inset.bottom).map(|v| -v)).unwrap_or(0.0);
             want = (dx, dy);
         }
         // Boxes reused from the previous layout may carry their offset

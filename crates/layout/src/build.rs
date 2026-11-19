@@ -525,6 +525,19 @@ impl<'a> Builder<'a> {
                     }
                     let mut c = c;
                     c.counter_touch = true;
+                    if style.position == Position::Relative {
+                        // A block inside a relatively positioned inline
+                        // moves with it: an anonymous block carries the
+                        // inline's offsets.
+                        let mut s = anonymous_style(&style, Display::Block);
+                        s.position = Position::Relative;
+                        s.inset = style.inset;
+                        let mut w = LayoutBox::new(BoxKind::AnonymousBlock, None, Rc::new(s));
+                        w.counter_touch = true;
+                        w.children = vec![c];
+                        w.formatting = Formatting::Block;
+                        c = w;
+                    }
                     parts.push(c);
                 } else {
                     run.push(c);

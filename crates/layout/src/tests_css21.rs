@@ -424,3 +424,26 @@ fn first_letter_wraps_letter_in_nested_block() {
     let d = find(&tree.root, node).unwrap();
     assert!(d.children.iter().any(|c| c.flow == Flow::FloatLeft && c.rect.height > 40.0), "{}", tree.dump());
 }
+
+/// Percentage `top` against an indefinite containing block height is
+/// `auto`; against a definite one it resolves.
+#[test]
+fn relative_percent_top_needs_definite_height() {
+    let fx = Fx::new(
+        "<div style='min-height:100px'><div id=a style='height:10px;position:relative;top:50%'></div></div>\
+         <div style='height:100px'><div id=b style='height:10px;position:relative;top:50%'></div></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    assert!(close(fx.rect(&tree, "a").y, 0.0));
+    assert!(close(fx.rect(&tree, "b").y, 150.0));
+}
+
+/// A block inside a relatively positioned inline moves with it.
+#[test]
+fn block_in_relative_inline_is_offset() {
+    let fx = Fx::new("<div style='height:100px'><span style='position:relative;left:30px;top:20px'><div id=b style='height:10px'></div></span></div>", "body { margin: 0 }");
+    let tree = fx.layout();
+    let r = fx.rect(&tree, "b");
+    assert!(close(r.x, 30.0) && close(r.y, 20.0), "{r:?}");
+}

@@ -15,7 +15,7 @@ use crate::block::{horizontal_extras, Cb, Layouter, WidthMode};
 use crate::float::Bfc;
 use crate::tree::{BoxKind, Flow, Formatting, LayoutBox};
 use rabbithole_gfx::{Color, Rect};
-use rabbithole_style::{BorderStyle, BoxSizing, ComputedStyle, Display, Edges, Length, VerticalAlign};
+use rabbithole_style::{BorderStyle, BoxSizing, ComputedStyle, Display, Edges, Length, Position, VerticalAlign};
 use std::rc::Rc;
 
 pub(crate) fn is_row_group(b: &LayoutBox) -> bool {
@@ -667,6 +667,24 @@ impl<'a> Layouter<'a> {
                 cursor = b.children[i].rect.bottom();
             }
             i += 1;
+        }
+        // Positioned rows and row groups are the containing blocks of
+        // their absolutely positioned descendants (rows first: a group's
+        // walk stops at positioned rows).
+        if g.rows.iter().any(|p| row_ref(b, *p).style.position != Position::Static) {
+            for p in g.rows.iter() {
+                let row = row_mut(b, *p);
+                if row.style.position != Position::Static {
+                    let r = row.rect;
+                    self.layout_abs_descendants(row, r);
+                }
+            }
+        }
+        for i in 0..b.children.len() {
+            if is_row_group(&b.children[i]) && b.children[i].style.position != Position::Static {
+                let r = b.children[i].rect;
+                self.layout_abs_descendants(&mut b.children[i], r);
+            }
         }
         // Columns (painted beneath rows and cells).
         let (gy, gh) = if nrows > 0 { (row_y[0], row_y[nrows - 1] + row_h[nrows - 1] - row_y[0]) } else { (content_y, 0.0) };
