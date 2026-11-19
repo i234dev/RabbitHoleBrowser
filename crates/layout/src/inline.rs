@@ -2,7 +2,8 @@
 
 use crate::block::{Cb, Layouter};
 use crate::float::Bfc;
-use crate::text::{cjk_break_between, segment_tabs, split_cjk, transform, Collapser, Seg};
+use crate::linebreak as lb;
+use crate::text::{segment_tabs, transform, Collapser, Seg};
 use crate::tree::{DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{FontId, Rect};
@@ -20,13 +21,10 @@ enum BreakPolicy {
     /// `overflow-wrap: anywhere|break-word` / `word-break: break-word`:
     /// split only when the word does not fit on a line of its own.
     IfNeeded,
-    /// `word-break: break-all`: break between any two characters.
-    Anywhere,
 }
 
 fn break_policy(style: &ComputedStyle) -> BreakPolicy {
     match style.word_break {
-        WordBreak::BreakAll => BreakPolicy::Anywhere,
         WordBreak::BreakWord | WordBreak::AutoPhrase => BreakPolicy::IfNeeded,
         _ => match style.overflow_wrap {
             OverflowWrap::Normal => BreakPolicy::Never,
@@ -265,31 +263,6 @@ fn justify_between(p: char, c: char, mode: u8) -> bool {
     }
 }
 
-/// Split a word after hyphens so `foo-bar` can wrap after the dash.
-fn split_hyphens(w: &str) -> Vec<(String, bool)> {
-    if w.len() < 3 || !w.contains('-') {
-        return vec![(w.to_string(), false)];
-    }
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let chars: Vec<char> = w.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        cur.push(c);
-        if c == '-' && i + 1 < chars.len() && chars[i + 1].is_alphanumeric() && cur.chars().count() > 1 {
-            out.push((std::mem::take(&mut cur), !out.is_empty()));
-        }
-    }
-    if !cur.is_empty() {
-        let cont = !out.is_empty();
-        out.push((cur, cont));
-    }
-    // Mark continuations (everything after the first part).
-    for (i, part) in out.iter_mut().enumerate() {
-        part.1 = i > 0;
-    }
-    out
-}
-
 impl<'a> Layouter<'a> {
     pub(crate) fn text_metrics(&mut self, style: &ComputedStyle) -> TextMetrics {
         let font = self.font_for(style);
@@ -345,6 +318,11 @@ impl<'a> Layouter<'a> {
         // Last character of the previous word (breaks between ideographs
         // need no space).
         let mut prev_char: Option<char> = None;
+        // The last character before the current spaces, when a space ends
+        // the previous word (its break may be forbidden by what follows).
+        let mut last_char: Option<char> = None;
+        let mut space_opp: Option<Option<char>> = None;
+        let mut points = Vec::new();
         let mut segs = Vec::new();
         for (i, item) in items.iter().enumerate() {
             match item {
@@ -357,37 +335,54 @@ impl<'a> Layouter<'a> {
                     segs.clear();
                     segment_tabs(&t, ws, &mut col, &mut segs, style.tab_size.max(1.0) as usize);
                     let ls = style.letter_spacing;
-                    let keep_all = match style.word_break {
-                        rabbithole_style::WordBreak::KeepAll => 1u8,
-                        rabbithole_style::WordBreak::AutoPhrase => 2,
-                        _ => 0,
+                    let rules = lb::Rules {
+                        line_break: if style.line_break == 3 && style.wrap_inside_avoid { 0 } else { style.line_break },
+                        word_break: match style.word_break {
+                            rabbithole_style::WordBreak::KeepAll => 1,
+                            rabbithole_style::WordBreak::AutoPhrase => 2,
+                            rabbithole_style::WordBreak::BreakAll => 3,
+                            _ => 0,
+                        },
+                        cjk: matches!(style.lang, rabbithole_style::LANG_JA | rabbithole_style::LANG_ZH),
+                        break_spaces: ws == rabbithole_style::WhiteSpace::BreakSpaces,
                     };
-                    let strict = style.line_break == 2;
-                    let anywhere = style.line_break == 3 && !style.wrap_inside_avoid;
+                    let anywhere = rules.line_break == 3;
                     for seg in segs.drain(..) {
                         match seg {
                             Seg::Word(w) => {
                                 let is_space_word = w.chars().all(|c| c == ' ' || c == '\t');
                                 // A break between the previous word and this
-                                // one (ideographs break without spaces).
+                                // one when no space separates them
+                                // (ideographs, punctuation)...
                                 if wraps && !prev_break_opp {
                                     if let (Some(p), Some(c)) = (prev_char, w.chars().next()) {
-                                        if p != ' ' && c != ' ' && (anywhere || cjk_break_between(p, c, keep_all, strict)) {
+                                        let something = Some(lb::Unit { c: 'a', cls: lb::Lb::AL });
+                                        // `anywhere` breaks around preserved spaces too.
+                                        if (anywhere && !attaches_to_previous(c)) || (p != ' ' && c != ' ' && lb::direct_break(&rules, something, rules.unit(p), rules.unit(c), w.chars().nth(1))) {
                                             prev_break_opp = true;
                                         }
+                                    }
+                                }
+                                // ... and none at the spaces before closing
+                                // punctuation or after opening punctuation
+                                // (UAX #14 LB13-LB17).
+                                if let (Some(before), Some(c)) = (space_opp.take(), w.chars().next()) {
+                                    if prev_break_opp && !anywhere && c != ' ' && c != '\t' && !lb::break_after_spaces(&rules, before, c) {
+                                        prev_break_opp = false;
                                     }
                                 }
                                 let prev_before = prev_char;
                                 prev_char = w.chars().rev().find(|&c| !attaches_to_previous(c)).or(w.chars().last());
                                 let mut parts: Vec<(String, bool)> = Vec::new();
-                                for (part, continuation) in split_hyphens(&w) {
-                                    if wraps && !is_space_word {
-                                        for (k, p) in split_cjk(&part, keep_all, strict, anywhere).into_iter().enumerate() {
-                                            parts.push((p, continuation || k > 0));
-                                        }
-                                    } else {
-                                        parts.push((part, continuation));
+                                if wraps && !is_space_word {
+                                    lb::split_points(&rules, &w, &mut points);
+                                    let mut start = 0;
+                                    for &p in points.iter().chain(std::iter::once(&w.len())) {
+                                        parts.push((w[start..p].to_string(), start > 0));
+                                        start = p;
                                     }
+                                } else {
+                                    parts.push((w, false));
                                 }
                                 // `text-autospace`: 1/8ic between ideographs and
                                 // other letters or digits.
@@ -448,21 +443,33 @@ impl<'a> Layouter<'a> {
                                     prev_break_opp = false;
                                 }
                                 prev_break_opp = is_space_word && wraps;
+                                if prev_break_opp {
+                                    space_opp = Some(last_char);
+                                } else {
+                                    last_char = prev_char;
+                                }
                             }
                             Seg::Space => {
                                 let width = self.measurer.space_width(font, size) + style.word_spacing;
                                 pieces.push(Piece::Space { width, item: i });
                                 prev_break_opp = wraps;
+                                if wraps {
+                                    space_opp = Some(last_char);
+                                }
                                 prev_char = Some(' ');
                             }
                             Seg::Opportunity => {
                                 prev_break_opp = wraps;
                                 prev_char = None;
+                                space_opp = None;
+                                last_char = None;
                             }
                             Seg::Break => {
                                 pieces.push(Piece::Break);
                                 prev_break_opp = true;
                                 prev_char = None;
+                                space_opp = None;
+                                last_char = None;
                             }
                         }
                     }
@@ -478,6 +485,8 @@ impl<'a> Layouter<'a> {
                 }
                 InlineItem::Atomic(c) => {
                     prev_char = None;
+                    space_opp = None;
+                    last_char = None;
                     pieces.push(Piece::Atomic(*c));
                     prev_break_opp = container_wraps;
                     // An atomic box interrupts the whitespace sequence, so a
@@ -490,6 +499,8 @@ impl<'a> Layouter<'a> {
                     pieces.push(Piece::Break);
                     col.prev_space = true;
                     prev_break_opp = true;
+                    space_opp = None;
+                    last_char = None;
                 }
             }
         }
@@ -994,7 +1005,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 self.push_text(text, width, item, break_before);
                 return;
             }
-            if self.cur.has_content && policy != BreakPolicy::Anywhere {
+            if self.cur.has_content {
                 if break_before {
                     self.finish_line(false);
                     break_before = false;

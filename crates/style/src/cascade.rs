@@ -1223,6 +1223,21 @@ fn auto_direction(doc: &Document, node: NodeId) -> Option<bool> {
     None
 }
 
+/// The [`ComputedStyle::lang`] code of a BCP 47 language tag.
+pub fn lang_code(tag: &str) -> u8 {
+    let primary = tag.split(['-', '_']).next().unwrap_or("").to_ascii_lowercase();
+    match primary.as_str() {
+        "ja" => LANG_JA,
+        "zh" => LANG_ZH,
+        "ko" => LANG_KO,
+        "tr" | "az" => LANG_TR,
+        "lt" => LANG_LT,
+        "el" => LANG_EL,
+        "nl" => LANG_NL,
+        _ => 0,
+    }
+}
+
 fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     let el = doc.element(node)?;
     let mut css = String::new();
@@ -1255,6 +1270,10 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     }
     if let Some(c) = el.attr("bgcolor") {
         css.push_str(&format!("background-color:{};", legacy_color(c)));
+    }
+    // The content language (inherited through `ComputedStyle::lang`).
+    if let Some(l) = el.attr("lang").or_else(|| el.attr("xml:lang")) {
+        css.push_str(&format!("-rh-lang:{};", lang_code(l)));
     }
     // `dir=auto` (and `bdi` without a valid `dir`): the direction of the
     // first strong character of the element's text (HTML §3.2.6.4).

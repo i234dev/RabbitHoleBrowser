@@ -21,6 +21,7 @@ mod inline;
 mod intrinsic;
 mod table;
 mod text;
+mod linebreak;
 mod widgets;
 mod wm;
 mod filter;

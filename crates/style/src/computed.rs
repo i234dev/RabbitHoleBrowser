@@ -289,6 +289,17 @@ pub enum Clear {
     Both,
 }
 
+/// [`ComputedStyle::lang`] codes: the languages whose text layout rules
+/// differ (line breaking, case mapping).
+pub const LANG_JA: u8 = 1;
+pub const LANG_ZH: u8 = 2;
+pub const LANG_KO: u8 = 3;
+/// Turkish and Azerbaijani (dotted / dotless i).
+pub const LANG_TR: u8 = 4;
+pub const LANG_LT: u8 = 5;
+pub const LANG_EL: u8 = 6;
+pub const LANG_NL: u8 = 7;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlign {
     /// `start` (the initial value): left in ltr, right in rtl.
@@ -1293,6 +1304,9 @@ pub struct ComputedStyle {
     pub hyphens: u8,
     /// `hyphenate-character` (inherited); `None` = `auto` (U+2010).
     pub hyphenate_character: Option<std::rc::Rc<str>>,
+    /// The content language (inherited, from `lang` attributes): one of
+    /// the `LANG_*` codes, 0 when none of them.
+    pub lang: u8,
     pub text_decoration: TextDecoration,
     pub text_transform: TextTransform,
     pub text_indent: Length,
@@ -1592,6 +1606,7 @@ impl ComputedStyle {
             text_justify: 0,
             hyphens: 1,
             hyphenate_character: None,
+            lang: 0,
             text_align_webkit_center: false,
             text_decoration: TextDecoration::default(),
             text_transform: TextTransform::None,
@@ -1755,6 +1770,7 @@ impl ComputedStyle {
             text_justify: parent.text_justify,
             hyphens: parent.hyphens,
             hyphenate_character: parent.hyphenate_character.clone(),
+            lang: parent.lang,
             // `text-decoration-line` is not inherited; the decorations it
             // draws propagate through `applied_decorations`.
             applied_decorations: parent.applied_decorations.clone(),
@@ -1821,6 +1837,7 @@ impl ComputedStyle {
             && self.text_justify == o.text_justify
             && self.hyphens == o.hyphens
             && self.hyphenate_character == o.hyphenate_character
+            && self.lang == o.lang
             && self.applied_decorations == o.applied_decorations
             && self.text_underline_offset == o.text_underline_offset
             && self.text_emphasis_style == o.text_emphasis_style

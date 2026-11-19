@@ -491,6 +491,11 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             _ if values::is_ident(c0, "auto") => style.hyphenate_character = None,
             _ => return true,
         },
+        "-rh-lang" => {
+            if let Some(n) = values::number(c0) {
+                style.lang = n as u8;
+            }
+        }
         "text-justify" => {
             style.text_justify = match values::ident(c0).as_deref() {
                 Some("auto") => 0,
