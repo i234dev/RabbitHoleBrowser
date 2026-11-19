@@ -147,14 +147,40 @@ pub(crate) fn extent<'a>(items: impl Iterator<Item = &'a DisplayItem>) -> Option
     out
 }
 
-/// A plane's painting, premultiplied, covering `[x0, x0 + w / sx) ×
-/// [y0, y0 + h / sy)` of its (canvas-local) coordinates.
+/// A plane's painting, premultiplied: texel (i, j) covers the unit square
+/// at (i, j) of `map` applied to the plane's (canvas-local) coordinates.
 struct Texture {
     px: Pixels,
-    x0: f32,
-    y0: f32,
-    sx: f32,
-    sy: f32,
+    /// Plane coordinates → texel coordinates (an affine matrix).
+    map: Matrix,
+}
+
+impl Texture {
+    #[cfg(test)]
+    fn grid(px: Pixels, x0: f32, y0: f32, sx: f32, sy: f32) -> Texture {
+        Texture { px, map: [sx, 0.0, 0.0, sy, -x0 * sx, -y0 * sy] }
+    }
+}
+
+/// For a plane `d` maps affinely: a texture on the device pixel grid
+/// (texel = device pixel) covering its visible part, so that it paints
+/// exactly as the 2D path would. Returns (map, width, height).
+fn device_grid(d: &Mat4, local: Rect, region: Rect) -> Option<(Matrix, usize, usize)> {
+    if mat4::is_projective(d) {
+        return None;
+    }
+    let w = if d[15] != 0.0 { d[15] } else { 1.0 };
+    let m: Matrix = [(d[0] / w) as f32, (d[4] / w) as f32, (d[1] / w) as f32, (d[5] / w) as f32, (d[3] / w) as f32, (d[7] / w) as f32];
+    let dev = rabbithole_gfx::path::transform_rect_bounds(&m, local).intersect(&region);
+    if dev.is_empty() {
+        return None;
+    }
+    let (x0, y0) = (dev.x.floor(), dev.y.floor());
+    let (tw, th) = ((dev.right().ceil() - x0) as usize, (dev.bottom().ceil() - y0) as usize);
+    if tw == 0 || th == 0 || (tw * th) as f32 > MAX_TEXELS {
+        return None;
+    }
+    Some((rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, -x0, -y0], m), tw, th))
 }
 
 /// For a plane mapped by an axis-aligned scale and offset: a texture grid
@@ -228,37 +254,45 @@ fn render_plane(items: &[&DisplayItem], d: &Mat4, region: Rect, fonts: &FontCont
     if local.w <= 0.0 || local.h <= 0.0 {
         return None;
     }
-    let (x0, y0, sx, sy) = match aligned_grid(d, local) {
+    let (map, tw, th) = match device_grid(d, local, region) {
         Some(g) => g,
         None => {
-            let (x0, y0) = (local.x.floor(), local.y.floor());
-            let (w, h) = ((local.right().ceil() - x0).max(1.0), (local.bottom().ceil() - y0).max(1.0));
-            let mut s = magnification(d, Rect::new(x0, y0, w, h)).clamp(1.0, 4.0);
-            if s < 1.05 {
-                s = 1.0;
-            }
-            while w * h * s * s > MAX_TEXELS && s > 0.05 {
-                s *= 0.5;
-            }
-            (x0, y0, s, s)
+            let (x0, y0, sx, sy) = match aligned_grid(d, local) {
+                Some(g) => g,
+                None => {
+                    let (x0, y0) = (local.x.floor(), local.y.floor());
+                    let (w, h) = ((local.right().ceil() - x0).max(1.0), (local.bottom().ceil() - y0).max(1.0));
+                    let mut s = magnification(d, Rect::new(x0, y0, w, h)).clamp(1.0, 4.0);
+                    if s < 1.05 {
+                        s = 1.0;
+                    }
+                    while w * h * s * s > MAX_TEXELS && s > 0.05 {
+                        s *= 0.5;
+                    }
+                    (x0, y0, s, s)
+                }
+            };
+            let (tw, th) = (((local.right() - x0) * sx).ceil().max(1.0) as usize, ((local.bottom() - y0) * sy).ceil().max(1.0) as usize);
+            ([sx, 0.0, 0.0, sy, -x0 * sx, -y0 * sy], tw, th)
         }
     };
-    let (tw, th) = (((local.right() - x0) * sx).ceil().max(1.0) as usize, ((local.bottom() - y0) * sy).ceil().max(1.0) as usize);
     if tw == 0 || th == 0 || (tw * th) as f32 > MAX_TEXELS * 1.01 {
         return None;
     }
-    let plain = sx == 1.0 && sy == 1.0 && x0.fract() == 0.0 && y0.fract() == 0.0;
+    // A whole-pixel translation: the painter's own offset (boxes snap to
+    // pixels as on the page).
+    let plain = map[0] == 1.0 && map[1] == 0.0 && map[2] == 0.0 && map[3] == 1.0 && map[4].fract() == 0.0 && map[5].fract() == 0.0;
     // `bg`: a solid background, or the canvas seen through the plane.
     let render = |bg: Result<Color, &Canvas>, items: &mut dyn Iterator<Item = &DisplayItem>| {
         let mut c = Canvas::new(tw as u32, th as u32);
         match bg {
             Ok(color) => c.clear(color),
-            Err(under) => warp_backdrop(&mut c, under, d, x0, y0, sx, sy),
+            Err(under) => warp_backdrop(&mut c, under, d, &map),
         }
-        let (sdx, sdy) = if plain { (st.dx - x0, st.dy - y0) } else { (st.dx, st.dy) };
-        let fixed_origin = if plain { (st.fixed_origin.0 - x0, st.fixed_origin.1 - y0) } else { st.fixed_origin };
+        let (sdx, sdy) = if plain { (st.dx + map[4], st.dy + map[5]) } else { (st.dx, st.dy) };
+        let fixed_origin = if plain { (st.fixed_origin.0 + map[4], st.fixed_origin.1 + map[5]) } else { st.fixed_origin };
         if !plain {
-            c.push_transform([sx, 0.0, 0.0, sy, -x0 * sx, -y0 * sy]);
+            c.push_transform(map);
         }
         let mut sub = State::nested(sdx, sdy, fixed_origin, st.ext);
         let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
@@ -298,18 +332,20 @@ fn render_plane(items: &[&DisplayItem], d: &Mat4, region: Rect, fonts: &FontCont
             }
         }
     }
-    Some(Texture { px, x0, y0, sx, sy })
+    Some(Texture { px, map })
 }
 
-/// Fill `c` (texture space: texel (i, j) is plane point (x0 + (i + ½) /
-/// s, y0 + (j + ½) / s)) with what `under` shows at each point under `d`.
-fn warp_backdrop(c: &mut Canvas, under: &Canvas, d: &Mat4, x0: f32, y0: f32, sx: f32, sy: f32) {
+/// Fill `c` (texture space, `map` from plane coordinates) with what
+/// `under` shows at each texel's plane point under `d`.
+fn warp_backdrop(c: &mut Canvas, under: &Canvas, d: &Mat4, map: &Matrix) {
     let (w, h) = (c.width as usize, c.height as usize);
     let (uw, uh) = (under.width as i64, under.height as i64);
+    let Some(inv) = crate::tree::invert_matrix(*map) else { return };
     for j in 0..h {
         for i in 0..w {
-            let x = x0 as f64 + (i as f64 + 0.5) / sx as f64;
-            let y = y0 as f64 + (j as f64 + 0.5) / sy as f64;
+            let (tx, ty) = (i as f32 + 0.5, j as f32 + 0.5);
+            let x = (inv[0] * tx + inv[2] * ty + inv[4]) as f64;
+            let y = (inv[1] * tx + inv[3] * ty + inv[5]) as f64;
             let p = mat4::map_homogeneous(d, x, y);
             if p[3] <= 1e-9 {
                 continue;
@@ -352,8 +388,9 @@ impl Compositor {
     /// Device bounds (pixels, within the compositor) of the texture's
     /// image under `d`, clipped to the half space in front of the viewer.
     fn bounds(&self, t: &Texture, d: &Mat4) -> Option<(i32, i32, i32, i32)> {
-        let (tw, th) = (t.px.w as f32 / t.sx, t.px.h as f32 / t.sy);
-        let corners = [(t.x0, t.y0), (t.x0 + tw, t.y0), (t.x0 + tw, t.y0 + th), (t.x0, t.y0 + th)];
+        let Some(inv) = crate::tree::invert_matrix(t.map) else { return None };
+        let (tw, th) = (t.px.w as f32, t.px.h as f32);
+        let corners = [(0.0, 0.0), (tw, 0.0), (tw, th), (0.0, th)].map(|(x, y)| (inv[0] * x + inv[2] * y + inv[4], inv[1] * x + inv[3] * y + inv[5]));
         let pts: Vec<[f64; 4]> = corners.iter().map(|&(x, y)| mat4::map_homogeneous(d, x as f64, y as f64)).collect();
         // Clip the quad against w = eps (Sutherland–Hodgman).
         const EPS: f64 = 1e-4;
@@ -399,7 +436,7 @@ impl Compositor {
         let Some(hi) = mat4::invert3(&h) else { return };
         let zr = [d[8], d[9], d[11]];
         let (tw, th) = (t.px.w as i64, t.px.h as i64);
-        let (sx, sy) = (t.sx as f64, t.sy as f64);
+        let tm = t.map.map(|v| v as f64);
         let texel = |x: i64, y: i64| -> [f32; 4] {
             if x < 0 || y < 0 || x >= tw || y >= th {
                 [0.0; 4]
@@ -424,8 +461,8 @@ impl Compositor {
                 }
                 // Quantized: equal matrices composed in different orders
                 // sample the same texels.
-                let fx = (((lx - t.x0 as f64) * sx - 0.5) * 1024.0).round() / 1024.0;
-                let fy = (((ly - t.y0 as f64) * sy - 0.5) * 1024.0).round() / 1024.0;
+                let fx = ((tm[0] * lx + tm[2] * ly + tm[4] - 0.5) * 1024.0).round() / 1024.0;
+                let fy = ((tm[1] * lx + tm[3] * ly + tm[5] - 0.5) * 1024.0).round() / 1024.0;
                 if fx < -1.0 || fy < -1.0 || fx > tw as f64 || fy > th as f64 {
                     continue;
                 }
@@ -541,7 +578,7 @@ mod tests {
     use super::*;
 
     fn tex(w: usize, h: usize, c: [f32; 4]) -> Texture {
-        Texture { px: Pixels { w, h, px: vec![c; w * h] }, x0: 0.0, y0: 0.0, sx: 1.0, sy: 1.0 }
+        Texture::grid(Pixels { w, h, px: vec![c; w * h] }, 0.0, 0.0, 1.0, 1.0)
     }
 
     #[test]

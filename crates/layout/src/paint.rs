@@ -356,7 +356,8 @@ fn paint_filtered(bounds: Rect, filters: &[rabbithole_style::FilterOp], items: &
         if !plain {
             c.push_transform(m);
         }
-        let mut s = State { dx: sdx, dy: sdy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, blend: 0, views: Vec::new() };
+        let fixed_origin = if plain { (st.fixed_origin.0 - x0 as f32, st.fixed_origin.1 - y0 as f32) } else { st.fixed_origin };
+        let mut s = State { dx: sdx, dy: sdy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin, ext: st.ext, mask: None, blend: 0, views: Vec::new() };
         let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
         for it in items {
             paint_item(it, &mut c, fonts, &mut s, all);
@@ -367,6 +368,55 @@ fn paint_filtered(bounds: Rect, filters: &[rabbithole_style::FilterOp], items: &
     let white = render(Color::WHITE);
     let mut px = crate::filter::from_black_white(&black, &white, w, h);
     crate::filter::apply(&mut px, filters, device_scale(&canvas.transform()));
+    draw_device_pixels(canvas, crate::filter::to_rgba(&px), x0, y0, w, h);
+}
+
+/// An isolated group: painted offscreen over black and over white in
+/// lockstep (blended layers composite against the group's own, partly
+/// transparent, backdrop), then composited normally.
+fn paint_isolated(bounds: Rect, items: &[DisplayItem], canvas: &mut Canvas, fonts: &FontContext, st: &mut State, view: Rect) {
+    let local = bounds.translate(st.dx, st.dy);
+    if !st.ext {
+        for it in items {
+            paint_item(it, canvas, fonts, st, view);
+        }
+        return;
+    }
+    let Some((x0, y0, w, h)) = device_bounds(canvas, local) else { return };
+    let m = rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, -(x0 as f32), -(y0 as f32)], canvas.transform());
+    let plain = rabbithole_gfx::path::is_identity(&canvas.transform());
+    let mut cb = Canvas::new(w as u32, h as u32);
+    let mut cw = Canvas::new(w as u32, h as u32);
+    cb.clear(Color::BLACK);
+    cw.clear(Color::WHITE);
+    let (sdx, sdy) = if plain { (st.dx - x0 as f32, st.dy - y0 as f32) } else { (st.dx, st.dy) };
+    if !plain {
+        cb.push_transform(m);
+        cw.push_transform(m);
+    }
+    // Fixed items are in viewport coordinates: shift their origin with
+    // the offscreen origin too.
+    let fixed_origin = if plain { (st.fixed_origin.0 - x0 as f32, st.fixed_origin.1 - y0 as f32) } else { st.fixed_origin };
+    let mut sb = State::nested(sdx, sdy, fixed_origin, st.ext);
+    let mut sw = State::nested(sdx, sdy, fixed_origin, st.ext);
+    let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
+    for it in items {
+        if let DisplayItem::PopLayer(opacity) = it {
+            if sb.blend != 0 && sb.layers.last() == Some(&true) && sw.layers.last() == Some(&true) {
+                sb.layers.pop();
+                sw.layers.pop();
+                let mode = std::mem::take(&mut sb.blend);
+                sw.blend = 0;
+                let mask = sb.mask.take();
+                sw.mask = None;
+                rabbithole_gfx::Canvas::end_layer_blend_isolated(&mut cb, &mut cw, *opacity, mode, mask.as_deref());
+                continue;
+            }
+        }
+        paint_item(it, &mut cb, fonts, &mut sb, all);
+        paint_item(it, &mut cw, fonts, &mut sw, all);
+    }
+    let px = crate::filter::from_black_white(&cb.data, &cw.data, w, h);
     draw_device_pixels(canvas, crate::filter::to_rgba(&px), x0, y0, w, h);
 }
 
@@ -526,6 +576,9 @@ pub(crate) fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontCo
         }
         DisplayItem::BackdropFilter { rect, radii, filters } => {
             paint_backdrop(*rect, *radii, filters, canvas, st, view);
+        }
+        DisplayItem::Isolated { bounds, items } => {
+            paint_isolated(*bounds, items, canvas, fonts, st, view);
         }
         DisplayItem::Transform3d(g) => {
             if st.ext {

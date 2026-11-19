@@ -130,6 +130,13 @@ pub enum DisplayItem {
     /// Items inside are in viewport coordinates (not scrolled).
     PushFixed,
     PopFixed,
+    /// An isolated group (a stacking context with blended descendants):
+    /// `items` composited offscreen from a transparent backdrop, so that
+    /// blend modes inside mix with the group only (CSS Compositing 1 §3.2).
+    Isolated {
+        bounds: Rect,
+        items: Vec<DisplayItem>,
+    },
     /// A box with a 3D transform, or a plane of a 3D rendering context
     /// (CSS Transforms 2): its painting mapped through a 4×4 matrix.
     Transform3d(Box<Group3d>),
@@ -371,6 +378,9 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         bounds,
         root,
         skip_root_bg: root_bg_painted,
+        canvas_bg: !bg.is_transparent(),
+        blends: 0,
+        snap_origin: (0.0, 0.0),
         sticky_scrollport: Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height),
         nested_port: false,
         flow_cb: Rect::default(),
@@ -400,6 +410,14 @@ struct Painter<'l, 't, 'a> {
     bounds: Rect,
     root: &'t LayoutBox,
     skip_root_bg: bool,
+    /// A page background was painted under the root group.
+    canvas_bg: bool,
+    /// Blended layers pushed so far (a stacking context whose painting
+    /// added some is isolated).
+    blends: usize,
+    /// Position of the nearest box under a 3D transform (its descendants'
+    /// offsets from it snap to whole pixels).
+    snap_origin: (f32, f32),
     sticky_scrollport: Rect,
     /// The sticky scrollport is an inner scroll container's.
     nested_port: bool,
@@ -596,10 +614,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
         let parent3d = std::mem::take(&mut self.next3d);
+        let mut saved_snap = None;
         // A box under a 3D transform or in a 3D rendering context: its
         // items are grouped (from `group3d.0`) and mapped at paint time.
         let mut group3d: Option<(usize, usize, Group3d)> = None;
-        let matrix = if root.wm_transform.is_none() && (parent3d != 0 || root.style.transform3d.is_some() || !root.style.transform.iter().all(rabbithole_style::TransformOp::is_2d)) {
+        let blended = root.style.mix_blend_mode != 0 && root.style.has_transform();
+        let matrix = if root.wm_transform.is_none() && (parent3d != 0 || blended || root.style.transform3d.is_some() || !root.style.transform.iter().all(rabbithole_style::TransformOp::is_2d)) {
             use rabbithole_gfx::mat4;
             let mut dom_parent = if root.pseudo.is_some() { root.node } else { root.node.and_then(|n| self.ctx.doc.flat_parent(n)) };
             // `display: contents` elements have no box: skip them.
@@ -615,28 +635,35 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             let in_context = p3d.is_some_and(|p| p.preserve);
             let preserve = root.style.preserves_3d();
             let backface_hidden = root.style.backface_hidden();
-            if in_context || preserve || mat4::is_projective(&full) || backface_hidden && !mat4::is_2d(&full) {
+            // A blended box under a transform that resamples it composites
+            // from an offscreen group (its edges' coverage blends exactly).
+            let resampled = !(mat4::is_2d(&full) && full[0] == 1.0 && full[1] == 0.0 && full[4] == 0.0 && full[5] == 1.0);
+            // Like a composited layer painted at a whole-pixel offset, a
+            // box under a 3D transform has the fraction of its position
+            // applied after the transform (2D transforms keep painting at
+            // subpixel offsets).
+            // (Its offset from the nearest such ancestor, whose position
+            // already snapped.)
+            let snapped = if mat4::is_2d(&full) {
+                full
+            } else {
+                let (rx, ry) = (root.rect.x - self.snap_origin.0, root.rect.y - self.snap_origin.1);
+                saved_snap = Some(std::mem::replace(&mut self.snap_origin, (root.rect.x, root.rect.y)));
+                mat4::mul(&mat4::translate(rx.round() - rx, ry.round() - ry, 0.0), &full)
+            };
+            if in_context || preserve || mat4::is_projective(&full) || backface_hidden && !mat4::is_2d(&full) || blended && resampled {
                 let flat = mat4::flatten_2d(&full);
                 let inverse = crate::tree::invert_matrix(flat);
                 self.push_scope(HitScope::Transform(inverse));
                 // The mapping is not affine: no culling inside.
                 self.bounds = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
-                // Like a layer painted at a whole-pixel offset: the
-                // fraction of the box's position moves the mapped result.
-                // (Translations keep the fraction, like 2D painting.)
-                let translation = mat4::is_2d(&full) && full[0] == 1.0 && full[1] == 0.0 && full[4] == 0.0 && full[5] == 1.0;
-                let matrix = if translation {
-                    full
-                } else {
-                    mat4::mul(&mat4::translate(root.rect.x.round() - root.rect.x, root.rect.y.round() - root.rect.y, 0.0), &full)
-                };
-                group3d = Some((self.list.items.len(), self.list.sticky.len(), Group3d { matrix, backface_hidden, preserve, blend: 0, items: Vec::new() }));
+                group3d = Some((self.list.items.len(), self.list.sticky.len(), Group3d { matrix: snapped, backface_hidden, preserve, blend: 0, items: Vec::new() }));
                 None
             } else if mat4::is_2d(&full) && p3d.and_then(|p| p.perspective).is_none() {
                 // The 2D path (same arithmetic as without 3D properties).
                 root.transform_matrix()
             } else {
-                Some(mat4::flatten_2d(&full))
+                Some(mat4::flatten_2d(&snapped))
             }
         } else {
             root.transform_matrix()
@@ -683,6 +710,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.bounds = saved_bounds;
             self.flipped = saved_flip;
             self.wm_bg = saved_wm_bg;
+            if let Some(o) = saved_snap {
+                self.snap_origin = o;
+            }
             return;
         }
         if !root.style.backdrop_filters.is_empty() && root.style.visibility != Visibility::Hidden {
@@ -709,6 +739,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.push(DisplayItem::PushLayer(root.subtree_bounds()));
         }
         let filter_start = (self.list.items.len(), self.list.sticky.len());
+        let blends_before = self.blends;
         self.paint_stacking_context_inner(root);
         // `filter`: the painted items move into a filtered group (not
         // around sticky descendants, whose items are patched in place).
@@ -725,11 +756,29 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             let bounds = Rect::new(b.x - e, b.y - e, b.w + 2.0 * e, b.h + 2.0 * e);
             self.list.push(DisplayItem::Filtered { bounds, filters: root.style.filters.clone(), items });
         }
+        // Blended descendants mix with this group only: isolate it (the
+        // root element's group too, unless the page background painted
+        // under it is the root element's: CSS Compositing 1 §4.1).
+        if root.style.filters.is_empty()
+            && (!std::ptr::eq(root, self.root) || !self.canvas_bg)
+            && self.list.sticky.len() == filter_start.1
+            && self.blends > blends_before
+        {
+            let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
+            let mut bounds = root.subtree_bounds();
+            if let Some(x) = crate::paint3d::extent(items.iter()) {
+                bounds = bounds.union(&x);
+            }
+            self.list.push(DisplayItem::Isolated { bounds, items });
+            // Its blends need no outer isolation.
+            self.blends = blends_before;
+        }
         if let Some(items) = mask {
             self.list.push(DisplayItem::LayerMask(items));
         }
         if root.style.mix_blend_mode != 0 && !blend_outside {
             self.list.push(DisplayItem::LayerBlend(root.style.mix_blend_mode));
+            self.blends += 1;
         }
         if layer {
             self.list.push(DisplayItem::PopLayer(opacity));
@@ -751,6 +800,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.push(DisplayItem::Transform3d(Box::new(g)));
         }
         self.pop_wrappers(pushed_matrix, pushed_transform);
+        if let Some(o) = saved_snap {
+            self.snap_origin = o;
+        }
         self.scope = saved_scope;
         self.bounds = saved_bounds;
         self.flipped = saved_flip;
