@@ -500,6 +500,7 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
         if is_attachment_kw(c) {
             seen_attach = true;
             out.fixed = values::is_ident(c, "fixed");
+            out.local = values::is_ident(c, "local");
             i += 1;
             continue;
         }
@@ -509,6 +510,7 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
             continue;
         }
         if values::is_ident(c, "text") {
+            out.clip_text = true;
             i += 1;
             continue;
         }
@@ -996,12 +998,15 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
         }
         "background-attachment" => {
-            let vals: Option<Vec<bool>> = values::split_commas(comps)
+            let vals: Option<Vec<(bool, bool)>> = values::split_commas(comps)
                 .iter()
-                .map(|l| if l.len() == 1 && is_attachment_kw(l[0]) { Some(values::is_ident(l[0], "fixed")) } else { None })
+                .map(|l| if l.len() == 1 && is_attachment_kw(l[0]) { Some((values::is_ident(l[0], "fixed"), values::is_ident(l[0], "local"))) } else { None })
                 .collect();
             if let Some(v) = vals {
-                set_each(style, v, |l, f| l.fixed = f);
+                set_each(style, v, |l, (f, local)| {
+                    l.fixed = f;
+                    l.local = local;
+                });
             }
         }
         "background-origin" => {
@@ -1026,9 +1031,8 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 .collect();
             if let Some(v) = vals {
                 set_each(style, v, |l, b| {
-                    if let Some(b) = b {
-                        l.clip = b;
-                    }
+                    l.clip_text = b.is_none();
+                    l.clip = b.unwrap_or(BoxArea::BorderBox);
                 });
             }
         }

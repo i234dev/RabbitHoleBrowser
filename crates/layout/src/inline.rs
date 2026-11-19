@@ -1873,7 +1873,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             text: Rc::from(text.as_str()),
                             font: tm.font,
                             size: tm.size,
-                            color: style.color,
+                            color: style.text_fill_color.unwrap_or(style.color),
                             letter_spacing: style.letter_spacing,
                             hidden: style.visibility == Visibility::Hidden,
                             decoration_info: DecorationInfo {

@@ -409,6 +409,13 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         }
         // none | [ex-height | cap-height | ch-width | ic-width | ic-height]?
         // [from-font | <number [0,∞]>]
+        "-webkit-text-fill-color" => {
+            match values::parse_color_component(c0) {
+                Some(ColorValue::Color(col)) => style.text_fill_color = Some(col),
+                Some(ColorValue::CurrentColor) => style.text_fill_color = None,
+                None => {}
+            }
+        }
         "text-justify" => {
             if let Some(k) = values::ident(c0).filter(|_| comps.len() == 1) {
                 match k.as_str() {
@@ -648,7 +655,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-orientation"
         | "text-combine-upright" | "word-spacing-x"
         | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"
-        | "-webkit-text-fill-color" | "-webkit-text-stroke" | "-webkit-text-stroke-width" | "-webkit-text-stroke-color"
+        | "-webkit-text-stroke" | "-webkit-text-stroke-width" | "-webkit-text-stroke-color"
         | "-webkit-tap-highlight-color" | "-webkit-touch-callout" | "text-decoration-skip-ink" | "text-decoration-skip" => {}
         _ => return false,
     }

@@ -672,7 +672,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         style.background_layers = b.style.mask_layers.clone();
         style.background_color = Color::TRANSPARENT;
         style.background_image = None;
-        let geom = BoxGeometry { border: b.rect, padding: b.padding_rect(), content: b.content_rect, radii: [(0.0, 0.0); 4], border_width: style.border_width };
+        let geom = BoxGeometry { border: b.rect, padding: b.padding_rect(), content: b.content_rect, radii: [(0.0, 0.0); 4], border_width: style.border_width, scrolled: None };
         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
         let mut tmp = DisplayList::default();
         background::paint_backgrounds(&mut tmp, &geom, &style, self.ctx.background_images, vp);
@@ -1016,13 +1016,35 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// Floats and atomic inline-level boxes paint atomically (as if they
     /// were stacking contexts with z-index 0 that don't capture positioned
     /// descendants — approximated by a full stacking context).
+    /// The glyphs of a box's text (and its in-flow descendants'), opaque,
+    /// as a layer mask for `background-clip: text`.
+    fn text_mask_items(&mut self, b: &'t LayoutBox) -> Vec<DisplayItem> {
+        let start = self.list.items.len();
+        let (hits, scopes, scope) = (self.hits.entries.len(), self.hits.scopes.len(), self.scope);
+        self.paint_phase(b, Phase::Content);
+        self.hits.entries.truncate(hits);
+        self.hits.scopes.truncate(scopes);
+        self.scope = scope;
+        self.list
+            .items
+            .drain(start..)
+            .filter_map(|it| match it {
+                DisplayItem::Text { x, y, font, size, text, letter_spacing, small_caps, oblique, .. } => {
+                    Some(DisplayItem::Text { x, y, font, size, color: Color::BLACK, text, letter_spacing, shadows: Vec::new(), small_caps, oblique })
+                }
+                it @ (DisplayItem::PushClip(_) | DisplayItem::PushClipRounded(..) | DisplayItem::PopClip | DisplayItem::PushTransform(_) | DisplayItem::PopTransform) => Some(it),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn paint_float_or_atomic(&mut self, c: &'t LayoutBox) {
         self.paint_stacking_context(c, c.content_rect);
     }
 
     // -------------------------------------------------------- backgrounds
 
-    fn paint_background_and_border(&mut self, b: &LayoutBox, skip_bg: bool) {
+    fn paint_background_and_border(&mut self, b: &'t LayoutBox, skip_bg: bool) {
         if b.style.visibility != Visibility::Hidden && b.style.pointer_events != PointerEvents::None {
             self.record_hit(b.rect, b.node);
         }
@@ -1045,12 +1067,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
         }
+        // A scroll container's scrolled padding box (`background-attachment:
+        // local` positions against its scrollable overflow area).
+        let scrolled = b.scroll_container.then(|| {
+            let p = b.padding_rect();
+            Rect::new(p.x - b.scroll_offset.0, p.y - b.scroll_offset.1, b.scroll_width.max(p.w), b.scroll_height.max(p.h))
+        });
         let geom = BoxGeometry {
             border: rect,
             padding: b.padding_rect(),
             content: b.content_rect,
             radii,
             border_width: style.border_width,
+            scrolled,
         };
         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
         let widget = crate::widgets::widget(b, self.ctx);
@@ -1068,7 +1097,32 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
             return;
         }
-        if !skip_bg {
+        if !skip_bg && style.background_layers.iter().any(|l| l.clip_text) {
+            // `background-clip: text`: those layers (and the color when the
+            // last layer clips to text) show only through the glyphs.
+            let mut boxed = (**style).clone();
+            let mut texty = (**style).clone();
+            let text_color = style.background_layers.last().is_some_and(|l| l.clip_text);
+            boxed.background_layers.retain(|l| !l.clip_text);
+            texty.background_layers.retain(|l| l.clip_text);
+            for l in &mut texty.background_layers {
+                l.clip = rabbithole_style::BoxArea::BorderBox;
+            }
+            if text_color {
+                boxed.background_color = Color::TRANSPARENT;
+            } else {
+                texty.background_color = Color::TRANSPARENT;
+            }
+            if let Some(last) = boxed.background_layers.last_mut().filter(|_| text_color) {
+                last.clip = rabbithole_style::BoxArea::BorderBox;
+            }
+            background::paint_backgrounds(self.list, &geom, &boxed, self.ctx.background_images, vp);
+            let mask = self.text_mask_items(b);
+            self.list.push(DisplayItem::PushLayer(rect));
+            background::paint_backgrounds(self.list, &geom, &texty, self.ctx.background_images, vp);
+            self.list.push(DisplayItem::LayerMask(mask));
+            self.list.push(DisplayItem::PopLayer(1.0));
+        } else if !skip_bg {
             background::paint_backgrounds(self.list, &geom, style, self.ctx.background_images, vp);
             // A vertical box's background images, unturned.
             if let Some((ptr, prect, m, bg)) = self.wm_bg.clone() {
@@ -1079,7 +1133,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         let pad = crate::block::resolve_edges(&bg.padding, prect.w);
                         let padding = Rect::new(prect.x + bw.left, prect.y + bw.top, (prect.w - bw.left - bw.right).max(0.0), (prect.h - bw.top - bw.bottom).max(0.0));
                         let content = Rect::new(padding.x + pad.left, padding.y + pad.top, (padding.w - pad.left - pad.right).max(0.0), (padding.h - pad.top - pad.bottom).max(0.0));
-                        let pgeom = BoxGeometry { border: prect, padding, content, radii: bg.resolved_radii(prect.w, prect.h), border_width: bw };
+                        let pgeom = BoxGeometry { border: prect, padding, content, radii: bg.resolved_radii(prect.w, prect.h), border_width: bw, scrolled: None };
                         background::paint_backgrounds(self.list, &pgeom, &bg, self.ctx.background_images, vp);
                         self.list.push(DisplayItem::PopTransform);
                     }
@@ -1508,6 +1562,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             content: f.rect,
                             radii,
                             border_width: rabbithole_style::Edges { top: widths[0], right: widths[1], bottom: widths[2], left: widths[3] },
+                            scrolled: None,
                         };
                         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
                         background::paint_box_shadows(self.list, &geom, &style.box_shadow, false);

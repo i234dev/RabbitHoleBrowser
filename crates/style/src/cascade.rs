@@ -1869,6 +1869,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "font-size-adjust" => to.font_size_adjust = from.font_size_adjust,
         "text-justify" => to.text_justify_inter_character = from.text_justify_inter_character,
+        "-webkit-text-fill-color" => to.text_fill_color = from.text_fill_color,
         "font-variant" => {
             to.font_variant_small_caps = from.font_variant_small_caps;
             to.font_features = from.font_features.clone();

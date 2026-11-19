@@ -30,6 +30,32 @@ pub(crate) struct BoxGeometry {
     /// Outer (border-box) radii.
     pub radii: Radii,
     pub border_width: Edges<f32>,
+    /// A scroll container's padding box moved by the scroll offset and
+    /// grown to its scrollable overflow (for `background-attachment: local`).
+    pub scrolled: Option<Rect>,
+}
+
+impl BoxGeometry {
+    /// The geometry of the scrolled contents: boxes relative to the
+    /// scrollable overflow area.
+    fn scrolled(&self) -> Option<BoxGeometry> {
+        let p = self.scrolled?;
+        let bw = &self.border_width;
+        let pad = Edges {
+            top: self.content.y - self.padding.y,
+            right: self.padding.right() - self.content.right(),
+            bottom: self.padding.bottom() - self.content.bottom(),
+            left: self.content.x - self.padding.x,
+        };
+        Some(BoxGeometry {
+            border: Rect::new(p.x - bw.left, p.y - bw.top, p.w + bw.left + bw.right, p.h + bw.top + bw.bottom),
+            padding: p,
+            content: Rect::new(p.x + pad.left, p.y + pad.top, (p.w - pad.left - pad.right).max(0.0), (p.h - pad.top - pad.bottom).max(0.0)),
+            radii: self.radii,
+            border_width: self.border_width,
+            scrolled: None,
+        })
+    }
 }
 
 /// Resolved border-box radii of a laid out box.
@@ -214,6 +240,24 @@ enum LayerImage<'a> {
 }
 
 fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLayer, images: &HashMap<String, Arc<Image>>, viewport: Rect, style: &ComputedStyle) {
+    // `local`: positioned and painted in the scrolled contents, seen
+    // through the scrollport (CSS Backgrounds 3 §3.6).
+    if layer.local && !layer.fixed {
+        if let Some(scrolled) = geom.scrolled() {
+            let port = area_rect(geom, BoxArea::PaddingBox);
+            let clip = if layer.clip == BoxArea::BorderBox { geom.border } else { port };
+            let radii = area_radii(geom, if layer.clip == BoxArea::BorderBox { BoxArea::BorderBox } else { BoxArea::PaddingBox });
+            list.items.push(if has_radii(&radii) { DisplayItem::PushClipRounded(clip, radii) } else { DisplayItem::PushClip(clip) });
+            let mut inner = layer.clone();
+            inner.local = false;
+            if inner.clip == BoxArea::BorderBox {
+                inner.clip = BoxArea::PaddingBox;
+            }
+            paint_layer(list, &scrolled, &inner, images, viewport, style);
+            list.items.push(DisplayItem::PopClip);
+            return;
+        }
+    }
     let pixelated = style.image_rendering_pixelated;
     let clip_rect = area_rect(geom, layer.clip);
     let clip_radii = area_radii(geom, layer.clip);

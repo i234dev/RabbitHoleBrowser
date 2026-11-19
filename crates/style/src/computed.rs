@@ -978,8 +978,12 @@ pub struct BackgroundLayer {
     pub repeat: (BackgroundRepeat, BackgroundRepeat),
     pub origin: BoxArea,
     pub clip: BoxArea,
+    /// `background-clip: text`: painted only inside the box's text.
+    pub clip_text: bool,
     /// `background-attachment: fixed`
     pub fixed: bool,
+    /// `background-attachment: local`
+    pub local: bool,
 }
 
 impl Default for BackgroundLayer {
@@ -991,6 +995,8 @@ impl Default for BackgroundLayer {
             repeat: (BackgroundRepeat::Repeat, BackgroundRepeat::Repeat),
             origin: BoxArea::PaddingBox,
             clip: BoxArea::BorderBox,
+            local: false,
+            clip_text: false,
             fixed: false,
         }
     }
@@ -1602,6 +1608,8 @@ pub struct ComputedStyle {
     /// `font_family` fallback.
     pub font_family_list: Vec<String>,
     pub font_variant_small_caps: bool,
+    /// `-webkit-text-fill-color` (None: the `color`).
+    pub text_fill_color: Option<Color>,
     /// `text-justify: inter-character` (or `distribute`): justification
     /// spaces every character, so ligatures are not formed.
     pub text_justify_inter_character: bool,
@@ -1822,6 +1830,7 @@ impl ComputedStyle {
             webkit_box: false,
             font_family_list: Vec::new(),
             font_variant_small_caps: false,
+            text_fill_color: None,
             text_justify_inter_character: false,
             font_size_adjust: None,
             font_size_unadjusted: None,
@@ -1903,6 +1912,7 @@ impl ComputedStyle {
             tab_size: parent.tab_size,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
+            text_fill_color: parent.text_fill_color,
             text_justify_inter_character: parent.text_justify_inter_character,
             font_size_adjust: parent.font_size_adjust,
             font_features: parent.font_features.clone(),
@@ -1967,6 +1977,7 @@ impl ComputedStyle {
             && self.tab_size == o.tab_size
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
+            && self.text_fill_color == o.text_fill_color
             && self.text_justify_inter_character == o.text_justify_inter_character
             && self.font_size_adjust == o.font_size_adjust
             && self.font_features == o.font_features
