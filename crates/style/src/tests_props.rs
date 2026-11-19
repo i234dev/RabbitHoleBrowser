@@ -1026,3 +1026,25 @@ fn gradients_of_css4_colors_default_to_oklab() {
     assert_eq!(interp("background-image: linear-gradient(red, oklch(50% 0.1 30))"), (oklab, true));
     assert_eq!(interp("background-image: linear-gradient(in srgb, red, color(srgb 0 0 1))").0, crate::ColorInterp::default());
 }
+
+#[test]
+fn revert_and_revert_layer_roll_back_the_cascade() {
+    let green = rabbithole_gfx::Color::rgb(0, 128, 0);
+    let bg = |css: &str, html: &str| {
+        let (doc, t) = styled(html, css);
+        style_of(&doc, &t, "p").background_color
+    };
+    let p = "<p>x</p>";
+    assert_eq!(bg("@layer a { p { background-color: green } } @layer b { p { background-color: red; background-color: revert-layer } }", p), green);
+    // !important revert-layer rolls back to earlier layers only.
+    assert_eq!(
+        bg("@layer a { p { background-color: green } } @layer b { p { background-color: red !important; background-color: revert-layer !important } } @layer c { p { background-color: red !important } }", p),
+        green
+    );
+    // The style attribute is a layer above the style sheets.
+    assert_eq!(bg("p { background-color: green }", "<p style='background-color: revert-layer'>x</p>"), green);
+    assert_eq!(bg("@layer a { p { background-color: green } } @layer b { p { background-color: red; width: 1px } p { all: revert-layer } }", p), green);
+    // revert rolls back to the user-agent origin.
+    let (doc, t) = styled("<div>x</div>", "div { display: inline; display: revert }");
+    assert_eq!(style_of(&doc, &t, "div").display, Display::Block);
+}

@@ -255,10 +255,6 @@ impl ScopeIndex {
     /// Groups of sheets indexed before are reused; returns the indices of
     /// the groups that were added.
     pub(crate) fn rebuild_shadow(&mut self, author: &[Stylesheet], env: &MediaEnv) -> Vec<usize> {
-        // Layers of shadow-scoped sheets are not ordered (treated as
-        // unlayered).
-        let no_layers: HashMap<std::sync::Arc<str>, u32> = HashMap::new();
-        let layers = &no_layers;
         let mut per_root: std::collections::BTreeMap<NodeId, Vec<usize>> = std::collections::BTreeMap::new();
         for (i, sheet) in author.iter().enumerate() {
             for &r in &sheet.shadow_scopes {
@@ -285,11 +281,26 @@ impl ScopeIndex {
                         ua_sheet().active_rules(env, &mut ua_rules);
                     }
                     let mut ix = RuleIndex::default();
-                    ix.add_sheet(&ua_rules, true, None, layers, 0);
-                    for &i in &list {
-                        let mut rules = Vec::new();
-                        author[i].active_rules(env, &mut rules);
-                        ix.add_sheet(&rules, false, author[i].base_url.as_deref().map(Rc::from), layers, i);
+                    // Each shadow tree orders its own layers by first
+                    // appearance in its sheets.
+                    let mut layers: HashMap<std::sync::Arc<str>, u32> = HashMap::new();
+                    let sheet_rules: Vec<Vec<&StyleRule>> = list
+                        .iter()
+                        .map(|&i| {
+                            let mut rules = Vec::new();
+                            author[i].active_rules(env, &mut rules);
+                            for r in &rules {
+                                if let Some(l) = &r.layer {
+                                    let n = layers.len() as u32 + 1;
+                                    layers.entry(layer_key(l, i)).or_insert(n);
+                                }
+                            }
+                            rules
+                        })
+                        .collect();
+                    ix.add_sheet(&ua_rules, true, None, &layers, 0);
+                    for (&i, rules) in list.iter().zip(&sheet_rules) {
+                        ix.add_sheet(rules, false, author[i].base_url.as_deref().map(Rc::from), &layers, i);
                     }
                     self.shadow.push(ix);
                     self.groups.insert(key.clone(), self.shadow.len() - 1);
@@ -475,7 +486,7 @@ pub(crate) fn compute_element<'a>(
                 rules.push((ix as *const RuleIndex as usize | 1, hi as u32));
                 for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
-                    matched.push(Matched { rank, specificity: r.specificity, order: hi as u32 + 1, decl: d, base: r.base.as_deref(), pseudo: r.selector.pseudo_element });
+                    matched.push(Matched { rank, specificity: layered(r.specificity, r.layer, d.important), order: hi as u32 + 1, decl: d, base: r.base.as_deref(), pseudo: r.selector.pseudo_element });
                 }
             }
         }
@@ -489,7 +500,7 @@ pub(crate) fn compute_element<'a>(
                 rules.push((ix as *const RuleIndex as usize | 2, si as u32));
                 for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
-                    matched.push(Matched { rank, specificity: r.specificity, order: si as u32 + 1, decl: d, base: r.base.as_deref(), pseudo: r.selector.pseudo_element });
+                    matched.push(Matched { rank, specificity: layered(r.specificity, r.layer, d.important), order: si as u32 + 1, decl: d, base: r.base.as_deref(), pseudo: r.selector.pseudo_element });
                 }
             }
         }
@@ -678,6 +689,7 @@ fn cascade_matched(
         });
     }
     local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
+    roll_back(&mut local);
 
     // Custom properties.
     let vars = custom_properties(&local, parent_vars, memo);
@@ -690,6 +702,7 @@ fn cascade_matched(
         return out;
     }
     pseudo_local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
+    roll_back(&mut pseudo_local);
     // Form controls never have markers: their marker slot carries the
     // style of their own pseudo-element (`::placeholder`, ...).
     let slot_pseudo = slot.unwrap_or(PseudoElement::Marker);
@@ -721,6 +734,97 @@ fn cascade_matched(
         }
     }
     out
+}
+
+/// The position of a declaration's cascade layer in layer order
+/// (unlayered last), undoing the reversal [`layered`] applies to
+/// `!important` declarations.
+fn layer_index(m: &Matched) -> u32 {
+    if m.specificity.0 == u32::MAX {
+        // The style attribute, above every layer.
+        return 0x10000;
+    }
+    let key = m.specificity.0 >> 16;
+    if matches!(m.rank, Rank::AuthorImportant | Rank::ShadowImportant | Rank::UaImportant) {
+        0xFFFF - key
+    } else {
+        key
+    }
+}
+
+/// `revert` / `revert-layer` as a declaration's whole value.
+fn rollback_keyword(d: &Declaration) -> Option<bool> {
+    match d.value.as_slice() {
+        [Token::Ident(s)] if s.eq_ignore_ascii_case("revert-layer") => Some(true),
+        [Token::Ident(s)] if s.eq_ignore_ascii_case("revert") => Some(false),
+        _ => None,
+    }
+}
+
+/// Resolve winning `revert` / `revert-layer` declarations in a sorted
+/// declaration list (CSS Cascade 5 §7.3): drop the property's
+/// declarations of the same cascade layer (`revert-layer`) or origin
+/// (`revert`), so the value rolls back to the earlier layers / origins.
+fn roll_back(local: &mut Vec<Matched>) {
+    if !local.iter().any(|m| rollback_keyword(m.decl).is_some()) {
+        return;
+    }
+    let origin = |r: Rank| match r {
+        Rank::UaNormal | Rank::UaImportant => 0,
+        Rank::ShadowNormal | Rank::ShadowImportant => 1,
+        Rank::AuthorNormal | Rank::AuthorImportant => 2,
+    };
+    let mut removed = vec![false; local.len()];
+    // `all: revert[-layer]` rolls back every property it wins for: the
+    // declarations before it from the same origin (and later layers).
+    for i in (0..local.len()).rev() {
+        if removed[i] || local[i].decl.name != "all" {
+            continue;
+        }
+        let Some(layer) = rollback_keyword(local[i].decl) else { continue };
+        let (o, l) = (origin(local[i].rank), layer_index(&local[i]));
+        removed[i] = true;
+        for j in 0..i {
+            let n = local[j].decl.name.as_str();
+            if n.starts_with("--") || n == "direction" || n == "unicode-bidi" {
+                continue;
+            }
+            if origin(local[j].rank) == o && (!layer || layer_index(&local[j]) >= l) {
+                removed[j] = true;
+            }
+        }
+    }
+    let mut done: Vec<&str> = Vec::new();
+    for i in (0..local.len()).rev() {
+        let name = local[i].decl.name.as_str();
+        if removed[i] || rollback_keyword(local[i].decl).is_none() || done.contains(&name) {
+            continue;
+        }
+        // The winning declaration of `name` (the last one not removed).
+        loop {
+            let Some(w) = (0..local.len()).rev().find(|&j| !removed[j] && local[j].decl.name == name) else { break };
+            let Some(layer) = rollback_keyword(local[w].decl) else { break };
+            let (o, l) = (origin(local[w].rank), layer_index(&local[w]));
+            for j in 0..local.len() {
+                if local[j].decl.name != name {
+                    continue;
+                }
+                // `revert-layer` keeps the declarations of earlier layers,
+                // normal or important (`!important` reverses the layer
+                // order, not the layers rolled back to).
+                let same = origin(local[j].rank) == o && (!layer || layer_index(&local[j]) >= l);
+                if same {
+                    removed[j] = true;
+                }
+            }
+        }
+        done.push(name);
+    }
+    let mut k = 0;
+    local.retain(|_| {
+        k += 1;
+        !removed[k - 1]
+    });
 }
 
 /// Apply sorted declarations on top of a style inherited from `parent`.
