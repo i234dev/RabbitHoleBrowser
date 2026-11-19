@@ -518,6 +518,30 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 note_container(inline);
             }
         }
+        "margin-trim" => {
+            // `none | block | inline | [block-start || inline-start ||
+            // block-end || inline-end]`
+            let kws: Option<Vec<String>> = comps.iter().map(|c| values::ident(c)).collect();
+            let Some(kws) = kws else { return true };
+            let bits = match kws.as_slice() {
+                [k] if k == "none" => Some(0),
+                [k] if k == "block" => Some(MARGIN_TRIM_BLOCK_START | MARGIN_TRIM_BLOCK_END),
+                [k] if k == "inline" => Some(MARGIN_TRIM_INLINE_START | MARGIN_TRIM_INLINE_END),
+                _ => kws.iter().try_fold(0u8, |acc, k| {
+                    let bit = match k.as_str() {
+                        "block-start" => MARGIN_TRIM_BLOCK_START,
+                        "block-end" => MARGIN_TRIM_BLOCK_END,
+                        "inline-start" => MARGIN_TRIM_INLINE_START,
+                        "inline-end" => MARGIN_TRIM_INLINE_END,
+                        _ => return None,
+                    };
+                    (acc & bit == 0).then_some(acc | bit)
+                }),
+            };
+            if let Some(b) = bits {
+                style.margin_trim = b;
+            }
+        }
         "container-name" => {
             if let Some(names) = container_names(comps) {
                 style.container_names = names;

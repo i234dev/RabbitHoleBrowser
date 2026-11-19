@@ -2378,6 +2378,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.tab_size_length = from.tab_size_length;
         }
         "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
+        "margin-trim" => to.margin_trim = from.margin_trim,
         "container-type" | "container" | "container-name" => {
             if prop != "container-name" {
                 to.container_size = from.container_size;

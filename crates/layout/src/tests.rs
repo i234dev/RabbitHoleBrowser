@@ -1346,3 +1346,19 @@ fn run_in_becomes_the_first_inline_box_of_the_next_block() {
         assert!(fx.find(&tree, "div").iter().any(|d| d.style.run_in), "{html}");
     }
 }
+
+#[test]
+fn margin_trim_block_trims_leading_and_trailing_child_margins() {
+    let fx = Fixture::new(
+        "<div id=c><i></i><p>x</p><p>y</p><i></i></div><div id=after></div>",
+        "body{margin:0;font:10px/10px monospace}#c{margin-trim:block;border:1px solid}p{margin:20px 0}i{display:block;margin:30px 0}",
+    );
+    let tree = fx.layout();
+    let c = fx.find(&tree, "div")[0];
+    let ps = fx.find(&tree, "p");
+    // The first paragraph sits at the content top, the last at its bottom;
+    // the margin between them stays.
+    assert_eq!(ps[0].rect.y, c.content_rect.y);
+    assert_eq!(ps[1].rect.y - ps[0].rect.bottom(), 20.0);
+    assert_eq!(c.content_rect.h, 10.0 + 20.0 + 10.0);
+}

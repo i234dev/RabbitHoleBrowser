@@ -312,6 +312,12 @@ pub enum TextAlign {
     Justify,
 }
 
+/// `margin-trim` bits.
+pub const MARGIN_TRIM_BLOCK_START: u8 = 1;
+pub const MARGIN_TRIM_BLOCK_END: u8 = 2;
+pub const MARGIN_TRIM_INLINE_START: u8 = 4;
+pub const MARGIN_TRIM_INLINE_END: u8 = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhiteSpace {
     Normal,
@@ -1649,6 +1655,8 @@ pub struct ComputedStyle {
     pub contain_paint: bool,
     pub contain_layout: bool,
     pub contain_size: bool,
+    /// `margin-trim` (`MARGIN_TRIM_*` bits).
+    pub margin_trim: u8,
     /// `contain: inline-size`.
     pub contain_inline_size: bool,
     /// `contain: style` (also implied by `content`, `strict` and query
@@ -1916,6 +1924,7 @@ impl ComputedStyle {
             contain_layout: false,
             contain_size: false,
             contain_inline_size: false,
+            margin_trim: 0,
             contain_style: false,
             run_in: false,
             container_size: false,
