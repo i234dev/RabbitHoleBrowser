@@ -343,6 +343,9 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
                 st.prev_space = false;
             }
             c if is_collapsible_ws(c) => {
+                if let Some(l) = word.chars().rev().find(|c| !ignorable(*c)) {
+                    st.last = Some(l);
+                }
                 flush(&mut word, out);
                 if !st.prev_space {
                     // A white space run with a segment break may vanish.
@@ -360,11 +363,11 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
             c => {
                 word.push(c);
                 st.prev_space = false;
-                if !ignorable(c) {
-                    st.last = Some(c);
-                }
             }
         }
+    }
+    if let Some(l) = word.chars().rev().find(|c| !ignorable(*c)) {
+        st.last = Some(l);
     }
     flush(&mut word, out);
 }

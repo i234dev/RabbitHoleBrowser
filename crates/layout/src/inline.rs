@@ -490,7 +490,6 @@ impl<'a> Layouter<'a> {
                                 if std::mem::take(&mut after_atomic) && w.chars().next().is_some_and(glues_atomic) {
                                     prev_break_opp = false;
                                 }
-                                let w_cursive = w.chars().any(is_cursive);
                                 let prev_before = prev_char;
                                 prev_char = w.chars().rev().find(|&c| !attaches_to_previous(c)).or(w.chars().last());
                                 let mut parts: Vec<(String, bool)> = Vec::new();
@@ -541,7 +540,7 @@ impl<'a> Layouter<'a> {
                                 }
                                 // The parts of a word in a joining script measure
                                 // as they are shaped together: by prefix widths.
-                                let joined = gapped.len() > 1 && w_cursive;
+                                let joined = gapped.len() > 1 && gapped.iter().any(|g| g.0.chars().any(is_cursive));
                                 let mut prefix = String::new();
                                 let mut prefix_w = 0.0;
                                 for (part, continuation, is_gap) in gapped {
