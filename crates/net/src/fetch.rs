@@ -1404,7 +1404,10 @@ impl Fetcher {
                             policy = p;
                         }
                         let next = next.without_fragment();
-                        if api && tainting == ResponseType::Cors && next.origin() != url.origin() && !same_origin {
+                        // Fetch §4.4 (HTTP-redirect fetch): any request
+                        // redirected away from a cross-origin URL has a
+                        // tainted origin (`Origin: null` from then on).
+                        if next.origin() != url.origin() && !same_origin {
                             tainted_origin = true;
                         }
                         site = worse_site(site, fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), &next));

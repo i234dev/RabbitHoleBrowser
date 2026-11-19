@@ -1086,3 +1086,19 @@ fn set_cookie_on_a_304_revalidation_is_stored() {
     let jar = f.cookies.as_ref().unwrap().lock().unwrap();
     assert_eq!(jar.header_for(&srv.url("/")).as_deref(), Some("first=1; fresh=2"));
 }
+
+#[test]
+fn post_navigation_redirected_across_origins_sends_origin_null() {
+    let target: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let t = target.clone();
+    let hop = serve(Arc::new(move |_req: &Req| (307, hv(&[("location", &format!("{}/final", t.lock().unwrap()))]), Vec::new())));
+    let end = serve(Arc::new(|_req: &Req| (200, hv(&[("content-type", "text/plain")]), b"ok".to_vec())));
+    *target.lock().unwrap() = end.origin().replace("127.0.0.1", "localhost");
+    let doc = Url::parse_absolute("http://idp.localhost:9/page").unwrap();
+    let f = fetcher();
+    f.request(&Request::post(hop.url("/cb"), Body::form(&[("a".into(), "b".into())])).with_referer(doc)).unwrap();
+    assert_eq!(hop.requests()[0].header("origin"), Some("http://idp.localhost:9"));
+    let last = end.requests().pop().unwrap();
+    assert_eq!((last.method.as_str(), last.body.as_slice()), ("POST", b"a=b".as_slice()), "307 keeps method and body");
+    assert_eq!(last.header("origin"), Some("null"), "redirected away from a cross-origin URL: tainted origin");
+}
