@@ -404,6 +404,12 @@ impl<'a> Layouter<'a> {
     /// Font for a style: the first available family of `font-family`
     /// (web fonts / system fonts) or the generic fallback.
     pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
+        let f = self.face_for(style);
+        // `font-kerning: none`: the face's runs are shaped without kerning.
+        if style.font_kerning_none { f.without_kerning() } else { f }
+    }
+
+    fn face_for(&mut self, style: &ComputedStyle) -> FontId {
         if self.font_ext && !style.font_family_list.is_empty() {
             let key = (style.font_family_list.join(","), style.font_weight, style.is_italic(), style.font_stretch);
             if let Some(f) = self.font_cache.get(&key) {

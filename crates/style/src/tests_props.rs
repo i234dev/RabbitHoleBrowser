@@ -857,3 +857,19 @@ fn monospace_alone_has_a_13px_medium() {
     let pre = doc.children(n).find(|&c| doc.is_element(c, "pre")).unwrap();
     assert_eq!(t.get(pre).unwrap().font_size, 12.0);
 }
+
+#[test]
+fn font_kerning_none_is_inherited_and_reset_by_font() {
+    let (doc, t) = styled("<div><p>a</p><span>b</span></div>", "div { font-kerning: none } span { font: 12px serif }");
+    assert!(style_of(&doc, &t, "div").font_kerning_none);
+    assert!(style_of(&doc, &t, "p").font_kerning_none);
+    assert!(!style_of(&doc, &t, "span").font_kerning_none);
+}
+
+#[test]
+fn font_synthesis_small_caps() {
+    assert!(one("").font_synthesis_small_caps);
+    assert!(!one("font-synthesis-small-caps: none").font_synthesis_small_caps);
+    assert!(!one("font-synthesis: weight style").font_synthesis_small_caps);
+    assert!(one("font-synthesis: small-caps").font_synthesis_small_caps);
+}

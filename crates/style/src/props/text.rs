@@ -440,7 +440,16 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         "font-synthesis" => {
             let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
             style.font_synthesis_style = kws.iter().any(|k| k == "style");
+            style.font_synthesis_small_caps = kws.iter().any(|k| k == "small-caps");
         }
+        "font-synthesis-small-caps" => match comps {
+            [c] => match values::ident(c).as_deref() {
+                Some("auto") => style.font_synthesis_small_caps = true,
+                Some("none") => style.font_synthesis_small_caps = false,
+                _ => return true,
+            },
+            _ => return true,
+        },
         "font-synthesis-style" => match comps {
             [c] => match values::ident(c).as_deref() {
                 Some("auto") => style.font_synthesis_style = true,
@@ -480,7 +489,12 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 };
             }
         }
-        "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
+        "font-kerning" => match values::ident(c0).as_deref() {
+            Some("none") => style.font_kerning_none = true,
+            Some("auto" | "normal") => style.font_kerning_none = false,
+            _ => {}
+        },
+        "hyphens" | "text-rendering" | "font-stretch" | "font-feature-settings"
         | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
         | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"

@@ -1543,11 +1543,11 @@ fn is_inherited(name: &str) -> bool {
             | "word-spacing" | "text-align" | "text-underline-offset" | "text-underline-position" | "text-transform" | "text-indent"
             | "white-space" | "list-style" | "list-style-type" | "list-style-position" | "visibility" | "cursor"
             | "border-collapse" | "border-spacing" | "direction" | "tab-size" | "word-break" | "overflow-wrap" | "word-wrap"
-            | "text-shadow" | "quotes" | "pointer-events" | "user-select" | "font-variant" | "font-variant-caps"
+            | "text-shadow" | "quotes" | "pointer-events" | "user-select" | "font-variant" | "font-variant-caps" | "font-kerning"
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
-            | "font-synthesis" | "font-synthesis-style"
+            | "font-synthesis" | "font-synthesis-style" | "font-synthesis-small-caps"
     )
 }
 
@@ -1650,6 +1650,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.font_family_list = from.font_family_list.clone();
             to.font_size = from.font_size;
             to.font_size_keyword = from.font_size_keyword;
+            to.font_kerning_none = from.font_kerning_none;
             to.font_weight = from.font_weight;
             to.font_stretch = from.font_stretch;
             to.font_style = from.font_style;
@@ -1705,7 +1706,12 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.text_wrap_balance = from.text_wrap_balance;
             to.white_space = from.white_space;
         }
-        "font-synthesis" | "font-synthesis-style" => to.font_synthesis_style = from.font_synthesis_style,
+        "font-synthesis" => {
+            to.font_synthesis_style = from.font_synthesis_style;
+            to.font_synthesis_small_caps = from.font_synthesis_small_caps;
+        }
+        "font-synthesis-style" => to.font_synthesis_style = from.font_synthesis_style,
+        "font-synthesis-small-caps" => to.font_synthesis_small_caps = from.font_synthesis_small_caps,
         "line-break" => to.line_break = from.line_break,
         "columns" | "column-count" | "column-width" => to.multicol = from.multicol,
         "text-underline-position" => to.text_underline_position = from.text_underline_position,
@@ -1880,6 +1886,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.line_clamp_prefixed = from.line_clamp_prefixed;
         }
         "font-variant" | "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
+        "font-kerning" => to.font_kerning_none = from.font_kerning_none,
         "font-variation-settings" => to.font_variation_settings = from.font_variation_settings.clone(),
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
@@ -2932,6 +2939,8 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     style.font_family_list = props::text::family_names(&fam_comps);
                 }
                 style.font_variant_small_caps = f.small_caps;
+                // The shorthand resets font-kerning to its initial value.
+                style.font_kerning_none = false;
             }
         }
         "line-height" => {

@@ -1878,7 +1878,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                                 variations: if style.applied_decorations.is_empty() { Vec::new() } else { style.font_variation_settings.clone() },
                             },
                             shadows: style.text_shadow.clone(),
-                            small_caps: style.font_variant_small_caps,
+                            // (Small caps are only synthesized.)
+                            small_caps: style.font_variant_small_caps && style.font_synthesis_small_caps,
                             oblique,
                             emphasis: if item == MARKER_ITEM { None } else { emphasis_of(&style) },
                         },

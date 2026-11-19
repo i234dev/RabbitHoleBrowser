@@ -1444,6 +1444,9 @@ pub struct ComputedStyle {
     pub wrap_inside_avoid: bool,
     /// `font-synthesis` allows a synthesized oblique (inherited).
     pub font_synthesis_style: bool,
+    /// `font-synthesis-small-caps` is `auto` (inherited): small caps may be
+    /// synthesized.
+    pub font_synthesis_small_caps: bool,
     /// `line-break` (inherited): 0 auto/normal, 1 loose, 2 strict,
     /// 3 anywhere.
     pub line_break: u8,
@@ -1494,6 +1497,8 @@ pub struct ComputedStyle {
     /// value, ...) through inheritance: it follows the family's own
     /// `medium` (inherited).
     pub font_size_keyword: bool,
+    /// `font-kerning: none` (inherited).
+    pub font_kerning_none: bool,
     pub font_variant_small_caps: bool,
     /// `font-variation-settings` (inherited): axis tag and value.
     pub font_variation_settings: Vec<([u8; 4], f32)>,
@@ -1677,6 +1682,7 @@ impl ComputedStyle {
             text_autospace: false,
             wrap_inside_avoid: false,
             font_synthesis_style: true,
+            font_synthesis_small_caps: true,
             line_break: 0,
             line_height_tight: false,
             text_underline_position: UnderlinePosition::default(),
@@ -1699,6 +1705,7 @@ impl ComputedStyle {
             font_family_list: Vec::new(),
             font_monospace_only: false,
             font_size_keyword: true,
+            font_kerning_none: false,
             font_variant_small_caps: false,
             font_variation_settings: Vec::new(),
             object_fit: ObjectFit::Fill,
@@ -1757,6 +1764,7 @@ impl ComputedStyle {
             text_wrap_balance: parent.text_wrap_balance,
             text_autospace: parent.text_autospace,
             font_synthesis_style: parent.font_synthesis_style,
+            font_synthesis_small_caps: parent.font_synthesis_small_caps,
             line_break: parent.line_break,
             line_height_tight: parent.line_height_tight,
             text_underline_position: parent.text_underline_position,
@@ -1776,6 +1784,7 @@ impl ComputedStyle {
             font_family_list: parent.font_family_list.clone(),
             font_monospace_only: parent.font_monospace_only,
             font_size_keyword: parent.font_size_keyword,
+            font_kerning_none: parent.font_kerning_none,
             font_variant_small_caps: parent.font_variant_small_caps,
             font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
@@ -1800,6 +1809,7 @@ impl ComputedStyle {
             && self.font_family == o.font_family
             && self.font_monospace_only == o.font_monospace_only
             && self.font_size_keyword == o.font_size_keyword
+            && self.font_kerning_none == o.font_kerning_none
             && self.font_size == o.font_size
             && self.font_weight == o.font_weight
             && self.font_stretch == o.font_stretch
@@ -1820,6 +1830,7 @@ impl ComputedStyle {
             && self.text_wrap_balance == o.text_wrap_balance
             && self.text_autospace == o.text_autospace
             && self.font_synthesis_style == o.font_synthesis_style
+            && self.font_synthesis_small_caps == o.font_synthesis_small_caps
             && self.line_break == o.line_break
             && self.line_height_tight == o.line_height_tight
             && self.text_underline_position == o.text_underline_position
