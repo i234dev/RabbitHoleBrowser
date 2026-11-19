@@ -301,6 +301,58 @@ fn shape_fn_path(from: (Length, Length), cmds: &[ShapeCommand], rb: Rect) -> Vec
 /// Bézier approximation constant for a quarter ellipse.
 const KAPPA: f32 = 0.552_284_8;
 
+/// The inner border edge of a shaped box: its outer edge (a closed,
+/// clockwise polyline) offset inwards by the border widths (`[top, right,
+/// bottom, left]`), each edge by the widths of the sides it faces.
+pub fn inset_contour(points: &[Point], widths: [f32; 4]) -> Vec<Point> {
+    let n = points.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    // Drop repeated points (zero-length edges have no normal).
+    let mut pts: Vec<Point> = Vec::with_capacity(n);
+    for &p in points {
+        if pts.last().is_none_or(|q: &Point| (q.x - p.x).abs() > 1e-4 || (q.y - p.y).abs() > 1e-4) {
+            pts.push(p);
+        }
+    }
+    while pts.len() > 1 && (pts[0].x - pts[pts.len() - 1].x).abs() <= 1e-4 && (pts[0].y - pts[pts.len() - 1].y).abs() <= 1e-4 {
+        pts.pop();
+    }
+    let n = pts.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    // Each edge as (point on the offset line, direction).
+    let edges: Vec<(Point, Point)> = (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+            let d = Point::new((b.x - a.x) / len, (b.y - a.y) / len);
+            // Inward normal of a clockwise contour (y down).
+            let nrm = Point::new(-d.y, d.x);
+            let wx = if nrm.x > 0.0 { widths[3] } else { widths[1] };
+            let wy = if nrm.y > 0.0 { widths[0] } else { widths[2] };
+            let w = ((nrm.x * wx).powi(2) + (nrm.y * wy).powi(2)).sqrt();
+            (Point::new(a.x + nrm.x * w, a.y + nrm.y * w), d)
+        })
+        .collect();
+    (0..n)
+        .map(|i| {
+            let (p0, d0) = edges[(i + n - 1) % n];
+            let (p1, d1) = edges[i];
+            // Intersection of the two offset lines (their shared end when
+            // they are parallel).
+            let cross = d0.x * d1.y - d0.y * d1.x;
+            if cross.abs() < 1e-6 {
+                return p1;
+            }
+            let t = ((p1.x - p0.x) * d1.y - (p1.y - p0.y) * d1.x) / cross;
+            Point::new(p0.x + d0.x * t, p0.y + d0.y * t)
+        })
+        .collect()
+}
+
 pub fn corner_shaped_path(rect: Rect, radii: Radii, shapes: [crate::computed::CornerShape; 4]) -> Vec<PathSeg> {
     use crate::computed::CornerShape;
     let r = clamp_radii(rect, radii);

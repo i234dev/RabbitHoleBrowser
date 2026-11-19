@@ -1165,7 +1165,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let border_image = style.border_image.as_deref().is_some_and(|bi| {
             crate::border_image::paint_border_image(self.list, &geom, bi, self.ctx.background_images, style)
         });
-        if style.has_visible_border() && !border_image {
+        if style.has_visible_border() && !border_image && shaped && self.paint_shaped_border(b, shaped_radii) {
+            // (Drawn along the corner shapes.)
+        } else if style.has_visible_border() && !border_image {
             let bw = style.border_width;
             let bs = style.border_style;
             let bc = style.border_color;
@@ -1185,6 +1187,42 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if shaped {
             self.list.push(DisplayItem::PopClip);
         }
+    }
+
+    /// A solid one-color border along shaped corners (`corner-shape`):
+    /// the band between the shaped outer edge and that edge inset by the
+    /// border widths. False when the border is not of that kind.
+    fn paint_shaped_border(&mut self, b: &LayoutBox, radii: Radii) -> bool {
+        let style = &b.style;
+        if style.border_shape.is_some() || !style.corner_shape.iter().any(|c| *c != rabbithole_style::CornerShape::Round) || !background::has_radii(&radii) {
+            return false;
+        }
+        let (bc, bs, bw) = (style.border_color, style.border_style, style.border_width);
+        let colors = [bc.top, bc.right, bc.bottom, bc.left];
+        let styles = [bs.top, bs.right, bs.bottom, bs.left];
+        let widths = [bw.top, bw.right, bw.bottom, bw.left];
+        let visible = |i: usize| widths[i] > 0.0 && styles[i].is_visible();
+        let first = (0..4).find(|&i| visible(i));
+        let Some(first) = first else { return false };
+        if (0..4).any(|i| visible(i) && (colors[i] != colors[first] || styles[i] != rabbithole_style::BorderStyle::Solid)) {
+            return false;
+        }
+        let widths = [0, 1, 2, 3].map(|i| if visible(i) { widths[i] } else { 0.0 });
+        let outer = rabbithole_style::shapes::corner_shaped_path(b.rect, radii, style.corner_shape);
+        let flat = rabbithole_gfx::path::flatten(&outer, &rabbithole_gfx::IDENTITY, 0.1);
+        let Some(contour) = flat.contours.first() else { return false };
+        let inner = rabbithole_style::shapes::inset_contour(&contour.points, widths);
+        let mut ring = outer;
+        if let Some((first, rest)) = inner.split_first() {
+            ring.push(PathSeg::MoveTo(*first));
+            ring.extend(rest.iter().map(|p| PathSeg::LineTo(*p)));
+            ring.push(PathSeg::Close);
+        }
+        let bounds = b.rect;
+        self.list.push(DisplayItem::PushClipPath { bounds, path: Arc::new(ring), evenodd: true, anchor: Point::new(b.rect.x, b.rect.y), rounded: None });
+        self.list.push(DisplayItem::Rect { rect: b.rect, color: colors[first], radius: 0.0 });
+        self.list.push(DisplayItem::PopClip);
+        true
     }
 
     /// Clip the box's own painting to its `border-shape` or shaped corners

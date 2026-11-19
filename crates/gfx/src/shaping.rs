@@ -246,7 +246,8 @@ impl FontContext {
         if upem <= 0.0 {
             return (0.5, 0.5, 1.0);
         }
-        let adv = |c: char| face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).map(|a| a as f32 / upem).filter(|a| *a > 0.0);
+        // A mapped glyph counts even with a zero advance.
+        let adv = |c: char| face.glyph_index(c).map(|g| face.glyph_hor_advance(g).unwrap_or(0) as f32 / upem);
         let ch = adv('0').unwrap_or(0.5);
         let ic = adv('\u{6C34}').unwrap_or(1.0);
         let ex = face
