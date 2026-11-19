@@ -198,7 +198,13 @@ fn avoid_floats(style: &ComputedStyle, bfc: &Bfc, cb: &Cb, (mut x, mut y, mut co
             x = l + ml;
             break;
         } else if outer <= r - l + 0.01 {
-            x = l + sml;
+            // Auto margins share the space left beside the floats.
+            let free = r - l - outer;
+            x = match (style.margin.left.is_auto(), style.margin.right.is_auto()) {
+                (true, true) => l + free / 2.0,
+                (true, false) => l + free,
+                _ => l + sml,
+            };
             break;
         }
         match bfc.next_y(y) {

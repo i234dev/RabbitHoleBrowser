@@ -1076,7 +1076,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             let h = self.children[c].margin_rect().h.max(self.strut_h());
             for _ in 0..64 {
                 let (l, r) = self.bfc.available(self.cur.y, h, self.content_x, self.content_w);
-                if (l - self.cur.left).abs() < 0.01 && (r - self.cur.align_right).abs() < 0.01 {
+                let unchanged = (l - self.cur.left).abs() < 0.01 && (r - self.cur.align_right).abs() < 0.01;
+                if unchanged && w <= r - l + 0.01 {
                     break;
                 }
                 if w > r - l + 0.01 && w <= self.content_w + 0.01 && self.cur.frags.is_empty() {
@@ -1085,7 +1086,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         continue;
                     }
                 }
-                self.narrow_line(l, r);
+                if !unchanged {
+                    self.narrow_line(l, r);
+                }
                 break;
             }
         }
