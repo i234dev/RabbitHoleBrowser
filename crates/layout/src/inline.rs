@@ -51,7 +51,8 @@ pub(crate) enum Piece {
     },
     Open(usize),
     Close(usize),
-    Atomic(usize),
+    /// An atomic inline; whether the line may break before it.
+    Atomic(usize, bool),
     Float(usize),
     Abs(usize),
     Break,
@@ -321,6 +322,12 @@ fn hyphenate_items(items: &[InlineItem]) -> Vec<Option<String>> {
     out
 }
 
+/// Characters that glue to an adjacent atomic inline (CSS Text 3 §5.1):
+/// GL (but NBSP), WJ and ZWJ.
+fn glues_atomic(c: char) -> bool {
+    c != ' ' && matches!(lb::class(c), lb::Lb::GL | lb::Lb::WJ | lb::Lb::ZWJ)
+}
+
 /// Word-separator characters (CSS Text 3 §4.1.1): expanded by
 /// `inter-word` justification.
 fn is_word_separator(c: char) -> bool {
@@ -414,6 +421,7 @@ impl<'a> Layouter<'a> {
         let mut last_char: Option<char> = None;
         let mut space_opp: Option<Option<char>> = None;
         let mut points = Vec::new();
+        let mut after_atomic = false;
         let mut segs = Vec::new();
         // `hyphens: auto`: the texts with soft hyphens at the hyphenation
         // points of their English words (which may span inline elements).
@@ -474,6 +482,9 @@ impl<'a> Layouter<'a> {
                                     if prev_break_opp && !anywhere && c != ' ' && c != '\t' && !lb::break_after_spaces(&rules, before, c) {
                                         prev_break_opp = false;
                                     }
+                                }
+                                if std::mem::take(&mut after_atomic) && w.chars().next().is_some_and(glues_atomic) {
+                                    prev_break_opp = false;
                                 }
                                 let w_cursive = w.chars().any(is_cursive);
                                 let prev_before = prev_char;
@@ -600,11 +611,15 @@ impl<'a> Layouter<'a> {
                     }
                 }
                 InlineItem::Atomic(c) => {
+                    // Atomic inlines break on both sides, except next to
+                    // glue (GL but NBSP, WJ, ZWJ).
+                    let before = container_wraps && !prev_char.is_some_and(glues_atomic);
                     prev_char = None;
                     space_opp = None;
                     last_char = None;
-                    pieces.push(Piece::Atomic(*c));
+                    pieces.push(Piece::Atomic(*c, before));
                     prev_break_opp = container_wraps;
+                    after_atomic = true;
                     // An atomic box interrupts the whitespace sequence, so a
                     // following space is not collapsed away.
                     col.prev_space = false;
@@ -1002,7 +1017,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
                 Piece::Open(i) => self.open(*i),
                 Piece::Close(i) => self.close(*i),
-                Piece::Atomic(c) => self.place_atomic(*c),
+                Piece::Atomic(c, before) => self.place_atomic(*c, *before),
                 Piece::Float(c) => self.place_float(*c),
                 Piece::Abs(c) => {
                     // A hypothetical block starts at its block container's
@@ -1251,24 +1266,28 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.has_content = true;
     }
 
-    fn place_atomic(&mut self, c: usize) {
+    fn place_atomic(&mut self, c: usize, break_before: bool) {
         let avail = self.content_w;
         let cb_h = self.cb_h;
         self.lay.layout_atomic(&mut self.children[c], avail, cb_h);
         let w = self.children[c].margin_rect().w;
-        let break_before = self.cstyle.white_space.wraps();
         let mut guard = 0;
         loop {
             guard += 1;
             let fits = self.cur.x + self.pending_w() + w <= self.cur.right + 0.01;
-            if fits || !self.cur.has_content || !break_before || guard > 100 {
+            if fits || !self.cur.has_content || guard > 100 {
                 break;
             }
-            if let Some(idx) = self.cur.break_at.filter(|i| *i > 0) {
-                if !break_before {
-                    self.carry_over(idx);
-                    continue;
+            if !break_before {
+                // Glued to what precedes: both move to the next line from
+                // the last opportunity, if any (otherwise they overflow).
+                if self.cstyle.white_space.wraps() {
+                    if let Some(idx) = self.cur.break_at.filter(|i| *i > 0) {
+                        self.carry_over(idx);
+                        continue;
+                    }
                 }
+                break;
             }
             self.finish_line(false);
         }
@@ -2120,21 +2139,31 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let baseline = y + a;
 
         // Horizontal alignment. Preserved spaces at the end of a `pre-wrap`
-        // line hang: what overflows the line does not count.
+        // line, and other space separators (U+3000...) at the end of any
+        // line but `break-spaces` ones, hang: they do not count.
         let mut hang = 0.0;
-        let trailing = match self.cur.frags.last() {
-            Some(PF { kind: PFKind::Text { text, item }, w, .. }) if text.ends_with(' ') => Some((*item, text.chars().rev().take_while(|c| *c == ' ').count(), *w)),
-            _ => None,
-        };
-        if let Some((item, n, w)) = trailing {
-            let st = self.style(item).clone();
-            if st.white_space == rabbithole_style::WhiteSpace::PreWrap {
-                let font = self.lay.font_for(&st);
-                let sw = self.lay.measurer.space_width(font, st.font_size) + st.letter_spacing;
-                let spaces = (sw * n as f32).min(w);
-                // At a soft wrap they hang unconditionally; before a forced
-                // break (or the end of the paragraph) only what overflows.
-                hang = if forced || self.final_flush { (self.cur.x - self.cur.right).clamp(0.0, spaces) } else { spaces };
+        if let Some(PF { kind: PFKind::Text { text, item }, w, .. }) = self.cur.frags.last() {
+            let st = self.style(*item).clone();
+            let ws = st.white_space;
+            let pre_wrap = ws == rabbithole_style::WhiteSpace::PreWrap;
+            if ws != rabbithole_style::WhiteSpace::BreakSpaces && *item != MARKER_ITEM {
+                let hangs = |c: char| (c == ' ' && pre_wrap) || lb::is_space_separator(c);
+                let n = text.chars().rev().take_while(|c| hangs(*c)).count();
+                if n > 0 {
+                    let font = self.lay.font_for(&st);
+                    let suffix_start = text.char_indices().rev().nth(n - 1).map_or(0, |(i, _)| i);
+                    let suffix = &text[suffix_start..];
+                    let width = if suffix.bytes().all(|b| b == b' ') {
+                        self.lay.measurer.space_width(font, st.font_size) * n as f32
+                    } else {
+                        self.lay.measurer.width(font, st.font_size, suffix)
+                    } + st.letter_spacing * n as f32;
+                    let spaces = width.min(*w);
+                    // Preserved spaces hang unconditionally at a soft wrap;
+                    // before a forced break (or the end of the paragraph)
+                    // only what overflows. Other space separators always.
+                    hang = if pre_wrap && (forced || self.final_flush) { (self.cur.x - self.cur.right).clamp(0.0, spaces) } else { spaces };
+                }
             }
         }
         let used = self.cur.x - self.cur.left - hang;
