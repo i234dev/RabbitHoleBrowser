@@ -19,7 +19,7 @@ dir css/css-nesting 13 17
 dir css/css-overflow 434 719
 dir css/css-position 150 251
 dir css/css-sizing 399 568
-dir css/css-text 1178 1550
+dir css/css-text 1181 1550
 dir css/css-text-decor 279 339
 dir css/css-transforms 371 794
 dir css/css-ui 870 962
@@ -2884,9 +2884,6 @@ fail css/css-text/letter-spacing/letter-spacing-nesting-001.html
 fail css/css-text/letter-spacing/letter-spacing-nesting-002.html
 fail css/css-text/letter-spacing/letter-spacing-nesting-003.xht
 fail css/css-text/line-break/line-break-anywhere-001.html
-fail css/css-text/line-break/line-break-anywhere-006.html
-fail css/css-text/line-break/line-break-anywhere-010.html
-fail css/css-text/line-break/line-break-anywhere-overrides-uax-behavior-005.html
 fail css/css-text/line-break/line-break-anywhere-overrides-uax-behavior-009.html
 fail css/css-text/line-break/line-break-anywhere-overrides-uax-behavior-010.html
 fail css/css-text/line-break/line-break-anywhere-overrides-uax-behavior-013.html

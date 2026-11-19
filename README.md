@@ -17,7 +17,7 @@ It can be used three ways:
 
 _Both images were produced by RabbitHole's renderer: every pixel comes from its own rasterizer._
 
-## Status (v0.1.35)
+## Status (v0.1.36)
 
 RabbitHole is young but already runs real, heavy sites: Google search,
 YouTube (playback with sound and AV1/VP9 video), Wikipedia,
@@ -31,6 +31,22 @@ paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
 median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
+
+Version 0.1.36 raises the WPT CSS reftests to 76.4 % (14,996 / 19,627,
+[measurement](docs/benchmarks/wpt-css-2026-11-19-v0.1.36.md); from this run on,
+a reftest with several match references passes when any of them matches, as
+WPT specifies):
+- UAX #14 line breaking, justification, hyphenation and skip-ink
+  underlines (css-text 76.2 %);
+- `::first-letter`, floats, tables and sticky positioning (CSS2 91.0 %);
+- border-image, conic and tiled gradients, gradient colour spaces, SVG images
+  at their drawn size, EXIF orientation, line-clamp and OpenType font
+  features (backgrounds 81.6 %, images 86.1 %).
+
+An iframe whose document changes only its URL fragment is no longer reloaded,
+and images served from the cache fire `load`. Speedometer 3.1 is 1.0095×
+faster than 0.1.35, in 8 of 8 paired runs
+([record](docs/benchmarks/speedometer-2026-11-19-v0.1.36.md)).
 
 Version 0.1.35 raises the WPT CSS reftests from 63.2 % to 67.9 % (13,328 /
 19,627, [measurement](docs/benchmarks/wpt-css-2026-11-19.md)):
@@ -116,7 +132,7 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 |---|---|---|
 | **test262** (ECMAScript) | **99.90 %** (46,017 / 46,064 run) | 2026-11-18, 0.1.34 JavaScript code `fe3d71e`, JIT on, 8 workers, profile ci; **99.93 % excluding Intl**, ECMA-402 98.6 %; multi-agent `Atomics` and `Intl.NumberFormat` v3 tests included; [measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md) and `crates/js/tests/test262_baseline.txt` |
 | **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **76.4 %** (14,993 / 19,627) | 2026-11-19, 0.1.36 CSS/layout code `890c370`; CSS2 91.0 %, css-ui 90.4 %, images 86.1 %, flexbox 84.8 %, backgrounds 81.6 %, grid 77.4 %, text 76.0 %; any-match rule for multiple references since this run; [measurement](docs/benchmarks/wpt-css-2026-11-19-v0.1.36.md) and `crates/engine/tests/wpt-css-baseline.txt` |
+| **WPT CSS reftests** (pixel comparison) | **76.4 %** (14,996 / 19,627) | 2026-11-19, 0.1.36 CSS/layout code `89d437d`; CSS2 91.0 %, css-ui 90.4 %, images 86.1 %, flexbox 84.8 %, backgrounds 81.6 %, grid 77.4 %, text 76.2 %; any-match rule for multiple references since this run; [measurement](docs/benchmarks/wpt-css-2026-11-19-v0.1.36.md) and `crates/engine/tests/wpt-css-baseline.txt` |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
