@@ -171,11 +171,14 @@ fn abs_align_fraction(align: ItemAlign, mods: rabbithole_style::AlignMods, rtl: 
 /// width), narrowed or moved below them.
 #[cold]
 #[inline(never)]
-fn avoid_floats(style: &ComputedStyle, bfc: &Bfc, cb: &Cb, (mut x, mut y, mut content_w): (f32, f32, f32), pb_h: f32, ml: f32, mr: f32) -> (f32, f32, f32) {
+/// `band_h` is the box's border-box height when known before its layout:
+/// it must clear the floats beside all of it.
+#[allow(clippy::too_many_arguments)]
+fn avoid_floats(style: &ComputedStyle, bfc: &Bfc, cb: &Cb, (mut x, mut y, mut content_w): (f32, f32, f32), pb_h: f32, ml: f32, mr: f32, band_h: f32) -> (f32, f32, f32) {
     let cbw = cb.width;
     let mut guard = 0;
     loop {
-        let (l, r) = bfc.available(y, 1.0, cb.x, cb.width);
+        let (l, r) = bfc.available(y, band_h.max(1.0), cb.x, cb.width);
         if l <= cb.x && r >= cb.x + cb.width {
             break;
         }
@@ -636,8 +639,15 @@ impl<'a> Layouter<'a> {
             y = y.max(bfc.clear_y(style.clear));
         }
         // A BFC root placed next to floats narrows (or moves below them).
-        if b.bfc_root && b.flow.is_in_flow() && matches!(mode, WidthMode::Fill) && !bfc.is_empty() {
-            (x, y, content_w) = avoid_floats(&style, bfc, cb, (x, y, content_w), pb_h, ml, mr);
+        // (Block-level tables too: they are as wide as their contents.)
+        let table = matches!(b.formatting, Formatting::Table | Formatting::TableWrapper) && b.kind != BoxKind::InlineBlock && style.display.is_block_level();
+        if b.bfc_root && b.flow.is_in_flow() && (matches!(mode, WidthMode::Fill) || table) && !bfc.is_empty() {
+            let band_h = self.resolve_height(&style, cb.height, pb_v).map_or(1.0, |h| h + pb_v);
+            if table {
+                (x, y, content_w) = self.table_beside_floats(b, bfc, cb, (x, y, content_w), pb_h, band_h, mode);
+            } else {
+                (x, y, content_w) = avoid_floats(&style, bfc, cb, (x, y, content_w), pb_h, ml, mr, band_h);
+            }
         }
 
         b.rect = Rect::new(x, y, content_w + pb_h, 0.0);
@@ -1325,6 +1335,45 @@ impl<'a> Layouter<'a> {
     }
 
     #[inline]
+    /// Place a block-level table (or table wrapper) beside floats: at the
+    /// first position where its width for the space left by the floats
+    /// fits there (CSS 2.1 §9.5).
+    #[allow(clippy::too_many_arguments)]
+    #[cold]
+    fn table_beside_floats(&mut self, b: &mut LayoutBox, bfc: &Bfc, cb: &Cb, (x, y, content_w): (f32, f32, f32), pb_h: f32, band_h: f32, mode: WidthMode) -> (f32, f32, f32) {
+        let style = b.style.clone();
+        let (sml, smr) = (style.margin.left.resolve(cb.width).unwrap_or(0.0), style.margin.right.resolve(cb.width).unwrap_or(0.0));
+        let mut yy = y;
+        for _ in 0..100 {
+            let (l, r) = bfc.available(yy, band_h.max(1.0), cb.x, cb.width);
+            if l <= cb.x && r >= cb.x + cb.width {
+                return (x, yy, content_w);
+            }
+            // Only an auto width depends on the space left (percentages
+            // resolve against the containing block).
+            let auto = if b.formatting == Formatting::TableWrapper {
+                b.children.iter().find(|c| c.formatting == Formatting::Table).is_some_and(|t| t.style.width.is_auto())
+            } else {
+                style.width.is_auto()
+            };
+            let w = if !auto {
+                content_w
+            } else if b.formatting == Formatting::TableWrapper {
+                self.wrapped_table_width(b, (r - l - sml - smr).max(0.0), mode)
+            } else {
+                self.compute_width(b, r - l, cb.height, pb_h, Some(sml), Some(smr), mode).0
+            };
+            if w + pb_h + sml + smr <= r - l + 0.01 {
+                return (l + sml, yy, w);
+            }
+            match bfc.next_y(yy) {
+                Some(ny) => yy = ny,
+                None => break,
+            }
+        }
+        (x, y, content_w)
+    }
+
     fn resolve_height(&self, style: &ComputedStyle, cb_h: Option<f32>, pb_v: f32) -> Option<f32> {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
         match style.height {
