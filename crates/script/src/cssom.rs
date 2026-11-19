@@ -641,6 +641,7 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
 fn border_style_css(b: rabbithole_style::BorderStyle) -> &'static str {
     match b {
         rabbithole_style::BorderStyle::None => "none",
+        rabbithole_style::BorderStyle::Hidden => "hidden",
         rabbithole_style::BorderStyle::Solid => "solid",
         rabbithole_style::BorderStyle::Dashed => "dashed",
         rabbithole_style::BorderStyle::Dotted => "dotted",

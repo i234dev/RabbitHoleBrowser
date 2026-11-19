@@ -380,6 +380,8 @@ pub enum VerticalAlign {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderStyle {
     None,
+    /// `hidden`: no border, and it wins collapsed border conflicts.
+    Hidden,
     Solid,
     Dashed,
     Dotted,
@@ -388,7 +390,7 @@ pub enum BorderStyle {
 
 impl BorderStyle {
     pub fn is_visible(&self) -> bool {
-        !matches!(self, BorderStyle::None)
+        !matches!(self, BorderStyle::None | BorderStyle::Hidden)
     }
 }
 

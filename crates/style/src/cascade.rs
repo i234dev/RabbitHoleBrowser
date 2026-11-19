@@ -2046,7 +2046,8 @@ fn non_negative(c: &[Token]) -> bool {
 
 fn border_style(c: &[Token]) -> Option<BorderStyle> {
     Some(match values::ident(c)?.as_str() {
-        "none" | "hidden" => BorderStyle::None,
+        "none" => BorderStyle::None,
+        "hidden" => BorderStyle::Hidden,
         "solid" | "groove" | "ridge" | "inset" | "outset" => BorderStyle::Solid,
         "dashed" => BorderStyle::Dashed,
         "dotted" => BorderStyle::Dotted,

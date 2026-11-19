@@ -825,10 +825,17 @@ impl<'a> Layouter<'a> {
                 BorderStyle::Solid => 4,
                 BorderStyle::Dashed => 3,
                 BorderStyle::Dotted => 2,
-                BorderStyle::None => 0,
+                BorderStyle::None | BorderStyle::Hidden => 0,
             }
         }
         fn better(a: Cand, b: Cand) -> Cand {
+            // `hidden` suppresses every other border (CSS 2.1 §17.6.2.1).
+            if a.1 == BorderStyle::Hidden {
+                return a;
+            }
+            if b.1 == BorderStyle::Hidden {
+                return b;
+            }
             let ka = (a.0, style_rank(a.1), a.3);
             let kb = (b.0, style_rank(b.1), b.3);
             if kb.0 > ka.0 || (kb.0 == ka.0 && (kb.1 > ka.1 || (kb.1 == ka.1 && kb.2 > ka.2))) {
