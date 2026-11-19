@@ -192,6 +192,11 @@ fn transforms_and_matrix() {
     assert!(s.transform.is_empty());
     let s = one("transform: matrix(1, 0, 0, 1, 30, 40)");
     assert_eq!(s.transform[0], TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 30.0, 40.0]));
+    // rotate3d() about the z axis is rotate(); skewX()/skewY() stay distinct.
+    let s = one("transform: rotate3d(0, 0, -1, 90deg) skewX(10deg) skewY(20deg)");
+    assert!(matches!(s.transform[0], TransformOp::Rotate(a) if (a + std::f32::consts::FRAC_PI_2).abs() < 1e-5), "{:?}", s.transform);
+    assert!(matches!(s.transform[1], TransformOp::SkewX(a) if (a - 10f32.to_radians()).abs() < 1e-5), "{:?}", s.transform);
+    assert!(matches!(s.transform[2], TransformOp::SkewY(a) if (a - 20f32.to_radians()).abs() < 1e-5), "{:?}", s.transform);
 }
 
 #[test]

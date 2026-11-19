@@ -168,6 +168,11 @@ fn parse_transform(comps: &[&[Token]], ctx: &LengthContext) -> Option<Vec<Transf
             "scalez" => TransformOp::Scale(1.0, 1.0),
             "scale3d" => TransformOp::Scale(num(0)?, num(1)?),
             "rotate" | "rotatez" => TransformOp::Rotate(ang(0)?),
+            // A rotation about the z axis is a 2D rotation.
+            "rotate3d" if args.len() == 4 && num(0) == Some(0.0) && num(1) == Some(0.0) && num(2).is_some_and(|z| z != 0.0) => {
+                let a = ang(3)?;
+                TransformOp::Rotate(if num(2)? < 0.0 { -a } else { a })
+            }
             "rotatex" | "rotatey" | "rotate3d" | "perspective" => TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
             "skew" => TransformOp::Skew(ang(0)?, ang(1).unwrap_or(0.0)),
             "skewx" => TransformOp::SkewX(ang(0)?),
