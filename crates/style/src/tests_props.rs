@@ -813,3 +813,28 @@ fn border_shape_and_corner_shape() {
     assert_eq!(one("corner-shape: superellipse(0)").corner_shape, [CornerShape::Bevel; 4]);
     assert_eq!(one("corner-shape: round; corner-top-left-shape: square").corner_shape[0], CornerShape::Square);
 }
+
+#[test]
+fn per_side_border_inherit_and_negative_sizes() {
+    let (doc, t) = styled("<div><p>x</p></div>", "div { border-left: 7px solid rgb(0, 0, 255) } p { border-left: inherit; border-top-width: inherit }");
+    let p = style_of(&doc, &t, "p");
+    assert_eq!(p.border_width.left, 7.0);
+    assert_eq!(p.border_style.left, BorderStyle::Solid);
+    assert_eq!(p.border_color.left, rabbithole_gfx::Color::rgb(0, 0, 255));
+    // The parent's top border has no style: its computed width is 0.
+    assert_eq!(p.border_width.top, 0.0);
+
+    let s = one("max-height: 10px; max-height: -1px; height: 5px; height: -5%; min-width: -2px");
+    assert_eq!(s.max_height, Length::Px(10.0));
+    assert_eq!(s.height, Length::Px(5.0));
+    assert_eq!(s.min_width, Length::Auto);
+}
+
+#[test]
+fn first_letter_style_is_computed() {
+    let (doc, t) = styled("<p>Text</p>", "p::first-letter { font-size: 30px; float: left }");
+    let n = doc.find_element("p").unwrap();
+    let fl = t.pseudo(n, PseudoElement::FirstLetter).expect("::first-letter style");
+    assert_eq!(fl.font_size, 30.0);
+    assert_eq!(fl.float, Float::Left);
+}
