@@ -144,15 +144,21 @@ impl<'a> Builder<'a> {
         let floated = !out_of_flow && style.float != Float::None;
         let kind = if out_of_flow || floated {
             BoxKind::Block
-        } else if style.display == Display::Inline {
-            BoxKind::Inline
-        } else if style.display.is_inline_level() {
-            BoxKind::InlineBlock
         } else {
-            BoxKind::Block
+            match style.display {
+                Display::Inline => BoxKind::Inline,
+                Display::TableCell => BoxKind::TableCell,
+                Display::TableRow => BoxKind::TableRow,
+                Display::Table => BoxKind::Table,
+                d if d.is_inline_level() => BoxKind::InlineBlock,
+                _ => BoxKind::Block,
+            }
         };
         let mut b = LayoutBox::new(kind, Some(node), style.clone());
         b.pseudo = Some(which);
+        if style.display == Display::ListItem && which != PseudoElement::Marker {
+            b.marker_text = list_marker_text(doc, node, &style);
+        }
         b.flow = if out_of_flow {
             Flow::Absolute
         } else if floated {
@@ -169,7 +175,18 @@ impl<'a> Builder<'a> {
         if kind == BoxKind::Inline {
             b.children = children;
             b.formatting = Formatting::Inline;
+        } else if !(out_of_flow || floated) && matches!(style.display, Display::Table | Display::InlineTable) {
+            // Table-level generated content gets the table fix-ups.
+            let captions = self.finish_table(&mut b, children);
+            return Some(self.wrap_table(b, captions));
+        } else if kind == BoxKind::TableRow {
+            self.finish_row(&mut b, children);
+        } else if crate::table::is_row_group(&b) {
+            self.finish_row_group(&mut b, children);
         } else {
+            if kind == BoxKind::TableCell {
+                b.bfc_root = true;
+            }
             self.finish_container(&mut b, children, false);
         }
         Some(b)
