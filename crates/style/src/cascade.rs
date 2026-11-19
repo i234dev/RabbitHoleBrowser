@@ -828,6 +828,10 @@ fn apply_declarations(
         }
     }
 
+    // `text-align: match-parent` on the root computes to `start`.
+    if is_root && style.text_align != TextAlign::Start && resolved.iter().any(|(n, v, _)| *n == "text-align" && values::components(v).first().is_some_and(|c| values::is_ident(c, "match-parent"))) {
+        style.text_align = TextAlign::Start;
+    }
     for (w, st) in [
         (&mut style.border_width.top, style.border_style.top),
         (&mut style.border_width.right, style.border_style.right),
@@ -849,6 +853,7 @@ fn apply_declarations(
             style.line_clamp = None;
         }
     }
+    style.resolve_spacing_pct();
     // A unitless line height scales with this element's font size (also
     // when inherited).
     if let Some(n) = style.line_height_number {
@@ -958,8 +963,10 @@ pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declara
     if decls.iter().any(|d| d.name.starts_with("text-") || d.name == "color") {
         apply_decorations(&mut style, parent);
     }
+    style.resolve_spacing_pct();
     style
 }
+
 
 // ---------------------------------------------------------------- font-face
 
@@ -1219,6 +1226,34 @@ fn auto_direction(doc: &Document, node: NodeId) -> Option<bool> {
     None
 }
 
+/// The [`ComputedStyle::lang`] code of a BCP 47 language tag.
+pub fn lang_code(tag: &str) -> u8 {
+    let mut parts = tag.split(['-', '_']);
+    let primary = parts.next().unwrap_or("").to_ascii_lowercase();
+    // An explicit script other than the language's own one disables its
+    // tailorings (tr-Cyrl is not cased like Turkish).
+    let script = parts.next().filter(|p| p.len() == 4 && p.bytes().all(|b| b.is_ascii_alphabetic())).map(|p| p.to_ascii_lowercase());
+    let own = match primary.as_str() {
+        "el" => "grek",
+        "ja" | "zh" | "ko" => "",
+        _ => "latn",
+    };
+    if script.as_deref().is_some_and(|s| !own.is_empty() && s != own) {
+        return 0;
+    }
+    match primary.as_str() {
+        "ja" => LANG_JA,
+        "zh" => LANG_ZH,
+        "ko" => LANG_KO,
+        "tr" | "az" => LANG_TR,
+        "lt" => LANG_LT,
+        "el" => LANG_EL,
+        "nl" => LANG_NL,
+        "en" => LANG_EN,
+        _ => 0,
+    }
+}
+
 fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     let el = doc.element(node)?;
     let mut css = String::new();
@@ -1251,6 +1286,10 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     }
     if let Some(c) = el.attr("bgcolor") {
         css.push_str(&format!("background-color:{};", legacy_color(c)));
+    }
+    // The content language (inherited through `ComputedStyle::lang`).
+    if let Some(l) = el.attr("lang").or_else(|| el.attr("xml:lang")) {
+        css.push_str(&format!("-rh-lang:{};", lang_code(l)));
     }
     // `dir=auto` (and `bdi` without a valid `dir`): the direction of the
     // first strong character of the element's text (HTML §3.2.6.4).
@@ -1516,7 +1555,7 @@ fn is_inherited(name: &str) -> bool {
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
-            | "font-synthesis" | "font-synthesis-style"
+            | "font-synthesis" | "font-synthesis-style" | "text-justify" | "hyphenate-character" | "text-decoration-skip-ink"
     )
 }
 
@@ -1598,12 +1637,24 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.line_height = from.line_height;
             to.line_height_number = from.line_height_number;
         }
-        "letter-spacing" => to.letter_spacing = from.letter_spacing,
-        "word-spacing" => to.word_spacing = from.word_spacing,
+        "letter-spacing" => {
+            to.letter_spacing = from.letter_spacing;
+            set_spacing_pct(to, 0, from.spacing_pct.map(|p| p[0]));
+        }
+        "word-spacing" => {
+            to.word_spacing = from.word_spacing;
+            set_spacing_pct(to, 1, from.spacing_pct.map(|p| p[1]));
+        }
         "text-align" => {
             to.text_align = from.text_align;
             to.text_align_webkit_center = from.text_align_webkit_center;
+            to.text_align_last = from.text_align_last;
         }
+        "text-align-last" => to.text_align_last = from.text_align_last,
+        "text-justify" => to.text_justify = from.text_justify,
+        "text-decoration-skip-ink" => to.text_decoration_skip_ink = from.text_decoration_skip_ink,
+        "hyphens" => to.hyphens = from.hyphens,
+        "hyphenate-character" => to.hyphenate_character = from.hyphenate_character.clone(),
         "text-decoration" => {
             to.text_decoration = from.text_decoration;
             to.text_decoration_color = from.text_decoration_color;
@@ -1636,8 +1687,14 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "text-underline-position" => to.text_underline_position = from.text_underline_position,
         "text-decoration-inset" => to.text_decoration_inset = from.text_decoration_inset,
         "text-decoration-line" => to.text_decoration = from.text_decoration,
-        "text-transform" => to.text_transform = from.text_transform,
-        "text-indent" => to.text_indent = from.text_indent,
+        "text-transform" => {
+            to.text_transform = from.text_transform;
+            to.text_transform_extra = from.text_transform_extra;
+        }
+        "text-indent" => {
+            to.text_indent = from.text_indent;
+            to.text_indent_flags = from.text_indent_flags;
+        }
         "white-space" => to.white_space = from.white_space,
         "vertical-align" => to.vertical_align = from.vertical_align,
         "list-style" => {
@@ -1791,7 +1848,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "direction" => to.direction = from.direction,
         "writing-mode" | "-webkit-writing-mode" => to.writing_mode = from.writing_mode,
         "unicode-bidi" => to.unicode_bidi = from.unicode_bidi,
-        "tab-size" => to.tab_size = from.tab_size,
+        "tab-size" => {
+            to.tab_size = from.tab_size;
+            to.tab_size_length = from.tab_size_length;
+        }
         "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
         "container-type" | "container" => to.container_size = from.container_size,
         "contain" => {
@@ -2326,7 +2386,7 @@ const SINGLE_VALUE: &[&str] = &[
     "border-top-style", "border-right-style", "border-bottom-style", "border-left-style", "border-top-color",
     "border-right-color", "border-bottom-color", "border-left-color", "box-sizing", "top", "right", "bottom", "left",
     "color", "background-color", "opacity", "font-weight", "font-style", "line-height", "letter-spacing", "word-spacing",
-    "text-align", "text-transform", "text-indent", "white-space", "vertical-align", "list-style-type",
+    "text-align", "white-space", "vertical-align", "list-style-type",
     "list-style-position", "overflow-x", "overflow-y", "visibility", "z-index", "font-size",
     "border-collapse", "table-layout", "caption-side", "empty-cells",
 ];
@@ -2849,16 +2909,22 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "letter-spacing" | "word-spacing" => {
+            // (px, percent of the font size)
             let v = if values::is_ident(c0, "normal") {
-                Some(0.0)
+                Some((0.0, 0.0))
             } else {
                 match resolve_len_no_auto(c0, ctx) {
-                    Some(Length::Px(v)) => Some(v),
+                    Some(Length::Px(v)) => Some((v, 0.0)),
+                    Some(Length::Percent(p)) => Some((0.0, p)),
+                    Some(Length::Calc(px, p)) => Some((px, p)),
                     _ => None,
                 }
             };
-            if let Some(v) = v {
-                if name == "letter-spacing" {
+            if let Some((px, pct)) = v {
+                let i = if name == "letter-spacing" { 0 } else { 1 };
+                set_spacing_pct(style, i, (pct != 0.0).then_some((px, pct)));
+                let v = px + pct / 100.0 * style.font_size;
+                if i == 0 {
                     style.letter_spacing = v;
                 } else {
                     style.word_spacing = v;
@@ -2867,6 +2933,8 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         }
         "text-align" => {
             if let Some(kw) = values::ident(c0) {
+                // `text-align` is a shorthand of `text-align-all` and
+                // `text-align-last` (CSS Text 3 §7.1).
                 style.text_align = match kw.as_str() {
                     "start" => TextAlign::Start,
                     "end" => TextAlign::End,
@@ -2874,25 +2942,76 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     "right" | "-webkit-right" | "-moz-right" => TextAlign::Right,
                     "center" | "-webkit-center" | "-moz-center" => TextAlign::Center,
                     "justify" | "justify-all" => TextAlign::Justify,
+                    "match-parent" => match_parent(parent.text_align, parent.direction),
                     _ => return,
+                };
+                style.text_align_last = match kw.as_str() {
+                    "justify-all" => Some(TextAlign::Justify),
+                    "match-parent" => parent.text_align_last.map(|a| match_parent(a, parent.direction)),
+                    _ => None,
                 };
                 style.text_align_webkit_center = matches!(kw.as_str(), "-webkit-center" | "-moz-center");
             }
         }
-        "text-transform" => {
+        "text-align-last" => {
             if let Some(kw) = values::ident(c0) {
-                style.text_transform = match kw.as_str() {
-                    "none" => TextTransform::None,
-                    "uppercase" => TextTransform::Uppercase,
-                    "lowercase" => TextTransform::Lowercase,
-                    "capitalize" => TextTransform::Capitalize,
+                style.text_align_last = match kw.as_str() {
+                    "auto" => None,
+                    "start" => Some(TextAlign::Start),
+                    "end" => Some(TextAlign::End),
+                    "left" => Some(TextAlign::Left),
+                    "right" => Some(TextAlign::Right),
+                    "center" => Some(TextAlign::Center),
+                    "justify" => Some(TextAlign::Justify),
+                    "match-parent" => Some(match_parent(parent.text_align_last.unwrap_or(match parent.text_align {
+                        TextAlign::Justify => TextAlign::Start,
+                        a => a,
+                    }), parent.direction)),
                     _ => return,
                 };
             }
         }
+        "text-transform" => {
+            // none | [capitalize | uppercase | lowercase] || full-width ||
+            // full-size-kana
+            if comps.len() == 1 && values::is_ident(c0, "none") {
+                style.text_transform = TextTransform::None;
+                style.text_transform_extra = 0;
+                return;
+            }
+            let (mut case, mut extra) = (None, 0u8);
+            for c in &comps {
+                match values::ident(c).as_deref() {
+                    Some("uppercase") if case.is_none() => case = Some(TextTransform::Uppercase),
+                    Some("lowercase") if case.is_none() => case = Some(TextTransform::Lowercase),
+                    Some("capitalize") if case.is_none() => case = Some(TextTransform::Capitalize),
+                    Some("full-width") if extra & 1 == 0 => extra |= 1,
+                    Some("full-size-kana") if extra & 2 == 0 => extra |= 2,
+                    _ => return,
+                }
+            }
+            style.text_transform = case.unwrap_or(TextTransform::None);
+            style.text_transform_extra = extra;
+        }
         "text-indent" => {
-            if let Some(l) = resolve_len_no_auto(c0, ctx) {
+            // <length-percentage> && hanging? && each-line?
+            let mut len = None;
+            let mut flags = 0u8;
+            for c in &comps {
+                match values::ident(c).as_deref() {
+                    Some("each-line") if flags & 1 == 0 => flags |= 1,
+                    Some("hanging") if flags & 2 == 0 => flags |= 2,
+                    Some(_) => return,
+                    None if len.is_none() => match resolve_len_no_auto(c, ctx) {
+                        Some(l) => len = Some(l),
+                        None => return,
+                    },
+                    None => return,
+                }
+            }
+            if let Some(l) = len {
                 style.text_indent = l;
+                style.text_indent_flags = flags;
             }
         }
         "white-space" => {
@@ -3043,6 +3162,24 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         _ => {
             props::apply(name, &comps, value, style, parent, ctx);
         }
+    }
+}
+
+/// Record (or clear) the percentage part of letter (0) / word (1) spacing.
+fn set_spacing_pct(style: &mut ComputedStyle, i: usize, v: Option<(f32, f32)>) {
+    let mut p = style.spacing_pct.unwrap_or([(0.0, 0.0); 2]);
+    p[i] = v.unwrap_or((0.0, 0.0));
+    style.spacing_pct = if p.iter().all(|e| e.1 == 0.0) { None } else { Some(p) };
+}
+
+/// `match-parent`: the parent's alignment, `start` / `end` resolved
+/// against the parent's direction.
+fn match_parent(a: TextAlign, dir: Direction) -> TextAlign {
+    let rtl = dir == Direction::Rtl;
+    match a {
+        TextAlign::Start => if rtl { TextAlign::Right } else { TextAlign::Left },
+        TextAlign::End => if rtl { TextAlign::Left } else { TextAlign::Right },
+        a => a,
     }
 }
 

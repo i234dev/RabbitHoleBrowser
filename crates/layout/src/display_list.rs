@@ -50,6 +50,8 @@ pub enum DisplayItem {
         color: Color,
         text: String,
         letter_spacing: f32,
+        /// Extra space after each word separator (justification).
+        word_spacing: f32,
         shadows: Vec<Shadow>,
         small_caps: bool,
         oblique: bool,
@@ -902,6 +904,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         color: m.color,
                         text: m.text.to_string(),
                         letter_spacing: 0.0,
+                        word_spacing: 0.0,
                         shadows: Vec::new(),
                         small_caps: false,
                         oblique: false,
@@ -1171,6 +1174,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             color: st.color,
             text: text.to_string(),
             letter_spacing: st.letter_spacing,
+            word_spacing: 0.0,
             shadows: Vec::new(),
             small_caps: false,
             oblique: false,
@@ -1211,6 +1215,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 color: st.color,
                 text: alt,
                 letter_spacing: 0.0,
+                        word_spacing: 0.0,
                 shadows: Vec::new(),
                 small_caps: false,
                 oblique: false,
@@ -1288,6 +1293,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             color: fg,
             text: label,
             letter_spacing: 0.0,
+                        word_spacing: 0.0,
             shadows: Vec::new(),
             small_caps: false,
             oblique: false,
@@ -1465,6 +1471,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         size,
                         color,
                         letter_spacing,
+                        word_spacing,
                         hidden,
                         decoration_info,
                         shadows,
@@ -1487,8 +1494,33 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         }
                         // Underlines and overlines go under the text,
                         // line-throughs over it (CSS Text Decoration 3 §2.1).
+                        // Text shadows also shadow the decorations, all
+                        // below the text and its decorations (CSS Text
+                        // Decoration 3 §4): one layer per shadow, the
+                        // first on top.
+                        let decorated_shadows = decoration_info.any() && !shadows.is_empty();
+                        if decorated_shadows {
+                            for sh in shadows.iter().rev() {
+                                let off = Some((sh.x, sh.y, sh.color));
+                                self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, false, off);
+                                self.list.push(DisplayItem::Text {
+                                    x: f.rect.x,
+                                    y: f.baseline,
+                                    font: *font,
+                                    size: *size,
+                                    color: Color::TRANSPARENT,
+                                    text: text.to_string(),
+                                    letter_spacing: *letter_spacing,
+                                    word_spacing: *word_spacing,
+                                    shadows: vec![sh.clone()],
+                                    small_caps: *small_caps,
+                                    oblique: *oblique,
+                                });
+                                self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, true, off);
+                            }
+                        }
                         if decoration_info.any() {
-                            self.paint_decorations(f.rect, f.baseline, *font, *size, *color, decoration_info, false);
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, false, None);
                         }
                         self.list.push(DisplayItem::Text {
                             x: f.rect.x,
@@ -1498,18 +1530,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             color: *color,
                             text: text.to_string(),
                             letter_spacing: *letter_spacing,
-                            shadows: shadows.clone(),
+                            word_spacing: *word_spacing,
+                            shadows: if decorated_shadows { Vec::new() } else { shadows.clone() },
                             small_caps: *small_caps,
                             oblique: *oblique,
                         });
                         if decoration_info.any() {
-                            self.paint_decorations(f.rect, f.baseline, *font, *size, *color, decoration_info, true);
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, true, None);
                         }
                         if self.flipped {
                             self.list.push(DisplayItem::PopTransform);
                         }
                         if let Some(e) = emphasis {
-                            self.paint_emphasis(f.rect, *font, *size, text, *letter_spacing, e);
+                            self.paint_emphasis(f.rect, *font, *size, text, (*letter_spacing, *word_spacing), e);
                         }
                     }
                     FragmentKind::Box(i) => {
@@ -1525,7 +1558,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     /// Paint emphasis marks centered over (or under) each character of a
     /// text fragment, at half the font size, touching the glyph box.
-    fn paint_emphasis(&mut self, rect: Rect, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, e: &crate::tree::Emphasis) {
+    fn paint_emphasis(&mut self, rect: Rect, font: rabbithole_gfx::FontId, size: f32, text: &str, (letter_spacing, word_spacing): (f32, f32), e: &crate::tree::Emphasis) {
         let fonts = self.ctx.fonts;
         let msize = size / 2.0;
         let mm = fonts.metrics(font, msize);
@@ -1546,7 +1579,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             if emphasis_skips(ch) {
                 continue;
             }
-            let x = rect.x + g.x + (adv - letter_spacing - mw) / 2.0;
+            let x = rect.x + g.x + crate::tree::word_spacing_before(text, g.byte_index, word_spacing) + (adv - letter_spacing - mw) / 2.0;
             if self.flipped {
                 let cy = y - mm.ascent + (mm.ascent + mm.descent) / 2.0;
                 self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * cy]));
@@ -1559,6 +1592,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 color: e.color,
                 text: e.mark.to_string(),
                 letter_spacing: 0.0,
+                        word_spacing: 0.0,
                 shadows: Vec::new(),
                 small_caps: false,
                 oblique: false,
@@ -1572,12 +1606,23 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// Paint the underlines and overlines (`through` false) or the
     /// line-throughs (`through` true) of a text fragment.
     #[allow(clippy::too_many_arguments)]
-    fn paint_decorations(&mut self, rect: Rect, baseline: f32, font: rabbithole_gfx::FontId, size: f32, _text_color: Color, info: &DecorationInfo, through: bool) {
+    /// `shadow`: paint them as the shadow (offset, color) of a text-shadow.
+    fn paint_decorations(&mut self, rect: Rect, baseline: f32, font: rabbithole_gfx::FontId, size: f32, text: (&str, f32, f32), info: &DecorationInfo, through: bool, shadow: Option<(f32, f32, Color)>) {
+        let (rect, baseline) = match shadow {
+            Some((dx, dy, _)) => (Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h), baseline + dy),
+            None => (rect, baseline),
+        };
+        // Ink of the glyphs crossing underlines and overlines (skipped),
+        // computed once per fragment.
+        let mut ink: Option<Vec<(f32, f32, f32, f32)>> = None;
+        let text_baseline = baseline;
         let fm = self.ctx.fonts.decoration_metrics(font, size, &info.variations);
         let asc = baseline - rect.y;
         let desc = rect.bottom() - baseline;
         for (i, d) in info.list.iter().enumerate() {
             let (x0, x1) = info.extents.get(i).copied().flatten().map(|(a, b)| (rect.x + a, rect.x + b)).unwrap_or((rect.x, rect.right()));
+            let x0 = if info.skip_spaces.0 > 0.0 { x0.max(rect.x + info.skip_spaces.0) } else { x0 };
+            let x1 = if info.skip_spaces.1 > 0.0 { x1.min(rect.right() - info.skip_spaces.1) } else { x1 };
             let (bo, asc, desc) = info.metrics.get(i).copied().unwrap_or((0.0, asc, desc));
             let baseline = baseline + bo;
             if x1 <= x0 {
@@ -1595,13 +1640,50 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             // thickness, at least 1px; pixel-aligned ends so the pieces of a
             // line over adjacent fragments join seamlessly), as in Blink.
             let (x0, x1) = (x0.round(), x1.round());
+            // (Not for a decoration propagated across a baseline shift: its
+            // line does not follow these glyphs.)
+            let skip = !through && info.skip_ink != 1 && bo.abs() < 0.01;
+            if skip && ink.is_none() {
+                ink = Some(glyph_ink(self.ctx.fonts, font, size, text.0, (text.1, text.2), rect.x, text_baseline, info.skip_ink == 2));
+            }
+            let list = &mut self.list;
             let mut line = |top: f32, t: f32| {
                 if t <= 0.0 || x1 <= x0 {
                     return;
                 }
                 let t = t.round().max(1.0);
                 let top = top.round();
-                self.list.push(DisplayItem::Line { x0, y0: top + t / 2.0, x1, y1: top + t / 2.0, width: t, color: d.color, style: d.style });
+                let y = top + t / 2.0;
+                let color = shadow.map_or(d.color, |s| s.2);
+                let mut push = |a: f32, b: f32| {
+                    if b > a {
+                        list.push(DisplayItem::Line { x0: a, y0: y, x1: b, y1: y, width: t, color, style: d.style });
+                    }
+                };
+                match ink.as_deref().filter(|_| skip) {
+                    Some(ink) => {
+                        // `text-decoration-skip-ink`: gaps where glyphs
+                        // cross the line, padded by its thickness.
+                        let mut gaps: Vec<(f32, f32)> = Vec::new();
+                        for &(gx0, gx1, gy0, gy1) in ink {
+                            if gy1 < top || gy0 > top + t {
+                                continue;
+                            }
+                            // (The clearance stops growing with thick lines.)
+                            gaps.push((gx0 - t.min(13.0), gx1 + t.min(13.0)));
+                        }
+                        gaps.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        let mut x = x0;
+                        for (a, b) in gaps {
+                            if a > x {
+                                push(x, a.min(x1).round());
+                            }
+                            x = x.max(b.round());
+                        }
+                        push(x, x1);
+                    }
+                    None => push(x0, x1),
+                }
             };
             if through {
                 if d.lines.line_through {
@@ -1620,7 +1702,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 } else if let Some(o) = d.underline_offset {
                     baseline + o
                 } else {
-                    baseline + t
+                    // The gap below the baseline is the automatic
+                    // thickness: a thicker line grows downwards.
+                    baseline + if d.thickness.is_some() { auto_t.min(t) } else { t }
                 };
                 line(top, t);
             }
@@ -1630,6 +1714,72 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
     }
+}
+
+/// For `text-decoration-skip-ink`: per glyph of `text` (drawn at `x` on
+/// `baseline`), the extent of its ink in each band of rows, as
+/// (x0, x1, y0, y1) boxes — one per bitmap row with ink, so a line only
+/// skips where the glyph actually crosses it. Ideographs are skipped
+/// only with `all`.
+#[allow(clippy::too_many_arguments)]
+fn glyph_ink(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, (letter_spacing, word_spacing): (f32, f32), x: f32, baseline: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
+    // The ink relative to the origin is cached across display list builds
+    // (the same link texts are decorated again on every rebuild).
+    type Key = (usize, u32, u32, u32, bool, Box<str>);
+    thread_local! {
+        static INK: std::cell::RefCell<std::collections::HashMap<Key, std::rc::Rc<Vec<(f32, f32, f32, f32)>>>> = Default::default();
+    }
+    let key: Key = (font.0 ^ ((fonts as *const rabbithole_gfx::FontContext as usize) << 20), size.to_bits(), letter_spacing.to_bits(), word_spacing.to_bits(), all, Box::from(text));
+    let cached = INK.with(|c| c.borrow().get(&key).cloned());
+    let rel = match cached {
+        Some(r) => r,
+        None => {
+            let r = std::rc::Rc::new(glyph_ink_rel(fonts, font, size, text, letter_spacing, word_spacing, all));
+            INK.with(|c| {
+                let mut c = c.borrow_mut();
+                if c.len() > 2048 {
+                    c.clear();
+                }
+                c.insert(key, r.clone());
+            });
+            r
+        }
+    };
+    rel.iter().map(|&(a, b, c, d)| (x + a, x + b, baseline + c, baseline + d)).collect()
+}
+
+/// [`glyph_ink`] relative to the run's origin on its baseline.
+fn glyph_ink_rel(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, word_spacing: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
+    let (x, baseline) = (0.0f32, 0.0f32);
+    let mut out: Vec<(f32, f32, f32, f32)> = Vec::new();
+    for g in fonts.shape(font, size, text, letter_spacing) {
+        if !all {
+            if let Some(c) = text.get(g.byte_index..).and_then(|t| t.chars().next()) {
+                if matches!(c as u32, 0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF | 0x20000..=0x3FFFD) {
+                    continue;
+                }
+            }
+        }
+        let bmp = fonts.rasterize(g.font, g.glyph, size);
+        if bmp.is_empty() {
+            continue;
+        }
+        let gx = x + g.x + g.dx + bmp.left as f32 + crate::tree::word_spacing_before(text, g.byte_index, word_spacing);
+        let gy = baseline - g.dy - bmp.top as f32;
+        let w = bmp.width as usize;
+        for r in 0..bmp.height as usize {
+            let row = &bmp.coverage[r * w..(r + 1) * w];
+            let (Some(a), Some(b)) = (row.iter().position(|&c| c > 96), row.iter().rposition(|&c| c > 96)) else { continue };
+            let y = gy + r as f32;
+            let (x0, x1) = (gx + a as f32, gx + b as f32 + 1.0);
+            // Rows with the same extent merge into one box.
+            match out.last_mut() {
+                Some(last) if last.0 == x0 && last.1 == x1 && (last.3 - y).abs() < 0.01 => last.3 = y + 1.0,
+                _ => out.push((x0, x1, y, y + 1.0)),
+            }
+        }
+    }
+    out
 }
 
 /// Characters that get no emphasis mark: separators, controls and

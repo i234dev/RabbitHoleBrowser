@@ -289,6 +289,18 @@ pub enum Clear {
     Both,
 }
 
+/// [`ComputedStyle::lang`] codes: the languages whose text layout rules
+/// differ (line breaking, case mapping).
+pub const LANG_JA: u8 = 1;
+pub const LANG_ZH: u8 = 2;
+pub const LANG_KO: u8 = 3;
+/// Turkish and Azerbaijani (dotted / dotless i).
+pub const LANG_TR: u8 = 4;
+pub const LANG_LT: u8 = 5;
+pub const LANG_EL: u8 = 6;
+pub const LANG_NL: u8 = 7;
+pub const LANG_EN: u8 = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlign {
     /// `start` (the initial value): left in ltr, right in rtl.
@@ -1280,13 +1292,37 @@ pub struct ComputedStyle {
     pub line_height_number: Option<f32>,
     pub letter_spacing: f32,
     pub word_spacing: f32,
+    /// Letter / word spacing with a percentage of the font size (px,
+    /// percent): inherited as such and resolved for each element's font
+    /// size (into `letter_spacing` / `word_spacing`).
+    pub spacing_pct: Option<[(f32, f32); 2]>,
     pub text_align: TextAlign,
     /// `text-align: -webkit-center` (`<center>`, `align=center`): also
     /// centers block-level children with non-auto margins. Inherited.
     pub text_align_webkit_center: bool,
+    /// `text-align-last` (inherited); `None` = `auto`.
+    pub text_align_last: Option<TextAlign>,
+    /// `text-justify` (inherited): 0 auto, 1 none, 2 inter-word,
+    /// 3 inter-character (`distribute`).
+    pub text_justify: u8,
+    /// `hyphens` (inherited): 0 none, 1 manual (initial), 2 auto.
+    pub hyphens: u8,
+    /// `hyphenate-character` (inherited); `None` = `auto` (U+2010).
+    pub hyphenate_character: Option<std::rc::Rc<str>>,
+    /// `text-decoration-skip-ink` (inherited): 0 auto, 1 none, 2 all.
+    pub text_decoration_skip_ink: u8,
+    /// The content language (inherited, from `lang` attributes): one of
+    /// the `LANG_*` codes, 0 when none of them.
+    pub lang: u8,
     pub text_decoration: TextDecoration,
     pub text_transform: TextTransform,
+    /// `text-transform` keywords beyond the case (inherited with it):
+    /// bit 1 `full-width`, bit 2 `full-size-kana`.
+    pub text_transform_extra: u8,
     pub text_indent: Length,
+    /// `text-indent` keywords (inherited with it): bit 1 `each-line`,
+    /// bit 2 `hanging`.
+    pub text_indent_flags: u8,
     pub white_space: WhiteSpace,
     pub vertical_align: VerticalAlign,
 
@@ -1462,6 +1498,9 @@ pub struct ComputedStyle {
     /// its logical (horizontal) layout space.
     pub layout_transposed: bool,
     pub tab_size: f32,
+    /// `tab-size` is a length (`tab_size` in px) rather than a number of
+    /// spaces (inherited with it).
+    pub tab_size_length: bool,
     /// `-webkit-line-clamp`
     pub line_clamp: Option<u32>,
     /// `content-visibility: hidden`: the contents are not rendered.
@@ -1575,11 +1614,20 @@ impl ComputedStyle {
             line_height_number: None,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            spacing_pct: None,
             text_align: TextAlign::Start,
+            text_align_last: None,
+            text_justify: 0,
+            hyphens: 1,
+            hyphenate_character: None,
+            text_decoration_skip_ink: 0,
+            lang: 0,
             text_align_webkit_center: false,
             text_decoration: TextDecoration::default(),
             text_transform: TextTransform::None,
+            text_transform_extra: 0,
             text_indent: Length::ZERO,
+            text_indent_flags: 0,
             white_space: WhiteSpace::Normal,
             vertical_align: VerticalAlign::Baseline,
             list_style_type: ListStyleType::Disc,
@@ -1677,6 +1725,7 @@ impl ComputedStyle {
             unicode_bidi: UnicodeBidi::Normal,
             layout_transposed: false,
             tab_size: 8.0,
+            tab_size_length: false,
             line_clamp: None,
             content_visibility_hidden: false,
             contain_paint: false,
@@ -1732,8 +1781,15 @@ impl ComputedStyle {
             line_height_number: parent.line_height_number,
             letter_spacing: parent.letter_spacing,
             word_spacing: parent.word_spacing,
+            spacing_pct: parent.spacing_pct,
             text_align: parent.text_align,
             text_align_webkit_center: parent.text_align_webkit_center,
+            text_align_last: parent.text_align_last,
+            text_justify: parent.text_justify,
+            hyphens: parent.hyphens,
+            hyphenate_character: parent.hyphenate_character.clone(),
+            text_decoration_skip_ink: parent.text_decoration_skip_ink,
+            lang: parent.lang,
             // `text-decoration-line` is not inherited; the decorations it
             // draws propagate through `applied_decorations`.
             applied_decorations: parent.applied_decorations.clone(),
@@ -1750,7 +1806,9 @@ impl ComputedStyle {
             line_height_tight: parent.line_height_tight,
             text_underline_position: parent.text_underline_position,
             text_transform: parent.text_transform,
+            text_transform_extra: parent.text_transform_extra,
             text_indent: parent.text_indent,
+            text_indent_flags: parent.text_indent_flags,
             white_space: parent.white_space,
             list_style_type: parent.list_style_type,
             list_style_position: parent.list_style_position,
@@ -1762,6 +1820,7 @@ impl ComputedStyle {
             direction: parent.direction,
             writing_mode: parent.writing_mode,
             tab_size: parent.tab_size,
+            tab_size_length: parent.tab_size_length,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
             font_variation_settings: parent.font_variation_settings.clone(),
@@ -1779,6 +1838,19 @@ impl ComputedStyle {
         }
     }
 
+    /// Resolve percentage letter / word spacings against the font size
+    /// (after it changes: inheritance, animations).
+    pub fn resolve_spacing_pct(&mut self) {
+        if let Some(p) = self.spacing_pct {
+            if p[0].1 != 0.0 {
+                self.letter_spacing = p[0].0 + p[0].1 / 100.0 * self.font_size;
+            }
+            if p[1].1 != 0.0 {
+                self.word_spacing = p[1].0 + p[1].1 / 100.0 * self.font_size;
+            }
+        }
+    }
+
     /// Do two styles agree on every field [`ComputedStyle::inherit_from`]
     /// copies (keep both lists in sync)? Children of an element whose
     /// inherited part did not change need no restyle for inheritance.
@@ -1793,8 +1865,15 @@ impl ComputedStyle {
             && self.line_height_number == o.line_height_number
             && self.letter_spacing == o.letter_spacing
             && self.word_spacing == o.word_spacing
+            && self.spacing_pct == o.spacing_pct
             && self.text_align == o.text_align
             && self.text_align_webkit_center == o.text_align_webkit_center
+            && self.text_align_last == o.text_align_last
+            && self.text_justify == o.text_justify
+            && self.hyphens == o.hyphens
+            && self.hyphenate_character == o.hyphenate_character
+            && self.text_decoration_skip_ink == o.text_decoration_skip_ink
+            && self.lang == o.lang
             && self.applied_decorations == o.applied_decorations
             && self.text_underline_offset == o.text_underline_offset
             && self.text_emphasis_style == o.text_emphasis_style
@@ -1809,7 +1888,9 @@ impl ComputedStyle {
             && self.line_height_tight == o.line_height_tight
             && self.text_underline_position == o.text_underline_position
             && self.text_transform == o.text_transform
+            && self.text_transform_extra == o.text_transform_extra
             && self.text_indent == o.text_indent
+            && self.text_indent_flags == o.text_indent_flags
             && self.white_space == o.white_space
             && self.list_style_type == o.list_style_type
             && self.list_style_position == o.list_style_position
@@ -1821,6 +1902,7 @@ impl ComputedStyle {
             && self.direction == o.direction
             && self.writing_mode == o.writing_mode
             && self.tab_size == o.tab_size
+            && self.tab_size_length == o.tab_size_length
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
             && self.font_variation_settings == o.font_variation_settings

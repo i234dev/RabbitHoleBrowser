@@ -593,12 +593,43 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             color,
             text,
             letter_spacing,
+            word_spacing,
             shadows,
             small_caps,
             oblique,
         } => {
             let (px, py) = (x + dx, y + dy);
             if py + size < view.y - 2.0 || py - size * 1.5 > view.bottom() + 2.0 || px > view.right() {
+                return;
+            }
+            if *word_spacing != 0.0 {
+                // A justified run: each word is drawn at its place, moved
+                // by the extra space after the separators before it.
+                let glyphs = fonts.shape(*font, *size, text, *letter_spacing);
+                let mut start = 0;
+                let mut seps = 0usize;
+                for (i, c) in text.char_indices() {
+                    let end = i + c.len_utf8();
+                    if crate::tree::is_word_separator(c) || end == text.len() {
+                        let off = glyphs.iter().find(|g| g.byte_index >= start).map_or(0.0, |g| g.x) + *word_spacing * seps as f32;
+                        let item = DisplayItem::Text {
+                            x: *x + off,
+                            y: *y,
+                            font: *font,
+                            size: *size,
+                            color: *color,
+                            text: text[start..end].to_string(),
+                            letter_spacing: *letter_spacing,
+                            word_spacing: 0.0,
+                            shadows: shadows.clone(),
+                            small_caps: *small_caps,
+                            oblique: *oblique,
+                        };
+                        paint_item(&item, canvas, fonts, st, device_view);
+                        start = end;
+                        seps += 1;
+                    }
+                }
                 return;
             }
             if st.ext {
@@ -610,7 +641,9 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                     draw_text_basic(canvas, fonts, *font, *size, text, px + sh.x, py + sh.y, sh.color, *letter_spacing);
                 }
             }
-            if st.ext && (*small_caps || *oblique || letter_spacing.abs() >= 0.01) {
+            if color.a == 0 {
+                // Invisible glyphs (only their shadows show).
+            } else if st.ext && (*small_caps || *oblique || letter_spacing.abs() >= 0.01) {
                 canvas.draw_text_ext(fonts, *font, *size, text, px, py, *color, *letter_spacing, *small_caps, *oblique);
             } else {
                 draw_text_basic(canvas, fonts, *font, *size, text, px, py, *color, *letter_spacing);

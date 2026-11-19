@@ -211,11 +211,24 @@ impl<'a> Layouter<'a> {
         // text-indent widens the first line (percentages resolve against
         // a zero base here, as in browsers).
         let indent = cstyle.text_indent.resolve_or_zero(0.0);
-        line += indent;
-        run += indent;
+        // `hanging` indents all lines but the first; `each-line` the lines
+        // after forced breaks too.
+        let (each_line, hanging) = (cstyle.text_indent_flags & 1 != 0, cstyle.text_indent_flags & 2 != 0);
+        let soft_indent = if hanging { indent } else { 0.0 };
+        let forced_indent = if each_line != hanging { indent } else { 0.0 };
+        if !hanging {
+            line += indent;
+            run += indent;
+        }
         // Until the first word or atomic, break opportunities keep the
         // indent with the content that follows.
         let mut lead = true;
+        let mut after_shy = false;
+        // Hanging width at the end of the last word.
+        let mut trail: f32 = 0.0;
+        // Preserved `pre-wrap` spaces ending the run: they hang at a soft
+        // wrap and do not count for min-content.
+        let mut space_trail: f32 = 0.0;
         if let Some(mt) = &b.marker_text {
             if cstyle.list_style_position == rabbithole_style::ListStylePosition::Inside {
                 let font = self.font_for(&cstyle);
@@ -227,23 +240,76 @@ impl<'a> Layouter<'a> {
         for p in &pieces {
             match p {
                 Piece::Word {
-                    width, item, break_before, ..
+                    text, width, item, break_before,
                 } => {
-                    let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
+                    let st = item_style(&b.items, &cstyle, *item);
+                    // `auto-phrase` keeps its words whole in the intrinsic
+                    // sizes (soft hyphens are a fallback for overflow).
+                    let wraps = st.white_space.wraps() && !(after_shy && st.word_break == rabbithole_style::WordBreak::AutoPhrase);
+                    after_shy = text.ends_with('\u{ad}');
+                    let tab;
+                    let width = if &**text == "\t" {
+                        let st = item_style(&b.items, &cstyle, *item).clone();
+                        tab = self.tab_width(&cstyle, &st, line + pending_space - indent);
+                        &tab
+                    } else {
+                        width
+                    };
                     if *break_before && wraps && !lead {
-                        min = min.max(run);
-                        run = 0.0;
+                        min = min.max(run - trail - space_trail);
+                        run = soft_indent;
                     }
                     lead = false;
+                    if st.white_space == rabbithole_style::WhiteSpace::PreWrap && text.bytes().all(|b| b == b' ' || b == b'\t') {
+                        space_trail += width;
+                    } else {
+                        space_trail = 0.0;
+                    }
                     line += pending_space + width;
+                    // `overflow-wrap: anywhere` / `word-break: break-word`:
+                    // every grapheme cluster may end a line (min-content).
+                    if wraps && (st.overflow_wrap == rabbithole_style::OverflowWrap::Anywhere || st.word_break == rabbithole_style::WordBreak::BreakWord) && text.chars().nth(1).is_some() {
+                        let font = self.font_for(st);
+                        let mut first = true;
+                        let mut start = 0;
+                        let mut it = text.char_indices().peekable();
+                        while it.next().is_some() {
+                            let end = it.peek().map_or(text.len(), |n| n.0);
+                            if it.peek().is_some_and(|n| matches!(crate::linebreak::class(n.1), crate::linebreak::Lb::CM | crate::linebreak::Lb::ZWJ)) {
+                                continue;
+                            }
+                            let cw = self.measurer.width(font, st.font_size, &text[start..end]) + st.letter_spacing * text[start..end].chars().count() as f32;
+                            if first {
+                                run += pending_space + cw;
+                                first = false;
+                            } else {
+                                min = min.max(run);
+                                run = cw;
+                            }
+                            start = end;
+                        }
+                        pending_space = 0.0;
+                        trail = if cstyle.line_height_tight { 0.0 } else { st.letter_spacing.max(0.0) };
+                        continue;
+                    }
                     run += pending_space + width;
                     pending_space = 0.0;
+                    // Other space separators ending a line hang; no
+                    // letter-spacing at a line end.
+                    trail = if cstyle.line_height_tight { 0.0 } else { st.letter_spacing.max(0.0) } + if text.chars().next_back().is_some_and(crate::linebreak::is_space_separator) && st.white_space != rabbithole_style::WhiteSpace::BreakSpaces {
+                        let font = self.font_for(st);
+                        let sep: String = text.chars().rev().take_while(|c| crate::linebreak::is_space_separator(*c)).collect();
+                        (self.measurer.width(font, st.font_size, &sep) + st.letter_spacing * sep.chars().count() as f32).min(*width)
+                    } else {
+                        0.0
+                    };
+                    continue;
                 }
                 Piece::Space { width, item } => {
                     let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
                     if wraps && !lead {
-                        min = min.max(run);
-                        run = 0.0;
+                        min = min.max(run - trail - space_trail);
+                        run = soft_indent;
                     }
                     if line > 0.0 && !lead {
                         pending_space = *width;
@@ -259,41 +325,44 @@ impl<'a> Layouter<'a> {
                     line += e;
                     run += e;
                 }
-                Piece::Atomic(c) | Piece::Float(c) => {
+                Piece::Atomic(c, _) | Piece::Float(c) => {
+                    let before = !matches!(p, Piece::Atomic(_, false));
                     let ex = extras_px(&b.children[*c].style);
                     let (cmin, cmax) = self.intrinsic(&mut b.children[*c]);
+                    if container_wraps && before && !lead {
+                        min = min.max(run - trail - space_trail);
+                        run = soft_indent;
+                    }
+                    run += cmin + ex;
                     if container_wraps {
-                        if lead {
-                            min = min.max(run + cmin + ex);
-                        } else {
-                            min = min.max(run);
-                            min = min.max(cmin + ex);
-                        }
-                        run = 0.0;
-                    } else {
-                        run += cmin + ex;
+                        min = min.max(run);
                     }
                     line += pending_space + cmax + ex;
                     pending_space = 0.0;
                     lead = false;
+                    trail = 0.0;
+                    space_trail = 0.0;
                 }
                 Piece::Abs(_) => {}
                 Piece::Gap(w) => {
                     run += w;
                     line += w;
+                    trail = 0.0;
+                    space_trail = 0.0;
                 }
                 Piece::Break => {
                     lead = false;
-                    min = min.max(run);
-                    run = 0.0;
-                    max = max.max(line);
-                    line = 0.0;
+                    min = min.max(run - trail - space_trail);
+                    run = forced_indent;
+                    max = max.max(line - trail);
+                    line = forced_indent;
                     pending_space = 0.0;
+                    trail = 0.0;
                 }
             }
         }
-        min = min.max(run);
-        max = max.max(line);
+        min = min.max(run - trail - space_trail);
+        max = max.max(line - trail);
         b.pieces = Some(pieces);
         (min, max)
     }

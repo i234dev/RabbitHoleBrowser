@@ -16,6 +16,8 @@ pub struct TextRun {
     pub font: FontId,
     pub size: f32,
     pub letter_spacing: f32,
+    /// Extra space after each word separator (justified lines).
+    pub word_spacing: f32,
 }
 
 /// A selection: highlight rectangles plus the selected text.
@@ -28,7 +30,7 @@ pub struct Selection {
 fn collect_runs(b: &LayoutBox, out: &mut Vec<TextRun>) {
     for line in &b.lines {
         for f in &line.fragments {
-            if let FragmentKind::Text { text, font, size, letter_spacing, hidden, .. } = &f.kind {
+            if let FragmentKind::Text { text, font, size, letter_spacing, word_spacing, hidden, .. } = &f.kind {
                 if *hidden || text.is_empty() {
                     continue;
                 }
@@ -40,6 +42,7 @@ fn collect_runs(b: &LayoutBox, out: &mut Vec<TextRun>) {
                     font: *font,
                     size: *size,
                     letter_spacing: *letter_spacing,
+                    word_spacing: *word_spacing,
                 });
             }
         }
@@ -56,7 +59,7 @@ fn x_at(fonts: &FontContext, run: &TextRun, idx: usize) -> f32 {
     if prefix.is_empty() {
         return 0.0;
     }
-    fonts.measure(run.font, run.size, prefix) + run.letter_spacing * prefix.chars().count() as f32
+    fonts.measure(run.font, run.size, prefix) + run.letter_spacing * prefix.chars().count() as f32 + rabbithole_layout::tree::word_spacing_before(prefix, prefix.len(), run.word_spacing)
 }
 
 /// Caret offsets can outlive an edit or refer to a different display string.
