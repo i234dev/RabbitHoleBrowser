@@ -1446,7 +1446,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             .collect();
         let explicit = chains.iter().any(|c| !c.is_empty()) || matches!(container_bidi, UnicodeBidi::BidiOverride | UnicodeBidi::IsolateOverride | UnicodeBidi::Plaintext);
         let rtl_text = self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { text, .. } if needs_bidi(text)));
-        if !explicit && !rtl_text {
+        // Left-to-right text spread over several fragments of a right-to-
+        // left line keeps its order: it needs the full algorithm.
+        let ltr_runs = base_rtl
+            && self.cur.frags.len() > 1
+            && self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { text, .. } if text.chars().any(|c| class(c) == BidiClass::L)));
+        if !explicit && !rtl_text && !ltr_runs {
             if base_rtl {
                 self.mirror_line();
             }
