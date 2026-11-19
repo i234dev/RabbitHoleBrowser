@@ -542,6 +542,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let mut pushed_matrix = false;
         let saved_flip = self.flipped;
         let saved_wm_bg = self.wm_bg.take();
+        // A positioned vertical box is its own stacking context: its
+        // wrapper's background must still reach it.
+        if saved_wm_bg.as_ref().is_some_and(|w| w.0 == root as *const LayoutBox as usize) {
+            self.wm_bg = saved_wm_bg.clone();
+        }
         if let (Some(m), Some(bg), Some(inner)) = (root.transform_matrix().filter(|_| root.wm_transform.is_some()), root.wm_background.clone(), root.children.first()) {
             self.wm_bg = Some((inner as *const LayoutBox as usize, root.rect, m, bg));
         }
