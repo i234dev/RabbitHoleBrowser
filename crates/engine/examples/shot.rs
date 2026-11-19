@@ -130,13 +130,21 @@ fn main() {
             Some(due) => {
                 let now = engine.start.elapsed().as_secs_f64() * 1000.0;
                 if due > now {
-                    // Idle until the next task: collector work first.
+                    // Idle until the next task: collector work first, then
+                    // sleep. A sleep wakes up late (0.1-1 ms, more in VMs),
+                    // which timers and animation frames would inherit: the
+                    // last stretch is spun so they run on time.
+                    const SPIN: std::time::Duration = std::time::Duration::from_micros(1500);
                     let wait = std::time::Duration::from_micros(((due - now) * 1000.0) as u64).min(std::time::Duration::from_millis(50));
                     let until = std::time::Instant::now() + wait;
+                    let wake = until.checked_sub(SPIN).unwrap_or(until);
                     idle_waits += 1;
                     idle_time += wait;
-                    engine.idle_gc(&mut page, until);
-                    std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
+                    engine.idle_gc(&mut page, wake);
+                    std::thread::sleep(wake.saturating_duration_since(std::time::Instant::now()));
+                    while std::time::Instant::now() < until {
+                        std::hint::spin_loop();
+                    }
                 }
                 let _ = engine.tick(&mut page);
             }
