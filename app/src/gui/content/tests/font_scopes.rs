@@ -31,7 +31,7 @@ fn retained_document_pdf_keeps_private_fallback_after_navigation() {
     let html = format!("<!doctype html><style>body{{font:20px sans-serif}}</style><p>{private_char}</p>");
     let mut loaded = engine.loader.load_html(&html, Url::parse("https://example.test/pdf-font-a").unwrap(), viewport);
     loaded.fonts.push(LoadedFont {
-        face: FontFace { family: "PDF private fallback".into(), sources: vec![], weight: (400, 400), italic: false, display: "auto".into(), unicode_range: None },
+        face: FontFace { family: "PDF private fallback".into(), sources: vec![], weight: (400, 400), italic: false, stretch: (100, 100), display: "auto".into(), unicode_range: None },
         data: Arc::new(private_font),
     });
     let mut a = engine.build_page_unscripted(loaded, viewport);
