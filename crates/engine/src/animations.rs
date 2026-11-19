@@ -557,6 +557,8 @@ fn identity_of(op: &TransformOp) -> TransformOp {
         TransformOp::Scale(..) => TransformOp::Scale(1.0, 1.0),
         TransformOp::Rotate(_) => TransformOp::Rotate(0.0),
         TransformOp::Skew(..) => TransformOp::Skew(0.0, 0.0),
+        TransformOp::SkewX(_) => TransformOp::SkewX(0.0),
+        TransformOp::SkewY(_) => TransformOp::SkewY(0.0),
         TransformOp::Matrix(_) => TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
     }
 }
@@ -564,10 +566,12 @@ fn identity_of(op: &TransformOp) -> TransformOp {
 fn lerp_op(a: &TransformOp, b: &TransformOp, t: f32) -> Option<TransformOp> {
     use TransformOp::*;
     Some(match (a, b) {
-        (Translate(ax, ay), Translate(bx, by)) => Translate(lerp_len(ax, bx, t)?, lerp_len(ay, by, t)?),
+        (Translate(ax, ay), Translate(bx, by)) => Translate(lerp_lp(ax, bx, t)?, lerp_lp(ay, by, t)?),
         (Scale(ax, ay), Scale(bx, by)) => Scale(lerp(*ax, *bx, t), lerp(*ay, *by, t)),
         (Rotate(x), Rotate(y)) => Rotate(lerp(*x, *y, t)),
         (Skew(ax, ay), Skew(bx, by)) => Skew(lerp(*ax, *bx, t), lerp(*ay, *by, t)),
+        (SkewX(x), SkewX(y)) => SkewX(lerp(*x, *y, t)),
+        (SkewY(x), SkewY(y)) => SkewY(lerp(*x, *y, t)),
         (Matrix(m), Matrix(n)) => {
             let mut o = [0.0; 6];
             for i in 0..6 {
@@ -615,6 +619,109 @@ fn lerp_filter(a: &FilterOp, b: &FilterOp, t: f32) -> Option<FilterOp> {
     })
 }
 
+/// Interpolate two transform lists (CSS Transforms 2 §interpolation):
+/// lists of the same functions pairwise (the shorter padded with
+/// identities), anything else as decomposed 2D matrices.
+fn lerp_transforms(x: &[TransformOp], y: &[TransformOp], t: f32) -> Option<Vec<TransformOp>> {
+    let n = x.len().max(y.len());
+    let pad = |l: &[TransformOp], other: &[TransformOp]| -> Vec<TransformOp> {
+        let mut v = l.to_vec();
+        v.extend(other[l.len().min(other.len())..].iter().map(identity_of));
+        v
+    };
+    let (px, py) = (pad(x, y), pad(y, x));
+    if px.len() == n && py.len() == n {
+        let ops: Option<Vec<TransformOp>> = px.iter().zip(py.iter()).map(|(p, q)| lerp_op(p, q, t)).collect();
+        if let Some(ops) = ops {
+            return Some(ops);
+        }
+    }
+    let ma = matrix_of(x)?;
+    let mb = matrix_of(y)?;
+    Some(vec![TransformOp::Matrix(lerp_matrix(ma, mb, t))])
+}
+
+/// The 2D matrix of a transform list (None when it needs the box size).
+fn matrix_of(ops: &[TransformOp]) -> Option<[f32; 6]> {
+    if ops.iter().any(|o| matches!(o, TransformOp::Translate(x, y) if !matches!(x, Length::Px(_)) || !matches!(y, Length::Px(_)))) {
+        return None;
+    }
+    Some(rabbithole_style::transform_matrix(ops, 0.0, 0.0, 0.0))
+}
+
+/// Decomposed 2D matrix: translate, scale, angle (degrees), 2x2 rest.
+struct Decomposed2d {
+    translate: [f64; 2],
+    scale: [f64; 2],
+    angle: f64,
+    m: [f64; 4],
+}
+
+fn decompose_2d(m: [f32; 6]) -> Decomposed2d {
+    let (mut r0x, mut r0y, mut r1x, mut r1y) = (m[0] as f64, m[1] as f64, m[2] as f64, m[3] as f64);
+    let mut scale = [(r0x * r0x + r0y * r0y).sqrt(), (r1x * r1x + r1y * r1y).sqrt()];
+    if r0x * r1y - r0y * r1x < 0.0 {
+        if r0x < r1y {
+            scale[0] = -scale[0];
+        } else {
+            scale[1] = -scale[1];
+        }
+    }
+    if scale[0] != 0.0 {
+        r0x /= scale[0];
+        r0y /= scale[0];
+    }
+    if scale[1] != 0.0 {
+        r1x /= scale[1];
+        r1y /= scale[1];
+    }
+    let angle = r0y.atan2(r0x);
+    if angle != 0.0 {
+        let (sn, cs) = (-r0y, r0x);
+        let (m11, m12, m21, m22) = (r0x, r0y, r1x, r1y);
+        r0x = cs * m11 + sn * m21;
+        r0y = cs * m12 + sn * m22;
+        r1x = -sn * m11 + cs * m21;
+        r1y = -sn * m12 + cs * m22;
+    }
+    Decomposed2d { translate: [m[4] as f64, m[5] as f64], scale, angle: angle.to_degrees(), m: [r0x, r0y, r1x, r1y] }
+}
+
+fn lerp_matrix(a: [f32; 6], b: [f32; 6], t: f32) -> [f32; 6] {
+    let (mut da, mut db) = (decompose_2d(a), decompose_2d(b));
+    if (da.scale[0] < 0.0 && db.scale[1] < 0.0) || (da.scale[1] < 0.0 && db.scale[0] < 0.0) {
+        da.scale = [-da.scale[0], -da.scale[1]];
+        da.angle += if da.angle < 0.0 { 180.0 } else { -180.0 };
+    }
+    // Don't rotate the long way around.
+    if da.angle == 0.0 {
+        da.angle = 360.0;
+    }
+    if db.angle == 0.0 {
+        db.angle = 360.0;
+    }
+    if (da.angle - db.angle).abs() > 180.0 {
+        if da.angle > db.angle {
+            da.angle -= 360.0;
+        } else {
+            db.angle -= 360.0;
+        }
+    }
+    let t = t as f64;
+    let l = |x: f64, y: f64| x + (y - x) * t;
+    let tr = [l(da.translate[0], db.translate[0]), l(da.translate[1], db.translate[1])];
+    let sc = [l(da.scale[0], db.scale[0]), l(da.scale[1], db.scale[1])];
+    let angle = l(da.angle, db.angle).to_radians();
+    let mm = [l(da.m[0], db.m[0]), l(da.m[1], db.m[1]), l(da.m[2], db.m[2]), l(da.m[3], db.m[3])];
+    // Recompose: rotate × m, then scale the rows.
+    let (c, s) = (angle.cos(), angle.sin());
+    let r0x = c * mm[0] + s * mm[2];
+    let r0y = c * mm[1] + s * mm[3];
+    let r1x = -s * mm[0] + c * mm[2];
+    let r1y = -s * mm[1] + c * mm[3];
+    [(r0x * sc[0]) as f32, (r0y * sc[0]) as f32, (r1x * sc[1]) as f32, (r1y * sc[1]) as f32, tr[0] as f32, tr[1] as f32]
+}
+
 fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
@@ -624,22 +731,7 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
             Val::C(Color { r: ch(x.r, y.r), g: ch(x.g, y.g), b: ch(x.b, y.b), a: ch(x.a, y.a) })
         }
         (Val::L(x), Val::L(y)) => lerp_len(x, y, t).map(Val::L).unwrap_or_else(discrete),
-        (Val::T(x), Val::T(y)) => {
-            let (x, y): (Vec<TransformOp>, Vec<TransformOp>) = if x.is_empty() {
-                (y.iter().map(identity_of).collect(), y.clone())
-            } else if y.is_empty() {
-                (x.clone(), x.iter().map(identity_of).collect())
-            } else {
-                (x.clone(), y.clone())
-            };
-            if x.len() == y.len() {
-                let ops: Option<Vec<TransformOp>> = x.iter().zip(y.iter()).map(|(p, q)| lerp_op(p, q, t)).collect();
-                if let Some(ops) = ops {
-                    return Val::T(ops);
-                }
-            }
-            discrete()
-        }
+        (Val::T(x), Val::T(y)) => lerp_transforms(x, y, t).map(Val::T).unwrap_or_else(discrete),
         (Val::Fl(x), Val::Fl(y)) => {
             // Filter Effects §8: a missing list is the identity of the other;
             // lists of the same functions interpolate pairwise.
@@ -933,6 +1025,10 @@ pub struct AnimationState {
     script_nodes: std::collections::HashSet<NodeId>,
     /// Keyframes of script effects resolved against their element's style.
     script_frames: HashMap<u64, ScriptFrames>,
+    /// Indices of the registry's effects in effect, per element, valid
+    /// for registry generation `script_index_gen`.
+    script_index: HashMap<NodeId, Vec<usize>>,
+    script_index_gen: u64,
     /// Last id given to a transition or animation.
     next_id: u64,
     /// Style changes seen (transition generations).
@@ -1240,11 +1336,13 @@ impl Engine {
     }
 
     fn cancel_effects(&self, page: &mut Page, node: NodeId, events: bool) {
+        let now = now_ms(self);
         let a = &mut page.anim;
         let mut ev = Vec::new();
         a.transitions.retain(|t| {
             if t.node == node {
-                ev.push(QueuedEvent { node, ty: "transitioncancel", name: t.prop.name().into(), elapsed: 0.0, transition: true });
+                let elapsed = ((t.clock.local(now).unwrap_or(0.0) - t.delay).max(0.0) / 1000.0) as f32;
+                ev.push(QueuedEvent { node, ty: "transitioncancel", name: t.prop.name().into(), elapsed, transition: true });
                 false
             } else {
                 true
@@ -1303,7 +1401,14 @@ impl Engine {
         let Some(reg) = page.anim.script.clone() else { return };
         let reg = reg.borrow();
         let base_key = Rc::as_ptr(base) as usize;
-        for e in reg.effects_of(node) {
+        // The per-element index (linear scan when the registry changed
+        // since it was built).
+        let indexed: Vec<usize> = if page.anim.script_index_gen == reg.generation {
+            page.anim.script_index.get(&node).cloned().unwrap_or_default()
+        } else {
+            reg.effects.iter().enumerate().filter(|(_, e)| e.node == node && e.progress.is_some()).map(|(i, _)| i).collect()
+        };
+        for e in indexed.into_iter().filter_map(|i| reg.effects.get(i)) {
             if upto.is_some_and(|o| e.order > o) {
                 break;
             }
@@ -1353,6 +1458,14 @@ impl Engine {
                 return false;
             }
             let nodes: std::collections::HashSet<NodeId> = r.effects.iter().filter(|e| e.progress.is_some()).map(|e| e.node).collect();
+            let mut index: HashMap<NodeId, Vec<usize>> = HashMap::new();
+            for (i, e) in r.effects.iter().enumerate() {
+                if e.progress.is_some() {
+                    index.entry(e.node).or_default().push(i);
+                }
+            }
+            page.anim.script_index = index;
+            page.anim.script_index_gen = r.generation;
             (r.generation, nodes)
         };
         {
@@ -1779,16 +1892,7 @@ fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::F(_), Val::F(_)) | (Val::C(_), Val::C(_)) | (Val::V(_), Val::V(_)) => true,
         (Val::L(x), Val::L(y)) => lerp_len(x, y, 0.5).is_some(),
-        (Val::T(x), Val::T(y)) => {
-            let (x, y): (Vec<TransformOp>, Vec<TransformOp>) = if x.is_empty() {
-                (y.iter().map(identity_of).collect(), y.clone())
-            } else if y.is_empty() {
-                (x.clone(), x.iter().map(identity_of).collect())
-            } else {
-                (x.clone(), y.clone())
-            };
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| lerp_op(p, q, 0.5).is_some())
-        }
+        (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),
         (Val::Cp(Some(x)), Val::Cp(Some(y))) => lerp_clip(x, y, 0.5).is_some(),
         _ => false,
     }
@@ -1878,6 +1982,10 @@ mod tests {
         assert_eq!(parse_easing("cubic-bezier(0.4, 0, 0.2, 1)"), Easing::Bezier(0.4, 0.0, 0.2, 1.0));
         assert_eq!(ease(&parse_easing("steps(4, end)"), 0.3), 0.25);
         assert_eq!(ease(&parse_easing("step-start"), 0.01), 1.0);
+        assert_eq!(ease(&parse_easing("steps(3, jump-none)"), 0.5), 0.5);
+        assert_eq!(ease(&parse_easing("steps(1, jump-both)"), 0.5), 0.5);
+        // Linear-equivalent Béziers stay linear.
+        assert!((ease(&parse_easing("cubic-bezier(0, 0, 0, 0)"), 0.25) - 0.25).abs() < 1e-6);
     }
 
     #[test]
@@ -1888,5 +1996,37 @@ mod tests {
         let t = interpolate(&Val::T(vec![]), &Val::T(vec![TransformOp::Rotate(1.0)]), 0.5);
         assert_eq!(t, Val::T(vec![TransformOp::Rotate(0.5)]));
         assert_eq!(interpolate(&Val::V(Visibility::Visible), &Val::V(Visibility::Hidden), 0.9), Val::V(Visibility::Visible));
+        // Mixed units interpolate through calc().
+        let t = interpolate(&Val::T(vec![TransformOp::Translate(Length::Px(50.0), Length::Px(0.0))]), &Val::T(vec![TransformOp::Translate(Length::Percent(50.0), Length::Px(0.0))]), 0.5);
+        assert_eq!(t, Val::T(vec![TransformOp::Translate(Length::Calc(25.0, 25.0), Length::Px(0.0))]));
+        // Different functions: decomposed matrices, the short way around.
+        let Val::T(ops) = interpolate(&Val::T(vec![TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])]), &Val::T(vec![TransformOp::Rotate(std::f32::consts::FRAC_PI_2)]), 0.5) else { panic!() };
+        let TransformOp::Matrix(m) = ops[0] else { panic!("{ops:?}") };
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        for (x, y) in m.iter().zip([h, h, -h, h, 0.0, 0.0]) {
+            assert!((x - y).abs() < 1e-5, "{m:?}");
+        }
+        // Lists padded with identity functions.
+        let t = interpolate(&Val::T(vec![TransformOp::Scale(2.0, 2.0)]), &Val::T(vec![TransformOp::Scale(4.0, 4.0), TransformOp::Rotate(1.0)]), 0.5);
+        assert_eq!(t, Val::T(vec![TransformOp::Scale(3.0, 3.0), TransformOp::Rotate(0.5)]));
+    }
+
+    #[test]
+    fn script_keyframe_intervals_and_composite() {
+        let base = ComputedStyle::initial();
+        let kf = |offset: f32, v: f32, easing: Easing, composite: Option<Composite>| ScriptKeyframe { offset, easing, composite, values: vec![(Prop::Opacity, Val::F(v))] };
+        let frames = vec![kf(0.0, 0.0, Easing::Linear, None), kf(0.5, 1.0, Easing::Steps(1, false, 0), None), kf(1.0, 0.0, Easing::Linear, None)];
+        let at = |p: f64, c: Composite| script_effect_values(&frames, p, c, &base)[0].1.clone();
+        assert_eq!(at(0.25, Composite::Replace), Val::F(0.5));
+        // steps(1) on the second interval holds its start value.
+        assert_eq!(at(0.75, Composite::Replace), Val::F(1.0));
+        assert_eq!(at(1.0, Composite::Replace), Val::F(0.0));
+        // Extrapolated below 0 from the first interval.
+        assert_eq!(at(-0.5, Composite::Replace), Val::F(-1.0));
+        // add: composited with the underlying value (opacity 1).
+        assert_eq!(at(0.25, Composite::Add), Val::F(1.5));
+        // A missing 0% keyframe takes the underlying value.
+        let single = vec![kf(1.0, 0.0, Easing::Linear, None)];
+        assert_eq!(script_effect_values(&single, 0.5, Composite::Replace, &base)[0].1, Val::F(0.5));
     }
 }

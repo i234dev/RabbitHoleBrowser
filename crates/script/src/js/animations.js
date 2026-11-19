@@ -568,9 +568,10 @@
   let activeFlag = false;
   let replaceCheck = false;     // a finished filling animation may replace others
   const cssAnims = new Map();  // engine id -> CSSAnimation / CSSTransition
+  const cssTicking = new Set(); // those running (their finish is watched)
 
   function refreshActive() {
-    const on = ticking.size > 0 || pendingSet.size > 0 || eventQueue.length > 0 || cssAnims.size > 0 || replaceCheck;
+    const on = ticking.size > 0 || pendingSet.size > 0 || eventQueue.length > 0 || cssTicking.size > 0 || replaceCheck;
     if (on !== activeFlag) { activeFlag = on; N.animSetActive(on); }
   }
 
@@ -884,7 +885,7 @@
     if (phase === 0) {
       for (const a of Array.from(pendingSet)) runPendingTask(a);
       for (const a of Array.from(ticking)) updateFinishedState(a, false, false);
-      for (const a of Array.from(cssAnims.values())) cssRefresh(a);
+      for (const a of Array.from(cssTicking)) cssRefresh(a);
       replaceCheck = false;
       removeReplaced();
       refreshActive();
@@ -1089,9 +1090,9 @@
       hidden(effect, S, { id: 0, target: info.target, pseudo: null, frames: [], timing: Object.assign({}, TIMING_DEFAULTS), composite: 'replace', iterationComposite: 'replace', animation: a, version: 1, pushed: false });
       a[S].effect = effect;
       cssAnims.set(info.id, a);
-      refreshActive();
     }
     cssApply(a, info);
+    if (playStateOf(a) === 'running' && !cssTicking.has(a)) { cssTicking.add(a); refreshActive(); }
     return a;
   }
   const safeEasing = (e) => { try { return parseEasing(e).css; } catch (err) { return 'linear'; } };
@@ -1124,6 +1125,7 @@
     if (info && !info.ended) cssApply(a, info);
     else {
       cssAnims.delete(st.cssId);
+      cssTicking.delete(a);
       refreshActive();
       if (info && info.ended && st.startTime !== null) {
         // Ran to its end: finished, held at the end.
@@ -1146,6 +1148,8 @@
     if (now === 'finished' && st.finishedState === 'pending' && (was !== 'finished' || !st.seenFinished)) finishNotification(a);
     st.seenFinished = now === 'finished';
     if (now !== 'finished' && st.finishedState === 'resolved') newFinished(a);
+    const runs = now === 'running';
+    if (runs !== cssTicking.has(a)) { if (runs) cssTicking.add(a); else cssTicking.delete(a); refreshActive(); }
   }
   // A script controls a CSS animation the engine has not started yet: it
   // continues as a pending play of the script's.

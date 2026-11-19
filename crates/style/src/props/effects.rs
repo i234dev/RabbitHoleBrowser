@@ -170,8 +170,8 @@ fn parse_transform(comps: &[&[Token]], ctx: &LengthContext) -> Option<Vec<Transf
             "rotate" | "rotatez" => TransformOp::Rotate(ang(0)?),
             "rotatex" | "rotatey" | "rotate3d" | "perspective" => TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
             "skew" => TransformOp::Skew(ang(0)?, ang(1).unwrap_or(0.0)),
-            "skewx" => TransformOp::Skew(ang(0)?, 0.0),
-            "skewy" => TransformOp::Skew(0.0, ang(0)?),
+            "skewx" => TransformOp::SkewX(ang(0)?),
+            "skewy" => TransformOp::SkewY(ang(0)?),
             "matrix" => {
                 if args.len() != 6 {
                     return None;
