@@ -127,6 +127,21 @@ impl DecorationInfo {
     }
 }
 
+/// Word-separator characters (CSS Text 3 §4.1.1): expanded by
+/// `inter-word` justification (NBSP is a space in laid-out text).
+pub fn is_word_separator(c: char) -> bool {
+    matches!(c, ' ' | '\u{a0}' | '\u{1361}' | '\u{10100}' | '\u{10101}' | '\u{1039f}' | '\u{1091f}')
+}
+
+/// The extra justification space (`word_spacing` per separator) before
+/// byte `idx` of `text`.
+pub fn word_spacing_before(text: &str, idx: usize, word_spacing: f32) -> f32 {
+    if word_spacing == 0.0 {
+        return 0.0;
+    }
+    word_spacing * text[..idx.min(text.len())].chars().filter(|c| is_word_separator(*c)).count() as f32
+}
+
 /// A painted piece of a line.
 #[derive(Debug, Clone)]
 pub enum FragmentKind {
@@ -136,6 +151,8 @@ pub enum FragmentKind {
         size: f32,
         color: Color,
         letter_spacing: f32,
+        /// Extra space after each word separator (justification).
+        word_spacing: f32,
         /// Hide text but keep its space (`visibility: hidden`).
         hidden: bool,
         /// Text decorations.

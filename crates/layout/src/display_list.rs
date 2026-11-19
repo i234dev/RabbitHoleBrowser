@@ -50,6 +50,8 @@ pub enum DisplayItem {
         color: Color,
         text: String,
         letter_spacing: f32,
+        /// Extra space after each word separator (justification).
+        word_spacing: f32,
         shadows: Vec<Shadow>,
         small_caps: bool,
         oblique: bool,
@@ -902,6 +904,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         color: m.color,
                         text: m.text.to_string(),
                         letter_spacing: 0.0,
+                        word_spacing: 0.0,
                         shadows: Vec::new(),
                         small_caps: false,
                         oblique: false,
@@ -1171,6 +1174,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             color: st.color,
             text: text.to_string(),
             letter_spacing: st.letter_spacing,
+            word_spacing: 0.0,
             shadows: Vec::new(),
             small_caps: false,
             oblique: false,
@@ -1211,6 +1215,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 color: st.color,
                 text: alt,
                 letter_spacing: 0.0,
+                        word_spacing: 0.0,
                 shadows: Vec::new(),
                 small_caps: false,
                 oblique: false,
@@ -1288,6 +1293,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             color: fg,
             text: label,
             letter_spacing: 0.0,
+                        word_spacing: 0.0,
             shadows: Vec::new(),
             small_caps: false,
             oblique: false,
@@ -1465,6 +1471,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         size,
                         color,
                         letter_spacing,
+                        word_spacing,
                         hidden,
                         decoration_info,
                         shadows,
@@ -1495,7 +1502,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         if decorated_shadows {
                             for sh in shadows.iter().rev() {
                                 let off = Some((sh.x, sh.y, sh.color));
-                                self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, false, off);
+                                self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, false, off);
                                 self.list.push(DisplayItem::Text {
                                     x: f.rect.x,
                                     y: f.baseline,
@@ -1504,15 +1511,16 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                                     color: Color::TRANSPARENT,
                                     text: text.to_string(),
                                     letter_spacing: *letter_spacing,
+                                    word_spacing: *word_spacing,
                                     shadows: vec![sh.clone()],
                                     small_caps: *small_caps,
                                     oblique: *oblique,
                                 });
-                                self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, true, off);
+                                self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, true, off);
                             }
                         }
                         if decoration_info.any() {
-                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, false, None);
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, false, None);
                         }
                         self.list.push(DisplayItem::Text {
                             x: f.rect.x,
@@ -1522,18 +1530,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             color: *color,
                             text: text.to_string(),
                             letter_spacing: *letter_spacing,
+                            word_spacing: *word_spacing,
                             shadows: if decorated_shadows { Vec::new() } else { shadows.clone() },
                             small_caps: *small_caps,
                             oblique: *oblique,
                         });
                         if decoration_info.any() {
-                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, true, None);
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, true, None);
                         }
                         if self.flipped {
                             self.list.push(DisplayItem::PopTransform);
                         }
                         if let Some(e) = emphasis {
-                            self.paint_emphasis(f.rect, *font, *size, text, *letter_spacing, e);
+                            self.paint_emphasis(f.rect, *font, *size, text, (*letter_spacing, *word_spacing), e);
                         }
                     }
                     FragmentKind::Box(i) => {
@@ -1549,7 +1558,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     /// Paint emphasis marks centered over (or under) each character of a
     /// text fragment, at half the font size, touching the glyph box.
-    fn paint_emphasis(&mut self, rect: Rect, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, e: &crate::tree::Emphasis) {
+    fn paint_emphasis(&mut self, rect: Rect, font: rabbithole_gfx::FontId, size: f32, text: &str, (letter_spacing, word_spacing): (f32, f32), e: &crate::tree::Emphasis) {
         let fonts = self.ctx.fonts;
         let msize = size / 2.0;
         let mm = fonts.metrics(font, msize);
@@ -1570,7 +1579,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             if emphasis_skips(ch) {
                 continue;
             }
-            let x = rect.x + g.x + (adv - letter_spacing - mw) / 2.0;
+            let x = rect.x + g.x + crate::tree::word_spacing_before(text, g.byte_index, word_spacing) + (adv - letter_spacing - mw) / 2.0;
             if self.flipped {
                 let cy = y - mm.ascent + (mm.ascent + mm.descent) / 2.0;
                 self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * cy]));
@@ -1583,6 +1592,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 color: e.color,
                 text: e.mark.to_string(),
                 letter_spacing: 0.0,
+                        word_spacing: 0.0,
                 shadows: Vec::new(),
                 small_caps: false,
                 oblique: false,
@@ -1597,7 +1607,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// line-throughs (`through` true) of a text fragment.
     #[allow(clippy::too_many_arguments)]
     /// `shadow`: paint them as the shadow (offset, color) of a text-shadow.
-    fn paint_decorations(&mut self, rect: Rect, baseline: f32, font: rabbithole_gfx::FontId, size: f32, text: (&str, f32), info: &DecorationInfo, through: bool, shadow: Option<(f32, f32, Color)>) {
+    fn paint_decorations(&mut self, rect: Rect, baseline: f32, font: rabbithole_gfx::FontId, size: f32, text: (&str, f32, f32), info: &DecorationInfo, through: bool, shadow: Option<(f32, f32, Color)>) {
         let (rect, baseline) = match shadow {
             Some((dx, dy, _)) => (Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h), baseline + dy),
             None => (rect, baseline),
@@ -1634,7 +1644,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             // line does not follow these glyphs.)
             let skip = !through && info.skip_ink != 1 && bo.abs() < 0.01;
             if skip && ink.is_none() {
-                ink = Some(glyph_ink(self.ctx.fonts, font, size, text.0, text.1, rect.x, text_baseline, info.skip_ink == 2));
+                ink = Some(glyph_ink(self.ctx.fonts, font, size, text.0, (text.1, text.2), rect.x, text_baseline, info.skip_ink == 2));
             }
             let list = &mut self.list;
             let mut line = |top: f32, t: f32| {
@@ -1712,19 +1722,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 /// skips where the glyph actually crosses it. Ideographs are skipped
 /// only with `all`.
 #[allow(clippy::too_many_arguments)]
-fn glyph_ink(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, x: f32, baseline: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
+fn glyph_ink(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, (letter_spacing, word_spacing): (f32, f32), x: f32, baseline: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
     // The ink relative to the origin is cached across display list builds
     // (the same link texts are decorated again on every rebuild).
-    type Key = (usize, u32, u32, bool, Box<str>);
+    type Key = (usize, u32, u32, u32, bool, Box<str>);
     thread_local! {
         static INK: std::cell::RefCell<std::collections::HashMap<Key, std::rc::Rc<Vec<(f32, f32, f32, f32)>>>> = Default::default();
     }
-    let key: Key = (font.0 ^ ((fonts as *const rabbithole_gfx::FontContext as usize) << 20), size.to_bits(), letter_spacing.to_bits(), all, Box::from(text));
+    let key: Key = (font.0 ^ ((fonts as *const rabbithole_gfx::FontContext as usize) << 20), size.to_bits(), letter_spacing.to_bits(), word_spacing.to_bits(), all, Box::from(text));
     let cached = INK.with(|c| c.borrow().get(&key).cloned());
     let rel = match cached {
         Some(r) => r,
         None => {
-            let r = std::rc::Rc::new(glyph_ink_rel(fonts, font, size, text, letter_spacing, all));
+            let r = std::rc::Rc::new(glyph_ink_rel(fonts, font, size, text, letter_spacing, word_spacing, all));
             INK.with(|c| {
                 let mut c = c.borrow_mut();
                 if c.len() > 2048 {
@@ -1739,7 +1749,7 @@ fn glyph_ink(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, 
 }
 
 /// [`glyph_ink`] relative to the run's origin on its baseline.
-fn glyph_ink_rel(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
+fn glyph_ink_rel(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, word_spacing: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
     let (x, baseline) = (0.0f32, 0.0f32);
     let mut out: Vec<(f32, f32, f32, f32)> = Vec::new();
     for g in fonts.shape(font, size, text, letter_spacing) {
@@ -1754,7 +1764,7 @@ fn glyph_ink_rel(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::Font
         if bmp.is_empty() {
             continue;
         }
-        let gx = x + g.x + g.dx + bmp.left as f32;
+        let gx = x + g.x + g.dx + bmp.left as f32 + crate::tree::word_spacing_before(text, g.byte_index, word_spacing);
         let gy = baseline - g.dy - bmp.top as f32;
         let w = bmp.width as usize;
         for r in 0..bmp.height as usize {

@@ -25,9 +25,9 @@ fn item_eq(a: &DisplayItem, b: &DisplayItem) -> bool {
             D::BoxShadow { rect: r2, radii: q2, offset: o2, blur: b2, spread: s2, color: c2, inset: i2 },
         ) => r1 == r2 && q1 == q2 && o1 == o2 && b1 == b2 && s1 == s2 && c1 == c2 && i1 == i2,
         (
-            D::Text { x: x1, y: y1, font: f1, size: z1, color: c1, text: t1, letter_spacing: l1, shadows: h1, small_caps: s1, oblique: o1 },
-            D::Text { x: x2, y: y2, font: f2, size: z2, color: c2, text: t2, letter_spacing: l2, shadows: h2, small_caps: s2, oblique: o2 },
-        ) => x1 == x2 && y1 == y2 && f1 == f2 && z1 == z2 && c1 == c2 && t1 == t2 && l1 == l2 && h1 == h2 && s1 == s2 && o1 == o2,
+            D::Text { x: x1, y: y1, font: f1, size: z1, color: c1, text: t1, letter_spacing: l1, word_spacing: w1, shadows: h1, small_caps: s1, oblique: o1 },
+            D::Text { x: x2, y: y2, font: f2, size: z2, color: c2, text: t2, letter_spacing: l2, word_spacing: w2, shadows: h2, small_caps: s2, oblique: o2 },
+        ) => w1 == w2 && x1 == x2 && y1 == y2 && f1 == f2 && z1 == z2 && c1 == c2 && t1 == t2 && l1 == l2 && h1 == h2 && s1 == s2 && o1 == o2,
         (D::Image { rect: r1, src: s1, image: i1, opacity: o1, pixelated: p1 }, D::Image { rect: r2, src: s2, image: i2, opacity: o2, pixelated: p2 }) => {
             r1 == r2 && s1 == s2 && Arc::ptr_eq(i1, i2) && o1 == o2 && p1 == p2
         }
@@ -60,10 +60,10 @@ fn item_bounds(item: &DisplayItem) -> Option<Rect> {
             let e = blur.abs() * 2.0 + spread.abs() + offset.0.abs().max(offset.1.abs());
             Rect::new(rect.x - e, rect.y - e, rect.w + 2.0 * e, rect.h + 2.0 * e)
         }
-        D::Text { x, y, size, text, letter_spacing, shadows, .. } => {
+        D::Text { x, y, size, text, letter_spacing, word_spacing, shadows, .. } => {
             // Generous: no glyph is wider than 1.5em plus spacing.
             let n = text.chars().count() as f32;
-            let w = n * (size * 1.5 + letter_spacing.abs());
+            let w = n * (size * 1.5 + letter_spacing.abs() + word_spacing.abs());
             let mut r = Rect::new(*x - size * 0.5, *y - size * 1.5, w + size, size * 2.3);
             for s in shadows {
                 let e = s.blur.abs() * 2.0;

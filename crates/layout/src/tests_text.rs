@@ -180,3 +180,18 @@ fn letter_spacing_is_not_applied_at_the_line_end() {
     let ls = lines(fx.block(&t, "d"));
     assert!((ls[0].last().unwrap().1.right() - 300.0).abs() < 0.5, "{ls:?}");
 }
+
+#[test]
+fn justified_lines_keep_whole_fragments_with_word_spacing() {
+    let fx = Fx::new("<div id=d style='width:200px;text-align:justify'>aa bb cc dd ee ff gg</div>");
+    let t = fx.layout();
+    let b = fx.block(&t, "d");
+    let first = &b.lines[0];
+    let texts: Vec<_> = first.fragments.iter().filter_map(|f| match &f.kind {
+        FragmentKind::Text { word_spacing, .. } => Some((*word_spacing, f.rect)),
+        _ => None,
+    }).collect();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].0 > 0.0);
+    assert!((texts[0].1.right() - 200.0).abs() < 0.5, "{texts:?}");
+}

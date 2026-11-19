@@ -4,7 +4,7 @@ use crate::block::{Cb, Layouter};
 use crate::float::Bfc;
 use crate::linebreak as lb;
 use crate::text::{segment_tabs, transform_style, Collapser, Seg};
-use crate::tree::{DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
+use crate::tree::{is_word_separator, DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{FontId, Rect};
 use rabbithole_style::{
@@ -328,11 +328,6 @@ fn glues_atomic(c: char) -> bool {
     c != ' ' && matches!(lb::class(c), lb::Lb::GL | lb::Lb::WJ | lb::Lb::ZWJ)
 }
 
-/// Word-separator characters (CSS Text 3 §4.1.1): expanded by
-/// `inter-word` justification.
-fn is_word_separator(c: char) -> bool {
-    matches!(c, ' ' | '\u{a0}' | '\u{1361}' | '\u{10100}' | '\u{10101}' | '\u{1039f}' | '\u{1091f}')
-}
 
 /// Default-ignorable format characters (bidi controls, joiners): they
 /// form no justification opportunity of their own.
@@ -720,6 +715,7 @@ impl<'a> Layouter<'a> {
                 pending_abs: Vec::new(),
                 first_line: true,
                 after_forced: false,
+                join_next: false,
                 indent,
                 ellipsis,
                 max_lines,
@@ -837,6 +833,9 @@ struct Line {
     align_right: f32,
     /// Space added by justification.
     justified: f32,
+    /// Per fragment, the justification space after each word separator
+    /// (empty when none).
+    frag_ws: Vec<f32>,
 }
 
 struct InlineLayout<'l, 'a> {
@@ -859,6 +858,8 @@ struct InlineLayout<'l, 'a> {
     first_line: bool,
     /// The previous line ended with a forced break.
     after_forced: bool,
+    /// The previous line ended inside a word of a joining script.
+    join_next: bool,
     indent: f32,
     /// `text-overflow: ellipsis` applies (overflow clipped).
     ellipsis: bool,
@@ -1003,6 +1004,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.has_content = false;
         self.cur.break_at = None;
         self.cur.justified = 0.0;
+        self.cur.frag_ws.clear();
         let x = self.cur.x;
         for o in &mut self.cur.open {
             o.start_x = x;
@@ -1438,6 +1440,46 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             out.push(f);
         }
         self.cur.frags = out;
+    }
+
+    /// A word of a joining script (Arabic) broken across lines keeps its
+    /// joined forms (as in browsers): the line ends with a ZWJ after a
+    /// dual-joining letter and the next line starts with one.
+    fn join_across_break(&mut self, forced: bool) {
+        fn dual_joining(c: char) -> bool {
+            let u = c as u32;
+            matches!(u, 0x0620..=0x064A | 0x066E..=0x06D3 | 0x06FA..=0x06FC | 0x0750..=0x077F)
+                && !matches!(u, 0x0622..=0x0625 | 0x0627 | 0x0629 | 0x062F..=0x0632 | 0x0648 | 0x0671..=0x0673 | 0x0675..=0x0677 | 0x0688..=0x0699 | 0x06C0 | 0x06C3..=0x06CB | 0x06CD | 0x06CF | 0x06D2 | 0x06D3)
+        }
+        if std::mem::take(&mut self.join_next) {
+            let mut delta = 0.0;
+            if let Some(PF { kind: PFKind::Text { text, item }, w, .. }) = self.cur.frags.first_mut() {
+                if text.chars().next().is_some_and(is_cursive) {
+                    text.insert(0, '\u{200D}');
+                    // It is drawn on its own: measure it so.
+                    let style = item_style(self.items, self.cstyle, *item).clone();
+                    let font = self.lay.font_for(&style);
+                    let painted = self.lay.measurer.width(font, style.font_size, text) + style.letter_spacing * (text.chars().count() - 1) as f32;
+                    delta = painted - *w;
+                    *w = painted;
+                }
+            }
+            if delta != 0.0 {
+                for f in self.cur.frags.iter_mut().skip(1) {
+                    f.x += delta;
+                }
+                self.cur.x += delta;
+            }
+        }
+        if forced || self.final_flush {
+            return;
+        }
+        if let Some(PF { kind: PFKind::Text { text, item }, .. }) = self.cur.frags.last_mut() {
+            if *item != MARKER_ITEM && text.chars().next_back().is_some_and(dual_joining) {
+                text.push('\u{200D}');
+                self.join_next = true;
+            }
+        }
     }
 
     /// A line broken at a soft hyphen ends with the hyphenation character
@@ -1998,8 +2040,26 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let frags = std::mem::take(&mut self.cur.frags);
         let mut out: Vec<PF> = Vec::with_capacity(frags.len() + count);
         let mut shift = 0.0;
+        // Lines without bidi reordering keep a text fragment whole when all
+        // its opportunities follow word separators: the painter spaces its
+        // words (`word_spacing`). Others are cut at the opportunities.
+        let whole = !self.bidi_items
+            && self.cstyle.direction != Direction::Rtl
+            && !frags.iter().any(|f| matches!(&f.kind, PFKind::Text { text, .. } if crate::bidi::needs_bidi(text)));
+        let mut frag_ws: Vec<f32> = Vec::new();
         for (fi, f) in frags.into_iter().enumerate() {
             match f.kind {
+                PFKind::Text { text, item }
+                    if whole && opp[fi].iter().any(|o| *o) && text.chars().zip(opp[fi].iter()).all(|(c, o)| !*o || is_word_separator(c)) =>
+                {
+                    let k = opp[fi].iter().filter(|o| **o).count();
+                    frag_ws.resize(out.len(), 0.0);
+                    frag_ws.push(extra);
+                    out.push(PF { x: f.x + shift, w: f.w + extra * k as f32, kind: PFKind::Text { text, item } });
+                    // (Inline box edges fall on fragment edges.)
+                    marks.extend(std::iter::repeat_n(f.x + f.w, k));
+                    shift += extra * k as f32;
+                }
                 PFKind::Text { text, item } if opp[fi].iter().any(|o| *o) => {
                     let style = self.style(item).clone();
                     let font = self.lay.font_for(&style);
@@ -2038,6 +2098,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             }
         }
         self.cur.frags = out;
+        self.cur.frag_ws = frag_ws;
         let map = |x: f32| x + extra * marks.iter().take_while(|m| **m <= x + 0.01).count() as f32;
         for bg in &mut self.cur.bg {
             let (a, b) = (map(bg.x), map(bg.x + bg.w));
@@ -2059,11 +2120,14 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 return;
             }
         }
-        self.cur.pending_space = None;
+        // (Whether the line ends at a space, for joining scripts.)
+        let mut at_space = self.cur.pending_space.take().is_some();
+        at_space |= matches!(self.cur.frags.last(), Some(PF { kind: PFKind::Text { text, .. }, .. }) if text.ends_with(' '));
         self.trim_trailing_space();
         if !forced && !self.final_flush {
             self.show_hyphen();
         }
+        self.join_across_break(forced || at_space);
         // No letter-spacing at the end of a line (CSS Text 3 §8.2); the
         // lines of ruby bases and annotations are not line ends.
         if let Some(PF { kind: PFKind::Text { item, .. }, w, .. }) = self.cur.frags.last_mut().filter(|_| !self.cstyle.line_height_tight) {
@@ -2345,6 +2409,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             size: tm.size,
                             color: style.color,
                             letter_spacing: style.letter_spacing,
+                            word_spacing: self.cur.frag_ws.get(fi).copied().unwrap_or(0.0),
                             hidden: style.visibility == Visibility::Hidden,
                             decoration_info: DecorationInfo {
                                 list: style.applied_decorations.clone(),
