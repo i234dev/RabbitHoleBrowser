@@ -2130,9 +2130,9 @@ impl Page {
         let mut r = self.layout_rect_of(node)?;
         let mut cur = Some(node);
         while let Some(n) = cur {
-            if let Some(s) = self.styles.get(n).filter(|s| !s.transform.is_empty()) {
+            if let Some(s) = self.styles.get(n).filter(|s| s.has_transform()) {
                 if let Some(b) = self.layout_rect_of(n) {
-                    let m = rabbithole_style::transform_matrix(&s.transform, b.w, b.h, s.font_size);
+                    let m = rabbithole_style::transform_matrix(&s.transform_ops(), b.w, b.h, s.font_size);
                     let ox = b.x + s.transform_origin.0.resolve_or_zero(b.w);
                     let oy = b.y + s.transform_origin.1.resolve_or_zero(b.h);
                     let full = rabbithole_style::multiply_matrix(rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, ox, oy], m), [1.0, 0.0, 0.0, 1.0, -ox, -oy]);
@@ -2289,7 +2289,7 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
                 continue;
             }
             // A transformed box counts with its transformed bounds.
-            if !c.style.transform.is_empty() {
+            if c.style.has_transform() {
                 let b = rabbithole_layout::block_content_bounds(c);
                 add(u, &b, dx, dy);
                 continue;

@@ -2256,7 +2256,7 @@ fn inline_containing_blocks(b: &LayoutBox) -> HashMap<rabbithole_dom::NodeId, Re
 pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
     // A transformed box contributes its transformed border box (its auto
     // margins, turned, must not extend the overflow).
-    let transformed = !b.style.transform.is_empty();
+    let transformed = b.style.has_transform();
     let mut r = if transformed { b.rect } else { b.margin_rect() };
     if b.flow == Flow::Absolute && b.fixed {
         return r;
@@ -2274,7 +2274,7 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
     for c in b.children.iter().filter(|c| !c.clamped) {
         let cr = content_bounds(c);
         // A transformed empty box (nothing to draw) adds no overflow.
-        if cr.w <= 0.0 && cr.h <= 0.0 || !c.style.transform.is_empty() && (cr.w <= 0.0 || cr.h <= 0.0) {
+        if cr.w <= 0.0 && cr.h <= 0.0 || c.style.has_transform() && (cr.w <= 0.0 || cr.h <= 0.0) {
             continue;
         }
         r = r.union(&cr);

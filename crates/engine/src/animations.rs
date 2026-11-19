@@ -51,6 +51,9 @@ enum Prop {
     PaddingBottom,
     PaddingLeft,
     Transform,
+    Translate,
+    Rotate,
+    Scale,
     Visibility,
     LetterSpacing,
     FontSize,
@@ -87,6 +90,9 @@ const ALL: &[Prop] = &[
     Prop::PaddingBottom,
     Prop::PaddingLeft,
     Prop::Transform,
+    Prop::Translate,
+    Prop::Rotate,
+    Prop::Scale,
     Prop::Visibility,
     Prop::LetterSpacing,
     Prop::FontSize,
@@ -125,6 +131,9 @@ impl Prop {
             Prop::PaddingBottom => "padding-bottom",
             Prop::PaddingLeft => "padding-left",
             Prop::Transform => "transform",
+            Prop::Translate => "translate",
+            Prop::Rotate => "rotate",
+            Prop::Scale => "scale",
             Prop::Visibility => "visibility",
             Prop::LetterSpacing => "letter-spacing",
             Prop::FontSize => "font-size",
@@ -203,6 +212,9 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         PaddingBottom => Val::L(s.padding.bottom),
         PaddingLeft => Val::L(s.padding.left),
         Transform => Val::T(s.transform.clone()),
+        Translate => Val::T(s.transform3d.as_ref().and_then(|t| t.translate.clone()).into_iter().collect()),
+        Rotate => Val::T(s.transform3d.as_ref().and_then(|t| t.rotate.clone()).into_iter().collect()),
+        Scale => Val::T(s.transform3d.as_ref().and_then(|t| t.scale.clone()).into_iter().collect()),
         Visibility => Val::V(s.visibility),
         LetterSpacing => Val::F(s.letter_spacing),
         FontSize => Val::F(s.font_size),
@@ -242,6 +254,17 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         (PaddingBottom, Val::L(l)) => s.padding.bottom = *l,
         (PaddingLeft, Val::L(l)) => s.padding.left = *l,
         (Transform, Val::T(t)) => s.transform = t.clone(),
+        (Translate | Rotate | Scale, Val::T(t)) => {
+            let v = t.first().cloned();
+            if v.is_some() || s.transform3d.is_some() {
+                let t3 = s.transform3d_mut();
+                match p {
+                    Translate => t3.translate = v,
+                    Rotate => t3.rotate = v,
+                    _ => t3.scale = v,
+                }
+            }
+        }
         (Visibility, Val::V(v)) => s.visibility = *v,
         (LetterSpacing, Val::F(f)) => s.letter_spacing = *f,
         (FontSize, Val::F(f)) => {
@@ -563,7 +586,54 @@ fn identity_of(op: &TransformOp) -> TransformOp {
         TransformOp::SkewX(_) => TransformOp::SkewX(0.0),
         TransformOp::SkewY(_) => TransformOp::SkewY(0.0),
         TransformOp::Matrix(_) => TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+        TransformOp::Translate3d(..) => TransformOp::Translate3d(Length::Px(0.0), Length::Px(0.0), 0.0),
+        TransformOp::Scale3d(..) => TransformOp::Scale3d(1.0, 1.0, 1.0),
+        TransformOp::Rotate3d(x, y, z, _) => TransformOp::Rotate3d(*x, *y, *z, 0.0),
+        TransformOp::Perspective(_) => TransformOp::Perspective(None),
+        TransformOp::Matrix3d(_) => TransformOp::Matrix3d(Box::new(rabbithole_gfx::mat4::to_css(&rabbithole_gfx::mat4::IDENTITY4))),
     }
+}
+
+/// A rotation as (normalized axis, angle); a zero axis is about z.
+fn rotation_of(op: &TransformOp) -> Option<([f64; 3], f64)> {
+    let (x, y, z, a) = match op {
+        TransformOp::Rotate(a) => (0.0, 0.0, 1.0, *a),
+        TransformOp::Rotate3d(x, y, z, a) => (*x, *y, *z, *a),
+        _ => return None,
+    };
+    let (x, y, z) = (x as f64, y as f64, z as f64);
+    let len = (x * x + y * y + z * z).sqrt();
+    if len == 0.0 {
+        return Some(([0.0, 0.0, 1.0], a as f64));
+    }
+    Some(([x / len, y / len, z / len], a as f64))
+}
+
+/// Interpolate two rotations (CSS Transforms 2 §interpolation of
+/// primitives): the angle when the axes agree, else the quaternions by
+/// spherical linear interpolation.
+fn lerp_rotation(a: &TransformOp, b: &TransformOp, t: f32) -> Option<TransformOp> {
+    let (aa, ang_a) = rotation_of(a)?;
+    let (ab, ang_b) = rotation_of(b)?;
+    let same = (aa[0] - ab[0]).abs() < 1e-6 && (aa[1] - ab[1]).abs() < 1e-6 && (aa[2] - ab[2]).abs() < 1e-6;
+    if same || ang_a == 0.0 || ang_b == 0.0 {
+        let axis = if !same && ang_a == 0.0 { ab } else { aa };
+        let ang = ang_a + (ang_b - ang_a) * t as f64;
+        if let (TransformOp::Rotate(_), TransformOp::Rotate(_)) = (a, b) {
+            return Some(TransformOp::Rotate(ang as f32));
+        }
+        return Some(TransformOp::Rotate3d(axis[0] as f32, axis[1] as f32, axis[2] as f32, ang as f32));
+    }
+    let q = |axis: [f64; 3], ang: f64| {
+        let s = (ang / 2.0).sin();
+        [axis[0] * s, axis[1] * s, axis[2] * s, (ang / 2.0).cos()]
+    };
+    let r = rabbithole_gfx::mat4::slerp(q(aa, ang_a), q(ab, ang_b), t as f64);
+    let w = r[3].clamp(-1.0, 1.0);
+    let ang = 2.0 * w.acos();
+    let s = (1.0 - w * w).sqrt();
+    let axis = if s < 1e-9 { [0.0, 0.0, 1.0] } else { [r[0] / s, r[1] / s, r[2] / s] };
+    Some(TransformOp::Rotate3d(axis[0] as f32, axis[1] as f32, axis[2] as f32, ang as f32))
 }
 
 fn lerp_op(a: &TransformOp, b: &TransformOp, t: f32) -> Option<TransformOp> {
@@ -581,6 +651,21 @@ fn lerp_op(a: &TransformOp, b: &TransformOp, t: f32) -> Option<TransformOp> {
                 o[i] = lerp(m[i], n[i], t);
             }
             Matrix(o)
+        }
+        (Translate(ax, ay) | Translate3d(ax, ay, _), Translate(bx, by) | Translate3d(bx, by, _)) => {
+            let z = |o: &TransformOp| if let Translate3d(_, _, z) = o { *z } else { 0.0 };
+            Translate3d(lerp_lp(ax, bx, t)?, lerp_lp(ay, by, t)?, lerp(z(a), z(b), t))
+        }
+        (Scale(ax, ay) | Scale3d(ax, ay, _), Scale(bx, by) | Scale3d(bx, by, _)) => {
+            let z = |o: &TransformOp| if let Scale3d(_, _, z) = o { *z } else { 1.0 };
+            Scale3d(lerp(*ax, *bx, t), lerp(*ay, *by, t), lerp(z(a), z(b), t))
+        }
+        (Rotate(_) | Rotate3d(..), Rotate(_) | Rotate3d(..)) => return lerp_rotation(a, b, t),
+        (Perspective(x), Perspective(y)) => {
+            // Interpolate the inverse distances (`none` is 0).
+            let inv = |d: &Option<f32>| d.map_or(0.0, |d| 1.0 / d.max(1.0));
+            let v = lerp(inv(x), inv(y), t);
+            Perspective((v > 0.0).then(|| 1.0 / v))
         }
         _ => return None,
     })
@@ -639,9 +724,26 @@ fn lerp_transforms(x: &[TransformOp], y: &[TransformOp], t: f32) -> Option<Vec<T
             return Some(ops);
         }
     }
+    if !x.iter().chain(y.iter()).all(TransformOp::is_2d) {
+        let ma = matrix3d_of(x)?;
+        let mb = matrix3d_of(y)?;
+        let m = rabbithole_gfx::mat4::interpolate(&ma, &mb, t)?;
+        if rabbithole_gfx::mat4::is_2d(&m) {
+            return Some(vec![TransformOp::Matrix(rabbithole_gfx::mat4::flatten_2d(&m))]);
+        }
+        return Some(vec![TransformOp::Matrix3d(Box::new(rabbithole_gfx::mat4::to_css(&m)))]);
+    }
     let ma = matrix_of(x)?;
     let mb = matrix_of(y)?;
     Some(vec![TransformOp::Matrix(lerp_matrix(ma, mb, t))])
+}
+
+/// The 3D matrix of a transform list (None when it needs the box size).
+fn matrix3d_of(ops: &[TransformOp]) -> Option<rabbithole_gfx::mat4::Mat4> {
+    if ops.iter().any(|o| matches!(o, TransformOp::Translate(x, y) | TransformOp::Translate3d(x, y, _) if !matches!(x, Length::Px(_)) || !matches!(y, Length::Px(_)))) {
+        return None;
+    }
+    Some(rabbithole_style::transform_matrix_3d(ops, 0.0, 0.0))
 }
 
 /// The 2D matrix of a transform list (None when it needs the box size).

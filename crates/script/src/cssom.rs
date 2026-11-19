@@ -559,7 +559,21 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         .to_string(),
         "pointer-events" => if s.pointer_events == rabbithole_style::PointerEvents::None { "none".into() } else { "auto".into() },
         "cursor" => s.cursor.into(),
-        "transform" => if s.transform.is_empty() { "none".into() } else { let m = rabbithole_style::transform_matrix(&s.transform, r.w, r.h, s.font_size); format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5]) },
+        "transform" => {
+            if s.transform.is_empty() {
+                "none".into()
+            } else if s.transform.iter().all(rabbithole_style::TransformOp::is_2d) {
+                let m = rabbithole_style::transform_matrix(&s.transform, r.w, r.h, s.font_size);
+                format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5])
+            } else {
+                let m = rabbithole_gfx::mat4::to_css(&rabbithole_style::transform_matrix_3d(&s.transform, r.w, r.h));
+                if rabbithole_gfx::mat4::is_2d(&rabbithole_gfx::mat4::from_css(&m)) {
+                    format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[4], m[5], m[12], m[13])
+                } else {
+                    format!("matrix3d({})", m.iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join(", "))
+                }
+            }
+        }
         "text-decoration" | "text-decoration-line" => {
             let mut parts = Vec::new();
             if s.text_decoration.underline {

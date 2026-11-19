@@ -65,7 +65,9 @@ fn uniform_radius(r: &Radii) -> Option<f32> {
 /// rounded to the nearest pixel), so adjacent boxes at fractional offsets
 /// do not leave antialiased seams. Only without a canvas transform.
 fn snap(r: Rect, canvas: &Canvas) -> Rect {
-    if !rabbithole_gfx::path::is_identity(&canvas.transform()) {
+    let m = canvas.transform();
+    // Also under mirrors / whole-pixel offsets: the grid maps onto itself.
+    if !rabbithole_gfx::path::is_identity(&m) && !(m[1] == 0.0 && m[2] == 0.0 && m[0].abs() == 1.0 && m[3].abs() == 1.0 && m[4].fract() == 0.0 && m[5].fract() == 0.0) {
         return r;
     }
     let (x0, y0) = (r.x.round(), r.y.round());
@@ -154,10 +156,10 @@ enum Frame {
     Canvas,
 }
 
-struct State {
+pub(crate) struct State {
     /// Current translation (document → canvas), including scroll.
-    dx: f32,
-    dy: f32,
+    pub(crate) dx: f32,
+    pub(crate) dy: f32,
     frames: Vec<Frame>,
     clips: Vec<bool>,
     layers: Vec<bool>,
@@ -168,12 +170,20 @@ struct State {
     /// Saved translation while inside the fixed layer.
     fixed_saved: Option<(f32, f32)>,
     /// Canvas offset of `position: fixed` content (the viewport origin).
-    fixed_origin: (f32, f32),
-    ext: bool,
+    pub(crate) fixed_origin: (f32, f32),
+    pub(crate) ext: bool,
     /// Under canvas transforms: the painted area mapped back into the
     /// items' coordinates (culling must not compare untransformed rects
     /// with the device area), one per pushed matrix.
     views: Vec<Rect>,
+}
+
+impl State {
+    /// A fresh state for painting a sub-list offscreen.
+    pub(crate) fn nested(dx: f32, dy: f32, fixed_origin: (f32, f32), ext: bool) -> State {
+        State { dx, dy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin, ext, mask: None, blend: 0, views: Vec::new() }
+    }
+
 }
 
 pub fn paint(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32) {
@@ -290,7 +300,7 @@ fn device_bounds(canvas: &Canvas, r: Rect) -> Option<(i32, i32, usize, usize)> {
 
 /// Draw straight RGBA pixels at device position (x0, y0), clipped by the
 /// canvas clips.
-fn draw_device_pixels(canvas: &mut Canvas, rgba: Vec<u8>, x0: i32, y0: i32, w: usize, h: usize) {
+pub(crate) fn draw_device_pixels(canvas: &mut Canvas, rgba: Vec<u8>, x0: i32, y0: i32, w: usize, h: usize) {
     let img = rabbithole_gfx::Image::new(w as u32, h as u32, rgba);
     let inv = crate::tree::invert_matrix(canvas.transform());
     if let Some(inv) = inv {
@@ -398,7 +408,7 @@ fn paint_backdrop(rect: Rect, radii: Radii, filters: &[rabbithole_style::FilterO
     canvas.pop_clip();
 }
 
-fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: &mut State, device_view: Rect) {
+pub(crate) fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: &mut State, device_view: Rect) {
     let (dx, dy) = (st.dx, st.dy);
     let view = st.views.last().copied().unwrap_or(device_view);
     match item {
@@ -503,6 +513,15 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
         }
         DisplayItem::BackdropFilter { rect, radii, filters } => {
             paint_backdrop(*rect, *radii, filters, canvas, st, view);
+        }
+        DisplayItem::Transform3d(g) => {
+            if st.ext {
+                crate::paint3d::paint_group(g, canvas, fonts, st, device_view);
+            } else {
+                for it in &g.items {
+                    paint_item(it, canvas, fonts, st, device_view);
+                }
+            }
         }
         DisplayItem::LayerBlend(mode) => {
             if st.layers.last() == Some(&true) {

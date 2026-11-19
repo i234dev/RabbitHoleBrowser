@@ -27,6 +27,7 @@ mod linebreak;
 mod widgets;
 mod wm;
 mod filter;
+mod paint3d;
 mod bidi;
 #[cfg(test)]
 mod tests;

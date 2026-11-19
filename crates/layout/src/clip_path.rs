@@ -149,7 +149,7 @@ pub(crate) fn url_geometry(b: &LayoutBox, id: &str, ctx: &crate::LayoutContext) 
     let transform = styles
         .get(node)
         .filter(|s| s.has_transform())
-        .map(|s| rabbithole_style::transform_matrix(&s.transform, 0.0, 0.0, s.font_size));
+        .map(|s| rabbithole_style::transform_matrix(&s.transform_ops(), 0.0, 0.0, s.font_size));
     let (path, rule) = tree.clip_outline(id, b.rect, transform)?;
     Some(ClipGeometry { path, rule, rounded: None })
 }

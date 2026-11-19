@@ -1971,7 +1971,32 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "text-shadow" => to.text_shadow = from.text_shadow.clone(),
         "transform" => to.transform = from.transform.clone(),
-        "transform-origin" => to.transform_origin = from.transform_origin,
+        "transform-origin" => {
+            to.transform_origin = from.transform_origin;
+            let z = from.transform3d.as_ref().map_or(0.0, |t| t.origin_z);
+            if z != 0.0 || to.transform3d.is_some() {
+                to.transform3d_mut().origin_z = z;
+            }
+        }
+        "translate" | "rotate" | "scale" | "perspective" | "perspective-origin" | "transform-style" | "-webkit-transform-style" | "backface-visibility"
+        | "-webkit-backface-visibility" | "-webkit-perspective" | "-webkit-perspective-origin" | "transform-box" => {
+            let d = Transform3dProps::default();
+            let f = from.transform3d.as_deref().unwrap_or(&d);
+            if from.transform3d.is_none() && to.transform3d.is_none() {
+                return;
+            }
+            let t = to.transform3d_mut();
+            match prop {
+                "translate" => t.translate = f.translate.clone(),
+                "rotate" => t.rotate = f.rotate.clone(),
+                "scale" => t.scale = f.scale.clone(),
+                "perspective" | "-webkit-perspective" => t.perspective = f.perspective,
+                "perspective-origin" | "-webkit-perspective-origin" => t.perspective_origin = f.perspective_origin,
+                "transform-style" | "-webkit-transform-style" => t.preserve_3d = f.preserve_3d,
+                "transform-box" => t.transform_box = f.transform_box,
+                _ => t.backface_hidden = f.backface_hidden,
+            }
+        }
         "outline" | "outline-width" | "outline-style" | "outline-color" | "outline-offset" => {
             to.outline_width = from.outline_width;
             to.outline_style = from.outline_style;
@@ -2068,7 +2093,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "caption-side" => to.caption_side_bottom = from.caption_side_bottom,
         "empty-cells" => to.empty_cells_hide = from.empty_cells_hide,
         "scroll-margin-top" => to.scroll_margin_top = from.scroll_margin_top,
-        "isolation" | "will-change" => to.creates_stacking_context = from.creates_stacking_context,
+        "isolation" | "will-change" => {
+            to.creates_stacking_context = from.creates_stacking_context;
+            to.isolate = from.isolate;
+        }
         "mix-blend-mode" => {
             to.creates_stacking_context = from.creates_stacking_context;
             to.mix_blend_mode = from.mix_blend_mode;

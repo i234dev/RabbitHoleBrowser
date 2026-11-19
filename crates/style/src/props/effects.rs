@@ -169,6 +169,14 @@ fn parse_shadows(comps: &[&[Token]], current: Color, ctx: &LengthContext, allow_
     Some(out)
 }
 
+/// A `<number>` or `<percentage>` (as a fraction), for scales.
+fn num_or_pct(c: &[Token]) -> Option<f32> {
+    match c {
+        [Token::Percentage(p)] => Some(p / 100.0),
+        _ => values::number(c),
+    }
+}
+
 fn parse_transform(comps: &[&[Token]], ctx: &LengthContext) -> Option<Vec<TransformOp>> {
     if comps.len() == 1 && values::is_ident(comps[0], "none") {
         return Some(Vec::new());
@@ -177,61 +185,161 @@ fn parse_transform(comps: &[&[Token]], ctx: &LengthContext) -> Option<Vec<Transf
     for c in comps {
         let name = super::fn_name(c)?;
         let args = super::fn_args(c);
-        let arg = |i: usize| -> Option<&[Token]> { args.get(i).and_then(|a| a.first().copied()) };
+        let arg = |i: usize| -> Option<&[Token]> { args.get(i).and_then(|a| if a.len() == 1 { a.first().copied() } else { None }) };
         let num = |i: usize| -> Option<f32> { arg(i).and_then(values::number) };
+        let scl = |i: usize| -> Option<f32> { arg(i).and_then(num_or_pct) };
         let len = |i: usize| -> Option<Length> {
             let a = arg(i)?;
             if let Some(n) = values::number(a) {
-                return Some(Length::Px(n));
+                // Only a unitless zero is a length.
+                return (n == 0.0).then_some(Length::Px(0.0));
             }
             super::len_no_auto(a, ctx)
         };
-        let ang = |i: usize| -> Option<f32> { arg(i).and_then(super::angle) };
-        let op = match name.as_str() {
-            "translate" => TransformOp::Translate(len(0)?, len(1).unwrap_or(Length::ZERO)),
-            "translatex" => TransformOp::Translate(len(0)?, Length::ZERO),
-            "translatey" => TransformOp::Translate(Length::ZERO, len(0)?),
-            "translatez" => TransformOp::Translate(Length::ZERO, Length::ZERO),
-            "translate3d" => TransformOp::Translate(len(0)?, len(1)?),
-            "scale" => {
-                let x = num(0)?;
-                TransformOp::Scale(x, num(1).unwrap_or(x))
+        // A length without percentages (z components).
+        let zlen = |i: usize| -> Option<f32> {
+            match len(i)? {
+                Length::Px(v) => Some(v),
+                _ => None,
             }
-            "scalex" => TransformOp::Scale(num(0)?, 1.0),
-            "scaley" => TransformOp::Scale(1.0, num(0)?),
-            "scalez" => TransformOp::Scale(1.0, 1.0),
-            "scale3d" => TransformOp::Scale(num(0)?, num(1)?),
-            "rotate" | "rotatez" => TransformOp::Rotate(ang(0)?),
-            // A rotation about the z axis is a 2D rotation.
-            "rotate3d" if args.len() == 4 && num(0) == Some(0.0) && num(1) == Some(0.0) && num(2).is_some_and(|z| z != 0.0) => {
-                let a = ang(3)?;
-                TransformOp::Rotate(if num(2)? < 0.0 { -a } else { a })
+        };
+        let ang = |i: usize| -> Option<f32> {
+            let a = arg(i)?;
+            // A unitless zero is an angle.
+            if values::number(a) == Some(0.0) {
+                return Some(0.0);
             }
-            "rotatex" | "rotatey" | "rotate3d" | "perspective" => TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
-            "skew" => TransformOp::Skew(ang(0)?, ang(1).unwrap_or(0.0)),
-            "skewx" => TransformOp::SkewX(ang(0)?),
-            "skewy" => TransformOp::SkewY(ang(0)?),
-            "matrix" => {
-                if args.len() != 6 {
-                    return None;
+            super::angle(a)
+        };
+        let n = args.len();
+        let op = match (name.as_str(), n) {
+            ("translate", 1) => TransformOp::Translate(len(0)?, Length::ZERO),
+            ("translate", 2) => TransformOp::Translate(len(0)?, len(1)?),
+            ("translatex", 1) => TransformOp::Translate(len(0)?, Length::ZERO),
+            ("translatey", 1) => TransformOp::Translate(Length::ZERO, len(0)?),
+            ("translatez", 1) => TransformOp::Translate3d(Length::ZERO, Length::ZERO, zlen(0)?),
+            ("translate3d", 3) => TransformOp::Translate3d(len(0)?, len(1)?, zlen(2)?),
+            ("scale", 1) => {
+                let x = scl(0)?;
+                TransformOp::Scale(x, x)
+            }
+            ("scale", 2) => TransformOp::Scale(scl(0)?, scl(1)?),
+            ("scalex", 1) => TransformOp::Scale(scl(0)?, 1.0),
+            ("scaley", 1) => TransformOp::Scale(1.0, scl(0)?),
+            ("scalez", 1) => TransformOp::Scale3d(1.0, 1.0, scl(0)?),
+            ("scale3d", 3) => TransformOp::Scale3d(scl(0)?, scl(1)?, scl(2)?),
+            ("rotate" | "rotatez", 1) => TransformOp::Rotate(ang(0)?),
+            ("rotatex", 1) => TransformOp::Rotate3d(1.0, 0.0, 0.0, ang(0)?),
+            ("rotatey", 1) => TransformOp::Rotate3d(0.0, 1.0, 0.0, ang(0)?),
+            ("rotate3d", 4) => TransformOp::Rotate3d(num(0)?, num(1)?, num(2)?, ang(3)?),
+            ("perspective", 1) => {
+                let a = arg(0)?;
+                if values::is_ident(a, "none") {
+                    TransformOp::Perspective(None)
+                } else {
+                    let d = zlen(0)?;
+                    if d < 0.0 {
+                        return None;
+                    }
+                    TransformOp::Perspective(Some(d))
                 }
+            }
+            ("skew", 1) => TransformOp::Skew(ang(0)?, 0.0),
+            ("skew", 2) => TransformOp::Skew(ang(0)?, ang(1)?),
+            ("skewx", 1) => TransformOp::SkewX(ang(0)?),
+            ("skewy", 1) => TransformOp::SkewY(ang(0)?),
+            ("matrix", 6) => {
                 let mut m = [0.0; 6];
                 for (i, v) in m.iter_mut().enumerate() {
                     *v = num(i)?;
                 }
                 TransformOp::Matrix(m)
             }
-            "matrix3d" => {
-                if args.len() != 16 {
-                    return None;
+            ("matrix3d", 16) => {
+                let mut m = [0.0; 16];
+                for (i, v) in m.iter_mut().enumerate() {
+                    *v = num(i)?;
                 }
-                TransformOp::Matrix([num(0)?, num(1)?, num(4)?, num(5)?, num(12)?, num(13)?])
+                TransformOp::Matrix3d(Box::new(m))
             }
             _ => return None,
         };
         ops.push(op);
     }
     Some(ops)
+}
+
+/// The `translate` property: `none | <length-percentage> [<length-percentage> <length>?]?`.
+fn parse_translate_prop(comps: &[&[Token]], ctx: &LengthContext) -> Option<Option<TransformOp>> {
+    if comps.len() == 1 && values::is_ident(comps[0], "none") {
+        return Some(None);
+    }
+    let len = |c: &[Token]| -> Option<Length> {
+        if values::number(c) == Some(0.0) {
+            return Some(Length::Px(0.0));
+        }
+        super::len_no_auto(c, ctx)
+    };
+    let (x, y, z) = match comps {
+        [x] => (len(x)?, Length::ZERO, 0.0),
+        [x, y] => (len(x)?, len(y)?, 0.0),
+        [x, y, z] => match len(z)? {
+            Length::Px(z) => (len(x)?, len(y)?, z),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(Some(TransformOp::Translate3d(x, y, z)))
+}
+
+/// The `rotate` property: `none | <angle> | [x | y | z | <number>{3}] && <angle>`.
+fn parse_rotate_prop(comps: &[&[Token]]) -> Option<Option<TransformOp>> {
+    if comps.len() == 1 && values::is_ident(comps[0], "none") {
+        return Some(None);
+    }
+    let mut kinds = String::new();
+    let mut angle = 0.0;
+    let mut axis = (0.0, 0.0, 1.0);
+    let mut nums = Vec::new();
+    for c in comps {
+        if let Some(k) = values::ident(c) {
+            axis = match k.as_str() {
+                "x" => (1.0, 0.0, 0.0),
+                "y" => (0.0, 1.0, 0.0),
+                "z" => (0.0, 0.0, 1.0),
+                _ => return None,
+            };
+            kinds.push('I');
+        } else if let Some(n) = values::number(c) {
+            nums.push(n);
+            kinds.push('N');
+        } else {
+            angle = super::angle(c)?;
+            kinds.push('A');
+        }
+    }
+    match kinds.as_str() {
+        "A" | "IA" | "AI" => {}
+        "NNNA" | "ANNN" => axis = (nums[0], nums[1], nums[2]),
+        _ => return None,
+    }
+    Some(Some(TransformOp::Rotate3d(axis.0, axis.1, axis.2, angle)))
+}
+
+/// The `scale` property: `none | [<number> | <percentage>]{1,3}`.
+fn parse_scale_prop(comps: &[&[Token]]) -> Option<Option<TransformOp>> {
+    if comps.len() == 1 && values::is_ident(comps[0], "none") {
+        return Some(None);
+    }
+    let v: Option<Vec<f32>> = comps.iter().map(|c| num_or_pct(c)).collect();
+    let v = v?;
+    let (x, y, z) = match v.as_slice() {
+        [x] => (*x, *x, 1.0),
+        [x, y] => (*x, *y, 1.0),
+        [x, y, z] => (*x, *y, *z),
+        _ => return None,
+    };
+    Some(Some(TransformOp::Scale3d(x, y, z)))
 }
 
 pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) -> bool {
@@ -245,6 +353,10 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         "-webkit-transform" | "-moz-transform" | "-ms-transform" | "-o-transform" => "transform",
         "-webkit-transform-origin" | "-moz-transform-origin" | "-ms-transform-origin" => "transform-origin",
         "-webkit-filter" => "filter",
+        "-webkit-perspective" => "perspective",
+        "-webkit-perspective-origin" => "perspective-origin",
+        "-webkit-transform-style" => "transform-style",
+        "-webkit-backface-visibility" => "backface-visibility",
         "-webkit-backdrop-filter" => "backdrop-filter",
         "-moz-outline" => "outline",
         n => n,
@@ -376,30 +488,67 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
         }
         "transform-origin" => {
-            // Drop a trailing z offset.
-            let take = comps.iter().take_while(|c| !(comps.len() >= 3 && std::ptr::eq(*c, comps.last().unwrap()) && super::px(c, ctx).is_some() && comps.len() == 3)).count();
-            if let Some(p) = super::parse_position(&comps[..take.max(1).min(comps.len())], ctx) {
+            // An optional trailing z length.
+            let (xy, z) = match comps {
+                [_, _, z] => match super::px(z, ctx) {
+                    Some(z) => (&comps[..2], z),
+                    None => return true,
+                },
+                _ => (comps, 0.0),
+            };
+            if let Some(p) = parse_origin(xy, ctx) {
                 style.transform_origin = p;
-            } else if let Some(p) = super::parse_position(comps, ctx) {
-                style.transform_origin = p;
+                let zv = z;
+                if zv != 0.0 || style.transform3d.is_some() {
+                    style.transform3d_mut().origin_z = zv;
+                }
             }
         }
+        "perspective-origin" => {
+            if let Some(p) = parse_origin(comps, ctx) {
+                style.transform3d_mut().perspective_origin = p;
+            }
+        }
+        "perspective" => {
+            if values::is_ident(c0, "none") && comps.len() == 1 {
+                if style.transform3d.is_some() {
+                    style.transform3d_mut().perspective = None;
+                }
+            } else if let (Some(d), 1) = (super::px(c0, ctx), comps.len()) {
+                if d >= 0.0 {
+                    style.transform3d_mut().perspective = Some(d);
+                }
+            }
+        }
+        "transform-style" => match values::ident(c0).as_deref() {
+            Some("preserve-3d") => style.transform3d_mut().preserve_3d = true,
+            Some("flat") if style.transform3d.is_some() => style.transform3d_mut().preserve_3d = false,
+            _ => {}
+        },
+        "backface-visibility" => match values::ident(c0).as_deref() {
+            Some("hidden") => style.transform3d_mut().backface_hidden = true,
+            Some("visible") if style.transform3d.is_some() => style.transform3d_mut().backface_hidden = false,
+            _ => {}
+        },
         "translate" => {
-            let x = super::len_no_auto(c0, ctx).or_else(|| values::number(c0).map(Length::Px));
-            if let Some(x) = x {
-                let y = comps.get(1).and_then(|c| super::len_no_auto(c, ctx)).unwrap_or(Length::ZERO);
-                style.transform.insert(0, TransformOp::Translate(x, y));
-            }
-        }
-        "scale" => {
-            if let Some(x) = values::number(c0) {
-                let y = comps.get(1).and_then(|c| values::number(c)).unwrap_or(x);
-                style.transform.insert(0, TransformOp::Scale(x, y));
+            if let Some(v) = parse_translate_prop(comps, ctx) {
+                if v.is_some() || style.transform3d.is_some() {
+                    style.transform3d_mut().translate = v;
+                }
             }
         }
         "rotate" => {
-            if let Some(a) = comps.iter().find_map(|c| super::angle(c)) {
-                style.transform.insert(0, TransformOp::Rotate(a));
+            if let Some(v) = parse_rotate_prop(comps) {
+                if v.is_some() || style.transform3d.is_some() {
+                    style.transform3d_mut().rotate = v;
+                }
+            }
+        }
+        "scale" => {
+            if let Some(v) = parse_scale_prop(comps) {
+                if v.is_some() || style.transform3d.is_some() {
+                    style.transform3d_mut().scale = v;
+                }
             }
         }
         "filter" => {
@@ -435,6 +584,9 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         "isolation" => {
             if values::is_ident(c0, "isolate") {
                 style.creates_stacking_context = true;
+                style.isolate = true;
+            } else if values::is_ident(c0, "auto") {
+                style.isolate = false;
             }
         }
         "contain" | "will-change" | "mix-blend-mode" => {
@@ -487,10 +639,27 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.clip_rect = v;
             }
         }
-        "perspective" | "perspective-origin"
-        | "backface-visibility" | "-webkit-backface-visibility" | "transform-style" | "-webkit-transform-style" | "transform-box"
-        | "box-reflect" | "-webkit-box-reflect" | "shape-outside" | "shape-margin" => {}
+        "transform-box" => {
+            let b = match values::ident(c0).as_deref() {
+                Some("content-box") => TransformBox::ContentBox,
+                Some("border-box") => TransformBox::BorderBox,
+                Some("fill-box") => TransformBox::FillBox,
+                Some("stroke-box") => TransformBox::StrokeBox,
+                Some("view-box") => TransformBox::ViewBox,
+                _ => return true,
+            };
+            if b != TransformBox::ViewBox || style.transform3d.is_some() {
+                style.transform3d_mut().transform_box = b;
+            }
+        }
+        "box-reflect" | "-webkit-box-reflect" | "shape-outside" | "shape-margin" => {}
         _ => return false,
     }
     true
+}
+
+/// A `transform-origin` / `perspective-origin` position (one or two
+/// components; keywords in either order).
+fn parse_origin(comps: &[&[Token]], ctx: &LengthContext) -> Option<(Length, Length)> {
+    super::parse_position(comps, ctx)
 }
