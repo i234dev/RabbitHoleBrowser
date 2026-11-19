@@ -444,7 +444,15 @@ impl Canvas {
                     (r + spread).max(0.0)
                 }
             };
-            let sradii = radii.map(|(h, v)| (grow(h), grow(v)));
+            // A fully rounded box (a circle or a pill) stays fully rounded.
+            let full = |r: f32, len: f32| len > 0.0 && r >= len / 2.0 - 0.01;
+            let sradii = radii.map(|(h, v)| {
+                if full(h, dr.w) && full(v, dr.h) {
+                    (srect.w / 2.0, srect.h / 2.0)
+                } else {
+                    (grow(h), grow(v))
+                }
+            });
             let shadow_shape = RoundedBox::new(srect, sradii);
             // Region: shadow rect padded by the blur, limited to clip ± pad.
             let region = Rect::new(srect.x - pad, srect.y - pad, srect.w + 2.0 * pad, srect.h + 2.0 * pad);
