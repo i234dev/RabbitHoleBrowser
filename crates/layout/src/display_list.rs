@@ -147,6 +147,8 @@ pub struct Group3d {
     /// planes of the same 3D rendering context instead of being
     /// flattened into this one.
     pub preserve: bool,
+    /// `mix-blend-mode` of the box, applied when the group is composited.
+    pub blend: u8,
     pub items: Vec<DisplayItem>,
 }
 
@@ -619,7 +621,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 self.push_scope(HitScope::Transform(inverse));
                 // The mapping is not affine: no culling inside.
                 self.bounds = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
-                group3d = Some((self.list.items.len(), self.list.sticky.len(), Group3d { matrix: full, backface_hidden, preserve, items: Vec::new() }));
+                group3d = Some((self.list.items.len(), self.list.sticky.len(), Group3d { matrix: full, backface_hidden, preserve, blend: 0, items: Vec::new() }));
                 None
             } else if mat4::is_2d(&full) && p3d.and_then(|p| p.perspective).is_none() {
                 // The 2D path (same arithmetic as without 3D properties).
@@ -690,7 +692,10 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
         let mask = self.mask_items(root);
-        let layer = layer || mask.is_some();
+        // A 3D group is painted offscreen: its blend mode applies when it
+        // is composited (outside the group), opacity and masks inside.
+        let blend_outside = group3d.is_some() && root.style.mix_blend_mode != 0;
+        let layer = (layer || mask.is_some()) && !(blend_outside && opacity >= 1.0 && mask.is_none());
         if layer {
             self.list.push(DisplayItem::PushLayer(root.subtree_bounds()));
         }
@@ -701,14 +706,20 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if !root.style.filters.is_empty() && self.list.sticky.len() == filter_start.1 {
             let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
             let e = crate::filter::spread(&root.style.filters);
-            let b = root.subtree_bounds();
+            let mut b = root.subtree_bounds();
+            // 3D-transformed descendants may project far outside the boxes.
+            if items.iter().any(|it| matches!(it, DisplayItem::Transform3d(_))) {
+                if let Some(x) = crate::paint3d::extent(items.iter()) {
+                    b = b.union(&x);
+                }
+            }
             let bounds = Rect::new(b.x - e, b.y - e, b.w + 2.0 * e, b.h + 2.0 * e);
             self.list.push(DisplayItem::Filtered { bounds, filters: root.style.filters.clone(), items });
         }
         if let Some(items) = mask {
             self.list.push(DisplayItem::LayerMask(items));
         }
-        if root.style.mix_blend_mode != 0 {
+        if root.style.mix_blend_mode != 0 && !blend_outside {
             self.list.push(DisplayItem::LayerBlend(root.style.mix_blend_mode));
         }
         if layer {
@@ -725,6 +736,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             // not patched on scroll inside a 3D group).
             self.list.sticky.truncate(sticky_start);
             g.items = self.list.items.drain(start..).collect();
+            if blend_outside {
+                g.blend = root.style.mix_blend_mode;
+            }
             self.list.push(DisplayItem::Transform3d(Box::new(g)));
         }
         self.pop_wrappers(pushed_matrix, pushed_transform);

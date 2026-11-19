@@ -323,20 +323,31 @@ pub fn decompose(m: &Mat4) -> Option<Decomposed> {
             row[i] = row[i].map(|v| -v);
         }
     }
-    let mut q = [
-        0.5 * (1.0 + row[0][0] - row[1][1] - row[2][2]).max(0.0).sqrt(),
-        0.5 * (1.0 - row[0][0] + row[1][1] - row[2][2]).max(0.0).sqrt(),
-        0.5 * (1.0 - row[0][0] - row[1][1] + row[2][2]).max(0.0).sqrt(),
-        0.5 * (1.0 + row[0][0] + row[1][1] + row[2][2]).max(0.0).sqrt(),
-    ];
-    if row[2][1] > row[1][2] {
-        q[0] = -q[0];
+    // The rotation's quaternion (x, y, z, w), from the largest of the
+    // trace and the diagonal (stable for half turns, whose w is 0).
+    let r = |i: usize, j: usize| row[j][i];
+    let tr = r(0, 0) + r(1, 1) + r(2, 2);
+    let mut q = if tr > 0.0 {
+        let s = (tr + 1.0).sqrt() * 2.0;
+        [(r(2, 1) - r(1, 2)) / s, (r(0, 2) - r(2, 0)) / s, (r(1, 0) - r(0, 1)) / s, s / 4.0]
+    } else if r(0, 0) > r(1, 1) && r(0, 0) > r(2, 2) {
+        let s = (1.0 + r(0, 0) - r(1, 1) - r(2, 2)).max(0.0).sqrt() * 2.0;
+        [s / 4.0, (r(0, 1) + r(1, 0)) / s, (r(0, 2) + r(2, 0)) / s, (r(2, 1) - r(1, 2)) / s]
+    } else if r(1, 1) > r(2, 2) {
+        let s = (1.0 + r(1, 1) - r(0, 0) - r(2, 2)).max(0.0).sqrt() * 2.0;
+        [(r(0, 1) + r(1, 0)) / s, s / 4.0, (r(1, 2) + r(2, 1)) / s, (r(0, 2) - r(2, 0)) / s]
+    } else {
+        let s = (1.0 + r(2, 2) - r(0, 0) - r(1, 1)).max(0.0).sqrt() * 2.0;
+        [(r(0, 2) + r(2, 0)) / s, (r(1, 2) + r(2, 1)) / s, s / 4.0, (r(1, 0) - r(0, 1)) / s]
+    };
+    // w ≥ 0 like the spec's square roots; a half turn (w ≈ 0) keeps the
+    // positive largest component instead of following rounding noise.
+    if q[3] < -1e-6 {
+        q = q.map(|v| -v);
     }
-    if row[0][2] > row[2][0] {
-        q[1] = -q[1];
-    }
-    if row[1][0] > row[0][1] {
-        q[2] = -q[2];
+    let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if n > 0.0 {
+        q = q.map(|v| v / n);
     }
     Some(Decomposed { translate, scale, skew, perspective, quaternion: q })
 }
@@ -520,6 +531,13 @@ mod tests {
             let r = recompose(&d);
             assert!(close(&r, &m), "{m:?}\n{r:?}\n{d:?}");
         }
+    }
+
+    #[test]
+    fn half_turn_quaternion_keeps_its_axis() {
+        let q = decompose(&rotate(0.0, 1.0, 1.0, std::f32::consts::PI)).unwrap().quaternion;
+        let s = if q[1] < 0.0 { -1.0 } else { 1.0 };
+        assert!(q[0].abs() < 1e-6 && (s * q[1] - 0.5f64.sqrt()).abs() < 1e-6 && (s * q[2] - 0.5f64.sqrt()).abs() < 1e-6 && q[3].abs() < 1e-6, "{q:?}");
     }
 
     #[test]

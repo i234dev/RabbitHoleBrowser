@@ -66,8 +66,21 @@ fn uniform_radius(r: &Radii) -> Option<f32> {
 /// do not leave antialiased seams. Only without a canvas transform.
 fn snap(r: Rect, canvas: &Canvas) -> Rect {
     let m = canvas.transform();
-    // Also under mirrors / whole-pixel offsets: the grid maps onto itself.
-    if !rabbithole_gfx::path::is_identity(&m) && !(m[1] == 0.0 && m[2] == 0.0 && m[0].abs() == 1.0 && m[3].abs() == 1.0 && m[4].fract() == 0.0 && m[5].fract() == 0.0) {
+    if !rabbithole_gfx::path::is_identity(&m) {
+        // Under mirrors / offsets the pixel grid maps onto itself: snap
+        // the device rect and map it back.
+        if m[1] == 0.0 && m[2] == 0.0 && m[0].abs() == 1.0 && m[3].abs() == 1.0 {
+            let (ax, bx) = (m[0] * r.x + m[4], m[0] * (r.x + r.w) + m[4]);
+            let (ay, by) = (m[3] * r.y + m[5], m[3] * (r.y + r.h) + m[5]);
+            let (x0, x1) = (ax.min(bx).round(), ax.max(bx).round());
+            let (y0, y1) = (ay.min(by).round(), ay.max(by).round());
+            if (x1 <= x0 && r.w > 0.0) || (y1 <= y0 && r.h > 0.0) {
+                return r;
+            }
+            let (lx0, lx1) = ((x0 - m[4]) * m[0], (x1 - m[4]) * m[0]);
+            let (ly0, ly1) = ((y0 - m[5]) * m[3], (y1 - m[5]) * m[3]);
+            return Rect::new(lx0.min(lx1), ly0.min(ly1), (lx1 - lx0).abs(), (ly1 - ly0).abs());
+        }
         return r;
     }
     let (x0, y0) = (r.x.round(), r.y.round());

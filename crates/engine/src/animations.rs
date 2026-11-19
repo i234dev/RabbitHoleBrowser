@@ -624,9 +624,11 @@ fn lerp_rotation(a: &TransformOp, b: &TransformOp, t: f32) -> Option<TransformOp
         }
         return Some(TransformOp::Rotate3d(axis[0] as f32, axis[1] as f32, axis[2] as f32, ang as f32));
     }
+    // The quaternions of the rotation matrices (whole turns vanish), as
+    // matrix interpolation would find them.
     let q = |axis: [f64; 3], ang: f64| {
-        let s = (ang / 2.0).sin();
-        [axis[0] * s, axis[1] * s, axis[2] * s, (ang / 2.0).cos()]
+        let m = rabbithole_gfx::mat4::rotate(axis[0] as f32, axis[1] as f32, axis[2] as f32, ang as f32);
+        rabbithole_gfx::mat4::decompose(&m).map_or([0.0, 0.0, 0.0, 1.0], |d| d.quaternion)
     };
     let r = rabbithole_gfx::mat4::slerp(q(aa, ang_a), q(ab, ang_b), t as f64);
     let w = r[3].clamp(-1.0, 1.0);
@@ -2091,6 +2093,40 @@ mod tests {
         assert_eq!(ease(&parse_easing("steps(1, jump-both)"), 0.5), 0.5);
         // Linear-equivalent Béziers stay linear.
         assert!((ease(&parse_easing("cubic-bezier(0, 0, 0, 0)"), 0.25) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rotations_interpolate_3d() {
+        let deg = |d: f32| d.to_radians();
+        // Same axis: the angle.
+        let t = interpolate(&Val::T(vec![TransformOp::Rotate3d(1.0, 0.0, 0.0, 0.0)]), &Val::T(vec![TransformOp::Rotate3d(2.0, 0.0, 0.0, deg(90.0))]), 0.5);
+        let Val::T(ops) = t else { panic!() };
+        let TransformOp::Rotate3d(x, y, z, a) = ops[0] else { panic!("{ops:?}") };
+        assert!((x - 1.0).abs() < 1e-5 && y == 0.0 && z == 0.0 && (a - deg(45.0)).abs() < 1e-5, "{ops:?}");
+        // Different axes: quaternion slerp (CSS Transforms 2 example).
+        let t = interpolate(&Val::T(vec![TransformOp::Rotate3d(1.0, 1.0, 0.0, deg(90.0))]), &Val::T(vec![TransformOp::Rotate3d(0.0, 1.0, 1.0, deg(180.0))]), 0.5);
+        let Val::T(ops) = t else { panic!() };
+        let TransformOp::Rotate3d(x, y, z, a) = ops[0] else { panic!("{ops:?}") };
+        let n = (x * x + y * y + z * z).sqrt();
+        assert!((x / n - 0.3365568).abs() < 1e-3 && (y / n - 0.8125199).abs() < 1e-3 && (z / n - 0.4759632).abs() < 1e-3, "{ops:?}");
+        assert!((a - deg(129.094547)).abs() < 1e-3, "{ops:?}");
+        // A whole turn about x is no rotation: rotateX(360deg) → rotateZ(90deg)
+        // passes through rotateZ(45deg).
+        let t = interpolate(&Val::T(vec![TransformOp::Rotate3d(1.0, 0.0, 0.0, deg(360.0))]), &Val::T(vec![TransformOp::Rotate(deg(90.0))]), 0.5);
+        let Val::T(ops) = t else { panic!() };
+        let TransformOp::Rotate3d(x, y, z, a) = ops[0] else { panic!("{ops:?}") };
+        assert!(x.abs() < 1e-5 && y.abs() < 1e-5 && (z - 1.0).abs() < 1e-5 && (a - deg(45.0)).abs() < 1e-4, "{ops:?}");
+    }
+
+    #[test]
+    fn matrix3d_interpolates_by_decomposition() {
+        let m = |ops: &[TransformOp]| rabbithole_style::transform_matrix_3d(ops, 0.0, 0.0);
+        let a = vec![TransformOp::Perspective(Some(100.0)), TransformOp::Translate3d(Length::Px(0.0), Length::Px(0.0), 10.0)];
+        let b = vec![TransformOp::Scale3d(2.0, 2.0, 2.0)];
+        let Val::T(ops) = interpolate(&Val::T(a), &Val::T(b), 0.0) else { panic!() };
+        // Equal up to the homogeneous scale.
+        let (r, e) = (m(&ops), m(&[TransformOp::Perspective(Some(100.0)), TransformOp::Translate3d(Length::Px(0.0), Length::Px(0.0), 10.0)]));
+        assert!(r.iter().zip(e.iter()).all(|(p, q)| (p / r[15] - q / e[15]).abs() < 1e-4), "{r:?} {e:?}");
     }
 
     #[test]

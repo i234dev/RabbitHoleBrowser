@@ -53,29 +53,64 @@ fn mul2(m: &Matrix, n: &Matrix) -> Matrix {
     rabbithole_style::multiply_matrix(*m, *n)
 }
 
-/// Bounds of a 2D rect's image under a 4×4 matrix (`None` when part of it
-/// is behind the viewer).
-fn project_rect(m: &Mat4, r: Rect) -> Option<Rect> {
-    let mut x0 = f32::MAX;
-    let mut y0 = f32::MAX;
-    let mut x1 = f32::MIN;
-    let mut y1 = f32::MIN;
-    for (x, y) in [(r.x, r.y), (r.right(), r.y), (r.x, r.bottom()), (r.right(), r.bottom())] {
-        let p = mat4::map_homogeneous(m, x as f64, y as f64);
-        if p[3] <= 1e-6 {
-            return None;
+/// Keep the part of a polygon where `a·x + b·y + c >= 0`.
+fn clip_poly(poly: &[(f64, f64)], a: f64, b: f64, c: f64) -> Vec<(f64, f64)> {
+    let mut out = Vec::with_capacity(poly.len() + 2);
+    for i in 0..poly.len() {
+        let p = poly[i];
+        let q = poly[(i + 1) % poly.len()];
+        let (dp, dq) = (a * p.0 + b * p.1 + c, a * q.0 + b * q.1 + c);
+        if dp >= 0.0 {
+            out.push(p);
         }
-        let (px, py) = ((p[0] / p[3]) as f32, (p[1] / p[3]) as f32);
-        x0 = x0.min(px);
-        y0 = y0.min(py);
-        x1 = x1.max(px);
-        y1 = y1.max(py);
+        if (dp >= 0.0) != (dq >= 0.0) {
+            let k = dp / (dp - dq);
+            out.push((p.0 + (q.0 - p.0) * k, p.1 + (q.1 - p.1) * k));
+        }
     }
-    (x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
+    out
+}
+
+fn poly_bounds(poly: &[(f64, f64)]) -> Option<Rect> {
+    if poly.is_empty() {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in poly {
+        x0 = x0.min(p.0);
+        y0 = y0.min(p.1);
+        x1 = x1.max(p.0);
+        y1 = y1.max(p.1);
+    }
+    let r = Rect::new(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32);
+    (r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite()).then_some(r)
+}
+
+fn rect_poly(r: Rect) -> Vec<(f64, f64)> {
+    let (x0, y0, x1, y1) = (r.x as f64, r.y as f64, r.right() as f64, r.bottom() as f64);
+    vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+}
+
+/// Smallest w kept: points nearer the viewer's plane magnify more than
+/// this inverse and fall outside any painted area.
+const MIN_W: f64 = 1.0 / 64.0;
+
+/// Bounds of a 2D rect's image under a 4×4 matrix (the part in front of
+/// the viewer).
+fn project_rect(m: &Mat4, r: Rect) -> Option<Rect> {
+    let poly = clip_poly(&rect_poly(r), m[12], m[13], m[15] - MIN_W);
+    let pts: Vec<(f64, f64)> = poly
+        .iter()
+        .map(|&(x, y)| {
+            let p = mat4::map_homogeneous(m, x, y);
+            (p[0] / p[3], p[1] / p[3])
+        })
+        .collect();
+    poly_bounds(&pts)
 }
 
 /// Painted extent of items (their coordinates), generous.
-fn extent<'a>(items: impl Iterator<Item = &'a DisplayItem>) -> Option<Rect> {
+pub(crate) fn extent<'a>(items: impl Iterator<Item = &'a DisplayItem>) -> Option<Rect> {
     let mut stack: Vec<Matrix> = vec![rabbithole_gfx::IDENTITY];
     let mut out: Option<Rect> = None;
     let mut add = |r: Rect, m: &Matrix, out: &mut Option<Rect>| {
@@ -96,10 +131,8 @@ fn extent<'a>(items: impl Iterator<Item = &'a DisplayItem>) -> Option<Rect> {
             }
             DisplayItem::Transform3d(g) => {
                 if let Some(e) = extent(g.items.iter()) {
-                    match project_rect(&g.matrix, e) {
-                        Some(r) => add(r, &m, &mut out),
-                        // Partly behind the viewer: unbounded.
-                        None => add(Rect::new(-1.0e6, -1.0e6, 2.0e6, 2.0e6), &rabbithole_gfx::IDENTITY, &mut out),
+                    if let Some(r) = project_rect(&g.matrix, e) {
+                        add(r, &m, &mut out);
                     }
                 }
             }
@@ -114,13 +147,36 @@ fn extent<'a>(items: impl Iterator<Item = &'a DisplayItem>) -> Option<Rect> {
     out
 }
 
-/// A plane's painting, premultiplied, covering `[x0, x0 + w / scale) ×
-/// [y0, y0 + h / scale)` of its (canvas-local) coordinates.
+/// A plane's painting, premultiplied, covering `[x0, x0 + w / sx) ×
+/// [y0, y0 + h / sy)` of its (canvas-local) coordinates.
 struct Texture {
     px: Pixels,
     x0: f32,
     y0: f32,
-    scale: f32,
+    sx: f32,
+    sy: f32,
+}
+
+/// For a plane mapped by an axis-aligned scale and offset: a texture grid
+/// on the device pixel grid, (x0, y0, sx, sy), so that edges on device
+/// pixel boundaries stay sharp.
+fn aligned_grid(d: &Mat4, local: Rect) -> Option<(f32, f32, f32, f32)> {
+    let h = mat4::plane_homography(d);
+    if h[1] != 0.0 || h[3] != 0.0 || h[6] != 0.0 || h[7] != 0.0 || h[8] <= 0.0 {
+        return None;
+    }
+    let (a, tx, b, ty) = (h[0] / h[8], h[2] / h[8], h[4] / h[8], h[5] / h[8]);
+    let (sx, sy) = (a.abs(), b.abs());
+    // Uniform scales only (like a layer rasterized at its scale); others
+    // paint at the larger scale and are resampled.
+    if (sx - sy).abs() > 1e-9 || !(0.25..=4.0).contains(&sx) || !(0.25..=4.0).contains(&sy) || (local.w as f64 * sx) * (local.h as f64 * sy) > MAX_TEXELS as f64 {
+        return None;
+    }
+    // Device X = a·x + tx; texel boundaries at integer X.
+    let origin = |a: f64, t: f64, s: f64, e: f64| if a > 0.0 { ((t + s * e).floor() - t) / s } else { (t - (t - s * e).ceil()) / s };
+    let x0 = origin(a, tx, sx, local.x as f64);
+    let y0 = origin(b, ty, sy, local.y as f64);
+    Some((x0 as f32, y0 as f32, sx as f32, sy as f32))
 }
 
 /// Largest local → device magnification of `d` over a rect's corners.
@@ -144,70 +200,65 @@ fn magnification(d: &Mat4, r: Rect) -> f32 {
     s
 }
 
-/// The part of the plane (local coordinates) that can show in the device
-/// `region`, when it is bounded.
-fn visible_local(d: &Mat4, region: Rect) -> Option<Rect> {
+/// The part of `local` (plane coordinates) that can show in the device
+/// `region` under `d`, in front of the viewer.
+fn visible_local(d: &Mat4, local: Rect, region: Rect) -> Option<Rect> {
     let h = mat4::plane_homography(d);
-    let hi = mat4::invert3(&h)?;
-    let mut x0 = f64::MAX;
-    let mut y0 = f64::MAX;
-    let mut x1 = f64::MIN;
-    let mut y1 = f64::MIN;
-    for (x, y) in [(region.x, region.y), (region.right(), region.y), (region.x, region.bottom()), (region.right(), region.bottom())] {
-        let (x, y) = (x as f64, y as f64);
-        let u = hi[0] * x + hi[1] * y + hi[2];
-        let v = hi[3] * x + hi[4] * y + hi[5];
-        let w = hi[6] * x + hi[7] * y + hi[8];
-        if w.abs() < 1e-12 {
-            return None;
-        }
-        let (lx, ly) = (u / w, v / w);
-        // The corner must be in front of the viewer on the plane.
-        if h[6] * lx + h[7] * ly + h[8] <= 1e-9 {
-            return None;
-        }
-        x0 = x0.min(lx);
-        y0 = y0.min(ly);
-        x1 = x1.max(lx);
-        y1 = y1.max(ly);
+    let mut poly = clip_poly(&rect_poly(local), h[6], h[7], h[8] - MIN_W);
+    // X ≥ x0 ⇔ (h0·x + h1·y + h2) − x0·w ≥ 0 where w > 0, and so on.
+    let (rx0, ry0, rx1, ry1) = (region.x as f64 - 2.0, region.y as f64 - 2.0, region.right() as f64 + 2.0, region.bottom() as f64 + 2.0);
+    for (a, b, c) in [
+        (h[0] - rx0 * h[6], h[1] - rx0 * h[7], h[2] - rx0 * h[8]),
+        (rx1 * h[6] - h[0], rx1 * h[7] - h[1], rx1 * h[8] - h[2]),
+        (h[3] - ry0 * h[6], h[4] - ry0 * h[7], h[5] - ry0 * h[8]),
+        (ry1 * h[6] - h[3], ry1 * h[7] - h[4], ry1 * h[8] - h[5]),
+    ] {
+        poly = clip_poly(&poly, a, b, c);
     }
-    let r = Rect::new(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32);
-    (r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite()).then_some(r)
+    poly_bounds(&poly)
 }
 
 const MAX_TEXELS: f32 = 16.0e6;
 
-fn render_plane(items: &[&DisplayItem], d: &Mat4, region: Rect, fonts: &FontContext, st: &State) -> Option<Texture> {
+fn render_plane(items: &[&DisplayItem], d: &Mat4, region: Rect, fonts: &FontContext, st: &State, under: Option<&Canvas>) -> Option<Texture> {
     let e = extent(items.iter().copied())?.translate(st.dx, st.dy);
-    let local = match visible_local(d, region) {
-        // A margin keeps the sampling at the region's edges smooth.
-        Some(v) => e.intersect(&Rect::new(v.x - 2.0, v.y - 2.0, v.w + 4.0, v.h + 4.0)),
-        None => e,
-    };
+    // A margin keeps the sampling at the edges smooth.
+    let e = Rect::new(e.x - 1.0, e.y - 1.0, e.w + 2.0, e.h + 2.0);
+    let local = visible_local(d, e, region)?;
     if local.w <= 0.0 || local.h <= 0.0 {
         return None;
     }
-    let (x0, y0) = (local.x.floor(), local.y.floor());
-    let (w, h) = ((local.right().ceil() - x0).max(1.0), (local.bottom().ceil() - y0).max(1.0));
-    let mut s = magnification(d, Rect::new(x0, y0, w, h)).clamp(1.0, 4.0);
-    if s < 1.05 {
-        s = 1.0;
-    }
-    while w * h * s * s > MAX_TEXELS && s > 0.05 {
-        s *= 0.5;
-    }
-    let (tw, th) = ((w * s).ceil() as usize, (h * s).ceil() as usize);
+    let (x0, y0, sx, sy) = match aligned_grid(d, local) {
+        Some(g) => g,
+        None => {
+            let (x0, y0) = (local.x.floor(), local.y.floor());
+            let (w, h) = ((local.right().ceil() - x0).max(1.0), (local.bottom().ceil() - y0).max(1.0));
+            let mut s = magnification(d, Rect::new(x0, y0, w, h)).clamp(1.0, 4.0);
+            if s < 1.05 {
+                s = 1.0;
+            }
+            while w * h * s * s > MAX_TEXELS && s > 0.05 {
+                s *= 0.5;
+            }
+            (x0, y0, s, s)
+        }
+    };
+    let (tw, th) = (((local.right() - x0) * sx).ceil().max(1.0) as usize, ((local.bottom() - y0) * sy).ceil().max(1.0) as usize);
     if tw == 0 || th == 0 || (tw * th) as f32 > MAX_TEXELS * 1.01 {
         return None;
     }
-    let plain = s == 1.0;
-    let render = |bg: Color| {
+    let plain = sx == 1.0 && sy == 1.0 && x0.fract() == 0.0 && y0.fract() == 0.0;
+    // `bg`: a solid background, or the canvas seen through the plane.
+    let render = |bg: Result<Color, &Canvas>, items: &mut dyn Iterator<Item = &DisplayItem>| {
         let mut c = Canvas::new(tw as u32, th as u32);
-        c.clear(bg);
+        match bg {
+            Ok(color) => c.clear(color),
+            Err(under) => warp_backdrop(&mut c, under, d, x0, y0, sx, sy),
+        }
         let (sdx, sdy) = if plain { (st.dx - x0, st.dy - y0) } else { (st.dx, st.dy) };
         let fixed_origin = if plain { (st.fixed_origin.0 - x0, st.fixed_origin.1 - y0) } else { st.fixed_origin };
         if !plain {
-            c.push_transform([s, 0.0, 0.0, s, -x0 * s, -y0 * s]);
+            c.push_transform([sx, 0.0, 0.0, sy, -x0 * sx, -y0 * sy]);
         }
         let mut sub = State::nested(sdx, sdy, fixed_origin, st.ext);
         let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
@@ -216,10 +267,59 @@ fn render_plane(items: &[&DisplayItem], d: &Mat4, region: Rect, fonts: &FontCont
         }
         c.data
     };
-    let black = render(Color::BLACK);
-    let white = render(Color::WHITE);
-    let px = crate::filter::from_black_white(&black, &white, tw, th);
-    Some(Texture { px, x0, y0, scale: s })
+    let backdrop = items.iter().any(|it| matches!(it, DisplayItem::BackdropFilter { .. }));
+    let plain_items = || items.iter().copied().filter(|it| !matches!(it, DisplayItem::BackdropFilter { .. }));
+    let black = render(Ok(Color::BLACK), &mut plain_items());
+    let white = render(Ok(Color::WHITE), &mut plain_items());
+    let mut px = crate::filter::from_black_white(&black, &white, tw, th);
+    if let (true, Some(under)) = (backdrop, under) {
+        // `backdrop-filter` reads what lies behind the plane: paint over
+        // the canvas warped into plane space, and keep that painting
+        // where the filtered areas are (found by painting them alone).
+        let seen = render(Err(under), &mut items.iter().copied());
+        let mask_items: Vec<DisplayItem> = items
+            .iter()
+            .filter_map(|it| match it {
+                DisplayItem::BackdropFilter { rect, radii, .. } => Some(DisplayItem::RectRadii { rect: *rect, radii: *radii, paint: rabbithole_gfx::Paint::Solid(Color::WHITE) }),
+                DisplayItem::PushClip(_) | DisplayItem::PushClipRounded(..) | DisplayItem::PushClipPath { .. } | DisplayItem::PopClip | DisplayItem::PushTransform(_) | DisplayItem::PopTransform | DisplayItem::PushFixed | DisplayItem::PopFixed => Some((*it).clone()),
+                _ => None,
+            })
+            .collect();
+        let mask = render(Ok(Color::BLACK), &mut mask_items.iter());
+        for i in 0..px.px.len() {
+            let a = ((mask[i] >> 8) & 0xff) as f32 / 255.0;
+            if a > 0.0 {
+                let c = seen[i];
+                let o = [((c >> 16) & 0xff) as f32 / 255.0, ((c >> 8) & 0xff) as f32 / 255.0, (c & 0xff) as f32 / 255.0, 1.0];
+                let p = &mut px.px[i];
+                for k in 0..4 {
+                    p[k] = o[k] * a + p[k] * (1.0 - a);
+                }
+            }
+        }
+    }
+    Some(Texture { px, x0, y0, sx, sy })
+}
+
+/// Fill `c` (texture space: texel (i, j) is plane point (x0 + (i + ½) /
+/// s, y0 + (j + ½) / s)) with what `under` shows at each point under `d`.
+fn warp_backdrop(c: &mut Canvas, under: &Canvas, d: &Mat4, x0: f32, y0: f32, sx: f32, sy: f32) {
+    let (w, h) = (c.width as usize, c.height as usize);
+    let (uw, uh) = (under.width as i64, under.height as i64);
+    for j in 0..h {
+        for i in 0..w {
+            let x = x0 as f64 + (i as f64 + 0.5) / sx as f64;
+            let y = y0 as f64 + (j as f64 + 0.5) / sy as f64;
+            let p = mat4::map_homogeneous(d, x, y);
+            if p[3] <= 1e-9 {
+                continue;
+            }
+            let (dx, dy) = ((p[0] / p[3]).floor() as i64, (p[1] / p[3]).floor() as i64);
+            if dx >= 0 && dy >= 0 && dx < uw && dy < uh {
+                c.data[j * w + i] = under.data[(dy * uw + dx) as usize];
+            }
+        }
+    }
 }
 
 /// Device-space accumulation of planes with a depth buffer.
@@ -252,7 +352,7 @@ impl Compositor {
     /// Device bounds (pixels, within the compositor) of the texture's
     /// image under `d`, clipped to the half space in front of the viewer.
     fn bounds(&self, t: &Texture, d: &Mat4) -> Option<(i32, i32, i32, i32)> {
-        let (tw, th) = (t.px.w as f32 / t.scale, t.px.h as f32 / t.scale);
+        let (tw, th) = (t.px.w as f32 / t.sx, t.px.h as f32 / t.sy);
         let corners = [(t.x0, t.y0), (t.x0 + tw, t.y0), (t.x0 + tw, t.y0 + th), (t.x0, t.y0 + th)];
         let pts: Vec<[f64; 4]> = corners.iter().map(|&(x, y)| mat4::map_homogeneous(d, x as f64, y as f64)).collect();
         // Clip the quad against w = eps (Sutherland–Hodgman).
@@ -299,7 +399,7 @@ impl Compositor {
         let Some(hi) = mat4::invert3(&h) else { return };
         let zr = [d[8], d[9], d[11]];
         let (tw, th) = (t.px.w as i64, t.px.h as i64);
-        let s = t.scale as f64;
+        let (sx, sy) = (t.sx as f64, t.sy as f64);
         let texel = |x: i64, y: i64| -> [f32; 4] {
             if x < 0 || y < 0 || x >= tw || y >= th {
                 [0.0; 4]
@@ -324,8 +424,8 @@ impl Compositor {
                 }
                 // Quantized: equal matrices composed in different orders
                 // sample the same texels.
-                let fx = (((lx - t.x0 as f64) * s - 0.5) * 1024.0).round() / 1024.0;
-                let fy = (((ly - t.y0 as f64) * s - 0.5) * 1024.0).round() / 1024.0;
+                let fx = (((lx - t.x0 as f64) * sx - 0.5) * 1024.0).round() / 1024.0;
+                let fy = (((ly - t.y0 as f64) * sy - 0.5) * 1024.0).round() / 1024.0;
                 if fx < -1.0 || fy < -1.0 || fx > tw as f64 || fy > th as f64 {
                     continue;
                 }
@@ -367,9 +467,38 @@ impl Compositor {
         }
     }
 
-    fn finish(self, canvas: &mut Canvas) {
+    /// Composite onto the canvas, with blend mode `blend` (CSS
+    /// Compositing 1: the source alpha mixes the blended colour with the
+    /// backdrop).
+    fn finish(mut self, canvas: &mut Canvas, blend: u8) {
         if !self.drawn {
             return;
+        }
+        if blend != 0 {
+            let cw = canvas.width as usize;
+            for y in 0..self.h {
+                for x in 0..self.w {
+                    let p = &mut self.px[y * self.w + x];
+                    let a = p[3];
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let (dx, dy) = (self.x0 as usize + x, self.y0 as usize + y);
+                    if dx >= cw || dy >= canvas.height as usize {
+                        continue;
+                    }
+                    let cb = canvas.data[dy * cw + dx];
+                    let ch = |v: f32| ((v / a).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+                    let cs = (ch(p[0]) << 16) | (ch(p[1]) << 8) | ch(p[2]);
+                    let mixed = rabbithole_gfx::blend_pixel(blend, cb, cs);
+                    for (k, sh) in [16u32, 8, 0].into_iter().enumerate() {
+                        let b = ((cb >> sh) & 0xff) as f32 / 255.0;
+                        let m = ((mixed >> sh) & 0xff) as f32 / 255.0;
+                        p[k] = b * (1.0 - a) + m * a;
+                    }
+                    p[3] = 1.0;
+                }
+            }
         }
         let px = Pixels { w: self.w, h: self.h, px: self.px };
         draw_device_pixels(canvas, crate::filter::to_rgba(&px), self.x0, self.y0, self.w, self.h);
@@ -400,11 +529,11 @@ pub(crate) fn paint_group(g: &Group3d, canvas: &mut Canvas, fonts: &FontContext,
             // Seen edge-on: nothing shows.
             continue;
         }
-        if let Some(tex) = render_plane(&p.items, &d, region, fonts, st) {
+        if let Some(tex) = render_plane(&p.items, &d, region, fonts, st, Some(&*canvas)) {
             comp.draw(&tex, &d);
         }
     }
-    comp.finish(canvas);
+    comp.finish(canvas, g.blend);
 }
 
 #[cfg(test)]
@@ -412,7 +541,7 @@ mod tests {
     use super::*;
 
     fn tex(w: usize, h: usize, c: [f32; 4]) -> Texture {
-        Texture { px: Pixels { w, h, px: vec![c; w * h] }, x0: 0.0, y0: 0.0, scale: 1.0 }
+        Texture { px: Pixels { w, h, px: vec![c; w * h] }, x0: 0.0, y0: 0.0, sx: 1.0, sy: 1.0 }
     }
 
     #[test]
