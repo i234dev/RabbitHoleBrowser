@@ -17,7 +17,7 @@ It can be used three ways:
 
 _Both images were produced by RabbitHole's renderer: every pixel comes from its own rasterizer._
 
-## Status (v0.1.34)
+## Status (v0.1.35)
 
 RabbitHole is young but already runs real, heavy sites: Google search,
 YouTube (playback with sound and AV1/VP9 video), Wikipedia,
@@ -31,6 +31,21 @@ paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
 median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
+
+Version 0.1.35 raises the WPT CSS reftests from 63.2 % to 67.9 % (13,328 /
+19,627, [measurement](docs/benchmarks/wpt-css-2026-11-19.md)):
+- `clip-path` basic shapes, SVG `url()` clip paths, `border-shape` and `corner-shape`
+  (css-masking 25.0 % → 67.7 %);
+- grid track sizing, alignment and subgrid fixes (grid 58.7 % → 76.9 %);
+- flexbox and intrinsic sizing (flexbox 69.3 % → 84.3 %, sizing 50.7 % → 69.2 %);
+- `font-stretch` matching.
+
+CSS animations present at load now run, and the Web Animations API is
+implemented (`element.animate()`, `getAnimations()`, `CSSAnimation`/`CSSTransition`
+objects; WPT web-animations subtests 31.5 % → 49.1 %, partial measurement in the
+same record). DOM fixes make the Cloudflare dashboard's sign-in render. Speedometer
+3.1 is 1.016× faster than 0.1.34 in paired runs, but the NewsSite tests are 2 to
+2.5 % slower ([record](docs/benchmarks/speedometer-2026-11-19-v0.1.35.md)).
 
 Version 0.1.34 completes JavaScript up to ES2025: test262 passes 99.93 % of the
 executed files outside Intl and 99.90 % overall (ECMA-402 98.6 %), `SharedArrayBuffer` memory is
