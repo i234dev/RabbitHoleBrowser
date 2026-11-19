@@ -395,3 +395,32 @@ fn fixed_box_paints_in_tree_order_with_positioned_siblings() {
     let fixed = list.items.iter().position(|i| matches!(i, crate::DisplayItem::PushFixed)).expect("fixed scope");
     assert!(fixed < red);
 }
+
+/// `::first-letter` wraps the first letter and its punctuation, inside a
+/// nested block, in an inline box (or a float when floated).
+#[test]
+fn first_letter_wraps_letter_in_nested_block() {
+    use crate::tree::{Flow, InlineItem};
+    let fx = Fx::new("<div id=d><p id=p>  \"Txy</p></div>", "div::first-letter { font-size: 40px } p { margin: 0 }");
+    let tree = fx.layout();
+    let node = fx.doc.element_by_id("p").unwrap();
+    fn find(b: &LayoutBox, n: usize) -> Option<&LayoutBox> {
+        if b.node == Some(n) && b.kind == BoxKind::Block {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| find(c, n))
+    }
+    let p = find(&tree.root, node).unwrap();
+    let texts: Vec<(String, f32)> = p.items.iter().filter_map(|i| match i {
+        InlineItem::Text { text, style, .. } => Some((text.to_string(), style.font_size)),
+        _ => None,
+    }).collect();
+    assert!(texts.iter().any(|(t, s)| t == "\"T" && *s == 40.0), "{texts:?}");
+    assert!(texts.iter().any(|(t, s)| t == "xy" && *s == 16.0), "{texts:?}");
+
+    let fx = Fx::new("<div id=d>Drop cap</div>", "div::first-letter { float: left; font-size: 50px }");
+    let tree = fx.layout();
+    let node = fx.doc.element_by_id("d").unwrap();
+    let d = find(&tree.root, node).unwrap();
+    assert!(d.children.iter().any(|c| c.flow == Flow::FloatLeft && c.rect.height > 40.0), "{}", tree.dump());
+}

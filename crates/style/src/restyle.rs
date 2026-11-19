@@ -670,6 +670,7 @@ impl StyleEngine {
         tree.before = vec![None; n];
         tree.after = vec![None; n];
         tree.marker = vec![None; n];
+        tree.first_letter = vec![None; n];
         self.vars = vec![None; n];
         self.vars_memo = (0..n).map(|_| None).collect();
         self.inherit_dep = vec![false; n];
@@ -748,7 +749,7 @@ impl StyleEngine {
             self.collect_aux(tree, author, opts);
         }
         let n = doc.nodes.len();
-        for v in [&mut tree.styles, &mut tree.before, &mut tree.after, &mut tree.marker] {
+        for v in [&mut tree.styles, &mut tree.before, &mut tree.after, &mut tree.marker, &mut tree.first_letter] {
             if v.len() < n {
                 v.resize(n, None);
             }
@@ -1061,6 +1062,7 @@ impl StyleEngine {
                     tree.before[d] = None;
                     tree.after[d] = None;
                     tree.marker[d] = None;
+                    tree.first_letter[d] = None;
                 }
             }
         }
@@ -1150,6 +1152,7 @@ impl StyleEngine {
                     (&mut tree.before[node], if hidden { None } else { out.before }),
                     (&mut tree.after[node], if hidden { None } else { out.after }),
                     (&mut tree.marker[node], if hidden { None } else { out.marker }),
+                    (&mut tree.first_letter[node], if hidden { None } else { out.first_letter }),
                 ] {
                     match (slot.as_ref(), new) {
                         (Some(o), Some(nw)) if Rc::ptr_eq(o, &nw) || **o == *nw => {}
@@ -1181,6 +1184,7 @@ impl StyleEngine {
                             tree.before[d] = None;
                             tree.after[d] = None;
                             tree.marker[d] = None;
+                            tree.first_letter[d] = None;
                         }
                     }
                 }
@@ -1276,6 +1280,7 @@ fn clear_styles(doc: &Document, tree: &mut StyledTree, node: NodeId) {
             tree.before[d] = None;
             tree.after[d] = None;
             tree.marker[d] = None;
+            tree.first_letter[d] = None;
         }
     }
 }
