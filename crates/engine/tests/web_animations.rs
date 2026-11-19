@@ -164,3 +164,58 @@ fn effects_on_elements_inserted_by_the_script_apply() {
     );
     assert_eq!(logs(&mut p), vec!["0px 99.9px 150px 200px"]);
 }
+
+#[test]
+fn commit_styles_of_new_elements_and_finished_effects() {
+    let mut e = engine();
+    let mut p = load(
+        &mut e,
+        "<!doctype html><body><script>
+        const mk = () => document.body.appendChild(document.createElement('div'));
+        const d = mk();
+        d.style.marginLeft = '10px';
+        const a = d.animate({ opacity: [0.2, 0.7] }, 1000);
+        a.currentTime = 500;
+        a.commitStyles();
+        a.cancel();
+        const d2 = mk();
+        d2.style.opacity = '0.1';
+        const b = d2.animate({ opacity: [0.5, 1] }, { duration: 1 });
+        b.playbackRate = -1;
+        b.finish();
+        b.commitStyles();
+        console.log(getComputedStyle(d).opacity, getComputedStyle(d2).opacity);
+        </script>",
+    );
+    assert_eq!(logs(&mut p), vec!["0.45 0.5"]);
+}
+
+#[test]
+fn css_animations_set_by_scripts_are_listed() {
+    let mut e = engine();
+    let mut p = load(
+        &mut e,
+        "<!doctype html><style>@keyframes move { to { margin-left: 100px } }</style><body><script>
+        const d = document.body.appendChild(document.createElement('div'));
+        d.style.animation = 'move 100s -50s linear';
+        const [a] = d.getAnimations();
+        console.log(a && a.animationName, a && a.effect.getComputedTiming().delay, getComputedStyle(d).marginLeft);
+        const d2 = document.createElement('div');
+        d2.setAttribute('style', 'animation: move 100s');
+        document.body.appendChild(d2);
+        console.log(d2.getAnimations().length, document.getAnimations().length);
+        const finished = a.finished;
+        d.style.animation = '';
+        getComputedStyle(d).marginLeft;
+        finished.catch((e) => console.log('rejected', e.name, a.playState, a.finished !== finished));
+        </script>",
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut out = logs(&mut p);
+    while std::time::Instant::now() < deadline && out.len() < 2 {
+        e.tick(&mut p);
+        out.extend(logs(&mut p));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(out, vec!["move -50000 50px", "1 2", "rejected AbortError idle true"]);
+}

@@ -85,6 +85,8 @@ pub struct CssAnimationInfo {
     pub start_time: Option<f64>,
     /// Hold time (local ms).
     pub hold_time: Option<f64>,
+    /// Created since the last animation frame (play pending).
+    pub pending: bool,
     pub rate: f64,
     pub delay: f64,
     pub duration: f64,
@@ -158,10 +160,12 @@ fn anim_timeline(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<
     let st = state();
     let mut st = st.borrow_mut();
     if !st.webanim.active {
+        // No animation frames run: advance in whole frames (16 ms) from the
+        // last value, so reads within a frame interval agree.
         let t = (now - st.time_origin).max(0.0);
-        // Never go back (a frame may have set a later value).
-        if t > st.webanim.timeline {
-            st.webanim.timeline = t;
+        let cur = st.webanim.timeline;
+        if t - cur >= 16.0 {
+            st.webanim.timeline = if cur == 0.0 { t } else { cur + ((t - cur) / 16.0).floor() * 16.0 };
         }
     }
     Ok(Value::Number(st.webanim.timeline))
@@ -378,6 +382,7 @@ fn info_object(realm: &mut Realm, info: CssAnimationInfo) -> Value {
             ("name", Value::str(&info.name)),
             ("startTime", opt(info.start_time.map(|s| s - origin))),
             ("holdTime", opt(info.hold_time)),
+            ("pending", Value::Bool(info.pending)),
             ("rate", Value::Number(info.rate)),
             ("delay", Value::Number(info.delay)),
             ("duration", Value::Number(info.duration)),

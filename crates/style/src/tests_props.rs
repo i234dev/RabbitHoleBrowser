@@ -414,6 +414,8 @@ fn transitions_animations_misc() {
     assert!((s.transitions[1].duration - 0.2).abs() < 1e-6);
     assert_eq!(s.animations.len(), 1);
     assert_eq!(s.animations[0].name, "spin");
+    // Keyframes names keep their case in the shorthand.
+    assert_eq!(one("animation: moveAnimation 2s").animations[0].name, "moveAnimation");
     assert_eq!(s.animations[0].iterations, None);
     assert_eq!(s.animations[0].direction, "alternate");
     assert_eq!(s.pointer_events, PointerEvents::None);

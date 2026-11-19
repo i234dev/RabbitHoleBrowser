@@ -727,8 +727,7 @@ fn parse_easing(s: &str) -> Easing {
     Easing::Bezier(0.25, 0.1, 0.25, 1.0)
 }
 
-fn bezier(p1: f32, p2: f32, t: f32) -> f32 {
-    // B(t) = 3(1-t)^2 t p1 + 3(1-t) t^2 p2 + t^3
+fn bezier64(p1: f64, p2: f64, t: f64) -> f64 {
     let u = 1.0 - t;
     3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t
 }
@@ -747,22 +746,42 @@ fn ease(e: &Easing, x: f32) -> f32 {
             if x <= 0.0 || x >= 1.0 {
                 return x;
             }
-            // Solve bezier_x(t) = x by bisection (monotonic in t).
-            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            // Solve bezier_x(t) = x (monotonic in t): Newton steps, then
+            // bisection.
+            let (x, x1, y1, x2, y2) = (x as f64, x1 as f64, y1 as f64, x2 as f64, y2 as f64);
+            let bx = |t: f64| bezier64(x1, x2, t);
             let mut t = x;
-            for _ in 0..30 {
-                let bx = bezier(x1, x2, t);
-                if (bx - x).abs() < 1e-5 {
+            let mut solved = false;
+            for _ in 0..8 {
+                let e = bx(t) - x;
+                if e.abs() < 1e-9 {
+                    solved = true;
                     break;
                 }
-                if bx < x {
-                    lo = t;
-                } else {
-                    hi = t;
+                let u = 1.0 - t;
+                let d = 3.0 * u * u * x1 + 6.0 * u * t * (x2 - x1) + 3.0 * t * t * (1.0 - x2);
+                if d.abs() < 1e-9 {
+                    break;
                 }
-                t = (lo + hi) / 2.0;
+                t = (t - e / d).clamp(0.0, 1.0);
             }
-            bezier(y1, y2, t)
+            if !solved {
+                let (mut lo, mut hi) = (0.0f64, 1.0f64);
+                t = x;
+                for _ in 0..60 {
+                    let v = bx(t);
+                    if (v - x).abs() < 1e-9 {
+                        break;
+                    }
+                    if v < x {
+                        lo = t;
+                    } else {
+                        hi = t;
+                    }
+                    t = (lo + hi) / 2.0;
+                }
+            }
+            bezier64(y1, y2, t) as f32
         }
     }
 }
@@ -781,11 +800,14 @@ struct Clock {
     /// A script controls the playback: `animation-play-state` no longer
     /// applies.
     api: bool,
+    /// Just created: held at 0 until the next animation frame starts it
+    /// (as a pending Web Animations play).
+    pending: bool,
 }
 
 impl Clock {
-    fn running(now: f64) -> Clock {
-        Clock { start: Some(now), hold: None, rate: 1.0, api: false }
+    fn pending() -> Clock {
+        Clock { start: None, hold: Some(0.0), rate: 1.0, api: false, pending: true }
     }
 
     /// Local time (ms since the start), None when idle (cancelled).
@@ -806,6 +828,8 @@ struct Transition {
     from: Val,
     to: Val,
     clock: Clock,
+    /// Style change (restyle) that created it (composite order).
+    generation: u64,
     delay: f64,
     duration: f64,
     easing: Easing,
@@ -856,6 +880,13 @@ impl Animation {
         if c.api {
             return;
         }
+        if c.pending {
+            // Paused before it started: stays held at 0.
+            if paused {
+                c.pending = false;
+            }
+            return;
+        }
         match (paused, c.hold, c.start) {
             (true, None, Some(_)) => {
                 c.hold = c.local(now);
@@ -904,6 +935,8 @@ pub struct AnimationState {
     script_frames: HashMap<u64, ScriptFrames>,
     /// Last id given to a transition or animation.
     next_id: u64,
+    /// Style changes seen (transition generations).
+    generation: u64,
     /// Transitions / animations that ran to their end and were dropped
     /// (their script objects report them finished).
     ended: std::collections::HashSet<u64>,
@@ -993,6 +1026,7 @@ impl Engine {
             return;
         }
         let now = now_ms(self);
+        page.anim.generation += 1;
         let mut touched: Vec<NodeId> = Vec::new();
         if full {
             // Overlays were dropped: take the new styles as bases, and pick
@@ -1016,7 +1050,7 @@ impl Engine {
                 if !s.transitions.is_empty() {
                     page.anim.with_transitions.insert(i);
                 }
-                if s.animations.is_empty() || changed.contains(&i) {
+                if s.animations.is_empty() || changed.contains(&i) || s.display.is_none() {
                     continue;
                 }
                 let node: NodeId = i;
@@ -1039,11 +1073,16 @@ impl Engine {
                     page.anim.with_transitions.remove(&node);
                 }
             }
-            let Some(new) = new else {
-                if page.anim.has_effects(node) {
-                    self.cancel_effects(page, node, true);
+            // `display: none` (or no box) cancels transitions and animations.
+            let new = match new {
+                // (Unless `display` itself transitions: allow-discrete.)
+                Some(s) if !s.display.is_none() || s.transitions.iter().any(|t| t.property.trim().eq_ignore_ascii_case("display")) => s,
+                _ => {
+                    if page.anim.has_effects(node) {
+                        self.cancel_effects(page, node, true);
+                    }
+                    continue;
                 }
-                continue;
             };
             let before = page.anim.base.get(&node).cloned().or(old.clone());
             // A recomputation that only dropped our overlay is not a change.
@@ -1120,7 +1159,8 @@ impl Engine {
                 prop: p,
                 from,
                 to,
-                clock: Clock::running(now),
+                clock: Clock::pending(),
+                generation: page.anim.generation,
                 delay: delay as f64 * 1000.0,
                 duration: dur as f64 * 1000.0,
                 easing: parse_easing(&timing),
@@ -1153,6 +1193,7 @@ impl Engine {
             }
             if let Some(a) = page.anim.animations.iter_mut().find(|a| a.node == node && a.name == spec.name) {
                 a.set_paused(spec.paused, now);
+                a.index = index;
             }
             let running = page.anim.animations.iter().any(|a| a.node == node && a.name == spec.name);
             if running || (old_names.contains(&spec.name.as_str()) && before.is_some() && page.anim.base.contains_key(&node)) {
@@ -1173,10 +1214,9 @@ impl Engine {
             }
             frames.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
             page.anim.next_id += 1;
-            let mut clock = Clock::running(now);
+            let mut clock = Clock::pending();
             if spec.paused {
-                clock.start = None;
-                clock.hold = Some(0.0);
+                clock.pending = false;
             }
             page.anim.animations.push(Animation {
                 id: page.anim.next_id,
@@ -1233,7 +1273,10 @@ impl Engine {
         for t in page.anim.transitions.iter().filter(|t| t.node == node && !t.clock.idle()) {
             set(&mut style, t.prop, &t.value_at(now));
         }
-        for a in page.anim.animations.iter().filter(|a| a.node == node) {
+        // Composite order: position in `animation-name`.
+        let mut anims: Vec<&Animation> = page.anim.animations.iter().filter(|a| a.node == node).collect();
+        anims.sort_by_key(|a| a.index);
+        for a in anims {
             for (p, v) in animation_values(a, &base, now) {
                 // `!important` declarations override animations.
                 if base.important.as_ref().is_some_and(|names| names.iter().any(|n| p.covered_by(n))) {
@@ -1365,6 +1408,20 @@ impl Engine {
         Some(Rc::new(style))
     }
 
+    /// `nodes` were restyled without a reported change: their current
+    /// style (equal to the animated one) is their new base style.
+    pub(crate) fn refresh_animation_bases(&self, page: &mut Page, nodes: &[NodeId]) {
+        let now = now_ms(self);
+        for &n in nodes {
+            if !page.anim.base.contains_key(&n) {
+                continue;
+            }
+            let Some(s) = page.styles.get(n).cloned() else { continue };
+            page.anim.base.insert(n, s);
+            self.apply_overlay(page, n, now);
+        }
+    }
+
     /// Properties script effects in effect animate on `node`.
     fn script_animated(&self, page: &Page, node: NodeId) -> Vec<Prop> {
         let Some(reg) = &page.anim.script else { return Vec::new() };
@@ -1395,6 +1452,7 @@ impl Engine {
                 name: t.prop.name().to_string(),
                 start_time: t.clock.start,
                 hold_time: t.clock.hold,
+                pending: t.clock.pending,
                 rate: t.clock.rate,
                 delay: t.delay,
                 duration: t.duration,
@@ -1403,7 +1461,7 @@ impl Engine {
                 fill: "backwards".into(),
                 easing: t.timing.clone(),
                 keyframe_easing: "linear".into(),
-                order: ALL.iter().position(|p| *p == t.prop).unwrap_or(0) as u64,
+                order: t.generation,
                 ended: false,
                 keyframes: Vec::new(),
             });
@@ -1431,6 +1489,7 @@ impl Engine {
                 name: a.name.clone(),
                 start_time: a.clock.start,
                 hold_time: a.clock.hold,
+                pending: a.clock.pending,
                 rate: a.clock.rate,
                 delay: a.delay,
                 duration: a.duration,
@@ -1468,7 +1527,7 @@ impl Engine {
     /// whether a style changed.
     pub(crate) fn set_css_animation(&self, page: &mut Page, id: u64, start: Option<f64>, hold: Option<f64>, rate: f64) -> bool {
         let now = now_ms(self);
-        let clock = Clock { start, hold, rate, api: true };
+        let clock = Clock { start, hold, rate, api: true, pending: false };
         let mut node = None;
         if let Some(t) = page.anim.transitions.iter_mut().find(|t| t.id == id) {
             if !t.clock.idle() && clock.idle() {
@@ -1509,6 +1568,14 @@ impl Engine {
         }
         let now = now_ms(self);
         let mut nodes: Vec<NodeId> = Vec::new();
+        // Effects created since the last frame start now.
+        for c in page.anim.transitions.iter_mut().map(|t| &mut t.clock).chain(page.anim.animations.iter_mut().map(|a| &mut a.clock)) {
+            if c.pending {
+                c.pending = false;
+                c.start = Some(now - c.hold.unwrap_or(0.0) / c.rate);
+                c.hold = None;
+            }
+        }
         // Transitions: start / end.
         let mut i = 0;
         while i < page.anim.transitions.len() {

@@ -566,10 +566,11 @@
   const pendingSet = new Set();
   let eventQueue = [];
   let activeFlag = false;
+  let replaceCheck = false;     // a finished filling animation may replace others
   const cssAnims = new Map();  // engine id -> CSSAnimation / CSSTransition
 
   function refreshActive() {
-    const on = ticking.size > 0 || pendingSet.size > 0 || eventQueue.length > 0 || cssAnims.size > 0;
+    const on = ticking.size > 0 || pendingSet.size > 0 || eventQueue.length > 0 || cssAnims.size > 0 || replaceCheck;
     if (on !== activeFlag) { activeFlag = on; N.animSetActive(on); }
   }
 
@@ -585,6 +586,7 @@
     const st = a[S];
     const ct = currentTimeOf(a);
     if (ct === null && !st.pendingTask) return 'idle';
+    if (st.cssPending) return 'running';
     if (st.pendingTask === 'pause' || (st.startTime === null && st.pendingTask !== 'play')) return 'paused';
     const rate = st.pendingRate !== null ? st.pendingRate : st.rate;
     if (ct !== null && ((rate > 0 && ct >= effectEnd(a)) || (rate < 0 && ct <= 0))) return 'finished';
@@ -617,8 +619,11 @@
     st.pendingTask = task;
     if (task) pendingSet.add(a); else pendingSet.delete(a);
   }
-  function queueEvent(a, type, currentTime, timelineTimeValue) {
-    eventQueue.push({ target: a, type, currentTime, timelineTime: timelineTimeValue });
+  // Events are dispatched at the next frame, sorted by scheduled event
+  // time, then composite order.
+  function queueEvent(a, type, currentTime, timelineTimeValue, scheduled) {
+    const time = scheduled === undefined || scheduled === null ? (timelineTimeValue === null ? -Infinity : timelineTimeValue) : scheduled;
+    eventQueue.push({ target: a, type, currentTime, timelineTime: timelineTimeValue, time, seq: a[S].seq });
     refreshActive();
   }
 
@@ -765,7 +770,12 @@
     if (playStateOf(a) !== 'finished') return;
     st.finishedState = 'resolved';
     st.finishedResolve(a);
-    queueEvent(a, 'finish', currentTimeOf(a), timelineTime(st.timeline));
+    // Scheduled at the time the end was reached.
+    let scheduled = null;
+    if (st.startTime !== null && st.rate !== 0) scheduled = st.rate > 0 ? st.startTime + effectEnd(a) / st.rate : st.startTime;
+    const tt = timelineTime(st.timeline);
+    if (scheduled !== null && tt !== null && scheduled > tt) scheduled = tt;
+    queueEvent(a, 'finish', currentTimeOf(a), tt, scheduled);
   }
 
   // Effect values -> engine; frame bookkeeping.
@@ -776,13 +786,15 @@
     const runs = st.pendingTask !== null || (st.holdTime === null && st.startTime !== null && st.timeline !== null && st.rate !== 0);
     if (runs) ticking.add(a); else ticking.delete(a);
     if (runs || ct !== null) known.add(a); else known.delete(a);
+    if (!runs && ct !== null && st.replaceState === 'active' && st.effect && !replaceCheck && playStateOf(a) === 'finished') replaceCheck = true;
     syncEffect(a, false);
     refreshActive();
   }
-  function effectState(a) {
+  function effectState(a, fillBoth) {
     const e = a[S].effect;
     if (!e) return null;
-    return computeTiming(e[S].timing, currentTimeOf(a), a[S].rate < 0);
+    const t = fillBoth ? Object.assign({}, e[S].timing, { fill: 'both' }) : e[S].timing;
+    return computeTiming(t, currentTimeOf(a), a[S].rate < 0);
   }
   function framesForEngine(e) {
     const st = e[S];
@@ -799,7 +811,13 @@
     if (!e || st.external) return;
     const es = e[S];
     const target = es.target && !es.pseudo && es.target.isConnected ? es.target : null;
-    const r = target ? effectState(a) : null;
+    let r = target ? effectState(a) : null;
+    // commitStyles: an effect finished exactly at an end of its active
+    // interval commits its final value.
+    if (force && r && r.progress === null) {
+      const ct = currentTimeOf(a);
+      if (ct === 0 || ct === effectEnd(a)) r = effectState(a, true);
+    }
     const progress = r && r.progress !== null && (st.replaceState !== 'removed' || force) ? r.progress : null;
     if (progress === null) {
       if (es.pushed) { N.animDrop(es.id); es.pushed = false; }
@@ -867,12 +885,14 @@
       for (const a of Array.from(pendingSet)) runPendingTask(a);
       for (const a of Array.from(ticking)) updateFinishedState(a, false, false);
       for (const a of Array.from(cssAnims.values())) cssRefresh(a);
+      replaceCheck = false;
       removeReplaced();
       refreshActive();
       return;
     }
     const events = eventQueue;
     eventQueue = [];
+    events.sort((x, y) => x.time - y.time || x.seq - y.seq);
     for (const ev of events) {
       const e = new AnimationPlaybackEvent(ev.type, { currentTime: ev.currentTime, timelineTime: ev.timelineTime });
       ev.target.dispatchEvent(e);
@@ -929,7 +949,7 @@
     }
     get playState() { return playStateOf(this); }
     get replaceState() { return this[S].replaceState; }
-    get pending() { return this[S].pendingTask !== null; }
+    get pending() { return this[S].pendingTask !== null || !!this[S].cssPending; }
     get ready() { return this[S].ready; }
     get finished() { return this[S].finished; }
     get overallProgress() {
@@ -1001,9 +1021,11 @@
       if (!target) return;
       if (es.pseudo) throw domError("Failed to execute 'commitStyles' on 'Animation': Animations with a pseudo-element target cannot be committed.", 'NoModificationAllowedError');
       if (!target.style) throw domError("Failed to execute 'commitStyles' on 'Animation': Target element does not have a style attribute.", 'NoModificationAllowedError');
-      if (!target.isConnected || g.getComputedStyle(target).display === 'none') {
-        throw domError("Failed to execute 'commitStyles' on 'Animation': Target element is not rendered.", 'InvalidStateError');
+      let rendered = target.isConnected;
+      for (let n = target; rendered && n && n.nodeType === 1; n = n.parentElement || (n.parentNode && n.parentNode.host) || null) {
+        if (g.getComputedStyle(n).display === 'none') rendered = false;
       }
+      if (!rendered) throw domError("Failed to execute 'commitStyles' on 'Animation': Target element is not rendered.", 'InvalidStateError');
       const props = Array.from(effectProps(e)).filter((p) => !p.startsWith('--'));
       if (!props.length) return;
       syncEffect(this, true);
@@ -1081,6 +1103,8 @@
     st.startTime = info.startTime;
     st.holdTime = info.holdTime;
     st.rate = info.rate;
+    st.cssPending = !!info.pending;
+    if (!st.effect) return;
     const es = st.effect[S];
     es.target = info.target;
     es.timing = { delay: info.delay, direction: info.direction, duration: info.duration, easing: safeEasing(info.easing), endDelay: 0, fill: info.fill, iterationStart: 0, iterations: info.iterations };
@@ -1104,13 +1128,32 @@
       if (info && info.ended && st.startTime !== null) {
         // Ran to its end: finished, held at the end.
         st.holdTime = st.rate < 0 ? 0 : effectEnd(a);
-      } else { st.startTime = null; st.holdTime = null; }
+      } else {
+        // The style dropped it: cancelled.
+        if (was !== 'idle') {
+          resetPendingTasks(a);
+          if (st.finishedState === 'pending') { handled(st.finished); st.finishedReject(abortError()); }
+          st.finishNotify = null;
+          newFinished(a);
+          queueEvent(a, 'cancel', null, timelineTime(st.timeline));
+        }
+        st.startTime = null; st.holdTime = null;
+        return;
+      }
     }
     if (st.pendingTask) return;
     const now = playStateOf(a);
     if (now === 'finished' && st.finishedState === 'pending' && (was !== 'finished' || !st.seenFinished)) finishNotification(a);
     st.seenFinished = now === 'finished';
     if (now !== 'finished' && st.finishedState === 'resolved') newFinished(a);
+  }
+  // A script controls a CSS animation the engine has not started yet: it
+  // continues as a pending play of the script's.
+  function cssAdopt(a) {
+    const st = a[S];
+    if (!st.cssPending) return;
+    st.cssPending = false;
+    if (!st.pendingTask) setPending(a, 'play');
   }
   function cssPush(a) {
     const st = a[S];
@@ -1125,12 +1168,12 @@
     for (const k of ['currentTime', 'startTime', 'playbackRate', 'playState', 'pending', 'replaceState', 'ready', 'finished', 'overallProgress']) {
       const d = Object.getOwnPropertyDescriptor(Animation.prototype, k);
       const desc = { configurable: true, enumerable: true, get() { cssRefresh(this); return d.get.call(this); } };
-      if (d.set) desc.set = function (v) { cssRefresh(this); d.set.call(this, v); };
+      if (d.set) desc.set = function (v) { cssRefresh(this); cssAdopt(this); d.set.call(this, v); };
       Object.defineProperty(P, k, desc);
     }
     for (const k of ['play', 'pause', 'finish', 'cancel', 'reverse', 'updatePlaybackRate']) {
       const f = Animation.prototype[k];
-      hidden(P, k, { [k](...args) { cssRefresh(this); return f.apply(this, args); } }[k]);
+      hidden(P, k, { [k](...args) { cssRefresh(this); cssAdopt(this); return f.apply(this, args); } }[k]);
     }
   }
   // Engine CSS animations / transitions of the main document, as objects.
@@ -1159,15 +1202,18 @@
   }
   function collect(pred) {
     const css = cssList().filter((a) => {
-      const t = a[S].effect[S].target;
+      const t = a[S].info.target;
       return t && pred(t, null) && playStateOf(a) !== 'idle' && relevant(a);
     });
     css.sort((x, y) => {
       const kx = x instanceof CSSTransition ? 0 : 1, ky = y instanceof CSSTransition ? 0 : 1;
       if (kx !== ky) return kx - ky;
-      const c = treeCmp(x[S].effect[S].target, y[S].effect[S].target);
+      const c = treeCmp(x[S].info.target, y[S].info.target);
       if (c) return c;
-      return x[S].info.order - y[S].info.order;
+      const o = x[S].info.order - y[S].info.order;
+      if (o || kx === 1) return o;
+      // Transitions of one style change: by property name.
+      return x[S].name < y[S].name ? -1 : x[S].name > y[S].name ? 1 : 0;
     });
     const script = Array.from(known).filter((a) => {
       const e = a[S].effect;
@@ -1179,9 +1225,14 @@
     const subtree = !!(options && options.subtree);
     let pseudo = null;
     if (options && options.pseudoElement !== undefined && options.pseudoElement !== null) {
-      pseudo = checkPseudo(options.pseudoElement);
+      // Any well-formed pseudo-element selector (animatable or not).
+      let v = String(options.pseudoElement).toLowerCase();
+      if (v === ':before' || v === ':after' || v === ':first-line' || v === ':first-letter') v = ':' + v;
+      if (!/^::[a-z][a-z0-9-]*(\(.+\))?$/.test(v)) throw domError(`Failed to execute 'getAnimations' on 'Element': '${options.pseudoElement}' is not a valid pseudo-element selector.`, 'SyntaxError');
+      pseudo = v;
     }
     if (pseudo !== null) return collect((t, p) => p === pseudo && t === this);
+    void 0;
     return collect((t, p) => (t === this && p === null) || (subtree && (t === this || this.contains(t))));
   });
   hidden(g.Document.prototype, 'getAnimations', function getAnimations() {
