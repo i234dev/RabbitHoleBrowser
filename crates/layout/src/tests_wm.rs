@@ -291,3 +291,24 @@ fn right_to_left_tables_order_columns_from_the_right() {
     let t = fx.layout();
     assert!(close(fx.rect(&t, "s").y, 0.0), "{}", t.dump());
 }
+
+#[test]
+fn right_to_left_numbers_among_spaces_read_right_to_left() {
+    // "1 2" in a right-to-left paragraph shows as "2 1".
+    let fx = Fx::new("<div dir=rtl style='width:300px'>1 2</div>", RESET);
+    let t = fx.layout();
+    let mut xs = Vec::new();
+    fn walk(b: &LayoutBox, xs: &mut Vec<(String, f32)>) {
+        for l in &b.lines {
+            for f in &l.fragments {
+                if let crate::tree::FragmentKind::Text { text, .. } = &f.kind {
+                    xs.push((text.to_string(), f.rect.x));
+                }
+            }
+        }
+        b.children.iter().for_each(|c| walk(c, xs));
+    }
+    walk(&t.root, &mut xs);
+    let x_of = |d: &str| xs.iter().find(|(t, _)| t.trim() == d).map(|p| p.1);
+    assert!(x_of("1").zip(x_of("2")).is_some_and(|(a, b)| a > b), "{xs:?}");
+}

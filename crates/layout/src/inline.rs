@@ -1889,9 +1889,17 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let rtl_text = self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { text, .. } if needs_bidi(text)));
         // Left-to-right text spread over several fragments of a right-to-
         // left line keeps its order: it needs the full algorithm.
-        let ltr_runs = base_rtl
-            && self.cur.frags.len() > 1
-            && self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { text, .. } if text.chars().any(|c| class(c) == BidiClass::L)));
+        // So do numbers among neutrals (with no left-to-right letters, which
+        // would carry the neutrals along): each number reads left to right
+        // in place, the neutrals between them go right to left.
+        let classes = |f: &PF, pred: &dyn Fn(BidiClass) -> bool| matches!(&f.kind, PFKind::Text { text, .. } if text.chars().any(|c| pred(class(c))));
+        let ltr_runs = base_rtl && {
+            let has_l = self.cur.frags.iter().any(|f| classes(f, &|c| c == BidiClass::L));
+            (self.cur.frags.len() > 1 && has_l)
+                || (!has_l
+                    && self.cur.frags.iter().any(|f| classes(f, &|c| matches!(c, BidiClass::EN | BidiClass::AN)))
+                    && self.cur.frags.iter().any(|f| classes(f, &|c| !matches!(c, BidiClass::EN | BidiClass::AN))))
+        };
         if !explicit && !rtl_text && !ltr_runs {
             if base_rtl {
                 self.mirror_line();
