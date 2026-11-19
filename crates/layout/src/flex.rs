@@ -813,6 +813,23 @@ impl<'a> Layouter<'a> {
             child.style = std::rc::Rc::new(style);
             Some(original)
         } else { None };
+        // An orthogonal wrapper in a row is measured without the wrapped
+        // box's own logical block size (its physical width) either.
+        // (A column measures the wrapped box laid out at its own inline
+        // size: an intrinsic keyword there is the content measure.)
+        let inner_original = if child.wm_wrapper && axis == Axis::Row {
+            child.children.first_mut().filter(|r| matches!(r.style.height, Length::Px(_)) || r.style.min_height != Length::Auto || r.style.max_height != Length::Auto).map(|r| {
+                let original = (r.style.clone(), r.intrinsic_cache.take(), r.layout_cache.take());
+                let mut style = (*r.style).clone();
+                style.height = Length::Auto;
+                style.min_height = Length::Auto;
+                style.max_height = Length::Auto;
+                r.style = std::rc::Rc::new(style);
+                (original, child.intrinsic_cache.take())
+            })
+        } else {
+            None
+        };
         let sizes = match axis {
             Axis::Row => {
                 if child.kind == BoxKind::Image {
@@ -847,6 +864,14 @@ impl<'a> Layouter<'a> {
                 (h, h)
             }
         };
+        if let Some(((style, icache, lcache), wcache)) = inner_original {
+            if let Some(r) = child.children.first_mut() {
+                r.style = style;
+                r.intrinsic_cache = icache;
+                r.layout_cache = lcache;
+            }
+            child.intrinsic_cache = wcache;
+        }
         if let Some((style, cache)) = original {
             child.style = style;
             // (Set only when the measurement was cacheable.)

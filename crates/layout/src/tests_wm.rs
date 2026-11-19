@@ -260,3 +260,22 @@ fn vertical_tables_turn_and_resolve_colour_ties_towards_the_start() {
         }
     }
 }
+
+#[test]
+fn min_content_lines_do_not_start_with_the_breaking_space() {
+    let fx = Fx::new("<div id=a style='width:min-content'>x x x</div><div id=b style='width:min-content'>x</div>", RESET);
+    let t = fx.layout();
+    assert!(close(fx.rect(&t, "a").w, fx.rect(&t, "b").w), "{}", t.dump());
+}
+
+#[test]
+fn flexed_vertical_items_take_their_flex_basis() {
+    // The content size suggestion of an orthogonal item ignores its own
+    // width: flex: 0 0 100px wins over width: 500px (empty contents).
+    let fx = Fx::new("<div style='display:flex;height:100px'><div id=t style='display:table;writing-mode:vertical-lr;width:500px;flex:0 0 100px'></div><div id=b style='writing-mode:vertical-lr;width:500px;flex:0 0 100px'></div></div>", RESET);
+    let t = fx.layout();
+    for id in ["t", "b"] {
+        let r = fx.rect(&t, id);
+        assert!(close(r.w, 100.0) && close(r.h, 100.0), "#{id} {r:?}\n{}", t.dump());
+    }
+}

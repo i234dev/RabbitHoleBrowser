@@ -259,6 +259,9 @@ impl<'a> Layouter<'a> {
                         min = min.max(run - trail - space_trail);
                         run = soft_indent;
                     }
+                    // The spaces before a word starting a min-content line
+                    // are not part of it (they ended the previous one).
+                    let run_space = if run == soft_indent && *break_before && wraps { 0.0 } else { pending_space };
                     lead = false;
                     if st.white_space == rabbithole_style::WhiteSpace::PreWrap && text.bytes().all(|b| b == b' ' || b == b'\t') {
                         space_trail += width;
@@ -296,7 +299,7 @@ impl<'a> Layouter<'a> {
                             }
                             let cw = self.measurer.width(font, st.font_size, &text[start..end]) + st.letter_spacing * text[start..end].chars().count() as f32;
                             if first {
-                                run += pending_space + cw;
+                                run += run_space + cw;
                                 first = false;
                             } else {
                                 min = min.max(run);
@@ -308,7 +311,7 @@ impl<'a> Layouter<'a> {
                         trail = if cstyle.line_height_tight { 0.0 } else { st.letter_spacing.max(0.0) };
                         continue;
                     }
-                    run += pending_space + width;
+                    run += run_space + width;
                     pending_space = 0.0;
                     // Other space separators ending a line hang; no
                     // letter-spacing at a line end.

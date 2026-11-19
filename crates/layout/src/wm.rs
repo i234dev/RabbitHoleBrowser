@@ -254,6 +254,8 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
     ws.order = phys.order;
     ws.flex_grow = phys.flex_grow;
     ws.flex_shrink = phys.flex_shrink;
+    ws.flex_basis = phys.flex_basis;
+    ws.flex_basis_content = phys.flex_basis_content;
     ws.align_self = phys.align_self;
     ws.justify_self = phys.justify_self;
     ws.align_self_flags = phys.align_self_flags;
@@ -424,14 +426,28 @@ impl<'a> Layouter<'a> {
         };
         let lcb = Cb { x: 0.0, width: avail, height: Some((cbw - ml - mr).max(0.0)) };
         let mut bfc = Bfc::new();
+        let mut table_style = None;
         if let Some(h) = forced_block {
             let pb = r.style.padding.top.resolve_or_zero(cbw) + r.style.padding.bottom.resolve_or_zero(cbw) + r.style.border_width.top + r.style.border_width.bottom;
             self.forced_content_height = Some((h - pb).max(0.0));
+            if matches!(r.formatting, Formatting::Table | Formatting::TableWrapper) && r.style.height != Length::Px(h) {
+                // A table's height is a minimum: the size the parent
+                // gives it (a flexed item) replaces it.
+                let mut st = (*r.style).clone();
+                st.height = Length::Px(h);
+                st.box_sizing = rabbithole_style::BoxSizing::BorderBox;
+                table_style = Some(std::mem::replace(&mut r.style, Rc::new(st)));
+                r.layout_cache = None;
+            }
         } else {
             self.forced_content_height = None;
         }
         self.layout_block(r, &lcb, 0.0, &mut bfc, lmode);
         self.forced_content_height = None;
+        if let Some(st) = table_style {
+            r.style = st;
+            r.layout_cache = None;
+        }
         let lr = r.rect;
         let (pw, ph) = (lr.h, lr.w);
         // A combined-upright run wider than its 1em box is squeezed into it.
