@@ -67,6 +67,11 @@ pub(crate) fn transposed_as(style: &ComputedStyle, mode: WritingMode) -> Compute
         WritingMode::SidewaysLr => [sw(r[3]), sw(r[0]), sw(r[1]), sw(r[2])],
         _ => [sw(r[0]), sw(r[3]), sw(r[2]), sw(r[1])],
     };
+    // Upright vertical text is typeset left to right: its used direction
+    // is ltr (CSS Writing Modes 3 §5.1).
+    if style.text_orientation == rabbithole_style::TextOrientation::Upright && !style.writing_sideways {
+        s.direction = rabbithole_style::Direction::Ltr;
+    }
     s.layout_transposed = true;
     s
 }

@@ -565,7 +565,18 @@ impl<'a> Layouter<'a> {
             col_x.push(x);
             x += w + hs;
         }
+        // Right to left, the columns run from the right edge (CSS 2.1
+        // §17.5: the table's direction orders them).
+        let rtl = b.style.direction == rabbithole_style::Direction::Rtl;
+        if rtl {
+            let right = x - hs;
+            for (cx, w) in col_x.iter_mut().zip(&widths) {
+                *cx = content_x + hs + (right - (*cx + w));
+            }
+        }
         let span_w = |c: usize, span: usize| -> f32 { widths[c..c + span].iter().sum::<f32>() + (span.saturating_sub(1)) as f32 * hs };
+        // The left edge of `span` columns from `c`.
+        let span_x = |c: usize, span: usize| -> f32 { if rtl { col_x[c + span - 1] } else { col_x[c] } };
 
         // Pass 1: lay out cells (at y = 0) and measure them.
         let nrows = g.rows.len();
@@ -577,7 +588,7 @@ impl<'a> Layouter<'a> {
                 cell.style = Rc::new(hidden_cell_style(&cell.style));
             }
             let ex = cell_extras(&cell.style);
-            let ccb = Cb { x: col_x[info.col], width: cw, height: None };
+            let ccb = Cb { x: span_x(info.col, info.colspan), width: cw, height: None };
             let mut bfc = Bfc::new();
             self.layout_block(cell, &ccb, 0.0, &mut bfc, WidthMode::Fixed((cw - ex).max(0.0)));
             // Cells have no margins.
@@ -646,7 +657,7 @@ impl<'a> Layouter<'a> {
             y += row_h[r] + vs;
         }
         let content_h = if nrows > 0 { y - content_y } else { 0.0 };
-        let grid_x = col_x.first().copied().unwrap_or(content_x);
+        let grid_x = if n > 0 { span_x(0, n) } else { content_x };
         let grid_w: f32 = widths.iter().sum::<f32>() + (n.saturating_sub(1)) as f32 * hs;
         for (i, info) in g.cells.iter().enumerate() {
             let end = info.row + info.rowspan;
@@ -722,7 +733,7 @@ impl<'a> Layouter<'a> {
                 continue;
             }
             let span = cbx.span.min(n - cbx.first).max(1);
-            let r = Rect::new(col_x[cbx.first], gy, span_w(cbx.first, span), gh);
+            let r = Rect::new(span_x(cbx.first, span), gy, span_w(cbx.first, span), gh);
             let bx = match cbx.path.1 {
                 Some(j) => &mut b.children[cbx.path.0].children[j],
                 None => &mut b.children[cbx.path.0],

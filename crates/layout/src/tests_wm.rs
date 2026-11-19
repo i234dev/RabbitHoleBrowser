@@ -279,3 +279,15 @@ fn flexed_vertical_items_take_their_flex_basis() {
         assert!(close(r.w, 100.0) && close(r.h, 100.0), "#{id} {r:?}\n{}", t.dump());
     }
 }
+
+#[test]
+fn right_to_left_tables_order_columns_from_the_right() {
+    let fx = Fx::new("<table dir=rtl style='border-spacing:0'><tr><td id=a style='width:10px;padding:0'></td><td id=b style='width:20px;padding:0'></td></tr></table>", RESET);
+    let t = fx.layout();
+    let (a, b) = (fx.rect(&t, "a"), fx.rect(&t, "b"));
+    assert!(close(b.x, 0.0) && close(a.x, 20.0), "{a:?} {b:?}\n{}", t.dump());
+    // Upright vertical text is laid out left to right whatever `direction`.
+    let fx = Fx::new("<div dir=rtl style='writing-mode:vertical-rl;text-orientation:upright;height:100px'><span id=s style='display:inline-block;width:10px;height:10px'></span></div>", RESET);
+    let t = fx.layout();
+    assert!(close(fx.rect(&t, "s").y, 0.0), "{}", t.dump());
+}
