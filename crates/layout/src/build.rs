@@ -268,12 +268,15 @@ impl<'a> Builder<'a> {
         if matches!(style.display, Display::TableColumn | Display::TableColumnGroup) {
             // Columns only matter inside tables (widths, backgrounds); the
             // fix-up drops them elsewhere. They have no borders or padding.
+            // (Their counter properties still apply.)
+            self.apply_counters(&style);
             let mut b = LayoutBox::new(BoxKind::Block, Some(node), Rc::new(without_box_edges(&style)));
             b.formatting = Formatting::None;
             if style.display == Display::TableColumnGroup {
                 for c in doc.child_elements(node) {
                     if let Some(cs) = self.ctx.styles.get(c) {
                         if cs.display == Display::TableColumn {
+                            self.apply_counters(cs);
                             let mut col = LayoutBox::new(BoxKind::Block, Some(c), Rc::new(without_box_edges(cs)));
                             col.formatting = Formatting::None;
                             b.children.push(col);
