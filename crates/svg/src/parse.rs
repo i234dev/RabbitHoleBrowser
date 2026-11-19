@@ -101,8 +101,27 @@ pub enum Kind {
     ClipPath {
         units_bbox: bool,
     },
-    /// `<pattern>`: approximated by a flat color.
-    Pattern(Option<Color>),
+    /// `<pattern>` (its content is the node's children).
+    Pattern(Pattern),
+}
+
+/// `<pattern>` attributes (`None`: inherited through `href`, else the
+/// default).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Pattern {
+    pub x: Option<Length>,
+    pub y: Option<Length>,
+    pub width: Option<Length>,
+    pub height: Option<Length>,
+    /// `patternUnits` is `objectBoundingBox` (the default).
+    pub units_bbox: Option<bool>,
+    /// `patternContentUnits` is `objectBoundingBox` (default
+    /// `userSpaceOnUse`).
+    pub content_bbox: Option<bool>,
+    pub transform: Option<Matrix>,
+    pub viewbox: Option<ViewBox>,
+    pub par: Option<AspectRatio>,
+    pub href: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +134,22 @@ pub struct Node {
     /// Bounding box in this node's own user space (children transforms
     /// applied, this node's `transform` not), when known.
     pub bbox: Option<Rect>,
+    /// CSS `transform` / `transform-origin` / `transform-box`, resolved
+    /// into `transform` once bounding boxes are known.
+    pub xform: Option<Box<XformSpec>>,
+}
+
+/// The CSS transform properties of an element.
+#[derive(Debug, Clone)]
+pub struct XformSpec {
+    /// CSS `transform` text (from the page's CSS), replacing the attribute.
+    pub css: Option<String>,
+    /// `transform-origin` (CSS or attribute); `0 0` when absent.
+    pub origin: Option<String>,
+    /// `transform-box` keyword.
+    pub tbox: Option<String>,
+    /// The nearest viewport's size (`view-box`).
+    pub view: (f32, f32),
 }
 
 /// Result of building.
@@ -187,9 +222,19 @@ pub fn build_in(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) ->
     let mut b = Builder { doc, style_of, rules, nodes: Vec::new(), ids: HashMap::new(), built: HashMap::new(), viewport: (vw, vh) };
     let root_idx = b.build_node(root, 0, true)?;
     b.resolve_gradients();
+    b.resolve_patterns();
     let overflow_visible = b.nodes[root_idx].spec.overflow_visible.unwrap_or(false);
     let mut built = Built { nodes: b.nodes, root: root_idx, ids: b.ids, width, height, viewbox, par, overflow_visible };
     compute_bboxes(&mut built);
+    if built.nodes.iter().any(|n| n.xform.is_some()) {
+        for i in 0..built.nodes.len() {
+            if let Some(x) = built.nodes[i].xform.take() {
+                built.nodes[i].transform = crate::units::css_transform(&x, built.nodes[i].transform, built.nodes[i].bbox);
+            }
+        }
+        // Ancestors' boxes include the transformed children.
+        compute_bboxes(&mut built);
+    }
     Some(built)
 }
 
@@ -306,7 +351,15 @@ impl<'a> Builder<'a> {
         let id = self.attr(n, "id").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let (vw, vh) = self.viewport;
         let diag = ((vw * vw + vh * vh) / 2.0).sqrt();
-        let mk = |kind: Kind, children: Vec<usize>| Node { kind, spec: spec.clone(), transform, children, id: id.clone(), bbox: None };
+        let xform = if is_root {
+            None
+        } else {
+            let css = (self.style_of)(n, "transform");
+            let origin = (self.style_of)(n, "transform-origin").or_else(|| self.attr(n, "transform-origin").map(str::to_string));
+            let tbox = (self.style_of)(n, "transform-box");
+            (css.is_some() || origin.is_some()).then(|| Box::new(XformSpec { css, origin, tbox, view: (vw, vh) }))
+        };
+        let mk = |kind: Kind, children: Vec<usize>| Node { kind, spec: spec.clone(), transform, children, id: id.clone(), bbox: None, xform: xform.clone() };
 
         let node = match tag.as_str() {
             "svg" => {
@@ -477,16 +530,21 @@ impl<'a> Builder<'a> {
                 mk(Kind::ClipPath { units_bbox }, children)
             }
             "pattern" => {
-                // Average-ish color: first fill we can find among descendants.
-                let mut color = None;
-                for d in self.doc.descendants(n).skip(1) {
-                    let s = self.specified(d);
-                    if let Some(crate::style::PaintSpec::Color(c)) = s.fill {
-                        color = Some(c);
-                        break;
-                    }
-                }
-                mk(Kind::Pattern(color), Vec::new())
+                let l = |name: &str| self.attr(n, name).and_then(parse_length);
+                let pat = Pattern {
+                    x: l("x"),
+                    y: l("y"),
+                    width: l("width"),
+                    height: l("height"),
+                    units_bbox: self.attr(n, "patternunits").map(|u| !u.eq_ignore_ascii_case("userSpaceOnUse")),
+                    content_bbox: self.attr(n, "patterncontentunits").map(|u| u.eq_ignore_ascii_case("objectBoundingBox")),
+                    transform: self.attr(n, "patterntransform").map(parse_transform),
+                    viewbox: self.attr(n, "viewbox").and_then(parse_viewbox),
+                    par: self.attr(n, "preserveaspectratio").map(|p| parse_aspect_ratio(Some(p))),
+                    href: self.href(n).map(|h| h.trim_start_matches('#').to_string()),
+                };
+                let children = self.build_children(n, depth);
+                mk(Kind::Pattern(pat), children)
             }
             // Never rendered / unsupported.
             "title" | "desc" | "metadata" | "style" | "script" | "filter" | "mask" | "marker" | "foreignobject"
@@ -546,6 +604,38 @@ impl<'a> Builder<'a> {
             g.stops.push(ColorStop { offset, color });
         }
         g
+    }
+
+    /// Fill in pattern attributes and content inherited through `href`.
+    fn resolve_patterns(&mut self) {
+        for i in 0..self.nodes.len() {
+            let Kind::Pattern(_) = &self.nodes[i].kind else { continue };
+            let mut cur = i;
+            for _ in 0..16 {
+                let Kind::Pattern(p) = &self.nodes[cur].kind else { break };
+                let Some(&next) = p.href.as_ref().and_then(|h| self.ids.get(h)) else { break };
+                if next == i || next == cur {
+                    break;
+                }
+                let Kind::Pattern(parent) = self.nodes[next].kind.clone() else { break };
+                let parent_children = self.nodes[next].children.clone();
+                if self.nodes[i].children.is_empty() {
+                    self.nodes[i].children = parent_children;
+                }
+                if let Kind::Pattern(g) = &mut self.nodes[i].kind {
+                    g.x = g.x.or(parent.x);
+                    g.y = g.y.or(parent.y);
+                    g.width = g.width.or(parent.width);
+                    g.height = g.height.or(parent.height);
+                    g.units_bbox = g.units_bbox.or(parent.units_bbox);
+                    g.content_bbox = g.content_bbox.or(parent.content_bbox);
+                    g.transform = g.transform.or(parent.transform);
+                    g.viewbox = g.viewbox.or(parent.viewbox);
+                    g.par = g.par.or(parent.par);
+                }
+                cur = next;
+            }
+        }
     }
 
     /// Fill in gradient attributes/stops inherited through `href`.

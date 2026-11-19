@@ -498,10 +498,9 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             };
             if let Some(p) = parse_origin(xy, ctx) {
                 style.transform_origin = p;
-                let zv = z;
-                if zv != 0.0 || style.transform3d.is_some() {
-                    style.transform3d_mut().origin_z = zv;
-                }
+                let t = style.transform3d_mut();
+                t.origin_z = z;
+                t.origin_specified = true;
             }
         }
         "perspective-origin" => {

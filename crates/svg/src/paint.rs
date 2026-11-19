@@ -1,6 +1,6 @@
 //! Rendering of the tree onto a gfx `Canvas`.
 
-use crate::parse::{Built, Gradient, Kind, Node, Spread};
+use crate::parse::{Built, Gradient, Kind, Node, Pattern, Spread};
 use crate::style::{ClipRef, PaintSpec, Props, TextAnchor};
 use crate::units::{is_identity, multiply, scale_factor, transform_point, translate, viewbox_transform, Length, ViewBox};
 use rabbithole_gfx::{Canvas, Color, ColorStop, FillRule, FontContext, Paint, PathSeg, Point, Rect, StrokeStyle};
@@ -203,7 +203,109 @@ impl<'a> Painter<'a> {
         self.use_depth -= 1;
     }
 
+    /// The `<pattern>` a paint refers to, if any.
+    fn pattern_of(&self, spec: &PaintSpec) -> Option<usize> {
+        let PaintSpec::Url(id, _) = spec else { return None };
+        let &idx = self.tree.ids.get(id)?;
+        matches!(self.tree.nodes[idx].kind, Kind::Pattern(_)).then_some(idx)
+    }
+
+    /// Fill the current clip with the tiles of pattern `idx` for a shape
+    /// with bounding box `bbox` (SVG 1.1 §13.3).
+    fn paint_pattern(&mut self, idx: usize, bbox: Rect, opacity: f32) {
+        let Kind::Pattern(pat) = &self.tree.nodes[idx].kind else { return };
+        let pat: Pattern = pat.clone();
+        if self.use_depth >= MAX_USE_DEPTH {
+            return;
+        }
+        let units_bbox = pat.units_bbox.unwrap_or(true);
+        let (vw, vh) = self.viewport;
+        // In bbox units a bare number is a fraction of the box.
+        let res = |l: Option<Length>, origin: f32, size: f32, reference: f32| -> f32 {
+            match (l, units_bbox) {
+                (None, true) => origin,
+                (None, false) => 0.0,
+                (Some(Length::Px(v)), true) => origin + v * size,
+                (Some(Length::Percent(p)), true) => origin + p / 100.0 * size,
+                (Some(l), false) => l.resolve(reference),
+            }
+        };
+        let len = |l: Option<Length>, size: f32, reference: f32| -> f32 {
+            match (l, units_bbox) {
+                (None, _) => 0.0,
+                (Some(Length::Px(v)), true) => v * size,
+                (Some(Length::Percent(p)), true) => p / 100.0 * size,
+                (Some(l), false) => l.resolve(reference),
+            }
+        };
+        let tx = res(pat.x, bbox.x, bbox.w, vw);
+        let ty = res(pat.y, bbox.y, bbox.h, vh);
+        let tw = len(pat.width, bbox.w, vw);
+        let th = len(pat.height, bbox.h, vh);
+        if tw <= 0.0 || th <= 0.0 || !tw.is_finite() || !th.is_finite() {
+            return;
+        }
+        let content = match pat.viewbox {
+            Some(vb) if vb.w > 0.0 && vb.h > 0.0 => viewbox_transform(vb, Rect::new(0.0, 0.0, tw, th), pat.par.unwrap_or_default()),
+            _ if pat.content_bbox.unwrap_or(false) => [bbox.w, 0.0, 0.0, bbox.h, 0.0, 0.0],
+            _ => rabbithole_gfx::IDENTITY,
+        };
+        let pt = pat.transform.unwrap_or(rabbithole_gfx::IDENTITY);
+        // The tiles covering the shape's box, in pattern space.
+        let Some(inv) = crate::units::invert(&pt) else { return };
+        let area = crate::units::transform_rect_bounds(&inv, bbox);
+        let (i0, i1) = (((area.x - tx) / tw).floor() as i64, ((area.x + area.w - tx) / tw).ceil() as i64);
+        let (j0, j1) = (((area.y - ty) / th).floor() as i64, ((area.y + area.h - ty) / th).ceil() as i64);
+        if (i1 - i0).saturating_mul(j1 - j0) > 4096 {
+            return;
+        }
+        let layered = opacity < 1.0;
+        if layered {
+            self.canvas.begin_layer(bbox);
+        }
+        let props = Props::default().inherit(&self.tree.nodes[idx].spec, self.diag());
+        let children = self.tree.nodes[idx].children.clone();
+        self.use_depth += 1;
+        self.canvas.push_transform(pt);
+        for j in j0..j1 {
+            for i in i0..i1 {
+                let (ox, oy) = (tx + i as f32 * tw, ty + j as f32 * th);
+                self.canvas.push_transform(translate(ox, oy));
+                self.canvas.push_clip(Rect::new(0.0, 0.0, tw, th));
+                self.canvas.push_transform(content);
+                for &c in &children {
+                    self.paint_node(c, &props);
+                }
+                self.canvas.pop_transform();
+                self.canvas.pop_clip();
+                self.canvas.pop_transform();
+            }
+        }
+        self.canvas.pop_transform();
+        self.use_depth -= 1;
+        if layered {
+            self.canvas.end_layer(opacity);
+        }
+    }
+
     fn paint_shape(&mut self, path: &[PathSeg], props: &Props, bbox: Rect) {
+        if let Some(idx) = self.pattern_of(&props.fill) {
+            // Pattern fill: the tiles clipped to the shape, then the stroke.
+            if !props.paint_order_stroke_first {
+                self.canvas.push_clip_path(path, props.fill_rule);
+                self.paint_pattern(idx, bbox, props.fill_opacity);
+                self.canvas.pop_clip();
+            }
+            let mut rest = props.clone();
+            rest.fill = PaintSpec::None;
+            self.paint_shape(path, &rest, bbox);
+            if props.paint_order_stroke_first {
+                self.canvas.push_clip_path(path, props.fill_rule);
+                self.paint_pattern(idx, bbox, props.fill_opacity);
+                self.canvas.pop_clip();
+            }
+            return;
+        }
         let fill = self.make_paint(&props.fill, props.fill_opacity, props, bbox);
         let stroke = if props.stroke_width > 0.0 { self.make_paint(&props.stroke, props.stroke_opacity, props, bbox) } else { None };
         let do_fill = |p: &mut Self| {
@@ -250,10 +352,8 @@ impl<'a> Painter<'a> {
                 if let Some(&idx) = self.tree.ids.get(id) {
                     match &self.tree.nodes[idx].kind {
                         Kind::Gradient(g) => return self.gradient_paint(g, opacity, bbox),
-                        Kind::Pattern(color) => {
-                            let c = color.unwrap_or(Color::rgb(128, 128, 128));
-                            return Some(Paint::Solid(c.scale_alpha(opacity)));
-                        }
+                        // Pattern strokes are not supported: no paint.
+                        Kind::Pattern(_) => return None,
                         _ => {}
                     }
                 }

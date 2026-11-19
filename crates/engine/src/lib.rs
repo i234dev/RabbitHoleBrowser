@@ -1648,6 +1648,18 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
                 "opacity" if s.opacity < 1.0 => Some(format!("{}", s.opacity)),
                 "display" if s.display.is_none() => Some("none".into()),
                 "visibility" if s.visibility == rabbithole_style::Visibility::Hidden => Some("hidden".into()),
+                "transform" => svg_transform_text(s),
+                "transform-origin" => s.transform3d.as_ref().filter(|t| t.origin_specified).map(|_| format!("{} {}", svg_length_text(&s.transform_origin.0), svg_length_text(&s.transform_origin.1))),
+                "transform-box" => s.transform3d.as_ref().map(|t| t.transform_box).filter(|b| *b != rabbithole_style::TransformBox::ViewBox).map(|b| {
+                    match b {
+                        rabbithole_style::TransformBox::ContentBox => "content-box",
+                        rabbithole_style::TransformBox::BorderBox => "border-box",
+                        rabbithole_style::TransformBox::FillBox => "fill-box",
+                        rabbithole_style::TransformBox::StrokeBox => "stroke-box",
+                        rabbithole_style::TransformBox::ViewBox => "view-box",
+                    }
+                    .to_string()
+                }),
                 _ => s.svg_props.iter().find(|(n, _)| n == prop).map(|(_, v)| rabbithole_svg::tokens_to_string(v).trim().to_string()),
             }
         };
@@ -1659,10 +1671,59 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
         if w <= 0.0 || h <= 0.0 {
             continue;
         }
+        // Percentages resolve against the size the SVG is laid out at.
+        let tree = if tree.viewport_dependent() && (w, h) != (300.0, 150.0) {
+            match rabbithole_svg::SvgTree::from_dom_in(doc, n, &style_of, (w, h)) {
+                Some(t) => t,
+                None => tree,
+            }
+        } else {
+            tree
+        };
         let scale = if w.max(h) < 256.0 { 2.0 } else { 1.0 };
         let (pw, ph) = ((w * scale).round().clamp(1.0, 2048.0) as u32, (h * scale).round().clamp(1.0, 2048.0) as u32);
         images.insert(n, Arc::new(tree.rasterize(fonts, pw, ph)));
     }
+}
+
+/// A length for the SVG renderer's transform parser: `Npx`, `N%` or
+/// `Apx+B%`.
+fn svg_length_text(l: &rabbithole_style::Length) -> String {
+    match l {
+        rabbithole_style::Length::Percent(p) => format!("{p}%"),
+        rabbithole_style::Length::Calc(px, pct) => format!("{px}px+{pct}%"),
+        other => format!("{}px", other.resolve_or_zero(0.0)),
+    }
+}
+
+/// The element's CSS transform (`translate`, `rotate`, `scale` and
+/// `transform`) for the SVG renderer, which resolves percentages against
+/// the element's transform box; 3D functions are flattened.
+fn svg_transform_text(s: &rabbithole_style::ComputedStyle) -> Option<String> {
+    use rabbithole_style::TransformOp as T;
+    if !s.has_transform() {
+        return None;
+    }
+    let mut out = String::new();
+    for op in s.transform_ops().iter() {
+        let f = match op {
+            T::Translate(x, y) | T::Translate3d(x, y, _) => format!("translate({}, {})", svg_length_text(x), svg_length_text(y)),
+            T::Scale(x, y) | T::Scale3d(x, y, _) => format!("scale({x}, {y})"),
+            T::Rotate(a) => format!("rotate({a}rad)"),
+            T::Rotate3d(x, y, z, a) if *x == 0.0 && *y == 0.0 && *z != 0.0 => format!("rotate({}rad)", if *z < 0.0 { -a } else { *a }),
+            T::Skew(x, y) => format!("skew({x}rad, {y}rad)"),
+            T::SkewX(x) => format!("skewX({x}rad)"),
+            T::SkewY(y) => format!("skewY({y}rad)"),
+            T::Matrix(m) => format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5]),
+            other => {
+                let m = rabbithole_gfx::mat4::flatten_2d(&rabbithole_style::op_matrix_3d(other, 0.0, 0.0));
+                format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5])
+            }
+        };
+        out.push_str(&f);
+        out.push(' ');
+    }
+    Some(out)
 }
 
 fn css_color(c: Color) -> String {

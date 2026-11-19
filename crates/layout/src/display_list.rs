@@ -621,7 +621,16 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 self.push_scope(HitScope::Transform(inverse));
                 // The mapping is not affine: no culling inside.
                 self.bounds = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
-                group3d = Some((self.list.items.len(), self.list.sticky.len(), Group3d { matrix: full, backface_hidden, preserve, blend: 0, items: Vec::new() }));
+                // Like a layer painted at a whole-pixel offset: the
+                // fraction of the box's position moves the mapped result.
+                // (Translations keep the fraction, like 2D painting.)
+                let translation = mat4::is_2d(&full) && full[0] == 1.0 && full[1] == 0.0 && full[4] == 0.0 && full[5] == 1.0;
+                let matrix = if translation {
+                    full
+                } else {
+                    mat4::mul(&mat4::translate(root.rect.x.round() - root.rect.x, root.rect.y.round() - root.rect.y, 0.0), &full)
+                };
+                group3d = Some((self.list.items.len(), self.list.sticky.len(), Group3d { matrix, backface_hidden, preserve, blend: 0, items: Vec::new() }));
                 None
             } else if mat4::is_2d(&full) && p3d.and_then(|p| p.perspective).is_none() {
                 // The 2D path (same arithmetic as without 3D properties).

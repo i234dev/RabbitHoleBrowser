@@ -700,19 +700,20 @@ impl<'a> Layouter<'a> {
         // Positioned rows and row groups are the containing blocks of
         // their absolutely positioned descendants (rows first: a group's
         // walk stops at positioned rows).
-        if g.rows.iter().any(|p| row_ref(b, *p).style.position != Position::Static) {
+        // Transformed ones too (and of their fixed descendants).
+        if g.rows.iter().any(|p| crate::block::contains_positioned(&row_ref(b, *p).style)) {
             for p in g.rows.iter() {
                 let row = row_mut(b, *p);
-                if row.style.position != Position::Static {
+                if crate::block::contains_positioned(&row.style) {
                     let r = row.rect;
-                    self.layout_abs_descendants(row, r);
+                    self.layout_abs_descendants_of(row, r);
                 }
             }
         }
         for i in 0..b.children.len() {
-            if is_row_group(&b.children[i]) && b.children[i].style.position != Position::Static {
+            if is_row_group(&b.children[i]) && crate::block::contains_positioned(&b.children[i].style) {
                 let r = b.children[i].rect;
-                self.layout_abs_descendants(&mut b.children[i], r);
+                self.layout_abs_descendants_of(&mut b.children[i], r);
             }
         }
         // Columns (painted beneath rows and cells).

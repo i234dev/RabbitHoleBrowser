@@ -1973,9 +1973,11 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "transform" => to.transform = from.transform.clone(),
         "transform-origin" => {
             to.transform_origin = from.transform_origin;
-            let z = from.transform3d.as_ref().map_or(0.0, |t| t.origin_z);
-            if z != 0.0 || to.transform3d.is_some() {
-                to.transform3d_mut().origin_z = z;
+            let (z, specified) = from.transform3d.as_ref().map_or((0.0, false), |t| (t.origin_z, t.origin_specified));
+            if z != 0.0 || specified || to.transform3d.is_some() {
+                let t = to.transform3d_mut();
+                t.origin_z = z;
+                t.origin_specified = specified;
             }
         }
         "translate" | "rotate" | "scale" | "perspective" | "perspective-origin" | "transform-style" | "-webkit-transform-style" | "backface-visibility"

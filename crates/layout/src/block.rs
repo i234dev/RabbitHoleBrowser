@@ -121,6 +121,9 @@ pub(crate) struct Layouter<'a> {
     /// Containing blocks of absolutely positioned grid children placed by
     /// grid lines (their grid area), set by the grid layout.
     pub(crate) abs_cb: HashMap<rabbithole_dom::NodeId, Rect>,
+    /// The absolutely positioned boxes being laid out belong to a
+    /// transformed containing block, which also contains fixed boxes.
+    fixed_cb: bool,
     /// The block children being laid out have a `-webkit-center` parent.
     center_blocks: bool,
     /// The containing block of the block children being laid out is
@@ -397,6 +400,7 @@ impl<'a> Layouter<'a> {
             last_font: None,
             feature_cache: HashMap::new(),
             abs_cb: HashMap::new(),
+            fixed_cb: false,
             center_blocks: false,
             cb_rtl: false,
             clamp: None,
@@ -942,9 +946,9 @@ impl<'a> Layouter<'a> {
             b.baseline = None;
         }
 
-        if style.position != Position::Static {
+        if contains_positioned(&style) {
             let padding_box = b.padding_rect();
-            self.layout_abs_descendants(b, padding_box);
+            self.layout_abs_descendants_of(b, padding_box);
         }
         b.fixed = style.position == Position::Fixed;
         self.finish_scroll_container(b);
@@ -1821,6 +1825,14 @@ impl<'a> Layouter<'a> {
     /// Lay out the absolutely positioned descendants whose containing block
     /// is `b` (padding box `cb`).
     /// Returns whether any such descendant exists.
+    /// Lay out the absolutely positioned (and, when transformed, fixed)
+    /// descendants `b` is the containing block of.
+    pub(crate) fn layout_abs_descendants_of(&mut self, b: &mut LayoutBox, cb: Rect) {
+        let saved = std::mem::replace(&mut self.fixed_cb, transform_containing_block(&b.style));
+        self.layout_abs_descendants(b, cb);
+        self.fixed_cb = saved;
+    }
+
     pub(crate) fn layout_abs_descendants(&mut self, b: &mut LayoutBox, cb: Rect) -> bool {
         // The common case needs no inline geometry or allocation. Preserve
         // this fact on reused subtrees, just as the recursive walk below does.
@@ -1891,7 +1903,7 @@ impl<'a> Layouter<'a> {
                 });
                 self.layout_absolute(&mut b.children[i], area.unwrap_or(cb), static_right, static_rect);
                 found = true;
-            } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below {
+            } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below && !transform_containing_block(&b.children[i].style) {
                 // Kept boxes remember having none (their subtree is
                 // unchanged), so large static subtrees are walked once.
                 let f = self.layout_abs_descendants_with(&mut b.children[i], cb, inline_cbs, ancestors);
@@ -1903,7 +1915,17 @@ impl<'a> Layouter<'a> {
     }
 
     fn layout_absolute(&mut self, c: &mut LayoutBox, cb: Rect, static_right: bool, static_rect: Option<StaticRect>) {
-        let cb = if c.style.position == Position::Fixed {
+        let fixed_cb = std::mem::take(&mut self.fixed_cb);
+        self.layout_absolute_in(c, cb, static_right, static_rect, fixed_cb);
+        self.fixed_cb = fixed_cb;
+        if fixed_cb && c.style.position == Position::Fixed {
+            // Positioned against a transformed ancestor, not the viewport.
+            c.fixed = false;
+        }
+    }
+
+    fn layout_absolute_in(&mut self, c: &mut LayoutBox, cb: Rect, static_right: bool, static_rect: Option<StaticRect>, fixed_cb: bool) {
+        let cb = if c.style.position == Position::Fixed && !fixed_cb {
             Rect::new(0.0, 0.0, self.ctx.viewport_width, self.ctx.viewport_height)
         } else {
             cb
@@ -2190,13 +2212,28 @@ impl<'a> Layouter<'a> {
 /// `none` establish a containing block for absolute descendants).
 fn contains_absolutes(style: &rabbithole_style::ComputedStyle) -> bool {
     style.position != Position::Static
+        || transform_containing_block(style)
         || (style.display == rabbithole_style::Display::Inline && (!style.filters.is_empty() || !style.backdrop_filters.is_empty()))
+}
+
+/// Is the box the containing block of its absolutely positioned
+/// descendants (positioned or transformed)?
+pub(crate) fn contains_positioned(style: &rabbithole_style::ComputedStyle) -> bool {
+    style.position != Position::Static || transform_containing_block(style)
+}
+
+/// A transform, `perspective`, `transform-style: preserve-3d`, `filter` or
+/// `backdrop-filter` makes the box the containing block of its absolutely
+/// positioned and fixed descendants (CSS Transforms 1 §2, CSS Transforms 2
+/// §6, Filter Effects 1 §5).
+fn transform_containing_block(style: &rabbithole_style::ComputedStyle) -> bool {
+    style.has_transform() || !style.filters.is_empty() || !style.backdrop_filters.is_empty() || style.transform3d.as_ref().is_some_and(|t| t.perspective.is_some() || t.preserve_3d)
 }
 
 fn has_abs_descendants(b: &LayoutBox) -> bool {
     b.children.iter().any(|child| {
         child.flow == Flow::Absolute
-            || (child.style.position == Position::Static && !child.no_abs_below && has_abs_descendants(child))
+            || (child.style.position == Position::Static && !child.no_abs_below && !transform_containing_block(&child.style) && has_abs_descendants(child))
     })
 }
 

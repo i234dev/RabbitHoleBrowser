@@ -79,6 +79,19 @@ impl SvgTree {
         parse::build(doc, root, style_of).map(|built| SvgTree { built })
     }
 
+    /// Like [`SvgTree::from_dom`] for an `<svg>` laid out at `viewport`
+    /// (its CSS size): percentages resolve against it when there is no
+    /// `viewBox` or width / height attributes.
+    pub fn from_dom_in(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) -> Option<String>, viewport: (f32, f32)) -> Option<SvgTree> {
+        parse::build_in(doc, root, style_of, Some(viewport)).map(|built| SvgTree { built })
+    }
+
+    /// Do percentages depend on the size the SVG is laid out at (no
+    /// `viewBox`, not both width and height attributes)?
+    pub fn viewport_dependent(&self) -> bool {
+        self.built.viewbox.is_none() && (self.built.width.is_none() || self.built.height.is_none())
+    }
+
     /// `width`/`height` attributes in px (percentages → None) and `viewBox`.
     pub fn intrinsic_size(&self) -> (Option<f32>, Option<f32>, Option<ViewBox>) {
         (self.built.width, self.built.height, self.built.viewbox)

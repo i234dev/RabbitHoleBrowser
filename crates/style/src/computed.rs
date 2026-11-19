@@ -1106,6 +1106,8 @@ pub struct Transform3dProps {
     /// z component of `transform-origin` (px).
     pub origin_z: f32,
     pub transform_box: TransformBox,
+    /// `transform-origin` was declared (SVG elements default to `0 0`).
+    pub origin_specified: bool,
 }
 
 /// `transform-box`.
@@ -1131,6 +1133,7 @@ impl Default for Transform3dProps {
             backface_hidden: false,
             origin_z: 0.0,
             transform_box: TransformBox::ViewBox,
+            origin_specified: false,
         }
     }
 }
@@ -1425,7 +1428,10 @@ pub fn transform_matrix(ops: &[TransformOp], width: f32, height: f32, font_size:
                 [1.0, 0.0, 0.0, 1.0, x.resolve_or_zero(width), y.resolve_or_zero(height)]
             }
             TransformOp::Scale(x, y) => [*x, 0.0, 0.0, *y, 0.0, 0.0],
-            TransformOp::Rotate(a) => [a.cos(), a.sin(), -a.sin(), a.cos(), 0.0, 0.0],
+            TransformOp::Rotate(a) => {
+                let (s, c) = quarter_snap(*a);
+                [c, s, -s, c, 0.0, 0.0]
+            }
             TransformOp::Skew(x, y) => [1.0, y.tan(), x.tan(), 1.0, 0.0, 0.0],
             TransformOp::SkewX(x) => [1.0, 0.0, x.tan(), 1.0, 0.0, 0.0],
             TransformOp::SkewY(y) => [1.0, y.tan(), 0.0, 1.0, 0.0, 0.0],
@@ -1436,13 +1442,21 @@ pub fn transform_matrix(ops: &[TransformOp], width: f32, height: f32, font_size:
             TransformOp::Scale3d(x, y, _) => [*x, 0.0, 0.0, *y, 0.0, 0.0],
             TransformOp::Rotate3d(x, y, z, a) if *x == 0.0 && *y == 0.0 => {
                 let a = if *z < 0.0 { -*a } else if *z == 0.0 { 0.0 } else { *a };
-                [a.cos(), a.sin(), -a.sin(), a.cos(), 0.0, 0.0]
+                let (s, c) = quarter_snap(a);
+                [c, s, -s, c, 0.0, 0.0]
             }
             _ => rabbithole_gfx::mat4::flatten_2d(&op_matrix_3d(op, width, height)),
         };
         m = multiply_matrix(m, o);
     }
     m
+}
+
+/// (sin, cos) of an angle, exact at quarter turns (no 1e-8 residues that
+/// would turn a 180° rotation into a slightly skewed one).
+fn quarter_snap(a: f32) -> (f32, f32) {
+    let snap = |v: f32| if (v - v.round()).abs() < 1e-6 { v.round() } else { v };
+    (snap(a.sin()), snap(a.cos()))
 }
 
 /// The 4×4 matrix of one transform function (percentages against the

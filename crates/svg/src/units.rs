@@ -215,6 +215,16 @@ pub fn scale_factor(m: &Matrix) -> f32 {
 }
 
 /// Axis-aligned bounds of a transformed rect.
+/// The inverse of an affine matrix, if invertible.
+pub fn invert(m: &Matrix) -> Option<Matrix> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-12 || !det.is_finite() {
+        return None;
+    }
+    let (a, b, c, d) = (m[3] / det, -m[1] / det, -m[2] / det, m[0] / det);
+    Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
+}
+
 pub fn transform_rect_bounds(m: &Matrix, r: Rect) -> Rect {
     let pts = [
         transform_point(m, Point { x: r.x, y: r.y }),
@@ -315,4 +325,147 @@ mod tests {
         let m = viewbox_transform(vb, Rect::new(0.0, 0.0, 200.0, 200.0), parse_aspect_ratio(Some("xMinYMax slice")));
         assert_eq!(m, [4.0, 0.0, 0.0, 4.0, 0.0, 0.0]);
     }
+}
+
+/// A length of the CSS transform text the engine passes (`Npx`, `N%`,
+/// `Apx+B%`, unitless numbers as px) against `reference`.
+fn css_len(s: &str, reference: f32) -> Option<f32> {
+    let s = s.trim();
+    if let Some((a, b)) = s.split_once("px+") {
+        return Some(a.trim().parse::<f32>().ok()? + b.trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0 * reference);
+    }
+    if let Some(p) = s.strip_suffix('%') {
+        return Some(p.trim().parse::<f32>().ok()? / 100.0 * reference);
+    }
+    match parse_length(s)? {
+        Length::Px(v) => Some(v),
+        Length::Percent(p) => Some(p / 100.0 * reference),
+    }
+}
+
+/// An angle (`rad`, `deg`, `grad`, `turn`; bare numbers are degrees).
+fn css_angle(s: &str) -> Option<f32> {
+    let s = s.trim();
+    for (u, f) in [("deg", std::f32::consts::PI / 180.0), ("grad", std::f32::consts::PI / 200.0), ("rad", 1.0), ("turn", std::f32::consts::TAU)] {
+        if let Some(v) = s.strip_suffix(u) {
+            return Some(v.trim().parse::<f32>().ok()? * f);
+        }
+    }
+    Some(s.parse::<f32>().ok()?.to_radians())
+}
+
+/// A CSS transform list (with units) against the reference box `r`.
+fn parse_css_transform(s: &str, r: Rect) -> Option<Matrix> {
+    let mut m = IDENTITY;
+    let mut rest = s.trim();
+    while !rest.is_empty() {
+        let open = rest.find('(')?;
+        let name = rest[..open].trim().to_ascii_lowercase();
+        let close = rest[open..].find(')')? + open;
+        let args: Vec<&str> = rest[open + 1..close].split(',').map(str::trim).filter(|a| !a.is_empty()).collect();
+        rest = rest[close + 1..].trim_start();
+        let num = |i: usize| args.get(i).and_then(|a| a.parse::<f32>().ok());
+        let f: Matrix = match (name.as_str(), args.len()) {
+            ("matrix", 6) => [num(0)?, num(1)?, num(2)?, num(3)?, num(4)?, num(5)?],
+            ("translate", 1) => [1.0, 0.0, 0.0, 1.0, css_len(args[0], r.w)?, 0.0],
+            ("translate", 2) => [1.0, 0.0, 0.0, 1.0, css_len(args[0], r.w)?, css_len(args[1], r.h)?],
+            ("translatex", 1) => [1.0, 0.0, 0.0, 1.0, css_len(args[0], r.w)?, 0.0],
+            ("translatey", 1) => [1.0, 0.0, 0.0, 1.0, 0.0, css_len(args[0], r.h)?],
+            ("scale", 1) => [num(0)?, 0.0, 0.0, num(0)?, 0.0, 0.0],
+            ("scale", 2) => [num(0)?, 0.0, 0.0, num(1)?, 0.0, 0.0],
+            ("scalex", 1) => [num(0)?, 0.0, 0.0, 1.0, 0.0, 0.0],
+            ("scaley", 1) => [1.0, 0.0, 0.0, num(0)?, 0.0, 0.0],
+            ("rotate", 1) => rotation(css_angle(args[0])?),
+            ("skew", 1) => [1.0, 0.0, css_angle(args[0])?.tan(), 1.0, 0.0, 0.0],
+            ("skew", 2) => [1.0, css_angle(args[1])?.tan(), css_angle(args[0])?.tan(), 1.0, 0.0, 0.0],
+            ("skewx", 1) => [1.0, 0.0, css_angle(args[0])?.tan(), 1.0, 0.0, 0.0],
+            ("skewy", 1) => [1.0, css_angle(args[0])?.tan(), 0.0, 1.0, 0.0, 0.0],
+            _ => return None,
+        };
+        m = multiply(&m, &f);
+    }
+    Some(m)
+}
+
+/// A `transform-origin` against the reference box `r` (keywords, lengths
+/// and percentages; a z length is ignored). `None` when invalid.
+fn parse_origin(s: &str, r: Rect) -> Option<(f32, f32)> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum V {
+        H(f32),
+        Vert(f32),
+        Center,
+        Len(&'static str),
+    }
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let class = |p: &str| -> V {
+        match p {
+            "left" => V::H(0.0),
+            "right" => V::H(1.0),
+            "top" => V::Vert(0.0),
+            "bottom" => V::Vert(1.0),
+            "center" => V::Center,
+            _ => V::Len(""),
+        }
+    };
+    if parts.len() == 3 {
+        // The z component must be a length (not a percentage).
+        let z = parts[2];
+        if z.ends_with('%') || css_len(z, 0.0).is_none() {
+            return None;
+        }
+    }
+    let x_of = |p: &str, v: V| -> Option<f32> {
+        match v {
+            V::H(f) => Some(r.x + f * r.w),
+            V::Center => Some(r.x + 0.5 * r.w),
+            V::Len(_) => Some(r.x + css_len(p, r.w)?),
+            V::Vert(_) => None,
+        }
+    };
+    let y_of = |p: &str, v: V| -> Option<f32> {
+        match v {
+            V::Vert(f) => Some(r.y + f * r.h),
+            V::Center => Some(r.y + 0.5 * r.h),
+            V::Len(_) => Some(r.y + css_len(p, r.h)?),
+            V::H(_) => None,
+        }
+    };
+    let a = class(parts[0]);
+    if parts.len() == 1 {
+        return match a {
+            V::Vert(_) => Some((r.x + 0.5 * r.w, y_of(parts[0], a)?)),
+            _ => Some((x_of(parts[0], a)?, r.y + 0.5 * r.h)),
+        };
+    }
+    let b = class(parts[1]);
+    // Two keywords may come in either order.
+    if !matches!(a, V::Len(_)) && !matches!(b, V::Len(_)) && (matches!(a, V::Vert(_)) || matches!(b, V::H(_))) {
+        return Some((x_of(parts[1], b)?, y_of(parts[0], a)?));
+    }
+    Some((x_of(parts[0], a)?, y_of(parts[1], b)?))
+}
+
+/// The element's transform from its CSS transform properties: the CSS
+/// `transform` (else the attribute's `attr`) about `transform-origin`, both
+/// against the `transform-box` (`bbox` is the fill box).
+pub fn css_transform(x: &crate::parse::XformSpec, attr: Matrix, bbox: Option<Rect>) -> Matrix {
+    let view = Rect::new(0.0, 0.0, x.view.0, x.view.1);
+    let fill = bbox.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+    let r = match x.tbox.as_deref() {
+        Some("fill-box" | "content-box" | "stroke-box" | "border-box") => fill,
+        _ => view,
+    };
+    let m = match x.css.as_deref() {
+        Some(t) => parse_css_transform(t, r).unwrap_or(attr),
+        None => attr,
+    };
+    let (ox, oy) = match x.origin.as_deref() {
+        Some(o) => parse_origin(o.trim(), r).unwrap_or((r.x, r.y)),
+        None => (r.x, r.y),
+    };
+    multiply(&multiply(&translate(ox, oy), &m), &translate(-ox, -oy))
 }
