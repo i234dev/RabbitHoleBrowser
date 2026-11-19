@@ -2,7 +2,7 @@
 //! matching, expiry, and persistence in the Netscape `cookies.txt` format.
 
 use crate::url::Url;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -371,6 +371,20 @@ pub struct CookieJar {
     /// Browser setting: cross-site subresource requests neither send nor
     /// store cookies (top-level navigations are unaffected).
     pub block_third_party: bool,
+    /// Cookies stored or removed since the last [`CookieJar::sync`]: this
+    /// process's version of them wins over the file's.
+    touched: HashSet<CookieKey>,
+    /// `clear()` since the last sync: the file's cookies are not merged.
+    cleared: bool,
+    /// Modification time of the file when last read or written.
+    synced: Option<SystemTime>,
+}
+
+/// What identifies a stored cookie (RFC 6265bis §5.7, step 23).
+type CookieKey = (String, String, bool, String, Option<String>);
+
+fn key_of(c: &Cookie) -> CookieKey {
+    (c.name.clone(), c.domain.clone(), c.host_only, c.path.clone(), c.partition_key.clone())
 }
 
 impl CookieJar {
@@ -410,6 +424,7 @@ impl CookieJar {
             }
             // Keep the original creation time (and so the cookie order).
             cookie.created = self.cookies[i].created;
+            self.touched.insert(key_of(&cookie));
             if cookie.is_expired() {
                 self.cookies.remove(i);
             } else {
@@ -422,6 +437,7 @@ impl CookieJar {
             return false;
         }
         let site = crate::url::site_of(&cookie.domain);
+        self.touched.insert(key_of(&cookie));
         self.cookies.push(cookie);
         self.evict(&site);
         self.dirty = true;
@@ -440,14 +456,16 @@ impl CookieJar {
             let oldest = self.cookies.iter().enumerate().filter(|(_, c)| crate::url::site_of(&c.domain) == site).min_by_key(|(_, c)| c.created).map(|(i, _)| i);
             match oldest {
                 Some(i) => {
-                    self.cookies.remove(i);
+                    let gone = self.cookies.remove(i);
+                    self.touched.insert(key_of(&gone));
                 }
                 None => break,
             }
         }
         while self.cookies.len() > MAX_TOTAL {
             let oldest = self.cookies.iter().enumerate().min_by_key(|(_, c)| c.created).map(|(i, _)| i).unwrap_or(0);
-            self.cookies.remove(oldest);
+            let gone = self.cookies.remove(oldest);
+            self.touched.insert(key_of(&gone));
         }
     }
 
@@ -580,12 +598,20 @@ impl CookieJar {
     /// Remove all cookies for a host (and its subdomains).
     pub fn clear_host(&mut self, host: &str) {
         let host = host.to_ascii_lowercase();
-        self.cookies.retain(|c| !domain_matches(&c.domain, &host) && !domain_matches(&host, &c.domain));
+        let touched = &mut self.touched;
+        self.cookies.retain(|c| {
+            let keep = !domain_matches(&c.domain, &host) && !domain_matches(&host, &c.domain);
+            if !keep {
+                touched.insert(key_of(c));
+            }
+            keep
+        });
         self.dirty = true;
     }
 
     pub fn clear(&mut self) {
         self.cookies.clear();
+        self.cleared = true;
         self.dirty = true;
     }
 
@@ -713,14 +739,64 @@ impl CookieJar {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, self.to_netscape())?;
+        // Write a sibling file and rename it, so a reader (another window
+        // process sharing the profile) never sees a half-written jar.
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        std::fs::write(&tmp, self.to_netscape())?;
+        std::fs::rename(&tmp, path)?;
         self.dirty = false;
+        self.touched.clear();
+        self.cleared = false;
+        self.synced = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         Ok(())
     }
 
     pub fn load(path: &Path) -> std::io::Result<CookieJar> {
+        let synced = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         let text = std::fs::read_to_string(path)?;
-        Ok(CookieJar::from_netscape(&text))
+        let mut jar = CookieJar::from_netscape(&text);
+        jar.synced = synced;
+        Ok(jar)
+    }
+
+    /// Share the persistent jar with other processes using the same file
+    /// (browser windows): when the file changed since this jar last read
+    /// or wrote it, merge it — cookies this process stored or removed
+    /// since then keep its version, the others take the file's (new,
+    /// updated, or deleted persistent cookies) — then write it if this jar
+    /// has changes. Session cookies stay in memory.
+    pub fn sync(&mut self, path: &Path) -> std::io::Result<()> {
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if mtime.is_some() && mtime != self.synced {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                self.merge(CookieJar::from_netscape(&text));
+            }
+            self.synced = mtime;
+        }
+        if self.dirty {
+            self.save(path)?;
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, disk: CookieJar) {
+        if self.cleared {
+            return;
+        }
+        let on_disk: HashSet<CookieKey> = disk.cookies.iter().map(key_of).collect();
+        let touched = &self.touched;
+        // Persistent cookies another process deleted.
+        self.cookies.retain(|c| c.expires.is_none() || touched.contains(&key_of(c)) || on_disk.contains(&key_of(c)));
+        for c in disk.cookies {
+            let k = key_of(&c);
+            if self.touched.contains(&k) {
+                continue;
+            }
+            match self.cookies.iter().position(|m| key_of(m) == k) {
+                Some(i) => self.cookies[i] = c,
+                None => self.cookies.push(c),
+            }
+        }
     }
 
     /// Count of cookies per domain (diagnostics / settings UI).
@@ -998,5 +1074,33 @@ mod tests {
         assert_eq!(jar.len(), MAX_PER_SITE);
         assert!(!jar.cookies().iter().any(|c| c.name == "c0"));
         assert!(jar.cookies().iter().any(|c| c.name == format!("c{}", MAX_PER_SITE + 4)));
+    }
+
+    #[test]
+    fn windows_sharing_a_profile_merge_instead_of_overwriting() {
+        let dir = std::env::temp_dir().join(format!("rh-cookie-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("cookies.txt");
+        let u = url("https://app.example.com/");
+        let mut a = CookieJar::new();
+        a.store_from_headers(&u, &["old=1; Max-Age=999".into(), "gone=1; Max-Age=999".into()]);
+        a.sync(&path).unwrap();
+        // A second window starts from the file.
+        let mut b = CookieJar::load(&path).unwrap();
+        a.store_from_headers(&u, &["CF_Authorization=a; Max-Age=999; Secure; SameSite=None".into(), "gone=; Max-Age=0".into()]);
+        a.sync(&path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        b.store_from_headers(&u, &["b=1; Max-Age=999".into(), "s=session".into()]);
+        b.sync(&path).unwrap();
+        let names = |j: &CookieJar| {
+            let mut v: Vec<String> = j.cookies().iter().map(|c| c.pair()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&b), ["CF_Authorization=a", "b=1", "old=1", "s=session"], "B took A's cookie and deletion");
+        assert_eq!(names(&CookieJar::load(&path).unwrap()), ["CF_Authorization=a", "b=1", "old=1"], "file keeps both windows' cookies");
+        a.sync(&path).unwrap();
+        assert_eq!(names(&a), ["CF_Authorization=a", "b=1", "old=1"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
