@@ -1671,17 +1671,16 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
         if w <= 0.0 || h <= 0.0 {
             continue;
         }
-        // Percentages resolve against the size the SVG is laid out at.
-        let tree = if tree.viewport_dependent() && (w, h) != (300.0, 150.0) {
-            match rabbithole_svg::SvgTree::from_dom_in(doc, n, &style_of, (w, h)) {
-                Some(t) => t,
-                None => tree,
-            }
-        } else {
-            tree
-        };
         let scale = if w.max(h) < 256.0 { 2.0 } else { 1.0 };
         let (pw, ph) = ((w * scale).round().clamp(1.0, 2048.0) as u32, (h * scale).round().clamp(1.0, 2048.0) as u32);
+        // Without a viewBox (and both width and height), the laid-out size
+        // is the viewport: percentages resolve against it and user units
+        // are CSS px.
+        if tree.viewport_dependent() {
+            let tree = rabbithole_svg::SvgTree::from_dom_in(doc, n, &style_of, (w, h)).unwrap_or(tree);
+            images.insert(n, Arc::new(tree.rasterize_viewport(fonts, w, h, pw as f32 / w)));
+            continue;
+        }
         images.insert(n, Arc::new(tree.rasterize(fonts, pw, ph)));
     }
 }

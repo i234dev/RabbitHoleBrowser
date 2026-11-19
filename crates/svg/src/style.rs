@@ -204,7 +204,9 @@ pub fn parse_paint(s: &str) -> Option<PaintSpec> {
     if lower == "none" {
         return Some(PaintSpec::None);
     }
-    if let Some(rest) = lower.strip_prefix("url(") {
+    if lower.starts_with("url(") {
+        // Ids are case-sensitive: slice the original text.
+        let rest = &s[4..];
         let close = rest.find(')')?;
         let id = rest[..close].trim().trim_matches(|c| c == '"' || c == '\'').trim_start_matches('#').to_string();
         let fallback = rest[close + 1..].trim();
@@ -381,7 +383,9 @@ impl Specified {
             "vector-effect" => self.non_scaling_stroke = Some(v.eq_ignore_ascii_case("non-scaling-stroke")),
             "clip-path" => {
                 let l = v.trim().to_ascii_lowercase();
-                if let Some(rest) = l.strip_prefix("url(") {
+                if l.starts_with("url(") {
+                    // Ids are case-sensitive.
+                    let rest = &v.trim()[4..];
                     if let Some(close) = rest.find(')') {
                         let id = rest[..close].trim().trim_matches(|c| c == '"' || c == '\'').trim_start_matches('#');
                         self.clip_path = Some(ClipRef::Id(id.to_string()));
@@ -491,6 +495,7 @@ mod tests {
     fn paint_and_props() {
         assert_eq!(parse_paint("none"), Some(PaintSpec::None));
         assert_eq!(parse_paint("url(#g) red"), Some(PaintSpec::Url("g".into(), Some(Box::new(PaintSpec::Color(Color::rgb(255, 0, 0)))))));
+        assert_eq!(parse_paint("url(#coloredBoxes)"), Some(PaintSpec::Url("coloredBoxes".into(), None)));
         assert_eq!(parse_paint("currentColor"), Some(PaintSpec::CurrentColor));
         let mut s = Specified::default();
         s.apply("stroke-width", "2.5");

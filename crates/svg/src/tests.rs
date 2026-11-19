@@ -230,3 +230,60 @@ fn renders_many_icons_quickly() {
     let elapsed = start.elapsed();
     assert!(elapsed.as_millis() < 2000, "took {elapsed:?}");
 }
+
+#[test]
+fn pattern_fills_tiles() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <defs>
+        <pattern id="p" patternUnits="userSpaceOnUse" x="0" y="0" width="50" height="100">
+          <rect x="0" y="0" width="25" height="50" fill="#00ff00"/>
+          <rect x="25" y="0" width="25" height="50" fill="#ff00ff"/>
+          <rect x="0" y="50" width="25" height="50" fill="#ffff00"/>
+          <rect x="25" y="50" width="25" height="50" fill="#0000ff"/>
+        </pattern>
+      </defs>
+      <rect width="50" height="100" fill="url(#p)" transform="matrix(2 0 0 1 0 0)"/>
+    </svg>"##;
+    let t = SvgTree::parse(svg).expect("parses");
+    let fonts = FontContext::new();
+    let img = t.rasterize(&fonts, 100, 100);
+    let px = |x: usize, y: usize| {
+        let i = (y * 100 + x) * 4;
+        (img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3])
+    };
+    assert_eq!(px(25, 25), (0, 255, 0, 255));
+    assert_eq!(px(75, 25), (255, 0, 255, 255));
+    assert_eq!(px(25, 75), (255, 255, 0, 255));
+    assert_eq!(px(75, 75), (0, 0, 255, 255));
+    // Laid out at a CSS size, rasterized at twice that.
+    let svg = svg.replace(r#"width="100" height="100""#, "");
+    let t = SvgTree::parse_in(&svg, Some((100.0, 100.0))).expect("parses");
+    let img = t.rasterize_viewport(&fonts, 100.0, 100.0, 2.0);
+    let px = |x: usize, y: usize| {
+        let i = (y * 200 + x) * 4;
+        (img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3])
+    };
+    assert_eq!(px(50, 50), (0, 255, 0, 255));
+    assert_eq!(px(150, 150), (0, 0, 255, 255));
+}
+
+#[test]
+fn css_transform_origin_on_svg_elements() {
+    // `transform-origin` as a presentation attribute; an invalid one is
+    // ignored (SVG elements default to 0 0).
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <rect x="50" width="50" height="50" fill="#00ff00" transform="rotate(90)" transform-origin="50px 0"/>
+      <rect width="10" height="10" fill="#0000ff" transform="translate(90 90)" transform-origin="top 100%"/>
+    </svg>"##;
+    let t = SvgTree::parse(svg).expect("parses");
+    let fonts = FontContext::new();
+    let img = t.rasterize(&fonts, 100, 100);
+    let px = |x: usize, y: usize| {
+        let i = (y * 100 + x) * 4;
+        (img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3])
+    };
+    // Rotated a quarter turn about (50, 0): (50..100, 0..50) → (0..50, 0..50).
+    assert_eq!(px(25, 25), (0, 255, 0, 255));
+    assert_eq!(px(75, 25).3, 0);
+    assert_eq!(px(95, 95), (0, 0, 255, 255));
+}
