@@ -555,7 +555,13 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             let r = root.rect;
             // Shaped corners / `border-shape` bound the backdrop too.
             let shaped = self.push_border_shape(root, box_radii(root), true);
-            self.list.push(DisplayItem::BackdropFilter { rect: r, radii: root.style.resolved_radii(r.w, r.h), filters: root.style.backdrop_filters.clone() });
+            let mut radii = root.style.resolved_radii(r.w, r.h);
+            for (i, c) in root.style.corner_shape.iter().enumerate() {
+                if *c != rabbithole_style::CornerShape::Round {
+                    radii[i] = (0.0, 0.0);
+                }
+            }
+            self.list.push(DisplayItem::BackdropFilter { rect: r, radii, filters: root.style.backdrop_filters.clone() });
             if shaped {
                 self.list.push(DisplayItem::PopClip);
             }
@@ -964,6 +970,16 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if crate::widgets::native_rounding(b, self.ctx) {
             radii = [(2.0, 2.0); 4];
         }
+        // Corners with another `corner-shape` than `round` are drawn by the
+        // shape clip below: the background and border keep them square.
+        let shaped_radii = radii;
+        if background::has_radii(&radii) {
+            for (i, c) in style.corner_shape.iter().enumerate() {
+                if *c != rabbithole_style::CornerShape::Round {
+                    radii[i] = (0.0, 0.0);
+                }
+            }
+        }
         let geom = BoxGeometry {
             border: rect,
             padding: b.padding_rect(),
@@ -976,7 +992,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         background::paint_box_shadows(self.list, &geom, &style.box_shadow, false);
         // `border-shape` / `corner-shape`: the background and border are
         // clipped to the shape (the border is not drawn along it).
-        let shaped = self.push_border_shape(b, geom.radii, true);
+        let shaped = self.push_border_shape(b, shaped_radii, true);
         if let Some(crate::widgets::Widget::Replace(items)) = widget {
             // Native checkbox / radio / slider / progress / meter.
             for it in items {
