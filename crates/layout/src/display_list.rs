@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use crate::background::{self, box_radii, BoxGeometry};
-use crate::tree::{BoxKind, DecorationInfo, Flow, FragmentKind, LayoutBox, LayoutTree};
+use crate::tree::{BoxKind, DecorationInfo, Flow, Formatting, FragmentKind, LayoutBox, LayoutTree};
 use crate::LayoutContext;
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{Color, FillRule, FontId, Image, Matrix, Paint, PathSeg, Point, Radii, Rect};
@@ -150,6 +150,8 @@ pub struct StickyPatch {
     /// Index of its hit-test transform scope.
     pub scope: u32,
     pub margin_rect: Rect,
+    /// Its border box.
+    pub border_rect: Rect,
     pub cb: Rect,
     pub inset: rabbithole_style::Edges<rabbithole_style::Length>,
     /// Painted bounds of the sticky subtree (document coordinates, before
@@ -163,7 +165,7 @@ pub struct StickyPatch {
 impl StickyPatch {
     /// Displacement for a scrollport (document coordinates).
     pub fn offset(&self, port: Rect) -> (f32, f32) {
-        crate::tree::sticky_offset_for(&self.inset, self.margin_rect, port, self.cb)
+        crate::tree::sticky_offset_for(&self.inset, self.border_rect, self.margin_rect, port, self.cb)
     }
 }
 
@@ -489,6 +491,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                     item: start,
                     scope: (self.hits.scopes.len() - 1) as u32,
                     margin_rect: root.margin_rect(),
+                    border_rect: root.rect,
                     cb,
                     inset: root.style.inset,
                     bounds: root.subtree_bounds(),
@@ -767,7 +770,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// that are themselves deferred.
     fn collect_deferred(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
-        let flow_cb = if b.kind == BoxKind::AnonymousBlock { self.flow_cb } else { b.content_rect };
+        // Anonymous blocks and rows are transparent: a sticky cell moves
+        // within its row group (or table).
+        let flow_cb = if b.kind == BoxKind::AnonymousBlock || (b.formatting == Formatting::TableRow && !b.is_positioned()) { self.flow_cb } else { b.content_rect };
         let saved_flow_cb = std::mem::replace(&mut self.flow_cb, flow_cb);
         for c in &b.children {
             if self.hoisted.contains(&(c as *const LayoutBox as usize)) {

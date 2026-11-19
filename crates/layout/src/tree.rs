@@ -509,28 +509,30 @@ impl LayoutBox {
         if self.style.position != Position::Sticky {
             return (0.0, 0.0);
         }
-        sticky_offset_for(&self.style.inset, self.margin_rect(), scrollport, cb)
+        sticky_offset_for(&self.style.inset, self.rect, self.margin_rect(), scrollport, cb)
     }
 }
 
-/// `position: sticky` displacement of a box with margin box `mr` and
-/// insets `inset`, for a scrollport and containing block content rect.
-pub(crate) fn sticky_offset_for(inset: &Edges<rabbithole_style::Length>, mr: Rect, scrollport: Rect, cb: Rect) -> (f32, f32) {
+/// `position: sticky` displacement of a box with border box `br`, margin
+/// box `mr` and insets `inset`, for a scrollport and containing block
+/// content rect: the border box is kept `inset` inside the scrollport,
+/// and the margin box within the containing block (CSS Position 3 §3.4).
+pub(crate) fn sticky_offset_for(inset: &Edges<rabbithole_style::Length>, br: Rect, mr: Rect, scrollport: Rect, cb: Rect) -> (f32, f32) {
     let mut dy = 0.0;
     if let Some(top) = inset.top.resolve(scrollport.h) {
         let want = scrollport.y + top;
-        if mr.y < want {
-            dy = want - mr.y;
+        if br.y < want {
+            dy = want - br.y;
             // Stay within the containing block.
-            let max = (cb.bottom() - mr.h - mr.y).max(0.0);
+            let max = (cb.bottom() - mr.bottom()).max(0.0);
             dy = dy.min(max);
         }
     }
     if dy == 0.0 {
         if let Some(bottom) = inset.bottom.resolve(scrollport.h) {
-            let want = scrollport.bottom() - bottom - mr.h;
-            if mr.y > want {
-                dy = want - mr.y;
+            let want = scrollport.bottom() - bottom;
+            if br.bottom() > want {
+                dy = want - br.bottom();
                 let min = (cb.y - mr.y).min(0.0);
                 dy = dy.max(min);
             }
@@ -539,17 +541,17 @@ pub(crate) fn sticky_offset_for(inset: &Edges<rabbithole_style::Length>, mr: Rec
     let mut dx = 0.0;
     if let Some(left) = inset.left.resolve(scrollport.w) {
         let want = scrollport.x + left;
-        if mr.x < want {
-            dx = want - mr.x;
-            let max = (cb.right() - mr.w - mr.x).max(0.0);
+        if br.x < want {
+            dx = want - br.x;
+            let max = (cb.right() - mr.right()).max(0.0);
             dx = dx.min(max);
         }
     }
     if dx == 0.0 {
         if let Some(right) = inset.right.resolve(scrollport.w) {
-            let want = scrollport.right() - right - mr.w;
-            if mr.x > want {
-                dx = want - mr.x;
+            let want = scrollport.right() - right;
+            if br.right() > want {
+                dx = want - br.right();
                 let min = (cb.x - mr.x).min(0.0);
                 dx = dx.max(min);
             }
