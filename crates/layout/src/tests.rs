@@ -1298,3 +1298,33 @@ fn absolute_static_blocks_use_the_right_edge_of_a_rtl_parent() {
     let rect = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
     assert_eq!(rect, Rect::new(65.0, 0.0, 30.0, 20.0));
 }
+
+#[test]
+fn line_clamp_auto_clamps_by_max_height_and_hides_what_follows() {
+    let html = "<div id=c><p>Line 1\nLine 2\nLine 3\nLine 4</p><section>Line 5</section></div>";
+    let css = "body{margin:0} #c{line-clamp:auto; max-height:64px; font:16px/32px serif} p{margin:0; white-space:pre} section{background:red}";
+    let fx = Fixture::new(html, css);
+    let t = fx.layout();
+    let p = &fx.find(&t, "p")[0];
+    assert_eq!(p.lines.len(), 2, "two 32px lines fit in 64px");
+    assert!(text_of(p).ends_with('\u{2026}'), "the clamp line ends with the block ellipsis: {:?}", text_of(p));
+    let c = &fx.find(&t, "div")[0];
+    assert_eq!(c.rect.h, 64.0);
+    assert!(fx.find(&t, "section")[0].clamped, "content after the clamp point is hidden");
+    // The ellipsis follows the last soft wrap opportunity that fits.
+    let fx = Fixture::new("<div>aaaa bbbb cccc dddd eeee ffff gggg</div>", "div{line-clamp:1; width:20ch; font:16px monospace}");
+    let t = fx.layout();
+    let d = &fx.find(&t, "div")[0];
+    assert_eq!(d.lines.len(), 1);
+    let line = text_of(d);
+    assert!(line.ends_with(" bbbb cccc\u{2026}") || line.ends_with("cccc\u{2026}"), "{line:?}");
+}
+
+#[test]
+fn border_image_draws_nine_slices_instead_of_the_border() {
+    let fx = Fixture::new("<div></div>", "div{width:20px;height:20px;border:10px solid red;border-image:linear-gradient(green,green) 10}");
+    let dl = fx.display_list();
+    assert!(!dl.items.iter().any(|i| matches!(i, DisplayItem::Border { .. })), "no border styles");
+    let gradients = dl.items.iter().filter(|i| matches!(i, DisplayItem::RectRadii { paint: Paint::Linear { .. }, .. })).count();
+    assert_eq!(gradients, 8, "four corners and four edges, no middle without fill");
+}

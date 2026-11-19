@@ -575,3 +575,97 @@ fn perf_smoke() {
     eprintln!("perf: gradient rounded rect {grad:?}, box shadow {shadow:?}, ellipse {ell:?}");
     assert!(grad.as_millis() < 500 && shadow.as_millis() < 500 && ell.as_millis() < 500);
 }
+
+#[test]
+fn gradient_stops_outside_the_line_and_repeating_periods() {
+    let red = Color::rgb(255, 0, 0);
+    let blue = Color::rgb(0, 0, 255);
+    // Stops at -100% and 200%: the line shows the middle third only.
+    let mut c = Canvas::new(90, 4);
+    let paint = Paint::Linear {
+        start: Point::new(0.0, 0.0),
+        end: Point::new(90.0, 0.0),
+        stops: vec![ColorStop { offset: -1.0, color: red }, ColorStop { offset: 2.0, color: blue }],
+        repeat: false,
+    };
+    c.fill_rounded_rect_radii(Rect::new(0.0, 0.0, 90.0, 4.0), [(0.0, 0.0); 4], &paint);
+    let l = px(&c, 0, 2);
+    assert!(l.r > 150 && l.r < 190 && l.b > 70 && l.b < 100, "{l:?}");
+    // A repeating gradient repeats its first..last stop span (here 10px).
+    let mut c = Canvas::new(40, 4);
+    let paint = Paint::Linear {
+        start: Point::new(0.0, 0.0),
+        end: Point::new(40.0, 0.0),
+        stops: vec![ColorStop { offset: 0.25, color: red }, ColorStop { offset: 0.375, color: red }, ColorStop { offset: 0.375, color: blue }, ColorStop { offset: 0.5, color: blue }],
+        repeat: true,
+    };
+    c.fill_rounded_rect_radii(Rect::new(0.0, 0.0, 40.0, 4.0), [(0.0, 0.0); 4], &paint);
+    assert_eq!(px(&c, 2, 2), red);
+    assert_eq!(px(&c, 7, 2), blue);
+    assert_eq!(px(&c, 32, 2), red);
+    assert_eq!(px(&c, 37, 2), blue);
+}
+
+#[test]
+fn conic_and_tiled_paints() {
+    let red = Color::rgb(255, 0, 0);
+    let green = Color::rgb(0, 128, 0);
+    // A hard conic split: the right half red, the left half green.
+    let conic = Paint::Conic {
+        center: Point::new(20.0, 20.0),
+        angle: 0.0,
+        stops: vec![ColorStop { offset: 0.0, color: red }, ColorStop { offset: 0.5, color: red }, ColorStop { offset: 0.5, color: green }, ColorStop { offset: 1.0, color: green }],
+        repeat: false,
+    };
+    let mut c = Canvas::new(40, 40);
+    c.fill_rounded_rect_radii(Rect::new(0.0, 0.0, 40.0, 40.0), [(0.0, 0.0); 4], &conic);
+    assert_eq!(px(&c, 35, 20), red);
+    assert_eq!(px(&c, 5, 20), green);
+    // The same paint tiled every 20px with 10px tiles leaves gaps.
+    let tile = Paint::Linear {
+        start: Point::new(0.0, 0.0),
+        end: Point::new(10.0, 0.0),
+        stops: vec![ColorStop { offset: 0.0, color: red }, ColorStop { offset: 1.0, color: red }],
+        repeat: false,
+    };
+    let tiled = Paint::Tiled { paint: Box::new(tile), origin: Point::new(0.0, 0.0), size: (10.0, 10.0), step: (20.0, 20.0), repeat_x: true, repeat_y: true };
+    let mut c = Canvas::new(40, 40);
+    c.clear(Color::WHITE);
+    c.fill_rounded_rect_radii(Rect::new(0.0, 0.0, 40.0, 40.0), [(0.0, 0.0); 4], &tiled);
+    assert_eq!(px(&c, 5, 5), red);
+    assert_eq!(px(&c, 25, 25), red);
+    assert_eq!(px(&c, 15, 5), Color::WHITE);
+    assert_eq!(px(&c, 5, 15), Color::WHITE);
+}
+
+#[test]
+fn exif_orientation_turns_pixels() {
+    // 2×1: red, blue. Orientation 6 (rotate 90° clockwise) gives 1×2 with
+    // red on top; 3 (180°) swaps them.
+    let img = crate::Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]);
+    let r = img.clone().oriented(6);
+    assert_eq!((r.width, r.height, r.natural_width, r.natural_height), (1, 2, 1, 2));
+    assert_eq!(&r.rgba[0..4], &[255, 0, 0, 255]);
+    assert_eq!(&r.rgba[4..8], &[0, 0, 255, 255]);
+    assert_eq!(r.unoriented.as_ref().map(|u| (u.width, u.height)), Some((2, 1)));
+    let r = img.oriented(3);
+    assert_eq!(&r.rgba[0..4], &[0, 0, 255, 255]);
+    // The orientation tag is read from a PNG eXIf chunk (big-endian TIFF).
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let tiff: Vec<u8> = [b"MM\0*".as_slice(), &[0, 0, 0, 8], &[0, 1], &[0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0], &[0, 0, 0, 0]].concat();
+    png.extend_from_slice(&(tiff.len() as u32).to_be_bytes());
+    png.extend_from_slice(b"eXIf");
+    png.extend_from_slice(&tiff);
+    png.extend_from_slice(&[0, 0, 0, 0]);
+    assert_eq!(crate::image::exif_orientation(&png, crate::image::Format::Png), Some(6));
+}
+
+#[test]
+fn image_regions_never_sample_outside_the_source_rect() {
+    // Left half red, right half blue; drawing only the left half scaled up
+    // must not bleed blue at its right edge.
+    let img = crate::Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]);
+    let mut c = Canvas::new(20, 2);
+    c.draw_image_region(&img, Rect::new(0.0, 0.0, 1.0, 1.0), Rect::new(0.0, 0.0, 20.0, 2.0), 1.0);
+    assert_eq!(px(&c, 19, 1), Color::rgb(255, 0, 0));
+}

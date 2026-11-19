@@ -773,13 +773,21 @@ impl Canvas {
         let inv = invert(&m);
         let sx = src.w / dest.w;
         let sy = src.h / dest.h;
+        // A flip or quarter turn at unit scale maps device pixel centres
+        // onto source pixel centres: one sample per pixel copies exactly.
+        let unit = |v: f32| (v.abs() - 1.0).abs() < 1e-4;
+        let quarter_turn = ((m[1].abs() < 1e-6 && m[2].abs() < 1e-6 && unit(m[0]) && unit(m[3])) || (m[0].abs() < 1e-6 && m[3].abs() < 1e-6 && unit(m[1]) && unit(m[2])))
+            && (sx - 1.0).abs() < 1e-4 && (sy - 1.0).abs() < 1e-4;
+        const CENTRE: [(f32, f32); 1] = [(0.5, 0.5)];
+        const GRID: [(f32, f32); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
+        let samples: &[(f32, f32)] = if quarter_turn { &CENTRE } else { &GRID };
         for py in b.y0..b.y1 {
             let drow = py as usize * w;
             for px in b.x0..b.x1 {
                 // 2×2 supersampling for edge anti-aliasing.
                 let mut acc = [0.0f32; 4];
                 let mut hits = 0;
-                for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                for &(ox, oy) in samples {
                     let p = transform_point(&inv, Point::new(px as f32 + ox, py as f32 + oy));
                     if !dest.contains(p.x, p.y) {
                         continue;
@@ -803,7 +811,7 @@ impl Canvas {
                 let r = acc[0] / acc[3];
                 let g = acc[1] / acc[3];
                 let bl = acc[2] / acc[3];
-                let a = acc[3] / 4.0;
+                let a = acc[3] / samples.len() as f32;
                 let mut alpha = (a * op + 0.5) as u32;
                 if let Some(mk) = &mask {
                     alpha = (alpha * mk.get(px, py) as u32 + 127) / 255;

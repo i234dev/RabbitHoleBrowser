@@ -890,6 +890,16 @@ impl FontFeatureProps {
     }
 }
 
+/// The font metric `font-size-adjust` keeps constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontSizeAdjust {
+    ExHeight,
+    CapHeight,
+    ChWidth,
+    IcWidth,
+    IcHeight,
+}
+
 /// A `border-image-width` / `border-image-outset` value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BorderImageWidth {
@@ -1592,6 +1602,14 @@ pub struct ComputedStyle {
     /// `font_family` fallback.
     pub font_family_list: Vec<String>,
     pub font_variant_small_caps: bool,
+    /// `text-justify: inter-character` (or `distribute`): justification
+    /// spaces every character, so ligatures are not formed.
+    pub text_justify_inter_character: bool,
+    /// `font-size-adjust`: (metric, value); the value None is `from-font`.
+    pub font_size_adjust: Option<(FontSizeAdjust, Option<f32>)>,
+    /// The computed `font-size` when `font-size-adjust` changed the used
+    /// size in `font_size` (inherited values and `em` use this one).
+    pub font_size_unadjusted: Option<f32>,
     /// OpenType features from `font-feature-settings`, `font-kerning` and
     /// the `font-variant-*` longhands (None: all `normal`).
     pub font_features: Option<std::rc::Rc<FontFeatureProps>>,
@@ -1804,6 +1822,9 @@ impl ComputedStyle {
             webkit_box: false,
             font_family_list: Vec::new(),
             font_variant_small_caps: false,
+            text_justify_inter_character: false,
+            font_size_adjust: None,
+            font_size_unadjusted: None,
             font_features: None,
             font_variation_settings: Vec::new(),
             object_fit: ObjectFit::Fill,
@@ -1841,7 +1862,7 @@ impl ComputedStyle {
         ComputedStyle {
             color: parent.color,
             font_family: parent.font_family,
-            font_size: parent.font_size,
+            font_size: parent.computed_font_size(),
             font_weight: parent.font_weight,
             font_stretch: parent.font_stretch,
             font_style: parent.font_style,
@@ -1882,6 +1903,8 @@ impl ComputedStyle {
             tab_size: parent.tab_size,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
+            text_justify_inter_character: parent.text_justify_inter_character,
+            font_size_adjust: parent.font_size_adjust,
             font_features: parent.font_features.clone(),
             font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
@@ -1944,6 +1967,8 @@ impl ComputedStyle {
             && self.tab_size == o.tab_size
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
+            && self.text_justify_inter_character == o.text_justify_inter_character
+            && self.font_size_adjust == o.font_size_adjust
             && self.font_features == o.font_features
             && self.font_variation_settings == o.font_variation_settings
             && self.image_rendering_pixelated == o.image_rendering_pixelated
@@ -2001,6 +2026,11 @@ impl ComputedStyle {
 
     pub fn is_bold(&self) -> bool {
         self.font_weight >= 600
+    }
+
+    /// The computed `font-size` (before `font-size-adjust`).
+    pub fn computed_font_size(&self) -> f32 {
+        self.font_size_unadjusted.unwrap_or(self.font_size)
     }
 
     pub fn is_italic(&self) -> bool {

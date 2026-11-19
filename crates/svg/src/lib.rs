@@ -149,12 +149,19 @@ impl SvgTree {
             return;
         }
         let b = &self.built;
-        let (vw, vh) = match b.viewbox {
+        // As an image, an SVG with a width and height but no viewBox scales
+        // as if it had `viewBox="0 0 width height"` (SVG integration).
+        let synthesized = match (viewport, b.viewbox, b.width, b.height) {
+            (true, None, Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some(units::ViewBox { x: 0.0, y: 0.0, w, h }),
+            _ => None,
+        };
+        let viewbox = b.viewbox.or(synthesized);
+        let (vw, vh) = match viewbox {
             Some(v) => (v.w, v.h),
             None if viewport => (dest.w, dest.h),
             None => (b.width.unwrap_or(dest.w), b.height.unwrap_or(dest.h)),
         };
-        let m = match b.viewbox {
+        let m = match viewbox {
             Some(vb) => units::viewbox_transform(vb, dest, b.par),
             None if viewport => [1.0, 0.0, 0.0, 1.0, dest.x, dest.y],
             None => {

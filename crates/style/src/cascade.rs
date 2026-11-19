@@ -753,7 +753,7 @@ fn apply_declarations(
     // Pass 1: font-size (em resolves against the parent's font-size).
     let (pch, pex, pic) = crate::values::font_units(parent);
     let parent_ctx = LengthContext {
-        font_size: parent.font_size,
+        font_size: parent.computed_font_size(),
         root_font_size,
         viewport_w: env.width,
         viewport_h: env.height,
@@ -868,6 +868,24 @@ fn apply_declarations(
     }
     // Named font-variant-alternates follow the element's font families.
     crate::props::text::resolve_alternates(&mut style);
+    // `font-size-adjust` (CSS Fonts 5 §2.4): the used size keeps the chosen
+    // metric at value × computed size (em lengths above used the computed
+    // size).
+    style.font_size_unadjusted = None;
+    if let Some((metric, Some(value))) = style.font_size_adjust {
+        let (ch, ex, ic) = crate::values::font_units(&style);
+        let aspect = match metric {
+            FontSizeAdjust::ExHeight => Some(ex),
+            FontSizeAdjust::ChWidth => Some(ch),
+            FontSizeAdjust::IcWidth | FontSizeAdjust::IcHeight => Some(ic),
+            FontSizeAdjust::CapHeight => crate::values::font_cap_height(&style),
+        };
+        if let Some(a) = aspect.filter(|a| *a > 0.0) {
+            let computed = style.font_size;
+            style.font_size_unadjusted = Some(computed);
+            style.font_size = (computed * value / a).max(0.0);
+        }
+    }
     // A unitless line height scales with this element's font size (also
     // when inherited).
     if let Some(n) = style.line_height_number {
@@ -1849,6 +1867,8 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.line_clamp_auto = from.line_clamp_auto;
             to.block_ellipsis = from.block_ellipsis.clone();
         }
+        "font-size-adjust" => to.font_size_adjust = from.font_size_adjust,
+        "text-justify" => to.text_justify_inter_character = from.text_justify_inter_character,
         "font-variant" => {
             to.font_variant_small_caps = from.font_variant_small_caps;
             to.font_features = from.font_features.clone();
@@ -1914,7 +1934,7 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
     if let Some(w) = wide_keyword(value) {
         match w {
             Wide::Initial => style.font_size = 16.0,
-            _ => style.font_size = parent.font_size,
+            _ => style.font_size = parent.computed_font_size(),
         }
         return;
     }
@@ -1932,8 +1952,8 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
             "x-large" => 24.0,
             "xx-large" => 32.0,
             "xxx-large" => 48.0,
-            "smaller" => parent.font_size / 1.2,
-            "larger" => parent.font_size * 1.2,
+            "smaller" => parent.computed_font_size() / 1.2,
+            "larger" => parent.computed_font_size() * 1.2,
             _ => return,
         };
         style.font_size = px;
@@ -1942,7 +1962,7 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
     if let Some(lv) = values::parse_length(comps[0]) {
         match lv.resolve(ctx) {
             Length::Px(v) => style.font_size = v.max(0.0),
-            Length::Percent(p) => style.font_size = (parent.font_size * p / 100.0).max(0.0),
+            Length::Percent(p) => style.font_size = (parent.computed_font_size() * p / 100.0).max(0.0),
             _ => {}
         }
     }

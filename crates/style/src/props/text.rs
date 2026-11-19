@@ -407,6 +407,54 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 apply_font_variant(comps, style);
             }
         }
+        // none | [ex-height | cap-height | ch-width | ic-width | ic-height]?
+        // [from-font | <number [0,∞]>]
+        "text-justify" => {
+            if let Some(k) = values::ident(c0).filter(|_| comps.len() == 1) {
+                match k.as_str() {
+                    "inter-character" | "distribute" => style.text_justify_inter_character = true,
+                    "auto" | "none" | "inter-word" => style.text_justify_inter_character = false,
+                    _ => {}
+                }
+            }
+        }
+        "font-size-adjust" => {
+            if comps.len() == 1 && values::is_ident(c0, "none") {
+                style.font_size_adjust = None;
+                return true;
+            }
+            let mut metric = None;
+            let mut value: Option<Option<f32>> = None;
+            for c in comps {
+                if let Some(k) = values::ident(c) {
+                    let m = match k.as_str() {
+                        "ex-height" => FontSizeAdjust::ExHeight,
+                        "cap-height" => FontSizeAdjust::CapHeight,
+                        "ch-width" => FontSizeAdjust::ChWidth,
+                        "ic-width" => FontSizeAdjust::IcWidth,
+                        "ic-height" => FontSizeAdjust::IcHeight,
+                        "from-font" if value.is_none() => {
+                            value = Some(None);
+                            continue;
+                        }
+                        _ => return true,
+                    };
+                    if metric.is_some() || value.is_some() {
+                        return true;
+                    }
+                    metric = Some(m);
+                } else if let Some(n) = values::number(c).filter(|n| *n >= 0.0) {
+                    if value.is_some() {
+                        return true;
+                    }
+                    value = Some(Some(n));
+                } else {
+                    return true;
+                }
+            }
+            let Some(value) = value else { return true };
+            style.font_size_adjust = Some((metric.unwrap_or(FontSizeAdjust::ExHeight), value));
+        }
         "font-feature-settings" | "font-kerning" | "font-variant-ligatures" | "font-variant-position" | "font-variant-numeric"
         | "font-variant-east-asian" | "font-variant-alternates" | "font-language-override" => {
             let mut f = style.font_features.as_deref().cloned().unwrap_or_default();
@@ -597,7 +645,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             }
         }
         "hyphens" | "text-rendering" | "font-stretch"
-        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
+        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-orientation"
         | "text-combine-upright" | "word-spacing-x"
         | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"
         | "-webkit-text-fill-color" | "-webkit-text-stroke" | "-webkit-text-stroke-width" | "-webkit-text-stroke-color"

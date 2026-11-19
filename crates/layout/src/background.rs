@@ -799,6 +799,35 @@ mod tests {
     }
 
     #[test]
+    fn color_hints_curve_the_transition() {
+        let stops = vec![
+            GradientStop { color: Color::BLACK, position: None, hint: false },
+            GradientStop { color: Color::TRANSPARENT, position: Some(Length::Percent(20.0)), hint: true },
+            GradientStop { color: Color::WHITE, position: None, hint: false },
+        ];
+        let r = resolve_stops(&stops, 100.0);
+        // Expanded into intermediate stops; halfway in color at the hint.
+        assert!(r.len() > 3);
+        let at = |o: f32| r.iter().min_by(|a, b| (a.offset - o).abs().total_cmp(&(b.offset - o).abs())).unwrap().color;
+        let mid = at(0.1875).r as i32;
+        assert!((100..=140).contains(&mid), "{mid}");
+        // A hint at the midpoint is the plain linear transition.
+        let stops = vec![stops[0].clone(), GradientStop { position: Some(Length::Percent(50.0)), ..stops[1].clone() }, stops[2].clone()];
+        assert_eq!(resolve_stops(&stops, 100.0).len(), 2);
+    }
+
+    #[test]
+    fn default_sizing_and_ratio_fitting() {
+        assert_eq!(concrete_size((Some(10.0), None), (None, None, None), (50.0, 40.0)), (10.0, 40.0));
+        assert_eq!(concrete_size((None, None), (None, Some(8.0), Some(2.0)), (50.0, 40.0)), (16.0, 8.0));
+        assert_eq!(fit_ratio(2.0, (100.0, 100.0), false), (100.0, 50.0));
+        assert_eq!(fit_ratio(2.0, (100.0, 100.0), true), (200.0, 100.0));
+        // A zero-sized area: contain shows nothing, cover follows the other axis.
+        assert_eq!(fit_ratio(2.0, (100.0, 0.0), false), (0.0, 0.0));
+        assert_eq!(fit_ratio(2.0, (100.0, 0.0), true), (100.0, 50.0));
+    }
+
+    #[test]
     fn angles() {
         let w = 2.0;
         let h = 1.0;

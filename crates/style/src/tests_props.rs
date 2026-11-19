@@ -813,3 +813,82 @@ fn border_shape_and_corner_shape() {
     assert_eq!(one("corner-shape: superellipse(0)").corner_shape, [CornerShape::Bevel; 4]);
     assert_eq!(one("corner-shape: round; corner-top-left-shape: square").corner_shape[0], CornerShape::Square);
 }
+
+#[test]
+fn paint_and_image_properties() {
+    // Gradients: conic with a center, color hints, interpolation methods.
+    let s = one("background-image: conic-gradient(from 90deg at 10px 20%, red, 30%, blue 0.5turn)");
+    match &s.background_layers[0].image {
+        BackgroundImage::ConicGradient { angle, position, stops, .. } => {
+            assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+            assert_eq!(*position, (Length::Px(10.0), Length::Percent(20.0)));
+            assert_eq!(stops.len(), 3);
+            assert!(stops[1].hint && stops[1].position == Some(Length::Percent(30.0)));
+            assert_eq!(stops[2].position, Some(Length::Percent(50.0)));
+        }
+        other => panic!("{other:?}"),
+    }
+    let s = one("background-image: linear-gradient(to right in hsl longer hue, red, blue)");
+    match &s.background_layers[0].image {
+        BackgroundImage::LinearGradient { direction, interp, .. } => {
+            assert_eq!(*direction, GradientDirection::Corner(1, 0));
+            assert_eq!(*interp, crate::ColorInterp { space: crate::InterpSpace::Hsl, hue: crate::HueMethod::Longer });
+        }
+        other => panic!("{other:?}"),
+    }
+    // A hint must sit between two color stops.
+    let s = one("background-image: linear-gradient(red, 10%)");
+    assert!(s.background_layers.is_empty() || matches!(s.background_layers[0].image, BackgroundImage::None));
+    // Edge offsets in positions.
+    let s = one("background-position: right 10px bottom 5%");
+    assert_eq!(s.background_layers[0].position, (Length::Calc(-10.0, 100.0), Length::Percent(95.0)));
+    // Border images.
+    let s = one("border-image: linear-gradient(red, blue) 10% 20 fill / 2 auto 3px / 1px round space");
+    let bi = s.border_image.as_deref().expect("border image");
+    assert!(matches!(bi.source, BackgroundImage::LinearGradient { .. }));
+    assert_eq!(bi.slice, [Length::Percent(10.0), Length::Px(20.0), Length::Percent(10.0), Length::Px(20.0)]);
+    assert!(bi.fill);
+    assert_eq!(bi.width, [BorderImageWidth::Number(2.0), BorderImageWidth::Auto, BorderImageWidth::Length(Length::Px(3.0)), BorderImageWidth::Auto]);
+    assert_eq!(bi.outset, [BorderImageWidth::Length(Length::Px(1.0)); 4]);
+    assert_eq!(bi.repeat, (BorderImageRepeat::Round, BorderImageRepeat::Space));
+    assert!(one("border-image: url(a.png) -1").border_image.is_none(), "negative slices are invalid");
+    // overflow-clip-margin and image-orientation.
+    let s = one("overflow-clip-margin: content-box 5px; image-orientation: none");
+    assert_eq!(s.overflow_clip_margin, (BoxArea::ContentBox, 5.0));
+    assert!(s.image_orientation_none);
+    assert_eq!(one("overflow-clip-margin: -10px").overflow_clip_margin, (BoxArea::PaddingBox, 0.0));
+}
+
+#[test]
+fn line_clamp_shorthand() {
+    let s = one("line-clamp: 3 \" (more)\"");
+    assert_eq!((s.line_clamp, s.line_clamp_auto, s.block_ellipsis.as_deref()), (Some(3), false, Some(" (more)")));
+    let s = one("line-clamp: auto; max-height: 4lh; font: 16px/32px serif");
+    assert_eq!((s.line_clamp, s.line_clamp_auto), (Some(u32::MAX), true));
+    assert_eq!(s.max_height, Length::Px(128.0));
+    let s = one("line-clamp: 2 no-ellipsis");
+    assert_eq!((s.line_clamp, s.block_ellipsis.as_deref()), (Some(2), None));
+    let s = one("line-clamp: 4 auto");
+    assert_eq!((s.line_clamp, s.line_clamp_auto, s.block_ellipsis.as_deref()), (Some(4), false, Some("\u{2026}")));
+    assert_eq!(one("line-clamp: 0").line_clamp, None);
+}
+
+#[test]
+fn font_feature_properties() {
+    let s = one("font-feature-settings: \"liga\" off, \"ss01\"; font-variant-numeric: tabular-nums slashed-zero; font-kerning: none");
+    let f = s.font_features.as_deref().expect("features").resolved();
+    assert_eq!(f, vec![(*b"kern", 0), (*b"tnum", 1), (*b"zero", 1), (*b"liga", 0), (*b"ss01", 1)]);
+    // Contradictory keywords are invalid.
+    assert!(one("font-variant-numeric: lining-nums oldstyle-nums").font_features.is_none());
+    // Named alternates resolve through @font-feature-values of the family.
+    let (doc, t) = styled(
+        "<div>x</div>",
+        "@font-feature-values Fancy { @styleset { curly: 2 4; } @swash { flowing: 1; } } div { font-family: Fancy, serif; font-variant-alternates: styleset(curly) swash(flowing) }",
+    );
+    let f = style_of(&doc, &t, "div").font_features.as_deref().expect("features").resolved();
+    assert_eq!(f, vec![(*b"ss02", 1), (*b"ss04", 1), (*b"swsh", 1), (*b"cswh", 1)]);
+    let s = one("font-size: 20px; font-size-adjust: ex-height 0.6; width: 1em");
+    assert_eq!(s.font_size_adjust, Some((FontSizeAdjust::ExHeight, Some(0.6))));
+    // `em` keeps the computed size.
+    assert_eq!(s.width, Length::Px(20.0));
+}

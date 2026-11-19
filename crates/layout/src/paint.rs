@@ -76,6 +76,14 @@ fn snap(r: Rect, canvas: &Canvas) -> Rect {
     Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
 
+/// Pixels per CSS px for rendering a `w`×`h` vector image under `m`: the
+/// device scale, doubled for images up to 1024 device px (the draw then
+/// filters the rendering down: smoother, direction-independent edges).
+fn vector_scale(m: &Matrix, w: f32, h: f32) -> f32 {
+    let s = (m[0] * m[0] + m[1] * m[1]).sqrt().max((m[2] * m[2] + m[3] * m[3]).sqrt());
+    if w.max(h) * s < 1024.0 { s * 2.0 } else { s }
+}
+
 fn is_translation(m: &Matrix) -> bool {
     (m[0] - 1.0).abs() < 1e-6 && m[1].abs() < 1e-6 && m[2].abs() < 1e-6 && (m[3] - 1.0).abs() < 1e-6
 }
@@ -644,9 +652,8 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             if image.vector.is_some() && src.w > 0.0 && src.h > 0.0 {
                 // Render vector images at the device size they cover.
                 let m = canvas.transform();
-                let (sx, sy) = ((m[0] * m[0] + m[1] * m[1]).sqrt(), (m[2] * m[2] + m[3] * m[3]).sqrt());
                 let whole = (rect.w / src.w * image.width as f32, rect.h / src.h * image.height as f32);
-                let sized = image.for_size(whole.0, whole.1, sx.max(sy));
+                let sized = image.for_size(whole.0, whole.1, vector_scale(&m, whole.0, whole.1));
                 let (fx, fy) = (sized.width as f32 / image.width as f32, sized.height as f32 / image.height as f32);
                 let src2 = Rect::new(src.x * fx, src.y * fy, src.w * fx, src.h * fy);
                 if full && st.ext {
@@ -681,8 +688,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             canvas.image_smoothing = !*pixelated;
             let image = if image.vector.is_some() {
                 let m = canvas.transform();
-                let (sx, sy) = ((m[0] * m[0] + m[1] * m[1]).sqrt(), (m[2] * m[2] + m[3] * m[3]).sqrt());
-                image.for_size(tile.0, tile.1, sx.max(sy))
+                image.for_size(tile.0, tile.1, vector_scale(&m, tile.0, tile.1))
             } else {
                 image.clone()
             };

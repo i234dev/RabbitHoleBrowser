@@ -398,11 +398,22 @@ impl<'a> Layouter<'a> {
     /// (web fonts / system fonts) or the generic fallback.
     pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
         let font = self.font_for_family(style);
-        match &style.font_features {
-            // OpenType features (font-feature-settings, font-variant-*).
-            Some(f) if self.font_ext => self.ctx.fonts.with_features(font, &f.resolved()),
-            _ => font,
+        if !self.font_ext || style.font_features.is_none() && !style.text_justify_inter_character {
+            return font;
         }
+        // OpenType features (font-feature-settings, font-variant-*); text
+        // justified between characters forms no ligatures (CSS Text 3 §7.3).
+        let mut feats = Vec::new();
+        if style.text_justify_inter_character {
+            feats.extend([(*b"liga", 0), (*b"clig", 0), (*b"dlig", 0), (*b"hlig", 0), (*b"calt", 0)]);
+        }
+        if let Some(f) = &style.font_features {
+            for g in f.resolved() {
+                feats.retain(|h: &rabbithole_gfx::FontFeature| h.0 != g.0);
+                feats.push(g);
+            }
+        }
+        self.ctx.fonts.with_features(font, &feats)
     }
 
     fn font_for_family(&mut self, style: &ComputedStyle) -> FontId {
@@ -1523,8 +1534,14 @@ impl<'a> Layouter<'a> {
         // ratio: its auto width fills the containing block (300px when that
         // is unknown, e.g. for intrinsic sizing); the height follows the
         // ratio. (Its raster's pixel size is not its CSS size.)
+        // Likewise an `<object>` / `<embed>` showing an SVG document whose
+        // width is a percentage or omitted (100%): it fills the containing
+        // block like a nested document's viewport.
+        let fill_width = b.ratio_only
+            || b.image.as_ref().and_then(|i| i.vector.as_ref()).is_some_and(|v| v.width.is_none())
+                && b.node.and_then(|n| self.ctx.doc.tag(n)).is_some_and(|t| matches!(t, "object" | "embed"));
         let sw = match (sw, sh) {
-            (None, None) if b.ratio_only => Some(cbw.map(|c| (c - pb_h).max(0.0)).unwrap_or(300.0)),
+            (None, None) if fill_width => Some(cbw.map(|c| (c - pb_h).max(0.0)).unwrap_or(300.0)),
             _ => sw,
         };
         let (mut w, mut h) = match (sw, sh) {

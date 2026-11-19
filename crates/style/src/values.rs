@@ -115,6 +115,15 @@ pub fn font_units(style: &crate::ComputedStyle) -> (f32, f32, f32) {
     })
 }
 
+/// Cap height (em) of the element's first available font.
+pub fn font_cap_height(style: &crate::ComputedStyle) -> Option<f32> {
+    UNIT_FONTS.with(|f| {
+        let f = f.borrow();
+        let fonts = f.as_ref()?;
+        fonts.cap_height_em(&style.font_family_list, style.font_family, style.font_weight, style.is_italic())
+    })
+}
+
 /// A linear combination of length units, the result of evaluating a
 /// `calc()` expression (or a plain length).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

@@ -177,8 +177,12 @@ pub fn build_in(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) ->
     });
     let viewbox = attr_ci(doc, root, "viewbox").and_then(parse_viewbox);
     let par = parse_aspect_ratio(attr_ci(doc, root, "preserveaspectratio"));
-    let vw = viewbox.map(|v| v.w).or(viewport.map(|v| v.0)).or(width).unwrap_or(300.0);
-    let vh = viewbox.map(|v| v.h).or(viewport.map(|v| v.1)).or(height).unwrap_or(150.0);
+    // Percentages resolve against the viewBox, else the intrinsic size when
+    // both dimensions are given (an image synthesizes that viewBox), else
+    // the concrete size of the image.
+    let both = width.zip(height);
+    let vw = viewbox.map(|v| v.w).or(both.map(|b| b.0)).or(viewport.map(|v| v.0)).or(width).unwrap_or(300.0);
+    let vh = viewbox.map(|v| v.h).or(both.map(|b| b.1)).or(viewport.map(|v| v.1)).or(height).unwrap_or(150.0);
 
     let mut b = Builder { doc, style_of, rules, nodes: Vec::new(), ids: HashMap::new(), built: HashMap::new(), viewport: (vw, vh) };
     let root_idx = b.build_node(root, 0, true)?;

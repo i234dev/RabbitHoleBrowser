@@ -233,6 +233,20 @@ impl FontContext {
         (ch, ex, ic)
     }
 
+    /// Cap height of the primary face in em (OS/2 sCapHeight, else the
+    /// height of `H`).
+    pub fn cap_height_em(&self, families: &[String], generic: crate::Family, weight: u16, italic: bool) -> Option<f32> {
+        let font = if families.is_empty() { self.select(generic, weight, italic) } else { self.select_family(families, generic, weight, italic) };
+        let b = self.face_bytes(font.0)?;
+        let face = rustybuzz::ttf_parser::Face::parse(&b, 0).ok()?;
+        let upem = face.units_per_em() as f32;
+        let cap = face.capital_height().map(|v| v as f32).filter(|v| *v > 0.0).or_else(|| {
+            let g = face.glyph_index('H')?;
+            face.glyph_bounding_box(g).map(|r| r.y_max as f32)
+        })?;
+        (upem > 0.0).then(|| cap / upem)
+    }
+
     /// The face's SFNT bytes.
     pub(crate) fn face_bytes(&self, idx: usize) -> Option<Rc<Vec<u8>>> {
         self.shaping_data(idx).map(|(b, _, _)| b)
