@@ -613,7 +613,8 @@ impl<'a> Builder<'a> {
                     if b.marker_text.is_some() && b.children.is_empty() && b.items.is_empty() && style.list_style_position == rabbithole_style::ListStylePosition::Inside {
                         b.formatting = Formatting::Inline;
                     }
-                    if let Some(fl) = self.ctx.styles.pseudo(node, PseudoElement::FirstLetter).filter(|_| !matches!(tag, "input" | "select" | "textarea")) {
+                    let first_letter = self.ctx.styles.any_first_letter && !matches!(tag, "input" | "select" | "textarea");
+                    if let Some(fl) = first_letter.then(|| self.ctx.styles.pseudo(node, PseudoElement::FirstLetter)).flatten() {
                         crate::first_letter::apply(&mut b, fl);
                     }
                 }
