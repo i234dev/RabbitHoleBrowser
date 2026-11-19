@@ -130,6 +130,15 @@ pub enum DisplayItem {
     /// Items inside are in viewport coordinates (not scrolled).
     PushFixed,
     PopFixed,
+    /// A box with `mix-blend-mode`: `items` painted offscreen (with their
+    /// coverage) and blended onto what is below with `mode` (see
+    /// `rabbithole_gfx::blend_mode_index`) and `opacity`.
+    Blended {
+        bounds: Rect,
+        mode: u8,
+        opacity: f32,
+        items: Vec<DisplayItem>,
+    },
     /// An isolated group (a stacking context with blended descendants):
     /// `items` composited offscreen from a transparent backdrop, so that
     /// blend modes inside mix with the group only (CSS Compositing 1 §3.2).
@@ -615,6 +624,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         let parent3d = std::mem::take(&mut self.next3d);
         let mut saved_snap = None;
+        let mut singular = false;
         // A box under a 3D transform or in a 3D rendering context: its
         // items are grouped (from `group3d.0`) and mapped at paint time.
         let mut group3d: Option<(usize, usize, Group3d)> = None;
@@ -628,6 +638,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
             let p3d = (parent3d != 0).then(|| self.parents3d[parent3d as usize - 1]).filter(|p| p.node.is_some() && p.node == dom_parent);
             let own = root.transform_matrix_3d().unwrap_or(mat4::IDENTITY4);
+            // A non-invertible transform hides the box and its content
+            // (CSS Transforms 2 §transform-rendering).
+            singular = mat4::determinant(&own).abs() < 1e-12;
             let full = match p3d.and_then(|p| p.perspective) {
                 Some(p) => mat4::mul(&p, &own),
                 None => own,
@@ -668,6 +681,18 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         } else {
             root.transform_matrix()
         };
+        if singular {
+            self.list.items.truncate(start);
+            self.list.sticky.truncate(sticky_start);
+            self.scope = saved_scope;
+            self.bounds = saved_bounds;
+            self.flipped = saved_flip;
+            self.wm_bg = saved_wm_bg;
+            if let Some(o) = saved_snap {
+                self.snap_origin = o;
+            }
+            return;
+        }
         if let Some(m) = matrix {
             self.list.push(DisplayItem::PushTransform(m));
             let inverse = crate::tree::invert_matrix(m);
@@ -734,7 +759,10 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // A 3D group is painted offscreen: its blend mode applies when it
         // is composited (outside the group), opacity and masks inside.
         let blend_outside = group3d.is_some() && root.style.mix_blend_mode != 0;
-        let layer = (layer || mask.is_some()) && !(blend_outside && opacity >= 1.0 && mask.is_none());
+        // Other blended boxes (without masks) paint into an offscreen
+        // group composited with exact alpha (antialiased edges blend).
+        let blend_group = root.style.mix_blend_mode != 0 && !blend_outside && mask.is_none() && self.list.sticky.len() == sticky_start;
+        let layer = (layer || mask.is_some()) && !(blend_outside && opacity >= 1.0 && mask.is_none()) && !blend_group;
         if layer {
             self.list.push(DisplayItem::PushLayer(root.subtree_bounds()));
         }
@@ -750,7 +778,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             // 3D-transformed descendants may project far outside the boxes.
             if items.iter().any(|it| matches!(it, DisplayItem::Transform3d(_))) {
                 if let Some(x) = crate::paint3d::extent(items.iter()) {
-                    b = b.union(&x);
+                    // (A margin for the resampled edges.)
+                    b = b.union(&Rect::new(x.x - 2.0, x.y - 2.0, x.w + 4.0, x.h + 4.0));
                 }
             }
             let bounds = Rect::new(b.x - e, b.y - e, b.w + 2.0 * e, b.h + 2.0 * e);
@@ -776,7 +805,15 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if let Some(items) = mask {
             self.list.push(DisplayItem::LayerMask(items));
         }
-        if root.style.mix_blend_mode != 0 && !blend_outside {
+        if blend_group && self.list.sticky.len() == filter_start.1 {
+            let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
+            let mut bounds = root.subtree_bounds();
+            if let Some(x) = crate::paint3d::extent(items.iter()) {
+                bounds = bounds.union(&x);
+            }
+            self.list.push(DisplayItem::Blended { bounds, mode: root.style.mix_blend_mode, opacity, items });
+            self.blends += 1;
+        } else if root.style.mix_blend_mode != 0 && !blend_outside {
             self.list.push(DisplayItem::LayerBlend(root.style.mix_blend_mode));
             self.blends += 1;
         }

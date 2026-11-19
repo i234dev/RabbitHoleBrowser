@@ -229,7 +229,16 @@ pub fn build_in(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) ->
     if built.nodes.iter().any(|n| n.xform.is_some()) {
         for i in 0..built.nodes.len() {
             if let Some(x) = built.nodes[i].xform.take() {
-                built.nodes[i].transform = crate::units::css_transform(&x, built.nodes[i].transform, built.nodes[i].bbox);
+                let spec = &built.nodes[i].spec;
+                // (A non-scaling stroke has no fixed size in user space:
+                // the fill box.)
+                let stroked = matches!(spec.stroke, Some(ref p) if *p != crate::style::PaintSpec::None) && spec.non_scaling_stroke != Some(true);
+                let half = match spec.stroke_width {
+                    Some(Length::Px(w)) if stroked => w / 2.0,
+                    None if stroked => 0.5,
+                    _ => 0.0,
+                };
+                built.nodes[i].transform = crate::units::css_transform(&x, built.nodes[i].transform, built.nodes[i].bbox, half);
             }
         }
         // Ancestors' boxes include the transformed children.

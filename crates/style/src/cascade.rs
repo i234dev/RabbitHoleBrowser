@@ -954,6 +954,11 @@ fn apply_declarations(
     if in_flex_or_grid && style.z_index.is_some() && !matches!(style.position, Position::Absolute | Position::Fixed) {
         style.creates_stacking_context = true;
     }
+    // A box with a hidden back face in a 3D rendering context is a plane of
+    // its own (as in browsers: it paints as a stacking context).
+    if style.transform3d.as_ref().is_some_and(|t| t.backface_hidden) && parent.preserves_3d() {
+        style.creates_stacking_context = true;
+    }
     // Properties declared `!important` win over animations (CSS Cascade 4
     // §6.1): remembered for the animation overlay of animated elements.
     if !style.animations.is_empty() && local.iter().any(|m| m.rank >= Rank::AuthorImportant) {

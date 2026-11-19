@@ -1328,3 +1328,58 @@ fn border_image_draws_nine_slices_instead_of_the_border() {
     let gradients = dl.items.iter().filter(|i| matches!(i, DisplayItem::RectRadii { paint: Paint::Linear { .. }, .. })).count();
     assert_eq!(gradients, 8, "four corners and four edges, no middle without fill");
 }
+
+#[test]
+fn three_d_transforms_build_groups() {
+    let images = HashMap::new();
+    let bgs = HashMap::new();
+    // A child of a perspective box translated in z: a projective group.
+    let fx = Fixture::new("<div style='perspective:100px'><div style='transform:translateZ(50px);width:10px;height:10px;background:red'></div></div>", "");
+    let ctx = fx.ctx(&images, &bgs);
+    let list = build_display_list(&layout(&ctx), &ctx);
+    let g = list.items.iter().find_map(|i| match i {
+        DisplayItem::Transform3d(g) => Some(g),
+        _ => None,
+    });
+    let g = g.expect("a 3D group");
+    // Perspective 100px with z = 50px doubles sizes.
+    let p = rabbithole_gfx::mat4::map_homogeneous(&g.matrix, 10.0, 0.0);
+    let q = rabbithole_gfx::mat4::map_homogeneous(&g.matrix, 20.0, 0.0);
+    assert!(((q[0] / q[3] - p[0] / p[3]) - 20.0).abs() < 1e-3, "{:?}", g.matrix);
+    // Without perspective, rotateX() flattens to a 2D matrix.
+    let fx = Fixture::new("<div style='transform:rotateX(60deg);width:10px;height:10px;background:red'></div>", "");
+    let ctx = fx.ctx(&images, &bgs);
+    let list = build_display_list(&layout(&ctx), &ctx);
+    assert!(!list.items.iter().any(|i| matches!(i, DisplayItem::Transform3d(_))));
+    let m = list.items.iter().find_map(|i| match i {
+        DisplayItem::PushTransform(m) => Some(*m),
+        _ => None,
+    });
+    assert!(m.is_some_and(|m| (m[3] - 0.5).abs() < 1e-5), "{m:?}");
+    // preserve-3d: the transformed child is a plane of its parent's group.
+    let fx = Fixture::new("<div style='transform-style:preserve-3d;transform:rotateY(30deg)'><div style='transform:translateZ(5px);height:10px;background:red'></div></div>", "");
+    let ctx = fx.ctx(&images, &bgs);
+    let list = build_display_list(&layout(&ctx), &ctx);
+    let g = list.items.iter().find_map(|i| match i {
+        DisplayItem::Transform3d(g) => Some(g),
+        _ => None,
+    });
+    let g = g.expect("a 3D rendering context");
+    assert!(g.preserve);
+    assert!(g.items.iter().any(|i| matches!(i, DisplayItem::Transform3d(_))));
+}
+
+#[test]
+fn transformed_boxes_contain_fixed_descendants() {
+    let html = "<div style='height:50px'></div><div id=t style='transform:translateX(0);height:100px'><div style='position:fixed;top:10px;left:10px;width:5px;height:5px'></div></div>";
+    let fx = Fixture::new(html, "");
+    let images = HashMap::new();
+    let bgs = HashMap::new();
+    let ctx = fx.ctx(&images, &bgs);
+    let t = layout(&ctx);
+    let divs = fx.find(&t, "div");
+    let fixed = divs.iter().find(|b| b.style.position == rabbithole_style::Position::Fixed).expect("fixed box");
+    let cb = divs[1];
+    assert!((fixed.rect.y - (cb.rect.y + 10.0)).abs() < 0.5, "fixed at {:?}, containing block {:?}", fixed.rect, cb.rect);
+    assert!(!fixed.fixed);
+}

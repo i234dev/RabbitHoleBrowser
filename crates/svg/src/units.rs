@@ -481,11 +481,14 @@ fn parse_origin(s: &str, r: Rect) -> Option<(f32, f32)> {
 /// The element's transform from its CSS transform properties: the CSS
 /// `transform` (else the attribute's `attr`) about `transform-origin`, both
 /// against the `transform-box` (`bbox` is the fill box).
-pub fn css_transform(x: &crate::parse::XformSpec, attr: Matrix, bbox: Option<Rect>) -> Matrix {
+/// `stroke` is half the stroke width (the stroke box outsets the fill
+/// box by it).
+pub fn css_transform(x: &crate::parse::XformSpec, attr: Matrix, bbox: Option<Rect>, stroke: f32) -> Matrix {
     let view = Rect::new(0.0, 0.0, x.view.0, x.view.1);
     let fill = bbox.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
     let r = match x.tbox.as_deref() {
-        Some("fill-box" | "content-box" | "stroke-box" | "border-box") => fill,
+        Some("fill-box" | "content-box") => fill,
+        Some("stroke-box" | "border-box") => Rect::new(fill.x - stroke, fill.y - stroke, fill.w + 2.0 * stroke, fill.h + 2.0 * stroke),
         _ => view,
     };
     let m = match x.css.as_deref() {
