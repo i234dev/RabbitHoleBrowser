@@ -22,26 +22,26 @@ li { display: list-item; }
 summary { cursor: pointer; }
 
 blockquote, figure, dl, listing, plaintext, pre, xmp, ol, ul, menu, dir,
-h4, p { margin: 1em 0; }
-blockquote, figure { margin: 1em 40px; }
+h4, p { margin-block: 1em; }
+blockquote, figure { margin-inline: 40px; }
 address { font-style: italic; }
 listing, plaintext, pre, xmp { font-family: monospace; white-space: pre; tab-size: 8; }
-dd { margin-left: 40px; }
-ol, ul, menu, dir { padding-left: 40px; }
+dd { margin-inline-start: 40px; }
+ol, ul, menu, dir { padding-inline-start: 40px; }
 ol { list-style-type: decimal; }
 ul, menu, dir { list-style-type: disc; }
 ul ul, ol ul, menu ul, dir ul { list-style-type: circle; }
 ul ul ul, ol ul ul, ul ol ul, ol ol ul { list-style-type: square; }
 ol ol, ul ol { list-style-type: decimal; }
-ul ul, ol ul, ul ol, ol ol, menu menu { margin-top: 0; margin-bottom: 0; }
+ul ul, ol ul, ul ol, ol ol, menu menu { margin-block: 0; }
 
-h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0; }
-h2 { font-size: 1.5em; font-weight: bold; margin: 0.83em 0; }
-h3 { font-size: 1.17em; font-weight: bold; margin: 1em 0; }
-h4 { font-size: 1em; font-weight: bold; margin: 1.33em 0; }
-h5 { font-size: 0.83em; font-weight: bold; margin: 1.67em 0; }
-h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0; }
-article h1, aside h1, nav h1, section h1 { font-size: 1.5em; margin: 0.83em 0; }
+h1 { font-size: 2em; font-weight: bold; margin-block: 0.67em; }
+h2 { font-size: 1.5em; font-weight: bold; margin-block: 0.83em; }
+h3 { font-size: 1.17em; font-weight: bold; margin-block: 1em; }
+h4 { font-size: 1em; font-weight: bold; margin-block: 1.33em; }
+h5 { font-size: 0.83em; font-weight: bold; margin-block: 1.67em; }
+h6 { font-size: 0.67em; font-weight: bold; margin-block: 2.33em; }
+article h1, aside h1, nav h1, section h1 { font-size: 1.5em; margin-block: 0.83em; }
 
 hr { color: gray; border-style: solid; border-width: 1px; margin: 0.5em auto; overflow: hidden; }
 fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 2px solid #c0c0c0; }

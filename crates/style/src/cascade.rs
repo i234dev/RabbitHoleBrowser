@@ -1631,6 +1631,7 @@ fn is_inherited(name: &str) -> bool {
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
             | "font-synthesis" | "font-synthesis-style" | "font-synthesis-small-caps" | "text-justify" | "hyphenate-character" | "text-decoration-skip-ink"
+            | "writing-mode" | "-webkit-writing-mode" | "text-orientation" | "-webkit-text-orientation" | "text-combine-upright" | "-webkit-text-combine"
     )
 }
 
@@ -1988,7 +1989,12 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.text_decoration_thickness_from_font = from.text_decoration_thickness_from_font;
         }
         "direction" => to.direction = from.direction,
-        "writing-mode" | "-webkit-writing-mode" => to.writing_mode = from.writing_mode,
+        "writing-mode" | "-webkit-writing-mode" => {
+            to.writing_mode = from.writing_mode;
+            to.writing_sideways = from.writing_sideways;
+        }
+        "text-orientation" | "-webkit-text-orientation" => to.text_orientation = from.text_orientation,
+        "text-combine-upright" | "-webkit-text-combine" => to.text_combine_upright = from.text_combine_upright,
         "unicode-bidi" => to.unicode_bidi = from.unicode_bidi,
         "tab-size" => {
             to.tab_size = from.tab_size;
@@ -2647,7 +2653,33 @@ fn physical_side(side: &str, wm: WritingMode, rtl: bool) -> &'static str {
 
 /// Map a flow-relative longhand to its physical property for the
 /// element's writing mode and direction (CSS Logical Properties §4).
-fn logical_to_physical(name: &str, wm: WritingMode, rtl: bool) -> Option<String> {
+fn logical_to_physical(name: &str, wm: WritingMode, rtl: bool) -> Option<std::borrow::Cow<'static, str>> {
+    use std::borrow::Cow;
+    // Flow-relative margins and paddings (the user-agent sheet's) map
+    // without allocating.
+    let (prefix, rest) = match name.strip_prefix("margin-") {
+        Some(r) => (true, r),
+        None => match name.strip_prefix("padding-") {
+            Some(r) => (false, r),
+            None => (false, ""),
+        },
+    };
+    if matches!(rest, "block-start" | "block-end" | "inline-start" | "inline-end") {
+        return Some(Cow::Borrowed(match (prefix, physical_side(rest, wm, rtl)) {
+            (true, "top") => "margin-top",
+            (true, "right") => "margin-right",
+            (true, "bottom") => "margin-bottom",
+            (true, _) => "margin-left",
+            (false, "top") => "padding-top",
+            (false, "right") => "padding-right",
+            (false, "bottom") => "padding-bottom",
+            (false, _) => "padding-left",
+        }));
+    }
+    logical_to_physical_slow(name, wm, rtl).map(Cow::Owned)
+}
+
+fn logical_to_physical_slow(name: &str, wm: WritingMode, rtl: bool) -> Option<String> {
     let vertical = wm.is_vertical();
     let size = |inline: bool| if inline != vertical { "width" } else { "height" };
     match name {

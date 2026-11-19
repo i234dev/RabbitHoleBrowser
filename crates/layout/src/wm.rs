@@ -67,6 +67,11 @@ pub(crate) fn transposed_as(style: &ComputedStyle, mode: WritingMode) -> Compute
         WritingMode::SidewaysLr => [sw(r[3]), sw(r[0]), sw(r[1]), sw(r[2])],
         _ => [sw(r[0]), sw(r[3]), sw(r[2]), sw(r[1])],
     };
+    // Upright vertical text is typeset left to right: its used direction
+    // is ltr (CSS Writing Modes 3 §5.1).
+    if style.text_orientation == rabbithole_style::TextOrientation::Upright && !style.writing_sideways {
+        s.direction = rabbithole_style::Direction::Ltr;
+    }
     s.layout_transposed = true;
     s
 }
@@ -86,8 +91,116 @@ impl Cache {
     }
 }
 
+/// The text runs of `text` combined upright by `text-combine-upright`
+/// value `tcu` (1: all; n + 1: up to n ASCII digits in a row), as
+/// `(start, end, combined)` byte ranges covering the text.
+fn combined_runs(text: &str, tcu: u8) -> Vec<(usize, usize, bool)> {
+    if tcu == 1 {
+        return vec![(0, text.len(), true)];
+    }
+    let max = (tcu - 1) as usize;
+    let mut out = Vec::new();
+    let b = text.as_bytes();
+    let (mut i, mut last) = (0, 0);
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - start <= max {
+                if start > last {
+                    out.push((last, start, false));
+                }
+                out.push((start, i, true));
+                last = i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if last < b.len() {
+        out.push((last, b.len(), false));
+    }
+    out
+}
+
+#[cfg(test)]
+pub(crate) fn combined_runs_for_test(text: &str, tcu: u8) -> Vec<(usize, usize, bool)> {
+    combined_runs(text, tcu)
+}
+
+/// `text-combine-upright` (CSS Writing Modes 3 §9.1): each combined text
+/// run of the vertical inline formatting context `b` becomes an atomic
+/// inline holding the run set horizontally (its wrapper turns it upright
+/// and squeezes it into 1em).
+fn combine_upright(b: &mut LayoutBox, cache: &mut Cache, mode: WritingMode) {
+    let mut items = Vec::with_capacity(b.items.len() + 2);
+    let mut children: Vec<LayoutBox> = Vec::with_capacity(b.children.len() + 1);
+    let mut old_children = std::mem::take(&mut b.children).into_iter().map(Some).collect::<Vec<_>>();
+    let mut take = |i: usize, children: &mut Vec<LayoutBox>| {
+        children.push(old_children[i].take().unwrap_or_else(|| LayoutBox::new(BoxKind::Block, None, b.style.clone())));
+        children.len() - 1
+    };
+    for it in std::mem::take(&mut b.items) {
+        match it {
+            InlineItem::Text { text, style, node, elem } if style.text_combine_upright != 0 && !style.writing_sideways && style.writing_mode.is_vertical() && !style.layout_transposed => {
+                for (s, e, combined) in combined_runs(&text, style.text_combine_upright) {
+                    let run: Rc<str> = Rc::from(&text[s..e]);
+                    if !combined {
+                        items.push(InlineItem::Text { text: run, style: style.clone(), node, elem });
+                        continue;
+                    }
+                    let em = style.font_size;
+                    let mut st = ComputedStyle::inherit_from(&style);
+                    st.writing_mode = WritingMode::HorizontalTb;
+                    st.writing_sideways = false;
+                    st.text_combine_upright = 0;
+                    st.display = Display::InlineBlock;
+                    st.display_before_blockification = Display::InlineBlock;
+                    st.width = Length::Px(em);
+                    st.line_height = Some(em);
+                    st.text_align = rabbithole_style::TextAlign::Center;
+                    st.text_indent = Length::ZERO;
+                    // One line: white space collapses (or not) as usual.
+                    st.white_space = match style.white_space {
+                        rabbithole_style::WhiteSpace::Normal | rabbithole_style::WhiteSpace::PreLine => rabbithole_style::WhiteSpace::Nowrap,
+                        rabbithole_style::WhiteSpace::PreWrap | rabbithole_style::WhiteSpace::BreakSpaces => rabbithole_style::WhiteSpace::Pre,
+                        ws => ws,
+                    };
+                    st.unicode_bidi = style.unicode_bidi;
+                    // (The composition is decorated as one glyph of the
+                    // vertical line, not as horizontal text.)
+                    st.applied_decorations = Vec::new();
+                    st.text_orientation = rabbithole_style::TextOrientation::Mixed;
+                    let st = Rc::new(st);
+                    let mut inner = LayoutBox::new(BoxKind::InlineBlock, None, st.clone());
+                    inner.formatting = Formatting::Inline;
+                    inner.bfc_root = true;
+                    inner.items.push(InlineItem::Text { text: run, style: st, node, elem });
+                    let mut w = wrap(inner, cache, false, mode);
+                    w.wm_tcy = true;
+                    children.push(w);
+                    items.push(InlineItem::Atomic(children.len() - 1));
+                }
+            }
+            InlineItem::Atomic(i) => items.push(InlineItem::Atomic(take(i, &mut children))),
+            InlineItem::Float(i) => items.push(InlineItem::Float(take(i, &mut children))),
+            InlineItem::Absolute(i) => items.push(InlineItem::Absolute(take(i, &mut children))),
+            other => items.push(other),
+        }
+    }
+    // (Children no item refers to keep their place at the end.)
+    children.extend(old_children.into_iter().flatten());
+    b.items = items;
+    b.children = children;
+}
+
 /// Transpose a vertical subtree in place (styles of boxes and inline items).
 fn transpose_subtree(b: &mut LayoutBox, cache: &mut Cache, mode: WritingMode) {
+    if b.items.iter().any(|it| matches!(it, InlineItem::Text { style, .. } if style.text_combine_upright != 0)) {
+        combine_upright(b, cache, mode);
+    }
     b.style = cache.get(&b.style, mode);
     for it in &mut b.items {
         match it {
@@ -105,7 +218,7 @@ fn transpose_subtree(b: &mut LayoutBox, cache: &mut Cache, mode: WritingMode) {
         // Images stay upright: they are wrapped like horizontal blocks.
         let image = c.kind == BoxKind::Image && !c.style.layout_transposed;
         let orthogonal = image
-            || (!c.style.writing_mode.is_vertical() && !c.style.layout_transposed && !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Inline) && !table_internal(c));
+            || (!c.style.writing_mode.is_vertical() && !c.style.layout_transposed && !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Inline) && !table_internal(b, c));
         if orthogonal {
             let mut c = std::mem::replace(&mut b.children[i], LayoutBox::new(BoxKind::Block, None, b.style.clone()));
             if image {
@@ -132,6 +245,9 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
     ws.position = phys.position;
     ws.inset = phys.inset;
     ws.z_index = phys.z_index;
+    // The legacy `clip` of an absolutely positioned box: the wrapper is
+    // the positioned box now.
+    ws.clip_rect = phys.clip_rect;
     ws.float = phys.float;
     ws.clear = phys.clear;
     ws.margin = phys.margin;
@@ -146,6 +262,8 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
     ws.order = phys.order;
     ws.flex_grow = phys.flex_grow;
     ws.flex_shrink = phys.flex_shrink;
+    ws.flex_basis = phys.flex_basis;
+    ws.flex_basis_content = phys.flex_basis_content;
     ws.align_self = phys.align_self;
     ws.justify_self = phys.justify_self;
     ws.align_self_flags = phys.align_self_flags;
@@ -199,6 +317,7 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
         inner.background_layers = Vec::new();
     }
     inner.margin = Edges::all(Length::ZERO);
+    inner.clip_rect = None;
     inner.float = Float::None;
     inner.clear = rabbithole_style::Clear::None;
     if phys.position != Position::Static {
@@ -225,8 +344,10 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
 
 /// Table rows, cells and the table inside its wrapper must stay where
 /// they are (their parents lay them out as table parts).
-fn table_internal(b: &LayoutBox) -> bool {
-    matches!(b.kind, BoxKind::TableRow | BoxKind::TableCell | BoxKind::Table) || matches!(b.formatting, Formatting::TableRow | Formatting::Table) || crate::table::is_row_group(b)
+fn table_internal(parent: &LayoutBox, b: &LayoutBox) -> bool {
+    let table = b.kind == BoxKind::Table || b.formatting == Formatting::Table;
+    // (A table box outside a table wrapper box is the table itself.)
+    (table && parent.formatting == Formatting::TableWrapper) || matches!(b.kind, BoxKind::TableRow | BoxKind::TableCell) || b.formatting == Formatting::TableRow || crate::table::is_row_group(b)
 }
 
 /// Find the vertical subtrees below `b` (whose mode is `mode`) and wrap them.
@@ -238,7 +359,7 @@ fn prepare_children(b: &mut LayoutBox, cache: &mut Cache) {
         }
         let vertical = c.style.writing_mode.is_vertical() && !c.style.layout_transposed;
         // Images are not turned; table parts cannot leave their table.
-        let element = !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Image) && !table_internal(c);
+        let element = !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Image) && !table_internal(b, c);
         if vertical && element {
             let c = std::mem::replace(&mut b.children[i], LayoutBox::new(BoxKind::Block, None, b.style.clone()));
             b.children[i] = wrap(c, cache, false, WritingMode::HorizontalTb);
@@ -284,10 +405,12 @@ impl<'a> Layouter<'a> {
         let is_root = w.children.first().and_then(|r| r.node).is_some_and(|n| Some(n) == self.ctx.doc.html_element());
         let kind = w.wm_kind;
         let rl = kind == WmKind::Cw;
-        let vp_h = self.ctx.viewport_height.max(1.0);
-        // The available inline size is the physical height available.
-        let avail = if is_root { cb.height.unwrap_or(vp_h) } else { (cb.height.unwrap_or(vp_h) - mt - mb).max(0.0) };
         let Some(r) = w.children.first_mut() else { return };
+        // The available inline size is the wrapper's height available;
+        // without a definite one, the initial containing block's size in
+        // the orthogonal box's inline axis (CSS Writing Modes 3 §7.3).
+        let vp_h = icb_inline_size(self.ctx, &r.style);
+        let avail = if is_root { cb.height.unwrap_or(vp_h) } else { (cb.height.unwrap_or(vp_h) - mt - mb).max(0.0) };
         let inline_auto = r.style.width.is_auto();
         let pb_inline = r.style.padding.left.resolve_or_zero(cbw) + r.style.padding.right.resolve_or_zero(cbw) + r.style.border_width.left + r.style.border_width.right;
         let lmode = match mode {
@@ -312,16 +435,32 @@ impl<'a> Layouter<'a> {
         };
         let lcb = Cb { x: 0.0, width: avail, height: Some((cbw - ml - mr).max(0.0)) };
         let mut bfc = Bfc::new();
+        let mut table_style = None;
         if let Some(h) = forced_block {
             let pb = r.style.padding.top.resolve_or_zero(cbw) + r.style.padding.bottom.resolve_or_zero(cbw) + r.style.border_width.top + r.style.border_width.bottom;
             self.forced_content_height = Some((h - pb).max(0.0));
+            if matches!(r.formatting, Formatting::Table | Formatting::TableWrapper) && r.style.height != Length::Px(h) {
+                // A table's height is a minimum: the size the parent
+                // gives it (a flexed item) replaces it.
+                let mut st = (*r.style).clone();
+                st.height = Length::Px(h);
+                st.box_sizing = rabbithole_style::BoxSizing::BorderBox;
+                table_style = Some(std::mem::replace(&mut r.style, Rc::new(st)));
+                r.layout_cache = None;
+            }
         } else {
             self.forced_content_height = None;
         }
         self.layout_block(r, &lcb, 0.0, &mut bfc, lmode);
         self.forced_content_height = None;
+        if let Some(st) = table_style {
+            r.style = st;
+            r.layout_cache = None;
+        }
         let lr = r.rect;
         let (pw, ph) = (lr.h, lr.w);
+        // A combined-upright run wider than its 1em box is squeezed into it.
+        let squeeze = if w.wm_tcy { tcy_squeeze(r) } else { None };
         let x = if is_root && rl { cb.x + cb.width - pw - mr } else { cb.x + ml };
         let y = top;
         // Logical → physical.
@@ -329,6 +468,10 @@ impl<'a> Layouter<'a> {
             WmKind::Cw => [0.0, 1.0, -1.0, 0.0, x + pw + lr.y, y - lr.x],
             WmKind::Reflect => [0.0, 1.0, 1.0, 0.0, x - lr.y, y - lr.x],
             WmKind::Ccw => [0.0, -1.0, 1.0, 0.0, x - lr.y, y + ph + lr.x],
+        };
+        let mtx = match squeeze {
+            Some(sq) => rabbithole_style::multiply_matrix(mtx, sq),
+            None => mtx,
         };
         w.wm_transform = Some(mtx);
         w.rect = Rect::new(x, y, pw, ph);
@@ -345,8 +488,8 @@ impl<'a> Layouter<'a> {
     /// when laid out in the viewport height.
     pub(crate) fn wm_wrapper_intrinsic(&mut self, w: &mut LayoutBox) -> (f32, f32) {
         let _probe = self.grid_publication.probe();
-        let vp_h = self.ctx.viewport_height.max(1.0);
         let Some(r) = w.children.first_mut() else { return (0.0, 0.0) };
+        let vp_h = icb_inline_size(self.ctx, &r.style);
         let lcb = Cb { x: 0.0, width: vp_h, height: None };
         let mut bfc = Bfc::new();
         self.forced_content_height = None;
@@ -355,6 +498,37 @@ impl<'a> Layouter<'a> {
         let h = r.rect.h;
         (h, h)
     }
+}
+
+/// The horizontal scale (as a matrix in `r`'s space) fitting the text of a
+/// combined-upright box `r` into its content box, when it overflows.
+fn tcy_squeeze(r: &mut LayoutBox) -> Option<Matrix> {
+    let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+    for f in r.lines.iter().flat_map(|l| &l.fragments) {
+        x0 = x0.min(f.rect.x);
+        x1 = x1.max(f.rect.right());
+    }
+    let c = r.content_rect;
+    let wid = x1 - x0;
+    if !(wid > c.w + 0.01) || c.w <= 0.0 {
+        return None;
+    }
+    // The text starts at the content box's left edge (whatever its
+    // alignment and direction), then is scaled about that edge.
+    let dx = c.x - x0;
+    if dx != 0.0 {
+        for f in r.lines.iter_mut().flat_map(|l| &mut l.fragments) {
+            f.rect.x += dx;
+        }
+    }
+    let sx = c.w / wid;
+    Some([sx, 0.0, 0.0, 1.0, c.x * (1.0 - sx), 0.0])
+}
+
+/// The initial containing block's size in the inline axis of a box of
+/// (physical) style `s`: the viewport height for vertical text.
+fn icb_inline_size(ctx: &crate::LayoutContext, s: &ComputedStyle) -> f32 {
+    if s.writing_mode.is_vertical() { ctx.viewport_height.max(1.0) } else { ctx.viewport_width.max(1.0) }
 }
 
 /// Map a physical rectangle into the logical space of a wrapper.

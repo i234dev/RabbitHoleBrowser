@@ -347,6 +347,7 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         listed: std::collections::HashSet::new(),
         flipped: false,
         wm_bg: None,
+        wm_m: None,
         in_clamped: false,
     };
     p.paint_stacking_context(root, bounds);
@@ -389,6 +390,9 @@ struct Painter<'l, 't, 'a> {
     /// The box a vertical-mode wrapper turns, with the wrapper's physical
     /// rect, mapping and background layers: painted in physical space.
     wm_bg: Option<(usize, Rect, Matrix, std::rc::Rc<rabbithole_style::ComputedStyle>)>,
+    /// Inside vertical subtrees: their wrappers' mappings composed (the
+    /// current logical space onto the outermost horizontal one).
+    wm_m: Option<Matrix>,
     /// Collecting inside a box after a line-clamp point.
     in_clamped: bool,
 }
@@ -542,13 +546,24 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let mut pushed_matrix = false;
         let saved_flip = self.flipped;
         let saved_wm_bg = self.wm_bg.take();
+        // A positioned vertical box is its own stacking context: its
+        // wrapper's background must still reach it.
+        if saved_wm_bg.as_ref().is_some_and(|w| w.0 == root as *const LayoutBox as usize) {
+            self.wm_bg = saved_wm_bg.clone();
+        }
         if let (Some(m), Some(bg), Some(inner)) = (root.transform_matrix().filter(|_| root.wm_transform.is_some()), root.wm_background.clone(), root.children.first()) {
             self.wm_bg = Some((inner as *const LayoutBox as usize, root.rect, m, bg));
         }
+        let saved_wm_m = self.wm_m;
         if let Some(m) = root.wm_transform {
             if m[0] * m[3] - m[1] * m[2] < 0.0 {
                 self.flipped = !self.flipped;
             }
+            let m = root.transform_matrix().unwrap_or(m);
+            self.wm_m = Some(match self.wm_m {
+                Some(outer) => rabbithole_style::multiply_matrix(outer, m),
+                None => m,
+            });
         }
         if let Some(m) = root.transform_matrix() {
             self.list.push(DisplayItem::PushTransform(m));
@@ -564,10 +579,21 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // Legacy `clip` of absolutely positioned boxes.
         let rect_clipped = match root.style.clip_rect {
             Some(edges) if root.flow == Flow::Absolute => {
-                let r = root.rect;
+                // (The clip is physical: a vertical-mode wrapper — whose
+                // contents are already turned here — maps it.)
+                let turned = self.wm_m;
+                let outer = if root.wm_transform.is_some() { saved_wm_m } else { self.wm_m };
+                let r = match outer {
+                    Some(o) => rabbithole_gfx::path::transform_rect_bounds(&o, root.rect),
+                    None => root.rect,
+                };
                 let at = |l: rabbithole_style::Length, auto: f32| if l.is_auto() { auto } else { l.resolve_or_zero(0.0) };
                 let (top, right, bottom, left) = (at(edges[0], 0.0), at(edges[1], r.w), at(edges[2], r.h), at(edges[3], 0.0));
                 let c = Rect::new(r.x + left, r.y + top, (right - left).max(0.0), (bottom - top).max(0.0));
+                let c = match turned.and_then(crate::tree::invert_matrix) {
+                    Some(inv) => rabbithole_gfx::path::transform_rect_bounds(&inv, c),
+                    None => c,
+                };
                 self.list.push(DisplayItem::PushClip(c));
                 self.push_scope(HitScope::Clip(c));
                 true
@@ -592,6 +618,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.bounds = saved_bounds;
             self.flipped = saved_flip;
             self.wm_bg = saved_wm_bg;
+            self.wm_m = saved_wm_m;
             return;
         }
         if !root.style.backdrop_filters.is_empty() && root.style.visibility != Visibility::Hidden {
@@ -645,6 +672,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         self.bounds = saved_bounds;
         self.flipped = saved_flip;
         self.wm_bg = saved_wm_bg;
+        self.wm_m = saved_wm_m;
     }
 
     /// Push the `clip-path` of `b` (paint clip + hit scope); false when it
@@ -1052,6 +1080,42 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     // -------------------------------------------------------- backgrounds
 
+    /// Paint the backgrounds of `geom` (logical, in a vertical subtree)
+    /// in the physical space of the subtree's horizontal ancestor.
+    fn paint_unturned_backgrounds(&mut self, geom: &BoxGeometry, style: &rabbithole_style::ComputedStyle, vp: Rect) {
+        let Some(m) = self.wm_m else { return };
+        let Some(inv) = crate::tree::invert_matrix(m) else { return };
+        let mut color = style.clone();
+        color.background_image = None;
+        // The last layer's clip still applies to the colour.
+        color.background_layers = style.background_layers.last().map(|l| rabbithole_style::BackgroundLayer { image: rabbithole_style::BackgroundImage::None, ..l.clone() }).into_iter().collect();
+        background::paint_backgrounds(self.list, geom, &color, self.ctx.background_images, vp);
+        let map = |r: Rect| rabbithole_gfx::path::transform_rect_bounds(&m, r);
+        let (border, padding, content) = (map(geom.border), map(geom.padding), map(geom.content));
+        // Corners [tl, tr, br, bl]: each logical corner lands on a physical
+        // one, with its radii's axes swapped.
+        let mut radii = geom.radii;
+        let corners = [(geom.border.x, geom.border.y), (geom.border.right(), geom.border.y), (geom.border.right(), geom.border.bottom()), (geom.border.x, geom.border.bottom())];
+        let (cx, cy) = (border.x + border.w / 2.0, border.y + border.h / 2.0);
+        for (i, (x, y)) in corners.into_iter().enumerate() {
+            let (px, py) = crate::tree::map_point(m, x, y);
+            let j = match (px > cx, py > cy) {
+                (false, false) => 0,
+                (true, false) => 1,
+                (true, true) => 2,
+                (false, true) => 3,
+            };
+            radii[j] = (geom.radii[i].1, geom.radii[i].0);
+        }
+        let border_width = rabbithole_style::Edges { top: padding.y - border.y, right: border.right() - padding.right(), bottom: border.bottom() - padding.bottom(), left: padding.x - border.x };
+        let pgeom = BoxGeometry { border, padding, content, radii, border_width, scrolled: None };
+        let mut images = style.clone();
+        images.background_color = Color::TRANSPARENT;
+        self.list.push(DisplayItem::PushTransform(inv));
+        background::paint_backgrounds(self.list, &pgeom, &images, self.ctx.background_images, vp);
+        self.list.push(DisplayItem::PopTransform);
+    }
+
     fn paint_background_and_border(&mut self, b: &'t LayoutBox, skip_bg: bool) {
         if b.style.visibility != Visibility::Hidden && b.style.pointer_events != PointerEvents::None {
             self.record_hit(b.rect, b.node);
@@ -1140,6 +1204,10 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             background::paint_backgrounds(self.list, &geom, &texty, self.ctx.background_images, vp);
             self.list.push(DisplayItem::LayerMask(mask));
             self.list.push(DisplayItem::PopLayer(1.0));
+        } else if !skip_bg && self.wm_m.is_some_and(|m| m[0] == 0.0) && style.layout_transposed && (style.background_image.is_some() || !style.background_layers.is_empty()) {
+            // A box of a vertical subtree: its background images keep the
+            // page's orientation (only the box turns).
+            self.paint_unturned_backgrounds(&geom, style, vp);
         } else if !skip_bg {
             background::paint_backgrounds(self.list, &geom, style, self.ctx.background_images, vp);
             // A vertical box's background images, unturned.

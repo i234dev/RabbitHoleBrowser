@@ -591,7 +591,9 @@ impl Canvas {
             return 0.0;
         }
         let m = self.transform();
-        let aligned = is_identity(&m) || is_axis_aligned(&m);
+        // (A non-uniform scale, e.g. a squeezed combined-upright run, takes
+        // the general path: glyph bitmaps are mapped by the full matrix.)
+        let aligned = (is_identity(&m) || is_axis_aligned(&m)) && (m[0] - m[3]).abs() <= 1e-4 * m[3].abs().max(1.0);
         let sf = if aligned { m[3] } else { scale_factor(&m) };
         let dsize = size * sf;
         let origin = transform_point(&m, Point::new(x, baseline_y));

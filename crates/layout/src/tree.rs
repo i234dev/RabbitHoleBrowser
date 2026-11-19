@@ -353,6 +353,9 @@ pub struct LayoutBox {
     /// Anonymous wrapper of a vertical writing-mode subtree (its only
     /// child, laid out in logical space; see `wm.rs`).
     pub(crate) wm_wrapper: bool,
+    /// A wrapper holding a horizontal-in-vertical composition
+    /// (`text-combine-upright`): squeezed into 1em.
+    pub(crate) wm_tcy: bool,
     /// Logical → physical mapping of a wrapper's contents.
     pub(crate) wm_transform: Option<Matrix>,
     /// How a wrapper's contents are turned (see `wm.rs`).
@@ -433,6 +436,7 @@ impl LayoutBox {
             built_from: None,
             counter_io: None,
             wm_wrapper: false,
+            wm_tcy: false,
             ruby: 0,
             wm_transform: None,
             wm_kind: WmKind::Cw,
@@ -544,7 +548,10 @@ impl LayoutBox {
     pub fn transform_matrix(&self) -> Option<Matrix> {
         if let Some(m) = self.wm_transform {
             // Quarter turns map the pixel grid onto itself: keep the
-            // contents on whole pixels.
+            // contents on whole pixels (not a squeezed composition's).
+            if m[..4].iter().any(|v| *v != 0.0 && v.abs() != 1.0) {
+                return Some(m);
+            }
             return Some([m[0], m[1], m[2], m[3], m[4].round(), m[5].round()]);
         }
         if self.style.transform.is_empty() {
@@ -666,10 +673,15 @@ impl LayoutBox {
 
     /// Baseline of the box's first line (absolute y), searching descendants.
     pub fn first_baseline(&self) -> Option<f32> {
+        if self.wm_wrapper {
+            // An orthogonal flow has no baseline in its parent's axis (its
+            // lines are in its own, logical, space): one is synthesized.
+            return None;
+        }
         if self.formatting == Formatting::Flex && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
             // An item without a baseline has one synthesized from its
             // border box's bottom edge.
-            return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(c.rect.bottom()));
+            return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(self.synthesized_baseline_of(c)));
         }
         if let Some(l) = self.lines.first() {
             return Some(l.baseline);
@@ -679,6 +691,16 @@ impl LayoutBox {
             .filter(|c| c.is_in_flow())
             .find_map(|c| c.first_baseline())
             .or_else(|| self.synthesized_item_baseline(false))
+    }
+
+    /// The baseline synthesized from an item's border box: its bottom
+    /// edge, or its middle in a vertical container (central baseline).
+    fn synthesized_baseline_of(&self, c: &LayoutBox) -> f32 {
+        if self.style.central_baseline() {
+            c.rect.y + c.rect.h / 2.0
+        } else {
+            c.rect.bottom()
+        }
     }
 
     /// A grid container whose items have no baseline synthesizes one from
@@ -695,8 +717,11 @@ impl LayoutBox {
 
     /// Baseline of the last line (absolute y).
     pub fn last_baseline(&self) -> Option<f32> {
+        if self.wm_wrapper {
+            return None;
+        }
         if self.formatting == Formatting::Flex && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
-            return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(c.rect.bottom()));
+            return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(self.synthesized_baseline_of(c)));
         }
         if let Some(l) = self.lines.last() {
             return Some(l.baseline);

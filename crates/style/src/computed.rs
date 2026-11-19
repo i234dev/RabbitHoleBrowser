@@ -1236,6 +1236,24 @@ impl WritingMode {
     }
 }
 
+impl ComputedStyle {
+    /// Lines of this (block container) style align on the central
+    /// baseline: vertical text not set sideways (CSS Inline 3 §4.1,
+    /// `dominant-baseline: auto`).
+    pub fn central_baseline(&self) -> bool {
+        self.writing_mode.is_vertical() && !self.writing_sideways && self.text_orientation != TextOrientation::Sideways
+    }
+}
+
+/// `text-orientation` (CSS Writing Modes 3 §5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextOrientation {
+    #[default]
+    Mixed,
+    Upright,
+    Sideways,
+}
+
 /// `unicode-bidi`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnicodeBidi {
@@ -1629,6 +1647,14 @@ pub struct ComputedStyle {
     pub direction: Direction,
     /// `writing-mode` (inherited).
     pub writing_mode: WritingMode,
+    /// `writing-mode: sideways-*`: all text set sideways (inherited with
+    /// the writing mode).
+    pub writing_sideways: bool,
+    /// `text-orientation` (inherited).
+    pub text_orientation: TextOrientation,
+    /// `text-combine-upright`: 0 none, 1 all, n + 1 for `digits n`
+    /// (inherited).
+    pub text_combine_upright: u8,
     /// `unicode-bidi` (not inherited).
     pub unicode_bidi: UnicodeBidi,
     /// Layout-internal: a vertical writing mode's style transposed into
@@ -1890,6 +1916,9 @@ impl ComputedStyle {
             applied_decorations: Vec::new(),
             direction: Direction::Ltr,
             writing_mode: WritingMode::HorizontalTb,
+            writing_sideways: false,
+            text_orientation: TextOrientation::Mixed,
+            text_combine_upright: 0,
             unicode_bidi: UnicodeBidi::Normal,
             layout_transposed: false,
             tab_size: 8.0,
@@ -1999,6 +2028,9 @@ impl ComputedStyle {
             overflow_wrap: parent.overflow_wrap,
             direction: parent.direction,
             writing_mode: parent.writing_mode,
+            writing_sideways: parent.writing_sideways,
+            text_orientation: parent.text_orientation,
+            text_combine_upright: parent.text_combine_upright,
             tab_size: parent.tab_size,
             tab_size_length: parent.tab_size_length,
             font_family_list: parent.font_family_list.clone(),
@@ -2091,6 +2123,9 @@ impl ComputedStyle {
             && self.overflow_wrap == o.overflow_wrap
             && self.direction == o.direction
             && self.writing_mode == o.writing_mode
+            && self.writing_sideways == o.writing_sideways
+            && self.text_orientation == o.text_orientation
+            && self.text_combine_upright == o.text_combine_upright
             && self.tab_size == o.tab_size
             && self.tab_size_length == o.tab_size_length
             && self.font_family_list == o.font_family_list

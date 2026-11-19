@@ -565,7 +565,18 @@ impl<'a> Layouter<'a> {
             col_x.push(x);
             x += w + hs;
         }
+        // Right to left, the columns run from the right edge (CSS 2.1
+        // §17.5: the table's direction orders them).
+        let rtl = b.style.direction == rabbithole_style::Direction::Rtl;
+        if rtl {
+            let right = x - hs;
+            for (cx, w) in col_x.iter_mut().zip(&widths) {
+                *cx = content_x + hs + (right - (*cx + w));
+            }
+        }
         let span_w = |c: usize, span: usize| -> f32 { widths[c..c + span].iter().sum::<f32>() + (span.saturating_sub(1)) as f32 * hs };
+        // The left edge of `span` columns from `c`.
+        let span_x = |c: usize, span: usize| -> f32 { if rtl { col_x[c + span - 1] } else { col_x[c] } };
 
         // Pass 1: lay out cells (at y = 0) and measure them.
         let nrows = g.rows.len();
@@ -577,7 +588,7 @@ impl<'a> Layouter<'a> {
                 cell.style = Rc::new(hidden_cell_style(&cell.style));
             }
             let ex = cell_extras(&cell.style);
-            let ccb = Cb { x: col_x[info.col], width: cw, height: None };
+            let ccb = Cb { x: span_x(info.col, info.colspan), width: cw, height: None };
             let mut bfc = Bfc::new();
             self.layout_block(cell, &ccb, 0.0, &mut bfc, WidthMode::Fixed((cw - ex).max(0.0)));
             // Cells have no margins.
@@ -646,7 +657,7 @@ impl<'a> Layouter<'a> {
             y += row_h[r] + vs;
         }
         let content_h = if nrows > 0 { y - content_y } else { 0.0 };
-        let grid_x = col_x.first().copied().unwrap_or(content_x);
+        let grid_x = if n > 0 { span_x(0, n) } else { content_x };
         let grid_w: f32 = widths.iter().sum::<f32>() + (n.saturating_sub(1)) as f32 * hs;
         for (i, info) in g.cells.iter().enumerate() {
             let end = info.row + info.rowspan;
@@ -722,7 +733,7 @@ impl<'a> Layouter<'a> {
                 continue;
             }
             let span = cbx.span.min(n - cbx.first).max(1);
-            let r = Rect::new(col_x[cbx.first], gy, span_w(cbx.first, span), gh);
+            let r = Rect::new(span_x(cbx.first, span), gy, span_w(cbx.first, span), gh);
             let bx = match cbx.path.1 {
                 Some(j) => &mut b.children[cbx.path.0].children[j],
                 None => &mut b.children[cbx.path.0],
@@ -788,10 +799,16 @@ impl<'a> Layouter<'a> {
     /// the outer halves and no padding.
     pub(crate) fn resolve_collapsed_borders(&mut self, table: &mut LayoutBox) {
         let g = build_grid(table, self.ctx.doc);
+        // A vertical table is laid out transposed: so are the cascaded
+        // borders read here.
+        let vertical = table.style.layout_transposed.then_some(table.style.writing_mode);
         let orig = |b: &LayoutBox| -> Rc<ComputedStyle> {
             if b.pseudo.is_none() {
                 if let Some(s) = b.node.and_then(|n| self.ctx.styles.get(n)) {
-                    return s.clone();
+                    return match vertical {
+                        Some(wm) => Rc::new(crate::wm::transposed_as(s, wm)),
+                        None => s.clone(),
+                    };
                 }
             }
             b.style.clone()
@@ -844,6 +861,17 @@ impl<'a> Layouter<'a> {
                 a
             }
         }
+        // Two cells' borders differing only in colour: the one nearer the
+        // start (left in ltr, right in rtl: the previous column) and the
+        // top wins (CSS 2.1 §17.6.2.1, rule 5).
+        fn earlier_wins(own: Cand, earlier: Cand) -> Cand {
+            let b = better(own, earlier);
+            if b.1 != BorderStyle::Hidden && own.1 != BorderStyle::Hidden && b == own && own.0 == earlier.0 && style_rank(own.1) == style_rank(earlier.1) && own.3 == earlier.3 {
+                earlier
+            } else {
+                b
+            }
+        }
         const CELL: u8 = 6;
         const ROW: u8 = 5;
         const GROUP: u8 = 4;
@@ -894,7 +922,7 @@ impl<'a> Layouter<'a> {
             top = better(top, side(&row_styles[c.row], 0, ROW));
             if c.row > 0 {
                 if let Some(j) = g.slots[c.row - 1][c.col] {
-                    top = better(top, side(&cell_styles[j], 2, CELL));
+                    top = earlier_wins(top, side(&cell_styles[j], 2, CELL));
                 }
                 top = better(top, side(&row_styles[c.row - 1], 2, ROW));
             }
@@ -959,7 +987,7 @@ impl<'a> Layouter<'a> {
             }
             if c.col > 0 {
                 if let Some(j) = g.slots[c.row][c.col - 1] {
-                    left = better(left, side(&cell_styles[j], 1, CELL));
+                    left = earlier_wins(left, side(&cell_styles[j], 1, CELL));
                 }
             } else {
                 left = better(left, side(&row_styles[c.row], 3, ROW));
