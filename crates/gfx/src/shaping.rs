@@ -63,6 +63,18 @@ impl ShapeFeatures {
 }
 
 impl FontContext {
+    /// Whether the face has a real small-capitals feature (`smcp` in its
+    /// GSUB table), which `font-synthesis-small-caps: none` keeps.
+    pub fn has_small_caps(&self, font: crate::FontId) -> bool {
+        let idx = self.resolve_index(font.face().0);
+        let Some((bytes, layout, _)) = self.shaping_data(idx) else { return false };
+        if !layout {
+            return false;
+        }
+        let Ok(face) = rustybuzz::ttf_parser::Face::parse(&bytes, 0) else { return false };
+        face.tables().gsub.is_some_and(|g| g.features.into_iter().any(|f| f.tag == rustybuzz::ttf_parser::Tag::from_bytes(b"smcp")))
+    }
+
     /// SFNT bytes of a face and whether it has OpenType layout tables.
     fn shaping_data(&self, idx: usize) -> Option<(Rc<Vec<u8>>, bool, bool)> {
         if let Some(d) = self.shaping.data.borrow().get(&idx) {

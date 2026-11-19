@@ -1878,8 +1878,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                                 variations: if style.applied_decorations.is_empty() { Vec::new() } else { style.font_variation_settings.clone() },
                             },
                             shadows: style.text_shadow.clone(),
-                            // (Small caps are only synthesized.)
-                            small_caps: style.font_variant_small_caps && style.font_synthesis_small_caps,
+                            // (Drawn as synthesized small caps; without
+                            // synthesis only a face with real ones has them.)
+                            small_caps: style.font_variant_small_caps && (style.font_synthesis_small_caps || self.lay.ctx.fonts.has_small_caps(tm.font)),
                             oblique,
                             emphasis: if item == MARKER_ITEM { None } else { emphasis_of(&style) },
                         },
