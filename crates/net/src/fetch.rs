@@ -1183,7 +1183,12 @@ impl Fetcher {
             let mut b = resp.body;
             let _ = std::io::copy(&mut b, &mut std::io::sink());
             let fresh = c.freshen(entry, &resp.headers, t_req, t_resp);
-            return Ok(hop_from_entry(&fresh));
+            // The stored response never keeps Set-Cookie, but the 304
+            // itself may set cookies: they apply like any response's.
+            let mut hop = hop_from_entry(&fresh);
+            hop.headers.retain(|(k, _)| k != "set-cookie");
+            hop.headers.extend(resp.headers.iter().filter(|(k, _)| k == "set-cookie").cloned());
+            return Ok(hop);
         }
         // Unsafe methods invalidate stored responses for the URL.
         if !matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE") && resp.status < 400 {

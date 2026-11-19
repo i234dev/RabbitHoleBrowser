@@ -1069,3 +1069,20 @@ fn localhost_subdomains_resolve_to_loopback_and_are_separate_sites() {
     assert_eq!(f.cookies.as_ref().unwrap().lock().unwrap().len(), 1, "*.localhost is a secure context for Secure cookies");
     assert_ne!(url::site_of("a.b.localhost"), url::site_of("c.localhost"));
 }
+
+#[test]
+fn set_cookie_on_a_304_revalidation_is_stored() {
+    let srv = serve(Arc::new(|req: &Req| {
+        if req.header("if-none-match") == Some("\"v1\"") {
+            return (304, hv(&[("etag", "\"v1\""), ("set-cookie", "fresh=2; Path=/")]), Vec::new());
+        }
+        (200, hv(&[("etag", "\"v1\""), ("cache-control", "no-cache"), ("content-type", "text/plain"), ("set-cookie", "first=1; Path=/")]), b"body".to_vec())
+    }));
+    let f = fetcher();
+    assert_eq!(f.request(&Request::get(srv.url("/r"))).unwrap().body, b"body");
+    let r = f.request(&Request::get(srv.url("/r"))).unwrap();
+    assert_eq!((r.status, r.body.as_slice()), (200, b"body".as_slice()), "served from the revalidated cache entry");
+    assert_eq!(srv.requests().len(), 2);
+    let jar = f.cookies.as_ref().unwrap().lock().unwrap();
+    assert_eq!(jar.header_for(&srv.url("/")).as_deref(), Some("first=1; fresh=2"));
+}
