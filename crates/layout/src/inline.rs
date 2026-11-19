@@ -832,6 +832,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     if block && self.cur.has_content {
                         self.pending_abs.push(*c);
                     }
+                    self.children[*c].static_align = None;
                 }
                 Piece::Break => self.finish_line(true),
                 Piece::Gap(w) => {

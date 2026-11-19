@@ -201,10 +201,36 @@ pub fn parse_track_list(toks: &[Token], ctx: &LengthContext) -> Option<Vec<Track
         }
     }
     let items = parse_items(&mut cur, ctx)?;
-    if !cur.done() {
+    if !cur.done() || !valid_intrinsic_repeat(&items) {
         return None;
     }
     Some(items)
+}
+
+/// `<fixed-size>` (Grid2 §7.2): a length-percentage in at least one bound,
+/// and no flexible minimum.
+fn is_fixed_size(size: &TrackSize) -> bool {
+    let breadth = |s: &TrackSize| matches!(s, TrackSize::Length(Length::Px(_) | Length::Percent(_) | Length::Calc(..) | Length::Math(_)) | TrackSize::Calc(..));
+    match size {
+        TrackSize::MinMax(min, max) => breadth(min) || (breadth(max) && !matches!(**min, TrackSize::Fr(_))),
+        other => breadth(other),
+    }
+}
+
+/// An automatic repetition of intrinsic sizes (allowed in grid lanes,
+/// Grid3 §3.2.1) requires every other track to have a fixed size.
+fn valid_intrinsic_repeat(items: &[TrackListItem]) -> bool {
+    let fixed = |list: &[TrackListItem]| list.iter().all(|t| match t {
+        TrackListItem::Track { size, .. } => is_fixed_size(size),
+        _ => true,
+    });
+    let intrinsic = items.iter().any(|it| matches!(it, TrackListItem::Repeat { count: None, tracks, .. } if !fixed(tracks)));
+    !intrinsic
+        || items.iter().all(|it| match it {
+            TrackListItem::Track { size, .. } => is_fixed_size(size),
+            TrackListItem::Repeat { count: Some(_), tracks, .. } => fixed(tracks),
+            _ => true,
+        })
 }
 
 fn parse_items(cur: &mut Cur, ctx: &LengthContext) -> Option<Vec<TrackListItem>> {

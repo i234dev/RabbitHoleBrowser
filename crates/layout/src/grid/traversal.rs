@@ -9,7 +9,7 @@ use super::pass::{Frame,Measurements,Target};
 use super::phases::{AvailableSpace,AxisLayout,GridAxis,GridOperation,MeasureInputs,MeasurePoint,MinContentProbe,OperationKind,PerpendicularEstimate};
 use crate::block::Layouter;
 use crate::tree::{Flow,LayoutBox};
-use rabbithole_style::{ContentDistribution,ItemAlign};
+use rabbithole_style::ItemAlign;
 
 pub(super) fn ordinary_orthogonal_grid(b:&LayoutBox)->bool {
     if subgrid::requests(b)!=(false,false) {return false;}
@@ -26,8 +26,8 @@ pub(super) fn ordinary_orthogonal_grid(b:&LayoutBox)->bool {
 
 
 pub(super) fn ordinary_inputs(b:&LayoutBox,spaces:[AvailableSpace;2],gaps:[f32;2])->MeasureInputs {
-    let stretch=|axis:usize,align|spaces[axis].definite().is_some()&&matches!(align,ContentDistribution::Stretch|ContentDistribution::FlexStart);
-    let layouts=[AxisLayout::new(b.style.justify_content,stretch(0,b.style.justify_content)),AxisLayout::new(b.style.align_content,stretch(1,b.style.align_content))];
+    let stretch=|axis:usize|spaces[axis].definite().is_some()&&super::stretches_tracks(&b.style,axis==1);
+    let layouts=[AxisLayout::new(b.style.justify_content,stretch(0)),AxisLayout::new(b.style.align_content,stretch(1))];
     // This independent container has no inherited geometry. Item percentage
     // bases below come from its actual area spans, not these container tags.
     MeasureInputs::new(spaces,[AvailableSpace::Indefinite;2],gaps,layouts,spaces[0],None,None)

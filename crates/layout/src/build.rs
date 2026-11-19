@@ -385,11 +385,14 @@ impl<'a> Builder<'a> {
         if style.display == Display::InlineTable && !out_of_flow && !floated {
             b.kind = BoxKind::InlineBlock;
         }
+        // The body's overflow propagates to the viewport when the root's is
+        // visible (CSS Overflow 3 §3.3); its used value is then `visible`.
+        let overflow_propagated = tag == "body"
+            && doc.parent(node).filter(|&p| doc.tag(p) == Some("html")).and_then(|p| self.ctx.styles.get(p)).is_some_and(|root| !root.overflow_x.clips() && !root.overflow_y.clips());
         b.bfc_root = out_of_flow
             || floated
             || matches!(kind, BoxKind::InlineBlock | BoxKind::TableCell | BoxKind::Table)
-            || style.overflow_x.clips()
-            || style.overflow_y.clips()
+            || (!overflow_propagated && (style.overflow_x.clips() || style.overflow_y.clips()))
             || matches!(style.display, Display::FlowRoot | Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid);
         let contained = !matches!(style.display, Display::Inline | Display::Contents) && !matches!(tag, "html" | "body");
         b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && !matches!(tag, "html" | "body");

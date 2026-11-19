@@ -243,6 +243,12 @@ pub struct LayoutBox {
     pub(crate) bottom_margins: (f32, f32),
     /// Static position hint for absolutely positioned boxes.
     pub static_pos: (f32, f32),
+    /// Self-alignment within a static-position rectangle whose start corner
+    /// is `static_pos` (CSS Align 3 §A; children of grid containers).
+    pub static_align: Option<StaticAlign>,
+    /// A grid container whose items' areas overlap: its items then paint
+    /// atomically (as inline blocks) so later items cover earlier ones.
+    pub grid_items_overlap: bool,
     pub colspan: u32,
     /// Whether this box establishes a block formatting context.
     pub bfc_root: bool,
@@ -344,6 +350,8 @@ impl LayoutBox {
             collapsed_bottom_margin: 0.0,
             bottom_margins: (0.0, 0.0),
             static_pos: (0.0, 0.0),
+            static_align: None,
+            grid_items_overlap: false,
             colspan: 1,
             bfc_root: false,
             clips: false,
@@ -517,7 +525,22 @@ pub(crate) fn sticky_offset_for(inset: &Edges<rabbithole_style::Length>, mr: Rec
     (dx, dy)
 }
 
+/// A static-position rectangle and the alignment of an absolutely
+/// positioned box with auto insets inside it: per axis, the size and the
+/// fraction of the free space before the box (0 start, 0.5 center, 1 end).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StaticAlign {
+    pub size: (f32, f32),
+    pub factor: (f32, f32),
+}
+
 impl LayoutBox {
+    /// The element of an out-of-flow box: its own, or that of the box an
+    /// orthogonal writing-mode wrapper contains.
+    pub(crate) fn abs_node(&self) -> Option<rabbithole_dom::NodeId> {
+        self.node.or_else(|| if self.wm_wrapper { self.children.first().and_then(|c| c.node) } else { None })
+    }
+
     /// Move this box and everything inside it.
     pub fn translate(&mut self, dx: f32, dy: f32) {
         if dx == 0.0 && dy == 0.0 {

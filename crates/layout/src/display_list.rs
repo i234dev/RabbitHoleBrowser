@@ -837,7 +837,26 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 self.paint_float_or_atomic(c);
             }
         }
-        if b.lines.is_empty() {
+        if b.grid_items_overlap && b.formatting == crate::tree::Formatting::Grid && b.lines.is_empty() {
+            // Grid items paint as inline blocks (atomically), in
+            // order-modified document order (Grid2 §9.5 / §4.3). Their
+            // positioned descendants stay with the enclosing context.
+            // (Without overlapping areas only overflowing content could
+            // tell the difference; such grids keep the layered order.)
+            if phase == Phase::Content {
+                let mut items: Vec<&'t LayoutBox> = b.children.iter().filter(|c| c.flow == Flow::InFlow && !Self::is_deferred(c)).collect();
+                if items.iter().any(|c| c.style.order != 0) {
+                    items.sort_by_key(|c| c.style.order);
+                }
+                for c in items {
+                    if c.kind != BoxKind::Text {
+                        self.paint_background_and_border(c, false);
+                    }
+                    self.paint_contents(c);
+                    self.paint_outline(c);
+                }
+            }
+        } else if b.lines.is_empty() {
             for c in b.children.iter().filter(|c| c.flow == Flow::InFlow && !Self::is_deferred(c)) {
                 if phase == Phase::Backgrounds && c.kind != BoxKind::Text {
                     self.paint_background_and_border(c, false);

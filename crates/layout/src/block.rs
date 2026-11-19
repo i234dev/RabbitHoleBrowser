@@ -462,13 +462,16 @@ impl<'a> Layouter<'a> {
                 if l <= cb.x && r >= cb.x + cb.width {
                     break;
                 }
-                let outer = content_w + pb_h + ml + mr;
+                // The used margins of a sized box absorb the rest of the
+                // containing block; next to floats only its own margins count.
+                let (sml, smr) = (style.margin.left.resolve(cbw).unwrap_or(0.0), style.margin.right.resolve(cbw).unwrap_or(0.0));
+                let outer = content_w + pb_h + sml + smr;
                 if style.width.is_auto() {
                     content_w = (r - l - ml - mr - pb_h).max(0.0);
                     x = l + ml;
                     break;
                 } else if outer <= r - l + 0.01 {
-                    x = l + ml;
+                    x = l + sml;
                     break;
                 }
                 match bfc.next_y(y) {
@@ -803,6 +806,7 @@ impl<'a> Layouter<'a> {
                     let block = !b.children[i].style.display_before_blockification.is_inline_level();
                     let x = content_x + if block && b.style.direction == rabbithole_style::Direction::Rtl { cb.width } else { 0.0 };
                     b.children[i].static_pos = (x, cursor + off);
+                    b.children[i].static_align = None;
                 }
                 Flow::FloatLeft | Flow::FloatRight => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
@@ -964,7 +968,7 @@ impl<'a> Layouter<'a> {
         }
     }
 
-    fn clamp_height(&self, style: &ComputedStyle, h: f32, cb_h: Option<f32>, pb_v: f32) -> f32 {
+    pub(crate) fn clamp_height(&self, style: &ComputedStyle, h: f32, cb_h: Option<f32>, pb_v: f32) -> f32 {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
         let mut h = h;
         let max = match style.max_height {
@@ -1159,7 +1163,7 @@ impl<'a> Layouter<'a> {
         let mut found = false;
         for i in 0..b.children.len() {
             if b.children[i].flow == Flow::Absolute {
-                let area = b.children[i].node.and_then(|n| {
+                let area = b.children[i].abs_node().and_then(|n| {
                     if inline_cbs.is_empty() {
                         return self.abs_cb.get(&n).copied();
                     }
@@ -1211,7 +1215,11 @@ impl<'a> Layouter<'a> {
         let (mut mode, mut avail) = match (l, r, style.width.is_auto()) {
             (Some(l), Some(r), true) => (WidthMode::Fixed((cb.w - l - r - ml - mr - pb_h).max(0.0)), cb.w),
             _ => {
-                let used = l.or(r).unwrap_or(0.0);
+                // With both insets auto the box starts at its static
+                // position (CSS 2.1 §10.3.7); one left of the containing
+                // block (a grid area) widens the space up to its right edge.
+                let before = if l.is_none() && r.is_none() && c.static_align.is_none() && !static_right { (c.static_pos.0 + ml - cb.x).min(0.0) } else { 0.0 };
+                let used = l.or(r).unwrap_or(before);
                 (WidthMode::ShrinkToFit, (cb.w - used).max(0.0))
             }
         };
@@ -1291,6 +1299,8 @@ impl<'a> Layouter<'a> {
             cb.x + l + ml
         } else if let Some(r) = r {
             cb.right() - r - mr - c.rect.w
+        } else if let Some(a) = c.static_align {
+            c.static_pos.0 + ml + a.factor.0 * (a.size.0 - c.rect.w - ml - mr)
         } else {
             if static_right { c.static_pos.0 - mr - c.rect.w } else { c.static_pos.0 + ml }
         };
@@ -1305,6 +1315,8 @@ impl<'a> Layouter<'a> {
             cb.y + t + mt
         } else if let Some(bt) = btm {
             cb.bottom() - bt - mb - c.rect.h
+        } else if let Some(a) = c.static_align {
+            c.static_pos.1 + mt + a.factor.1 * (a.size.1 - c.rect.h - mt - mb)
         } else {
             c.static_pos.1 + mt
         };

@@ -218,6 +218,7 @@ impl<'a> Layouter<'a> {
             match c.flow {
                 Flow::Absolute => {
                     c.static_pos = (content_x, content_y);
+                    c.static_align = None;
                 }
                 _ => order.push((c.style.order, i)),
             }
