@@ -867,19 +867,18 @@ impl App {
         omnibox::resolve_input(input, self.settings.search_engine, &self.settings.homepage)
     }
 
-    /// Navigate a tab to a URL string (GET).
+    /// Navigate a tab to a URL string (GET) on the user's behalf (typed
+    /// address, bookmark, history, reload): a browser-initiated
+    /// navigation, so no Referer and no initiator — the page currently
+    /// shown must not make it cross-site (`Sec-Fetch-Site: none`, Strict
+    /// cookies sent).
     pub(crate) fn navigate_tab(&mut self, idx: usize, url: &str, push_history: bool) {
         let Some(parsed) = Url::parse(url) else {
             let html = pages::error_page(url, "The address could not be understood.");
             self.show_internal(idx, &html, url, push_history);
             return;
         };
-        let referer = self.tabs.get(idx).and_then(|t| t.current_url.clone()).filter(|u| u.is_http());
-        let mut req = Request::get(parsed);
-        if let Some(r) = referer {
-            req = req.with_referer(r);
-        }
-        self.navigate_request(idx, req, push_history);
+        self.navigate_request(idx, Request::get(parsed), push_history);
     }
 
     /// Navigate a tab with an arbitrary request (form submissions use
@@ -1321,8 +1320,13 @@ impl App {
             self.new_tab(Some(&link.to_string()), true);
             return;
         }
+        // A link of the current page: the page is the initiator.
         let idx = self.active;
-        self.navigate_tab(idx, &link.to_string(), true);
+        let mut req = Request::get(link);
+        if let Some(r) = self.tabs.get(idx).and_then(|t| t.current_url.clone()).filter(|u| u.is_http()) {
+            req = req.with_referer(r);
+        }
+        self.navigate_request(idx, req, true);
     }
 
     pub(crate) fn submit_url_field(&mut self) {
