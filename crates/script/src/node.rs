@@ -1773,27 +1773,9 @@ pub(crate) fn install(realm: &mut Realm) {
     m(realm, "lookupPrefix", 1, n_null);
     m(realm, "isDefaultNamespace", 1, n_false);
 
-    // ParentNode / ChildNode mixins (defined on Node for simplicity).
-    acc(realm, "children", n_children);
-    acc(realm, "firstElementChild", n_first_element_child);
-    acc(realm, "lastElementChild", n_last_element_child);
-    acc(realm, "childElementCount", n_child_element_count);
-    acc(realm, "previousElementSibling", n_prev_element_sibling);
-    acc(realm, "nextElementSibling", n_next_element_sibling);
-    m(realm, "append", 1, n_append);
-    m(realm, "prepend", 1, n_prepend);
-    m(realm, "before", 1, n_before);
-    m(realm, "after", 1, n_after);
-    m(realm, "replaceWith", 1, n_replace_with);
-    m(realm, "replaceChildren", 1, n_replace_children);
-    m(realm, "remove", 0, n_remove);
-    m(realm, "querySelector", 1, n_query_selector);
-    m(realm, "querySelectorAll", 1, n_query_selector_all);
-    m(realm, "getElementsByTagName", 1, n_get_elements_by_tag_name);
-    m(realm, "getElementsByTagNameNS", 2, n_get_elements_by_tag_name);
-    m(realm, "getElementsByClassName", 1, n_get_elements_by_class_name);
-
     let cd = define_class(realm, "CharacterData", Some("Node"), illegal_ctor);
+    install_child_node(realm, cd);
+    install_non_document_type_child_node(realm, cd);
     realm.define_accessor(cd, "data", Some(cd_data_get), Some(cd_data_set), rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_accessor(cd, "length", Some(cd_length), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_method(cd, "appendData", 1, cd_append_data);
@@ -1807,12 +1789,14 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "Comment", Some("CharacterData"), comment_ctor);
     define_class(realm, "CDATASection", Some("Text"), illegal_ctor);
     let dt = define_class(realm, "DocumentType", Some("Node"), illegal_ctor);
+    install_child_node(realm, dt);
     realm.define_accessor(dt, "name", Some(doctype_name), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_accessor(dt, "publicId", Some(doctype_public_id), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_accessor(dt, "systemId", Some(doctype_system_id), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     let pi = define_class(realm, "ProcessingInstruction", Some("CharacterData"), illegal_ctor);
     realm.define_accessor(pi, "target", Some(pi_target), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     let frag = define_class(realm, "DocumentFragment", Some("Node"), fragment_ctor);
+    install_parent_node(realm, frag);
     realm.define_method(frag, "getElementById", 1, fragment_get_element_by_id);
 
     // NodeList / HTMLCollection prototypes inherit from Array.prototype so
@@ -1871,4 +1855,44 @@ mod selector_pass_tests {
         assert_eq!(out, ["1 email true", "true"]);
         assert!(env.errors().is_empty(), "{:?}", env.errors());
     }
+}
+
+fn mixin_acc(realm: &mut Realm, p: ObjectId, name: &str, g: rabbithole_js::NativeFn) {
+    realm.define_accessor(p, name, Some(g), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
+}
+
+/// The ParentNode mixin (DOM §4.2.6): Document, DocumentFragment, Element.
+/// Kept off `Node.prototype`, where feature tests such as
+/// `Node.prototype.lastElementChild === null` must not hit a getter.
+pub(crate) fn install_parent_node(realm: &mut Realm, p: ObjectId) {
+    mixin_acc(realm, p, "children", n_children);
+    mixin_acc(realm, p, "firstElementChild", n_first_element_child);
+    mixin_acc(realm, p, "lastElementChild", n_last_element_child);
+    mixin_acc(realm, p, "childElementCount", n_child_element_count);
+    realm.define_method(p, "prepend", 0, n_prepend);
+    realm.define_method(p, "append", 0, n_append);
+    realm.define_method(p, "replaceChildren", 0, n_replace_children);
+    realm.define_method(p, "querySelector", 1, n_query_selector);
+    realm.define_method(p, "querySelectorAll", 1, n_query_selector_all);
+}
+
+/// The ChildNode mixin (DOM §4.2.8): DocumentType, Element, CharacterData.
+pub(crate) fn install_child_node(realm: &mut Realm, p: ObjectId) {
+    realm.define_method(p, "before", 0, n_before);
+    realm.define_method(p, "after", 0, n_after);
+    realm.define_method(p, "replaceWith", 0, n_replace_with);
+    realm.define_method(p, "remove", 0, n_remove);
+}
+
+/// NonDocumentTypeChildNode (DOM §4.2.7): Element, CharacterData.
+pub(crate) fn install_non_document_type_child_node(realm: &mut Realm, p: ObjectId) {
+    mixin_acc(realm, p, "previousElementSibling", n_prev_element_sibling);
+    mixin_acc(realm, p, "nextElementSibling", n_next_element_sibling);
+}
+
+/// getElementsByTagName / NS / ClassName: Document and Element.
+pub(crate) fn install_get_elements_by(realm: &mut Realm, p: ObjectId) {
+    realm.define_method(p, "getElementsByTagName", 1, n_get_elements_by_tag_name);
+    realm.define_method(p, "getElementsByTagNameNS", 2, n_get_elements_by_tag_name);
+    realm.define_method(p, "getElementsByClassName", 1, n_get_elements_by_class_name);
 }
