@@ -422,7 +422,7 @@ fn first_letter_wraps_letter_in_nested_block() {
     let tree = fx.layout();
     let node = fx.doc.element_by_id("d").unwrap();
     let d = find(&tree.root, node).unwrap();
-    assert!(d.children.iter().any(|c| c.flow == Flow::FloatLeft && c.rect.height > 40.0), "{}", tree.dump());
+    assert!(d.children.iter().any(|c| c.flow == Flow::FloatLeft && c.rect.h > 40.0), "{}", tree.dump());
 }
 
 /// Percentage `top` against an indefinite containing block height is
