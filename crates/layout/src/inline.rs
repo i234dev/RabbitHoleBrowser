@@ -448,11 +448,23 @@ impl<'a> Layouter<'a> {
         if b.pieces.is_some() {
             return;
         }
-        let pieces = self.build_pieces(&b.items, &b.style);
+        // Combined-upright compositions break like their text (a letter
+        // among letters), not like atomic inlines: (child, first, last).
+        let tcy: Vec<(usize, char, char)> = b
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.wm_tcy)
+            .filter_map(|(i, c)| match c.children.first().and_then(|r| r.items.first()) {
+                Some(InlineItem::Text { text, .. }) => Some((i, text.chars().next()?, text.chars().next_back()?)),
+                _ => None,
+            })
+            .collect();
+        let pieces = self.build_pieces(&b.items, &b.style, &tcy);
         b.pieces = Some(pieces);
     }
 
-    fn build_pieces(&mut self, items: &[InlineItem], container: &Rc<ComputedStyle>) -> Vec<Piece> {
+    fn build_pieces(&mut self, items: &[InlineItem], container: &Rc<ComputedStyle>, tcy: &[(usize, char, char)]) -> Vec<Piece> {
         let container_wraps = container.white_space.wraps();
         let mut col = Collapser::new();
         let mut stack: Vec<usize> = Vec::new();
@@ -649,6 +661,18 @@ impl<'a> Layouter<'a> {
                     if let Some(o) = stack.pop() {
                         pieces.push(Piece::Close(o));
                     }
+                }
+                InlineItem::Atomic(c) if tcy.iter().any(|t| t.0 == *c) => {
+                    let &(_, first, last) = tcy.iter().find(|t| t.0 == *c).expect("composition");
+                    let rules = line_rules(container);
+                    let something = Some(lb::Unit { c: 'a', cls: lb::Lb::AL });
+                    let before = container_wraps && (prev_break_opp || prev_char.is_some_and(|p| p != ' ' && lb::direct_break(&rules, something, rules.unit(p), rules.unit(first), None)));
+                    pieces.push(Piece::Atomic(*c, before));
+                    prev_char = Some(last);
+                    last_char = Some(last);
+                    space_opp = None;
+                    prev_break_opp = false;
+                    col.prev_space = false;
                 }
                 InlineItem::Atomic(c) => {
                     // Atomic inlines break on both sides, except next to
