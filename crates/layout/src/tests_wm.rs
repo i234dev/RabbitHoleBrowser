@@ -334,3 +334,28 @@ fn top_aligned_inline_text_sits_at_the_line_top() {
     let y_of = |d: &str| ys.iter().find(|(t, _)| t == d).map(|p| p.1).unwrap_or(f32::NAN);
     assert!(y_of("b") < 5.0 && y_of("A") > 30.0, "{ys:?}");
 }
+
+#[test]
+fn legacy_clip_of_a_turned_absolute_box_is_physical() {
+    // An absolutely positioned image in a vertical-rl page is wrapped (it
+    // stays upright); its `clip` keeps clipping its physical top-left
+    // quarter.
+    let fx = Fx::new("<html style='writing-mode:vertical-rl'><body><div><img style='position:absolute;clip:rect(0px,50px,50px,0px);width:100px;height:100px'></div></body></html>", "html, body { margin: 0; }");
+    let list = fx.display_list(&HashMap::new());
+    let mut stack: Vec<Matrix> = vec![[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]];
+    let mut clips = Vec::new();
+    for it in &list.items {
+        match it {
+            DisplayItem::PushTransform(m) => {
+                let top = *stack.last().unwrap();
+                stack.push(rabbithole_style::multiply_matrix(top, *m));
+            }
+            DisplayItem::PopTransform => {
+                stack.pop();
+            }
+            DisplayItem::PushClip(r) => clips.push(rabbithole_gfx::path::transform_rect_bounds(stack.last().unwrap(), *r)),
+            _ => {}
+        }
+    }
+    assert!(clips.iter().any(|c| close(c.w, 50.0) && close(c.h, 50.0)), "{clips:?}\n{:#?}", list.items);
+}
