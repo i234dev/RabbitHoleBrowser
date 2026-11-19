@@ -608,7 +608,7 @@ pub(crate) fn compute_element<'a>(
             return out;
         }
     }
-    let (cq_w, cq_h) = rabbithole_css::container::unit_basis(doc, node, opts.state, env);
+    let (cq_w, cq_h) = if opts.state.containers.is_empty() { (env.width, env.height) } else { rabbithole_css::container::unit_basis(doc, node, opts.state, env) };
     crate::values::set_container_unit_basis(cq_w, cq_h);
     let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root, slot, memo, rollback);
     if let (Some(cache), Some(k)) = (share, key) {

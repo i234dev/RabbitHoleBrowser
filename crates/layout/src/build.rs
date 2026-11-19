@@ -583,7 +583,7 @@ impl<'a> Builder<'a> {
             children.insert(0, bf);
         }
         // A run-in is the first inline box of the block it runs into.
-        let run_in = self.run_ins.borrow_mut().remove(&node);
+        let run_in = if self.run_ins.borrow().is_empty() { None } else { self.run_ins.borrow_mut().remove(&node) };
         if let Some(r) = run_in {
             children.insert(0, r);
             b.run_in_host = true;
