@@ -1713,7 +1713,35 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 /// only with `all`.
 #[allow(clippy::too_many_arguments)]
 fn glyph_ink(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, x: f32, baseline: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
-    let mut out = Vec::new();
+    // The ink relative to the origin is cached across display list builds
+    // (the same link texts are decorated again on every rebuild).
+    type Key = (usize, u32, u32, bool, Box<str>);
+    thread_local! {
+        static INK: std::cell::RefCell<std::collections::HashMap<Key, std::rc::Rc<Vec<(f32, f32, f32, f32)>>>> = Default::default();
+    }
+    let key: Key = (font.0 ^ ((fonts as *const rabbithole_gfx::FontContext as usize) << 20), size.to_bits(), letter_spacing.to_bits(), all, Box::from(text));
+    let cached = INK.with(|c| c.borrow().get(&key).cloned());
+    let rel = match cached {
+        Some(r) => r,
+        None => {
+            let r = std::rc::Rc::new(glyph_ink_rel(fonts, font, size, text, letter_spacing, all));
+            INK.with(|c| {
+                let mut c = c.borrow_mut();
+                if c.len() > 2048 {
+                    c.clear();
+                }
+                c.insert(key, r.clone());
+            });
+            r
+        }
+    };
+    rel.iter().map(|&(a, b, c, d)| (x + a, x + b, baseline + c, baseline + d)).collect()
+}
+
+/// [`glyph_ink`] relative to the run's origin on its baseline.
+fn glyph_ink_rel(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
+    let (x, baseline) = (0.0f32, 0.0f32);
+    let mut out: Vec<(f32, f32, f32, f32)> = Vec::new();
     for g in fonts.shape(font, size, text, letter_spacing) {
         if !all {
             if let Some(c) = text.get(g.byte_index..).and_then(|t| t.chars().next()) {
@@ -1733,7 +1761,12 @@ fn glyph_ink(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, 
             let row = &bmp.coverage[r * w..(r + 1) * w];
             let (Some(a), Some(b)) = (row.iter().position(|&c| c > 96), row.iter().rposition(|&c| c > 96)) else { continue };
             let y = gy + r as f32;
-            out.push((gx + a as f32, gx + b as f32 + 1.0, y, y + 1.0));
+            let (x0, x1) = (gx + a as f32, gx + b as f32 + 1.0);
+            // Rows with the same extent merge into one box.
+            match out.last_mut() {
+                Some(last) if last.0 == x0 && last.1 == x1 && (last.3 - y).abs() < 0.01 => last.3 = y + 1.0,
+                _ => out.push((x0, x1, y, y + 1.0)),
+            }
         }
     }
     out

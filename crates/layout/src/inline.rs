@@ -2116,6 +2116,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.bidi_line();
 
         // Vertical metrics.
+        #[derive(Clone, Copy)]
         struct FM {
             above: f32,
             below: f32,
@@ -2127,8 +2128,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let mut a = self.strut.above;
         let mut d = self.strut.below;
         let mut extra_h: f32 = 0.0;
+        // (Consecutive fragments of one text item share their metrics:
+        // justified lines have one per word.)
+        let mut last_text: Option<(usize, FM)> = None;
         for f in &self.cur.frags {
             let fm = match &f.kind {
+                PFKind::Text { item, .. } if last_text.is_some_and(|l| l.0 == *item) => last_text.unwrap().1,
                 PFKind::Text { item, .. } => {
                     let style = self.style(*item).clone();
                     let tm = self.lay.text_metrics(&style);
@@ -2202,6 +2207,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     }
                 }
             };
+            if let PFKind::Text { item, .. } = &f.kind {
+                last_text = Some((*item, fm));
+            }
             if fm.mode == 0 {
                 a = a.max(fm.above);
                 d = d.max(fm.below);
