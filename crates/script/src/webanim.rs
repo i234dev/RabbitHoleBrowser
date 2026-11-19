@@ -266,7 +266,12 @@ fn anim_progress(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
     let reg = registry();
     {
         let mut r = reg.borrow_mut();
-        let Some(i) = r.effects.iter().position(|e| e.id == id) else { return Ok(Value::Undefined) };
+        // Effects are sorted by composite order: usually found by it.
+        let i = match r.effects.binary_search_by_key(&order, |e| e.order) {
+            Ok(i) if r.effects[i].id == id => Some(i),
+            _ => r.effects.iter().position(|e| e.id == id),
+        };
+        let Some(i) = i else { return Ok(Value::Undefined) };
         let e = &mut r.effects[i];
         let comp_same = composite.as_ref().is_none_or(|c| *c == e.composite);
         if e.progress == progress && e.iteration == iteration && e.order == order && comp_same {

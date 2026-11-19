@@ -433,9 +433,18 @@
   }
 
   // ---------------------------------------------------------- timeline
+  // While animation frames run, the timeline only moves at frames: its
+  // time is cached until the next one.
+  let tlCache = null;
+  const docTime = () => {
+    if (tlCache !== null) return tlCache;
+    const t = N.animTimeline();
+    if (activeFlag) tlCache = t;
+    return t;
+  };
   class AnimationTimeline {
     constructor() { ILLEGAL(); }
-    get currentTime() { return N.animTimeline() - this[S].origin; }
+    get currentTime() { return docTime() - this[S].origin; }
     get duration() { return null; }
   }
   tag(AnimationTimeline, 'AnimationTimeline');
@@ -572,7 +581,7 @@
 
   function refreshActive() {
     const on = ticking.size > 0 || pendingSet.size > 0 || eventQueue.length > 0 || cssTicking.size > 0 || replaceCheck;
-    if (on !== activeFlag) { activeFlag = on; N.animSetActive(on); }
+    if (on !== activeFlag) { activeFlag = on; tlCache = null; N.animSetActive(on); }
   }
 
   function currentTimeOf(a, ignoreHold) {
@@ -811,7 +820,8 @@
     const e = st.effect;
     if (!e || st.external) return;
     const es = e[S];
-    const target = es.target && !es.pseudo && es.target.isConnected ? es.target : null;
+    // (The engine skips disconnected targets.)
+    const target = es.target && !es.pseudo ? es.target : null;
     let r = target ? effectState(a) : null;
     // commitStyles: an effect finished exactly at an end of its active
     // interval commits its final value.
@@ -882,9 +892,22 @@
 
   // The frame hook.
   N.animSetHook(function update(phase) {
+    tlCache = null;
     if (phase === 0) {
       for (const a of Array.from(pendingSet)) runPendingTask(a);
-      for (const a of Array.from(ticking)) updateFinishedState(a, false, false);
+      for (const a of Array.from(ticking)) {
+        // Fast path: running and not reaching an end this frame.
+        const st = a[S];
+        if (!st.pendingTask && st.holdTime === null && st.startTime !== null && st.timeline) {
+          const ct = currentTimeOf(a);
+          if (ct !== null && ((st.rate > 0 && ct < effectEnd(a)) || (st.rate < 0 && ct > 0))) {
+            st.previousCurrentTime = ct;
+            syncEffect(a, false);
+            continue;
+          }
+        }
+        updateFinishedState(a, false, false);
+      }
       for (const a of Array.from(cssTicking)) cssRefresh(a);
       replaceCheck = false;
       removeReplaced();
