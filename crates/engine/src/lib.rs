@@ -548,7 +548,7 @@ impl Loader {
                     if u.is_http() && !mime.is_empty() && mime != "text/css" {
                         caches.css_wrong_type.insert(key.clone());
                     }
-                    let text = decode_text(&resp.body, resp.charset.as_deref());
+                    let text = rabbithole_net::decode_css(&resp.body, resp.charset.as_deref());
                     caches.css_failed.remove(&key);
                     caches.css.insert(key, Arc::from(text));
                 }

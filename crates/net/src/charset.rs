@@ -34,6 +34,34 @@ pub fn decode_text_with_encoding(body: &[u8], hint: Option<&str>) -> (String, &'
     }
 }
 
+/// Decode a style sheet (CSS Syntax 3 §3.2): byte order mark, then the
+/// HTTP charset, then an `@charset "...";` rule at the very start (UTF-16
+/// labels mean UTF-8 there), then as [`decode_text`] without a hint.
+pub fn decode_css(body: &[u8], hint: Option<&str>) -> String {
+    if bom_sniff(body).is_some() {
+        return decode_text(body, None);
+    }
+    if let Some(enc) = hint.map(|h| h.trim().trim_matches(|c| c == '"' || c == '\'')).and_then(Encoding::for_label) {
+        return enc.decode_without_bom(body);
+    }
+    const PREFIX: &[u8] = b"@charset \"";
+    if body.starts_with(PREFIX) {
+        let rest = &body[PREFIX.len()..body.len().min(1024)];
+        if let Some(end) = rest.windows(2).position(|w| w == b"\";") {
+            if let Some(mut enc) = std::str::from_utf8(&rest[..end]).ok().and_then(Encoding::for_label) {
+                if enc == Encoding::UTF_16BE || enc == Encoding::UTF_16LE {
+                    enc = Encoding::UTF_8;
+                }
+                return enc.decode_without_bom(body);
+            }
+        }
+    }
+    match std::str::from_utf8(body) {
+        Ok(s) => s.to_string(),
+        Err(_) => Encoding::WINDOWS_1252.decode_without_bom(body),
+    }
+}
+
 /// Look for `<meta charset=...>` / `http-equiv` content-type in the first
 /// 2 KiB of an HTML document.
 pub fn sniff_meta_charset(head: &[u8]) -> Option<String> {
@@ -76,6 +104,22 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod css_tests {
+    use super::decode_css;
+
+    #[test]
+    fn css_encoding_from_http_then_at_charset() {
+        // "\u{3042}" in Shift_JIS is 0x82 0xA0.
+        let sjis = b"@charset \"windows-1252\"; .\x82\xa0 {}";
+        assert!(decode_css(sjis, Some("Shift_JIS")).contains('\u{3042}'));
+        let at = b"@charset \"shift_jis\"; .\x82\xa0 {}";
+        assert!(decode_css(at, None).contains('\u{3042}'));
+        // UTF-16 labels in @charset mean UTF-8.
+        assert_eq!(decode_css("@charset \"UTF-16LE\"; .\u{e9} {}".as_bytes(), None), "@charset \"UTF-16LE\"; .\u{e9} {}");
+    }
 }
 
 #[cfg(test)]
