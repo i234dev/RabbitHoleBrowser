@@ -810,10 +810,9 @@ fn eval_product(comps: &[&[Token]], i: &mut usize) -> Option<Lin> {
 /// Names of the CSS Values 4 math functions evaluated here (besides
 /// `calc()`, `min()`, `max()`, `clamp()`).
 fn is_math_fn(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "round" | "mod" | "rem" | "abs" | "sign" | "sin" | "cos" | "tan" | "pow" | "sqrt" | "hypot" | "log" | "exp"
-    )
+    // (No allocation: every function component of a length or number,
+    // colors included, is tested.)
+    ["round", "mod", "rem", "abs", "sign", "sin", "cos", "tan", "pow", "sqrt", "hypot", "log", "exp"].iter().any(|f| name.eq_ignore_ascii_case(f))
 }
 
 fn number_lin(n: f32) -> Lin {
@@ -964,13 +963,20 @@ fn eval_unit(comps: &[&[Token]], i: &mut usize) -> Option<Lin> {
         [Token::Number(n)] => Some(Lin { num: *n, is_number: true, ..Lin::default() }),
         [Token::Function(f), ..] if is_math_fn(f) => eval_math_fn(c),
         // Numeric constants (CSS Values 4 §10.7.1).
-        [Token::Ident(k)] => match k.to_ascii_lowercase().as_str() {
-            "e" => Some(number_lin(std::f32::consts::E)),
-            "pi" => Some(number_lin(std::f32::consts::PI)),
-            "infinity" => Some(number_lin(f32::INFINITY)),
-            "-infinity" => Some(number_lin(f32::NEG_INFINITY)),
-            _ => None,
-        },
+        [Token::Ident(k)] => {
+            let is = |n: &str| k.eq_ignore_ascii_case(n);
+            if is("e") {
+                Some(number_lin(std::f32::consts::E))
+            } else if is("pi") {
+                Some(number_lin(std::f32::consts::PI))
+            } else if is("infinity") {
+                Some(number_lin(f32::INFINITY))
+            } else if is("-infinity") {
+                Some(number_lin(f32::NEG_INFINITY))
+            } else {
+                None
+            }
+        }
         [Token::OpenParen, ..] => eval_sum(&components(strip_function(c))),
         [Token::Delim('-')] => {
             // unary minus

@@ -1112,6 +1112,10 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
     match_compound_cached(c, doc, node, state, &SelectorMatcher::new(doc, state))
 }
 
+// Kept out of `match_from` (as before :lang()/:dir() moved out of it):
+// inlining the compound test into the recursive combinator walk makes
+// matching slower.
+#[inline(never)]
 fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, state: &MatchState, matcher: &SelectorMatcher<'_, 's>) -> bool {
     let el = match doc.element(node) {
         Some(e) => e,
@@ -1702,6 +1706,7 @@ fn shadow_including_parent(doc: &Document, node: NodeId) -> Option<NodeId> {
 /// The language of an element (HTML "language"): the nearest `lang` /
 /// `xml:lang` attribute (shadow-including), else the document's
 /// `Content-Language` pragma; lower case.
+#[inline(never)]
 pub fn element_language(doc: &Document, node: NodeId) -> Option<String> {
     let mut cur = Some(node);
     while let Some(n) = cur {
@@ -1723,6 +1728,7 @@ pub fn element_language(doc: &Document, node: NodeId) -> Option<String> {
 
 /// RFC 4647 §3.3.2 extended filtering of a language tag by a range
 /// (both lower case); `*` matches any subtag sequence.
+#[inline(never)]
 pub fn lang_range_matches(range: &str, tag: &str) -> bool {
     if range.is_empty() {
         return tag.is_empty();
@@ -1773,6 +1779,7 @@ pub fn first_strong_rtl(s: &str) -> Option<bool> {
 /// The auto direction of an element's content: its first strong
 /// character, skipping `bdi`, `script`, `style`, `textarea` and elements
 /// with a valid `dir`.
+#[inline(never)]
 pub fn auto_direction(doc: &Document, node: NodeId) -> Option<bool> {
     for c in doc.children(node) {
         if let Some(t) = doc.text(c) {
@@ -1794,6 +1801,7 @@ pub fn auto_direction(doc: &Document, node: NodeId) -> Option<bool> {
 }
 
 /// The directionality of an element (HTML §3.2.6.4): `true` for RTL.
+#[inline(never)]
 pub fn is_rtl(doc: &Document, node: NodeId) -> bool {
     let mut cur = node;
     loop {
@@ -1813,6 +1821,7 @@ pub fn is_rtl(doc: &Document, node: NodeId) -> bool {
     }
 }
 
+#[inline(never)]
 fn auto_rtl(doc: &Document, node: NodeId) -> bool {
     let Some(el) = doc.element(node) else { return false };
     if el.tag == "textarea" || (el.tag == "input" && el.attr("type").is_none_or(|t| matches!(t.to_ascii_lowercase().as_str(), "text" | "search" | "tel" | "url" | "email"))) {
