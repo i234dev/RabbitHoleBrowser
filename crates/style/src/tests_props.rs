@@ -1018,6 +1018,7 @@ fn perspective_and_preserve_3d() {
     assert!(!one("transform-style: preserve-3d; overflow: hidden").preserves_3d());
     assert!(!one("transform-style: preserve-3d; isolation: isolate").preserves_3d());
     assert!(!one("perspective: none").is_stacking_context());
+}
 
 #[test]
 fn supports_declaration_validation() {
