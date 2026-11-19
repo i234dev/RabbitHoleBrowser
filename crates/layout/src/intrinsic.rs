@@ -251,6 +251,32 @@ impl<'a> Layouter<'a> {
                     }
                     lead = false;
                     line += pending_space + width;
+                    // `overflow-wrap: anywhere` / `word-break: break-word`:
+                    // every grapheme cluster may end a line (min-content).
+                    if wraps && (st.overflow_wrap == rabbithole_style::OverflowWrap::Anywhere || st.word_break == rabbithole_style::WordBreak::BreakWord) && text.chars().nth(1).is_some() {
+                        let font = self.font_for(st);
+                        let mut first = true;
+                        let mut start = 0;
+                        let mut it = text.char_indices().peekable();
+                        while it.next().is_some() {
+                            let end = it.peek().map_or(text.len(), |n| n.0);
+                            if it.peek().is_some_and(|n| matches!(crate::linebreak::class(n.1), crate::linebreak::Lb::CM | crate::linebreak::Lb::ZWJ)) {
+                                continue;
+                            }
+                            let cw = self.measurer.width(font, st.font_size, &text[start..end]) + st.letter_spacing * text[start..end].chars().count() as f32;
+                            if first {
+                                run += pending_space + cw;
+                                first = false;
+                            } else {
+                                min = min.max(run);
+                                run = cw;
+                            }
+                            start = end;
+                        }
+                        pending_space = 0.0;
+                        trail = 0.0;
+                        continue;
+                    }
                     run += pending_space + width;
                     pending_space = 0.0;
                     // Other space separators ending a line hang.
