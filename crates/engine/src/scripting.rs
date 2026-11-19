@@ -233,12 +233,45 @@ impl HostEnv for EngineEnv<'_> {
     fn mark_dom_dirty(&mut self) {
         self.page.script.dom_dirty = true;
     }
+    fn web_animations(&mut self, registry: &rabbithole_script::WebAnimations) {
+        if !self.page.anim.script.as_ref().is_some_and(|r| Rc::ptr_eq(r, registry)) {
+            self.page.anim.script = Some(registry.clone());
+        }
+    }
+    fn web_animation_style(&mut self, node: NodeId, order: u64) -> Option<Rc<ComputedStyle>> {
+        self.ensure_layout();
+        self.engine.script_animation_style(self.page, node, order)
+    }
+    fn css_animations(&mut self) -> Vec<rabbithole_script::CssAnimationInfo> {
+        if self.page.script.dom_dirty {
+            // Style changes start and stop CSS animations.
+            let t = std::time::Instant::now();
+            self.engine.flush_style(self.page);
+            rabbithole_script::exclude_from_watchdog(t.elapsed());
+        }
+        self.engine.css_animation_infos(self.page)
+    }
+    fn css_animation(&mut self, id: u64) -> Option<rabbithole_script::CssAnimationInfo> {
+        self.engine.css_animation_info(self.page, id)
+    }
+    fn set_css_animation(&mut self, id: u64, start: Option<f64>, hold: Option<f64>, rate: f64) {
+        if self.engine.set_css_animation(self.page, id, start, hold, rate) {
+            self.page.script.dom_dirty = true;
+        }
+    }
     fn ensure_layout(&mut self) {
+        if self.page.anim.script.is_some() && self.engine.sync_script_animations(self.page) {
+            self.page.script.dom_dirty = true;
+        }
         if self.page.script.dom_dirty {
             self.page.script.dom_dirty = false;
             let t = std::time::Instant::now();
             // Style + layout only; the display list waits for paint.
             self.engine.flush_layout(self.page);
+            // Elements styled for the first time get their script effects.
+            if self.page.anim.script.is_some() && self.engine.sync_script_animations(self.page) {
+                self.engine.flush_layout(self.page);
+            }
             // The browser's own work does not count against the script.
             rabbithole_script::exclude_from_watchdog(t.elapsed());
             if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
@@ -269,19 +302,30 @@ impl HostEnv for EngineEnv<'_> {
         Some(self.page.nodes_at_viewport(x, y))
     }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>> {
-        if !self.page.script.dom_dirty {
-            return self.page.styles.get(node).cloned().or_else(|| self.engine.unrendered_style(self.page, node));
+        let r = if self.page.script.dom_dirty {
+            // The DOM changed: compute just this element's chain instead of
+            // restyling and re-laying out the whole document (scripts often
+            // interleave style writes and reads).
+            let t = std::time::Instant::now();
+            let r = self.engine.computed_style_now(self.page, node);
+            rabbithole_script::exclude_from_watchdog(t.elapsed());
+            if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                eprintln!("[layout] style_chain {:?}", t.elapsed());
+            }
+            r
+        } else {
+            None
+        };
+        if self.page.anim.script.is_some() && self.engine.sync_script_animations(self.page) {
+            // Animated styles are patched in place; layout follows at the
+            // next geometry query or paint.
+            self.page.script.dom_dirty = true;
+            return self.page.styles.get(node).cloned().or(r);
         }
-        // The DOM changed: compute just this element's chain instead of
-        // restyling and re-laying out the whole document (scripts often
-        // interleave style writes and reads).
-        let t = std::time::Instant::now();
-        let r = self.engine.computed_style_now(self.page, node);
-        rabbithole_script::exclude_from_watchdog(t.elapsed());
-        if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
-            eprintln!("[layout] style_chain {:?}", t.elapsed());
+        if r.is_some() {
+            return r;
         }
-        r
+        self.page.styles.get(node).cloned().or_else(|| self.engine.unrendered_style(self.page, node))
     }
     fn used_grid_tracks(&mut self, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
         self.ensure_layout();
@@ -872,6 +916,10 @@ impl Engine {
             } else { Ok(()) };
             (result, self.settle(page, false))
         } else { (Ok(()), self.tick_scripts(page)) };
+        // Script animations updated by this frame.
+        if page.anim.script.is_some() && self.sync_script_animations(page) {
+            images_changed = true;
+        }
         out.merge(link_out);
         out.merge(scroll_out);
         out.merge(anim_out);

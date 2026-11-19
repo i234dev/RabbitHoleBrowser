@@ -557,6 +557,8 @@ fn identity_of(op: &TransformOp) -> TransformOp {
         TransformOp::Scale(..) => TransformOp::Scale(1.0, 1.0),
         TransformOp::Rotate(_) => TransformOp::Rotate(0.0),
         TransformOp::Skew(..) => TransformOp::Skew(0.0, 0.0),
+        TransformOp::SkewX(_) => TransformOp::SkewX(0.0),
+        TransformOp::SkewY(_) => TransformOp::SkewY(0.0),
         TransformOp::Matrix(_) => TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
     }
 }
@@ -564,10 +566,12 @@ fn identity_of(op: &TransformOp) -> TransformOp {
 fn lerp_op(a: &TransformOp, b: &TransformOp, t: f32) -> Option<TransformOp> {
     use TransformOp::*;
     Some(match (a, b) {
-        (Translate(ax, ay), Translate(bx, by)) => Translate(lerp_len(ax, bx, t)?, lerp_len(ay, by, t)?),
+        (Translate(ax, ay), Translate(bx, by)) => Translate(lerp_lp(ax, bx, t)?, lerp_lp(ay, by, t)?),
         (Scale(ax, ay), Scale(bx, by)) => Scale(lerp(*ax, *bx, t), lerp(*ay, *by, t)),
         (Rotate(x), Rotate(y)) => Rotate(lerp(*x, *y, t)),
         (Skew(ax, ay), Skew(bx, by)) => Skew(lerp(*ax, *bx, t), lerp(*ay, *by, t)),
+        (SkewX(x), SkewX(y)) => SkewX(lerp(*x, *y, t)),
+        (SkewY(x), SkewY(y)) => SkewY(lerp(*x, *y, t)),
         (Matrix(m), Matrix(n)) => {
             let mut o = [0.0; 6];
             for i in 0..6 {
@@ -615,6 +619,109 @@ fn lerp_filter(a: &FilterOp, b: &FilterOp, t: f32) -> Option<FilterOp> {
     })
 }
 
+/// Interpolate two transform lists (CSS Transforms 2 §interpolation):
+/// lists of the same functions pairwise (the shorter padded with
+/// identities), anything else as decomposed 2D matrices.
+fn lerp_transforms(x: &[TransformOp], y: &[TransformOp], t: f32) -> Option<Vec<TransformOp>> {
+    let n = x.len().max(y.len());
+    let pad = |l: &[TransformOp], other: &[TransformOp]| -> Vec<TransformOp> {
+        let mut v = l.to_vec();
+        v.extend(other[l.len().min(other.len())..].iter().map(identity_of));
+        v
+    };
+    let (px, py) = (pad(x, y), pad(y, x));
+    if px.len() == n && py.len() == n {
+        let ops: Option<Vec<TransformOp>> = px.iter().zip(py.iter()).map(|(p, q)| lerp_op(p, q, t)).collect();
+        if let Some(ops) = ops {
+            return Some(ops);
+        }
+    }
+    let ma = matrix_of(x)?;
+    let mb = matrix_of(y)?;
+    Some(vec![TransformOp::Matrix(lerp_matrix(ma, mb, t))])
+}
+
+/// The 2D matrix of a transform list (None when it needs the box size).
+fn matrix_of(ops: &[TransformOp]) -> Option<[f32; 6]> {
+    if ops.iter().any(|o| matches!(o, TransformOp::Translate(x, y) if !matches!(x, Length::Px(_)) || !matches!(y, Length::Px(_)))) {
+        return None;
+    }
+    Some(rabbithole_style::transform_matrix(ops, 0.0, 0.0, 0.0))
+}
+
+/// Decomposed 2D matrix: translate, scale, angle (degrees), 2x2 rest.
+struct Decomposed2d {
+    translate: [f64; 2],
+    scale: [f64; 2],
+    angle: f64,
+    m: [f64; 4],
+}
+
+fn decompose_2d(m: [f32; 6]) -> Decomposed2d {
+    let (mut r0x, mut r0y, mut r1x, mut r1y) = (m[0] as f64, m[1] as f64, m[2] as f64, m[3] as f64);
+    let mut scale = [(r0x * r0x + r0y * r0y).sqrt(), (r1x * r1x + r1y * r1y).sqrt()];
+    if r0x * r1y - r0y * r1x < 0.0 {
+        if r0x < r1y {
+            scale[0] = -scale[0];
+        } else {
+            scale[1] = -scale[1];
+        }
+    }
+    if scale[0] != 0.0 {
+        r0x /= scale[0];
+        r0y /= scale[0];
+    }
+    if scale[1] != 0.0 {
+        r1x /= scale[1];
+        r1y /= scale[1];
+    }
+    let angle = r0y.atan2(r0x);
+    if angle != 0.0 {
+        let (sn, cs) = (-r0y, r0x);
+        let (m11, m12, m21, m22) = (r0x, r0y, r1x, r1y);
+        r0x = cs * m11 + sn * m21;
+        r0y = cs * m12 + sn * m22;
+        r1x = -sn * m11 + cs * m21;
+        r1y = -sn * m12 + cs * m22;
+    }
+    Decomposed2d { translate: [m[4] as f64, m[5] as f64], scale, angle: angle.to_degrees(), m: [r0x, r0y, r1x, r1y] }
+}
+
+fn lerp_matrix(a: [f32; 6], b: [f32; 6], t: f32) -> [f32; 6] {
+    let (mut da, mut db) = (decompose_2d(a), decompose_2d(b));
+    if (da.scale[0] < 0.0 && db.scale[1] < 0.0) || (da.scale[1] < 0.0 && db.scale[0] < 0.0) {
+        da.scale = [-da.scale[0], -da.scale[1]];
+        da.angle += if da.angle < 0.0 { 180.0 } else { -180.0 };
+    }
+    // Don't rotate the long way around.
+    if da.angle == 0.0 {
+        da.angle = 360.0;
+    }
+    if db.angle == 0.0 {
+        db.angle = 360.0;
+    }
+    if (da.angle - db.angle).abs() > 180.0 {
+        if da.angle > db.angle {
+            da.angle -= 360.0;
+        } else {
+            db.angle -= 360.0;
+        }
+    }
+    let t = t as f64;
+    let l = |x: f64, y: f64| x + (y - x) * t;
+    let tr = [l(da.translate[0], db.translate[0]), l(da.translate[1], db.translate[1])];
+    let sc = [l(da.scale[0], db.scale[0]), l(da.scale[1], db.scale[1])];
+    let angle = l(da.angle, db.angle).to_radians();
+    let mm = [l(da.m[0], db.m[0]), l(da.m[1], db.m[1]), l(da.m[2], db.m[2]), l(da.m[3], db.m[3])];
+    // Recompose: rotate × m, then scale the rows.
+    let (c, s) = (angle.cos(), angle.sin());
+    let r0x = c * mm[0] + s * mm[2];
+    let r0y = c * mm[1] + s * mm[3];
+    let r1x = -s * mm[0] + c * mm[2];
+    let r1y = -s * mm[1] + c * mm[3];
+    [(r0x * sc[0]) as f32, (r0y * sc[0]) as f32, (r1x * sc[1]) as f32, (r1y * sc[1]) as f32, tr[0] as f32, tr[1] as f32]
+}
+
 fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
@@ -624,22 +731,7 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
             Val::C(Color { r: ch(x.r, y.r), g: ch(x.g, y.g), b: ch(x.b, y.b), a: ch(x.a, y.a) })
         }
         (Val::L(x), Val::L(y)) => lerp_len(x, y, t).map(Val::L).unwrap_or_else(discrete),
-        (Val::T(x), Val::T(y)) => {
-            let (x, y): (Vec<TransformOp>, Vec<TransformOp>) = if x.is_empty() {
-                (y.iter().map(identity_of).collect(), y.clone())
-            } else if y.is_empty() {
-                (x.clone(), x.iter().map(identity_of).collect())
-            } else {
-                (x.clone(), y.clone())
-            };
-            if x.len() == y.len() {
-                let ops: Option<Vec<TransformOp>> = x.iter().zip(y.iter()).map(|(p, q)| lerp_op(p, q, t)).collect();
-                if let Some(ops) = ops {
-                    return Val::T(ops);
-                }
-            }
-            discrete()
-        }
+        (Val::T(x), Val::T(y)) => lerp_transforms(x, y, t).map(Val::T).unwrap_or_else(discrete),
         (Val::Fl(x), Val::Fl(y)) => {
             // Filter Effects §8: a missing list is the identity of the other;
             // lists of the same functions interpolate pairwise.
@@ -683,7 +775,9 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
 enum Easing {
     Linear,
     Bezier(f32, f32, f32, f32),
-    Steps(u32, bool),
+    /// steps(n, position): (n, jump at start, extra jumps: -1 for
+    /// `jump-none`, 1 for `jump-both`).
+    Steps(u32, bool, i8),
 }
 
 fn parse_easing(s: &str) -> Easing {
@@ -694,8 +788,8 @@ fn parse_easing(s: &str) -> Easing {
         "ease-in" => return Easing::Bezier(0.42, 0.0, 1.0, 1.0),
         "ease-out" => return Easing::Bezier(0.0, 0.0, 0.58, 1.0),
         "ease-in-out" => return Easing::Bezier(0.42, 0.0, 0.58, 1.0),
-        "step-start" => return Easing::Steps(1, true),
-        "step-end" => return Easing::Steps(1, false),
+        "step-start" => return Easing::Steps(1, true, 0),
+        "step-end" => return Easing::Steps(1, false, 0),
         _ => {}
     }
     let args = |prefix: &str| -> Option<Vec<String>> {
@@ -710,14 +804,22 @@ fn parse_easing(s: &str) -> Easing {
     }
     if let Some(a) = args("steps") {
         let n = a.first().and_then(|x| x.parse::<u32>().ok()).unwrap_or(1).max(1);
-        let start = a.get(1).map(|p| p == "start" || p == "jump-start").unwrap_or(false);
-        return Easing::Steps(n, start);
+        let pos = a.get(1).map(|p| p.as_str()).unwrap_or("end");
+        return match pos {
+            "start" | "jump-start" => Easing::Steps(n, true, 0),
+            "jump-both" => Easing::Steps(n, true, 1),
+            "jump-none" if n >= 2 => Easing::Steps(n, false, -1),
+            _ => Easing::Steps(n, false, 0),
+        };
+    }
+    if s.starts_with("linear(") {
+        // linear() stop lists are approximated by a straight line.
+        return Easing::Linear;
     }
     Easing::Bezier(0.25, 0.1, 0.25, 1.0)
 }
 
-fn bezier(p1: f32, p2: f32, t: f32) -> f32 {
-    // B(t) = 3(1-t)^2 t p1 + 3(1-t) t^2 p2 + t^3
+fn bezier64(p1: f64, p2: f64, t: f64) -> f64 {
     let u = 1.0 - t;
     3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t
 }
@@ -726,54 +828,111 @@ fn ease(e: &Easing, x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
     match *e {
         Easing::Linear => x,
-        Easing::Steps(n, start) => {
+        Easing::Steps(n, start, extra) => {
+            let jumps = (n as i64 + extra as i64).max(1) as f32;
             let n = n as f32;
             let s = if start { (x * n).floor() + 1.0 } else { (x * n).floor() };
-            (s / n).clamp(0.0, 1.0)
+            (s.min(jumps) / jumps).clamp(0.0, 1.0)
         }
         Easing::Bezier(x1, y1, x2, y2) => {
             if x <= 0.0 || x >= 1.0 {
                 return x;
             }
-            // Solve bezier_x(t) = x by bisection (monotonic in t).
-            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            // Solve bezier_x(t) = x (monotonic in t): Newton steps, then
+            // bisection.
+            let (x, x1, y1, x2, y2) = (x as f64, x1 as f64, y1 as f64, x2 as f64, y2 as f64);
+            let bx = |t: f64| bezier64(x1, x2, t);
             let mut t = x;
-            for _ in 0..30 {
-                let bx = bezier(x1, x2, t);
-                if (bx - x).abs() < 1e-5 {
+            let mut solved = false;
+            for _ in 0..8 {
+                let e = bx(t) - x;
+                if e.abs() < 1e-9 {
+                    solved = true;
                     break;
                 }
-                if bx < x {
-                    lo = t;
-                } else {
-                    hi = t;
+                let u = 1.0 - t;
+                let d = 3.0 * u * u * x1 + 6.0 * u * t * (x2 - x1) + 3.0 * t * t * (1.0 - x2);
+                if d.abs() < 1e-9 {
+                    break;
                 }
-                t = (lo + hi) / 2.0;
+                t = (t - e / d).clamp(0.0, 1.0);
             }
-            bezier(y1, y2, t)
+            if !solved {
+                let (mut lo, mut hi) = (0.0f64, 1.0f64);
+                t = x;
+                for _ in 0..60 {
+                    let v = bx(t);
+                    if (v - x).abs() < 1e-9 {
+                        break;
+                    }
+                    if v < x {
+                        lo = t;
+                    } else {
+                        hi = t;
+                    }
+                    t = (lo + hi) / 2.0;
+                }
+            }
+            bezier64(y1, y2, t) as f32
         }
     }
 }
 
 // ---------------------------------------------------------------- state
 
+/// Playback of a transition or animation, as a Web Animations animation:
+/// start time (engine ms), hold time (local ms) and playback rate. CSS
+/// starts it running; scripts may pause, seek, reverse or cancel it
+/// through its `CSSAnimation` / `CSSTransition` object.
+#[derive(Debug, Clone, PartialEq)]
+struct Clock {
+    start: Option<f64>,
+    hold: Option<f64>,
+    rate: f64,
+    /// A script controls the playback: `animation-play-state` no longer
+    /// applies.
+    api: bool,
+    /// Just created: held at 0 until the next animation frame starts it
+    /// (as a pending Web Animations play).
+    pending: bool,
+}
+
+impl Clock {
+    fn pending() -> Clock {
+        Clock { start: None, hold: Some(0.0), rate: 1.0, api: false, pending: true }
+    }
+
+    /// Local time (ms since the start), None when idle (cancelled).
+    fn local(&self, now: f64) -> Option<f64> {
+        self.hold.or_else(|| self.start.map(|s| (now - s) * self.rate))
+    }
+
+    fn idle(&self) -> bool {
+        self.start.is_none() && self.hold.is_none()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Transition {
+    id: u64,
     node: NodeId,
     prop: Prop,
     from: Val,
     to: Val,
-    /// Engine time (ms) the transition was created.
-    start: f64,
+    clock: Clock,
+    /// Style change (restyle) that created it (composite order).
+    generation: u64,
     delay: f64,
     duration: f64,
     easing: Easing,
+    timing: String,
     started: bool,
 }
 
 impl Transition {
     fn value_at(&self, now: f64) -> Val {
-        let t = ((now - self.start - self.delay) / self.duration.max(1e-9)).clamp(0.0, 1.0) as f32;
+        let local = self.clock.local(now).unwrap_or(0.0);
+        let t = ((local - self.delay) / self.duration.max(1e-9)).clamp(0.0, 1.0) as f32;
         interpolate(&self.from, &self.to, ease(&self.easing, t))
     }
 }
@@ -786,10 +945,14 @@ struct Keyframe {
 
 #[derive(Debug, Clone)]
 struct Animation {
+    id: u64,
     node: NodeId,
     name: String,
     frames: Vec<Keyframe>,
-    start: f64,
+    clock: Clock,
+    /// Position in the element's `animation-name` list.
+    index: usize,
+    timing: String,
     delay: f64,
     duration: f64,
     /// None = infinite
@@ -800,24 +963,30 @@ struct Animation {
     started: bool,
     iteration: i64,
     finished: bool,
-    /// Time the animation is held at while paused
-    /// (`animation-play-state: paused`).
-    held: Option<f64>,
 }
 
 impl Animation {
-    /// The time the animation is at: held while paused.
-    fn time(&self, now: f64) -> f64 {
-        self.held.unwrap_or(now)
-    }
-
-    /// Follow `animation-play-state`.
+    /// Follow `animation-play-state` (unless a script took control).
     fn set_paused(&mut self, paused: bool, now: f64) {
-        match (paused, self.held) {
-            (true, None) => self.held = Some(now),
-            (false, Some(h)) => {
-                self.start += now - h;
-                self.held = None;
+        let c = &mut self.clock;
+        if c.api {
+            return;
+        }
+        if c.pending {
+            // Paused before it started: stays held at 0.
+            if paused {
+                c.pending = false;
+            }
+            return;
+        }
+        match (paused, c.hold, c.start) {
+            (true, None, Some(_)) => {
+                c.hold = c.local(now);
+                c.start = None;
+            }
+            (false, Some(h), None) => {
+                c.start = Some(now - h / c.rate);
+                c.hold = None;
             }
             _ => {}
         }
@@ -847,6 +1016,58 @@ pub struct AnimationState {
     /// are snapshotted before a restyle so a full restyle (which reports
     /// no per-element changes) can still start transitions.
     pub(crate) with_transitions: std::collections::HashSet<NodeId>,
+    /// Effects of script animations (Web Animations), shared with the
+    /// page's script host once a script animates something.
+    pub(crate) script: Option<rabbithole_script::WebAnimations>,
+    /// Registry generation last applied.
+    script_gen: u64,
+    /// Elements with script effects in effect (as last applied).
+    script_nodes: std::collections::HashSet<NodeId>,
+    /// Keyframes of script effects resolved against their element's style.
+    script_frames: HashMap<u64, ScriptFrames>,
+    /// Indices of the registry's effects in effect, per element, valid
+    /// for registry generation `script_index_gen`.
+    script_index: HashMap<NodeId, Vec<usize>>,
+    script_index_gen: u64,
+    /// Last id given to a transition or animation.
+    next_id: u64,
+    /// Style changes seen (transition generations).
+    generation: u64,
+    /// Transitions / animations that ran to their end and were dropped
+    /// (their script objects report them finished).
+    ended: std::collections::HashSet<u64>,
+}
+
+/// A script effect's keyframes as computed values.
+#[derive(Debug)]
+struct ScriptFrames {
+    version: u64,
+    /// Style the values were computed from (pointer identity).
+    base: usize,
+    frames: Vec<ScriptKeyframe>,
+}
+
+#[derive(Debug)]
+struct ScriptKeyframe {
+    offset: f32,
+    easing: Easing,
+    /// None = the effect's composite operation.
+    composite: Option<Composite>,
+    values: Vec<(Prop, Val)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Composite {
+    Replace,
+    Add,
+}
+
+fn composite_of(s: &str) -> Option<Composite> {
+    match s {
+        "replace" => Some(Composite::Replace),
+        "add" | "accumulate" => Some(Composite::Add),
+        _ => None,
+    }
 }
 
 impl AnimationState {
@@ -866,7 +1087,7 @@ impl AnimationState {
 
     /// No effects and no element with a transition or animation seen.
     pub fn is_idle(&self) -> bool {
-        self.transitions.is_empty() && self.animations.is_empty() && self.base.is_empty() && self.events.is_empty() && self.with_transitions.is_empty()
+        self.transitions.is_empty() && self.animations.is_empty() && self.base.is_empty() && self.events.is_empty() && self.with_transitions.is_empty() && self.script_nodes.is_empty()
     }
 
     /// Current (base) styles of the elements with transitions, before a
@@ -876,7 +1097,7 @@ impl AnimationState {
     }
 
     fn has_effects(&self, node: NodeId) -> bool {
-        self.transitions.iter().any(|t| t.node == node) || self.animations.iter().any(|a| a.node == node)
+        self.transitions.iter().any(|t| t.node == node) || self.animations.iter().any(|a| a.node == node) || self.script_nodes.contains(&node)
     }
 }
 
@@ -901,6 +1122,7 @@ impl Engine {
             return;
         }
         let now = now_ms(self);
+        page.anim.generation += 1;
         let mut touched: Vec<NodeId> = Vec::new();
         if full {
             // Overlays were dropped: take the new styles as bases, and pick
@@ -924,7 +1146,7 @@ impl Engine {
                 if !s.transitions.is_empty() {
                     page.anim.with_transitions.insert(i);
                 }
-                if s.animations.is_empty() || changed.contains(&i) {
+                if s.animations.is_empty() || changed.contains(&i) || s.display.is_none() {
                     continue;
                 }
                 let node: NodeId = i;
@@ -947,11 +1169,16 @@ impl Engine {
                     page.anim.with_transitions.remove(&node);
                 }
             }
-            let Some(new) = new else {
-                if page.anim.has_effects(node) {
-                    self.cancel_effects(page, node, true);
+            // `display: none` (or no box) cancels transitions and animations.
+            let new = match new {
+                // (Unless `display` itself transitions: allow-discrete.)
+                Some(s) if !s.display.is_none() || s.transitions.iter().any(|t| t.property.trim().eq_ignore_ascii_case("display")) => s,
+                _ => {
+                    if page.anim.has_effects(node) {
+                        self.cancel_effects(page, node, true);
+                    }
+                    continue;
                 }
-                continue;
             };
             let before = page.anim.base.get(&node).cloned().or(old.clone());
             // A recomputation that only dropped our overlay is not a change.
@@ -988,12 +1215,18 @@ impl Engine {
     }
 
     fn sync_transitions(&self, page: &mut Page, node: NodeId, before: &ComputedStyle, after: &ComputedStyle, now: f64) {
+        let scripted = self.script_animated(page, node);
         for &p in ALL {
+            // A script animation overrides both the before- and the
+            // after-change value: no transition.
+            if scripted.contains(&p) {
+                continue;
+            }
             let to = get(after, p);
             let running = page.anim.transitions.iter().position(|t| t.node == node && t.prop == p);
             let from = match running {
-                Some(i) => page.anim.transitions[i].value_at(now),
-                None => get(before, p),
+                Some(i) if !page.anim.transitions[i].clock.idle() => page.anim.transitions[i].value_at(now),
+                _ => get(before, p),
             };
             if let Some(i) = running {
                 if page.anim.transitions[i].to == to {
@@ -1004,7 +1237,7 @@ impl Engine {
             if let Some(i) = running {
                 // Replaced or no longer transitioned: cancel.
                 let t = page.anim.transitions.remove(i);
-                page.anim.events.push(QueuedEvent { node, ty: "transitioncancel", name: p.name().into(), elapsed: ((now - t.start - t.delay).max(0.0) / 1000.0) as f32, transition: true });
+                page.anim.events.push(QueuedEvent { node, ty: "transitioncancel", name: p.name().into(), elapsed: ((t.clock.local(now).unwrap_or(0.0) - t.delay).max(0.0) / 1000.0) as f32, transition: true });
             }
             let Some((dur, delay, timing)) = spec else { continue };
             if from == to {
@@ -1015,15 +1248,19 @@ impl Engine {
                 continue;
             }
             page.anim.events.push(QueuedEvent { node, ty: "transitionrun", name: p.name().into(), elapsed: 0.0, transition: true });
+            page.anim.next_id += 1;
             page.anim.transitions.push(Transition {
+                id: page.anim.next_id,
                 node,
                 prop: p,
                 from,
                 to,
-                start: now,
+                clock: Clock::pending(),
+                generation: page.anim.generation,
                 delay: delay as f64 * 1000.0,
                 duration: dur as f64 * 1000.0,
                 easing: parse_easing(&timing),
+                timing,
                 started: false,
             });
         }
@@ -1046,12 +1283,13 @@ impl Engine {
                 i += 1;
             }
         }
-        for spec in &after.animations {
+        for (index, spec) in after.animations.iter().enumerate() {
             if spec.name.is_empty() || spec.name == "none" {
                 continue;
             }
             if let Some(a) = page.anim.animations.iter_mut().find(|a| a.node == node && a.name == spec.name) {
                 a.set_paused(spec.paused, now);
+                a.index = index;
             }
             let running = page.anim.animations.iter().any(|a| a.node == node && a.name == spec.name);
             if running || (old_names.contains(&spec.name.as_str()) && before.is_some() && page.anim.base.contains_key(&node)) {
@@ -1071,11 +1309,19 @@ impl Engine {
                 }
             }
             frames.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
+            page.anim.next_id += 1;
+            let mut clock = Clock::pending();
+            if spec.paused {
+                clock.pending = false;
+            }
             page.anim.animations.push(Animation {
+                id: page.anim.next_id,
                 node,
                 name: spec.name.clone(),
                 frames,
-                start: now,
+                clock,
+                index,
+                timing: spec.timing.clone(),
                 delay: spec.delay as f64 * 1000.0,
                 duration: spec.duration as f64 * 1000.0,
                 iterations: spec.iterations.map(|n| n as f64),
@@ -1085,17 +1331,18 @@ impl Engine {
                 started: false,
                 iteration: 0,
                 finished: false,
-                held: spec.paused.then_some(now),
             });
         }
     }
 
     fn cancel_effects(&self, page: &mut Page, node: NodeId, events: bool) {
+        let now = now_ms(self);
         let a = &mut page.anim;
         let mut ev = Vec::new();
         a.transitions.retain(|t| {
             if t.node == node {
-                ev.push(QueuedEvent { node, ty: "transitioncancel", name: t.prop.name().into(), elapsed: 0.0, transition: true });
+                let elapsed = ((t.clock.local(now).unwrap_or(0.0) - t.delay).max(0.0) / 1000.0) as f32;
+                ev.push(QueuedEvent { node, ty: "transitioncancel", name: t.prop.name().into(), elapsed, transition: true });
                 false
             } else {
                 true
@@ -1121,10 +1368,13 @@ impl Engine {
     fn apply_overlay(&self, page: &mut Page, node: NodeId, now: f64) {
         let Some(base) = page.anim.base.get(&node).cloned() else { return };
         let mut style = (*base).clone();
-        for t in page.anim.transitions.iter().filter(|t| t.node == node) {
+        for t in page.anim.transitions.iter().filter(|t| t.node == node && !t.clock.idle()) {
             set(&mut style, t.prop, &t.value_at(now));
         }
-        for a in page.anim.animations.iter().filter(|a| a.node == node) {
+        // Composite order: position in `animation-name`.
+        let mut anims: Vec<&Animation> = page.anim.animations.iter().filter(|a| a.node == node).collect();
+        anims.sort_by_key(|a| a.index);
+        for a in anims {
             for (p, v) in animation_values(a, &base, now) {
                 // `!important` declarations override animations.
                 if base.important.as_ref().is_some_and(|names| names.iter().any(|n| p.covered_by(n))) {
@@ -1132,6 +1382,9 @@ impl Engine {
                 }
                 set(&mut style, p, &v);
             }
+        }
+        if page.anim.script_nodes.contains(&node) {
+            self.apply_script_effects(page, node, &base, &mut style, None);
         }
         let changed = page.styles.get(node).map(|s| **s != style).unwrap_or(true);
         if changed {
@@ -1142,6 +1395,284 @@ impl Engine {
         }
     }
 
+    /// Apply the script effects in effect on `node` (composite order up to
+    /// `upto`) over `style` (the base style with CSS effects applied).
+    fn apply_script_effects(&self, page: &mut Page, node: NodeId, base: &Rc<ComputedStyle>, style: &mut ComputedStyle, upto: Option<u64>) {
+        let Some(reg) = page.anim.script.clone() else { return };
+        let reg = reg.borrow();
+        let base_key = Rc::as_ptr(base) as usize;
+        // The per-element index (linear scan when the registry changed
+        // since it was built).
+        let indexed: Vec<usize> = if page.anim.script_index_gen == reg.generation {
+            page.anim.script_index.get(&node).cloned().unwrap_or_default()
+        } else {
+            reg.effects.iter().enumerate().filter(|(_, e)| e.node == node && e.progress.is_some()).map(|(i, _)| i).collect()
+        };
+        for e in indexed.into_iter().filter_map(|i| reg.effects.get(i)) {
+            if upto.is_some_and(|o| e.order > o) {
+                break;
+            }
+            let Some(progress) = e.progress else { continue };
+            let fresh = page.anim.script_frames.get(&e.id).is_some_and(|f| f.version == e.frames_version && f.base == base_key);
+            if !fresh {
+                let frames = self.resolve_script_frames(page, node, base, &e.frames);
+                page.anim.script_frames.insert(e.id, ScriptFrames { version: e.frames_version, base: base_key, frames });
+            }
+            let Some(sf) = page.anim.script_frames.get(&e.id) else { continue };
+            let effect_composite = composite_of(&e.composite).unwrap_or(Composite::Replace);
+            for (p, v) in script_effect_values(&sf.frames, progress, effect_composite, style) {
+                if base.important.as_ref().is_some_and(|names| names.iter().any(|n| p.covered_by(n))) {
+                    continue;
+                }
+                set(style, p, &v);
+            }
+        }
+    }
+
+    /// Computed values of script keyframes, as `@keyframes` frames are
+    /// computed for CSS animations.
+    fn resolve_script_frames(&self, page: &Page, node: NodeId, base: &ComputedStyle, frames: &[rabbithole_script::WebAnimKeyframe]) -> Vec<ScriptKeyframe> {
+        let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
+        let parent = page.doc.parent(node).and_then(|p| page.styles.get(p).cloned()).unwrap_or_else(|| Rc::new(ComputedStyle::initial()));
+        let viewport = (page.viewport.width, page.viewport.height);
+        let root_fs = page.styles.root_font_size;
+        frames
+            .iter()
+            .map(|f| {
+                let text: String = f.decls.iter().filter(|(p, _)| !p.starts_with("--")).map(|(p, v)| format!("{p}: {v};")).collect();
+                let decls = rabbithole_css::parse_declaration_list(&text);
+                let styled = rabbithole_style::cascade::apply_over(base, &parent, &decls, root_fs, viewport);
+                let values = ALL.iter().copied().filter(|p| decls.iter().any(|d| p.covered_by(&d.name))).map(|p| (p, get(&styled, p))).collect();
+                ScriptKeyframe { offset: f.offset as f32, easing: parse_easing(&f.easing), composite: composite_of(&f.composite), values }
+            })
+            .collect()
+    }
+
+    /// Apply changes of the script animations' effects (Web Animations) to
+    /// the page's styles. Returns whether a style changed.
+    pub(crate) fn sync_script_animations(&self, page: &mut Page) -> bool {
+        let Some(reg) = page.anim.script.clone() else { return false };
+        let (generation, nodes) = {
+            let r = reg.borrow();
+            if r.generation == page.anim.script_gen {
+                return false;
+            }
+            let nodes: std::collections::HashSet<NodeId> = r.effects.iter().filter(|e| e.progress.is_some()).map(|e| e.node).collect();
+            let mut index: HashMap<NodeId, Vec<usize>> = HashMap::new();
+            for (i, e) in r.effects.iter().enumerate() {
+                if e.progress.is_some() {
+                    index.entry(e.node).or_default().push(i);
+                }
+            }
+            page.anim.script_index = index;
+            page.anim.script_index_gen = r.generation;
+            (r.generation, nodes)
+        };
+        {
+            let r = reg.borrow();
+            page.anim.script_frames.retain(|id, _| r.effects.iter().any(|e| e.id == *id));
+        }
+        let connected: Vec<NodeId> = nodes.into_iter().filter(|n| page.doc.is_connected(*n)).collect();
+        // Elements not styled yet (inserted since the last restyle) get
+        // their effects once styled: apply this generation again then.
+        let unstyled = connected.iter().any(|n| page.styles.get(*n).is_none());
+        page.anim.script_gen = if unstyled { generation.wrapping_sub(1) } else { generation };
+        let nodes: std::collections::HashSet<NodeId> = connected.into_iter().filter(|n| page.styles.get(*n).is_some()).collect();
+        let old = std::mem::replace(&mut page.anim.script_nodes, nodes);
+        let mut all: Vec<NodeId> = old.union(&page.anim.script_nodes).copied().collect();
+        all.sort_unstable();
+        let before = page.incr.generation();
+        let now = now_ms(self);
+        for n in all {
+            if !page.anim.has_effects(n) {
+                if let Some(base) = page.anim.base.remove(&n) {
+                    if let Some(slot) = page.styles.styles.get_mut(n) {
+                        *slot = Some(base);
+                        page.incr.style_patched(n);
+                    }
+                }
+                continue;
+            }
+            if !page.anim.base.contains_key(&n) {
+                let Some(s) = page.styles.get(n).cloned() else { continue };
+                page.anim.base.insert(n, s);
+            }
+            self.apply_overlay(page, n, now);
+        }
+        page.incr.generation() != before
+    }
+
+    /// Style of `node` with its CSS effects and the script effects up to
+    /// composite order `order` applied (`commitStyles`).
+    pub(crate) fn script_animation_style(&self, page: &mut Page, node: NodeId, order: u64) -> Option<Rc<ComputedStyle>> {
+        self.sync_script_animations(page);
+        let base = page.anim.base.get(&node).cloned().or_else(|| page.styles.get(node).cloned())?;
+        let now = now_ms(self);
+        let mut style = (*base).clone();
+        for t in page.anim.transitions.iter().filter(|t| t.node == node && !t.clock.idle()) {
+            set(&mut style, t.prop, &t.value_at(now));
+        }
+        for a in page.anim.animations.iter().filter(|a| a.node == node) {
+            for (p, v) in animation_values(a, &base, now) {
+                set(&mut style, p, &v);
+            }
+        }
+        self.apply_script_effects(page, node, &base, &mut style, Some(order));
+        Some(Rc::new(style))
+    }
+
+    /// `nodes` were restyled without a reported change: their current
+    /// style (equal to the animated one) is their new base style.
+    pub(crate) fn refresh_animation_bases(&self, page: &mut Page, nodes: &[NodeId]) {
+        let now = now_ms(self);
+        for &n in nodes {
+            if !page.anim.base.contains_key(&n) {
+                continue;
+            }
+            let Some(s) = page.styles.get(n).cloned() else { continue };
+            page.anim.base.insert(n, s);
+            self.apply_overlay(page, n, now);
+        }
+    }
+
+    /// Properties script effects in effect animate on `node`.
+    fn script_animated(&self, page: &Page, node: NodeId) -> Vec<Prop> {
+        let Some(reg) = &page.anim.script else { return Vec::new() };
+        let reg = reg.borrow();
+        let mut out = Vec::new();
+        for e in reg.effects_of(node) {
+            for f in e.frames.iter() {
+                for (name, _) in &f.decls {
+                    for &p in ALL {
+                        if !out.contains(&p) && p.covered_by(name) {
+                            out.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Script view of a CSS transition / animation.
+    fn css_info_of(&self, page: &Page, id: u64) -> Option<rabbithole_script::CssAnimationInfo> {
+        use rabbithole_script::CssAnimationInfo;
+        if let Some(t) = page.anim.transitions.iter().find(|t| t.id == id) {
+            return Some(CssAnimationInfo {
+                id,
+                node: t.node,
+                transition: true,
+                name: t.prop.name().to_string(),
+                start_time: t.clock.start,
+                hold_time: t.clock.hold,
+                pending: t.clock.pending,
+                rate: t.clock.rate,
+                delay: t.delay,
+                duration: t.duration,
+                iterations: 1.0,
+                direction: "normal".into(),
+                fill: "backwards".into(),
+                easing: t.timing.clone(),
+                keyframe_easing: "linear".into(),
+                order: t.generation,
+                ended: false,
+                keyframes: Vec::new(),
+            });
+        }
+        if let Some(a) = page.anim.animations.iter().find(|a| a.id == id) {
+            let keyframes = page
+                .styles
+                .keyframes
+                .get(&a.name)
+                .map(|raw| {
+                    let mut out: Vec<(f64, Vec<rabbithole_css::Declaration>)> = Vec::new();
+                    for (offsets, decls) in raw {
+                        for o in offsets {
+                            out.push((o.clamp(0.0, 1.0) as f64, decls.clone()));
+                        }
+                    }
+                    out.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+                    out
+                })
+                .unwrap_or_default();
+            return Some(CssAnimationInfo {
+                id,
+                node: a.node,
+                transition: false,
+                name: a.name.clone(),
+                start_time: a.clock.start,
+                hold_time: a.clock.hold,
+                pending: a.clock.pending,
+                rate: a.clock.rate,
+                delay: a.delay,
+                duration: a.duration,
+                iterations: a.iterations.unwrap_or(f64::INFINITY),
+                direction: a.direction.clone(),
+                fill: a.fill.clone(),
+                easing: "linear".into(),
+                keyframe_easing: a.timing.clone(),
+                order: a.index as u64,
+                ended: false,
+                keyframes,
+            });
+        }
+        page.anim.ended.contains(&id).then(|| CssAnimationInfo { id, ended: true, ..Default::default() })
+    }
+
+    /// The page's CSS transitions and animations (connected elements).
+    pub(crate) fn css_animation_infos(&self, page: &Page) -> Vec<rabbithole_script::CssAnimationInfo> {
+        let ids: Vec<u64> = page
+            .anim
+            .transitions
+            .iter()
+            .filter(|t| rendered(page, t.node))
+            .map(|t| t.id)
+            .chain(page.anim.animations.iter().filter(|a| rendered(page, a.node)).map(|a| a.id))
+            .collect();
+        ids.into_iter().filter_map(|id| self.css_info_of(page, id)).collect()
+    }
+
+    pub(crate) fn css_animation_info(&self, page: &Page, id: u64) -> Option<rabbithole_script::CssAnimationInfo> {
+        self.css_info_of(page, id)
+    }
+
+    /// A script set a CSS transition / animation's playback. Returns
+    /// whether a style changed.
+    pub(crate) fn set_css_animation(&self, page: &mut Page, id: u64, start: Option<f64>, hold: Option<f64>, rate: f64) -> bool {
+        let now = now_ms(self);
+        let clock = Clock { start, hold, rate, api: true, pending: false };
+        let mut node = None;
+        if let Some(t) = page.anim.transitions.iter_mut().find(|t| t.id == id) {
+            if !t.clock.idle() && clock.idle() {
+                page.anim.events.push(QueuedEvent { node: t.node, ty: "transitioncancel", name: t.prop.name().into(), elapsed: 0.0, transition: true });
+            }
+            t.clock = clock;
+            node = Some(t.node);
+        } else if let Some(a) = page.anim.animations.iter_mut().find(|a| a.id == id) {
+            if !a.clock.idle() && clock.idle() && !a.finished {
+                page.anim.events.push(QueuedEvent { node: a.node, ty: "animationcancel", name: a.name.clone(), elapsed: 0.0, transition: false });
+            }
+            a.clock = clock;
+            // Seeking back before the end runs it again.
+            let active = a.iterations.map(|n| a.duration * n).unwrap_or(f64::INFINITY);
+            if let Some(local) = a.clock.local(now) {
+                if local - a.delay < active && (a.clock.rate >= 0.0 || local > 0.0) {
+                    a.finished = false;
+                }
+            }
+            node = Some(a.node);
+        }
+        let Some(node) = node else { return false };
+        if !page.anim.base.contains_key(&node) {
+            let Some(s) = page.styles.get(node).cloned() else { return false };
+            page.anim.base.insert(node, s);
+        }
+        let before = page.incr.generation();
+        self.apply_overlay(page, node, now);
+        page.anim.next_due = Some(now);
+        page.incr.generation() != before
+    }
+
     /// Advance transitions and animations; queue their events. Returns
     /// whether a style changed (relayout / repaint needed).
     pub(crate) fn advance_css_animations(&self, page: &mut Page) -> bool {
@@ -1150,19 +1681,32 @@ impl Engine {
         }
         let now = now_ms(self);
         let mut nodes: Vec<NodeId> = Vec::new();
+        // Effects created since the last frame start now.
+        for c in page.anim.transitions.iter_mut().map(|t| &mut t.clock).chain(page.anim.animations.iter_mut().map(|a| &mut a.clock)) {
+            if c.pending {
+                c.pending = false;
+                c.start = Some(now - c.hold.unwrap_or(0.0) / c.rate);
+                c.hold = None;
+            }
+        }
         // Transitions: start / end.
         let mut i = 0;
         while i < page.anim.transitions.len() {
             let t = &mut page.anim.transitions[i];
             nodes.push(t.node);
-            if !t.started && now >= t.start + t.delay {
+            let Some(local) = t.clock.local(now) else {
+                i += 1;
+                continue;
+            };
+            if !t.started && local >= t.delay {
                 t.started = true;
                 let (node, name) = (t.node, t.prop.name().to_string());
                 page.anim.events.push(QueuedEvent { node, ty: "transitionstart", name, elapsed: 0.0, transition: true });
             }
             let t = &page.anim.transitions[i];
-            if now >= t.start + t.delay + t.duration {
+            if local >= t.delay + t.duration && t.clock.rate > 0.0 {
                 let t = page.anim.transitions.remove(i);
+                page.anim.ended.insert(t.id);
                 page.anim.events.push(QueuedEvent { node: t.node, ty: "transitionend", name: t.prop.name().into(), elapsed: (t.duration / 1000.0) as f32, transition: true });
             } else {
                 i += 1;
@@ -1174,7 +1718,8 @@ impl Engine {
             if a.finished {
                 continue;
             }
-            let local = a.time(now) - a.start - a.delay;
+            let Some(local) = a.clock.local(now) else { continue };
+            let local = local - a.delay;
             if !a.started && local >= 0.0 {
                 a.started = true;
                 page.anim.events.push(QueuedEvent { node: a.node, ty: "animationstart", name: a.name.clone(), elapsed: 0.0, transition: false });
@@ -1186,7 +1731,7 @@ impl Engine {
                 Some(n) => a.duration * n,
                 None => f64::INFINITY,
             };
-            if local >= active {
+            if local >= active || (a.clock.rate < 0.0 && local + a.delay <= 0.0 && a.started) {
                 a.finished = true;
                 page.anim.events.push(QueuedEvent { node: a.node, ty: "animationend", name: a.name.clone(), elapsed: (active / 1000.0) as f32, transition: false });
             } else if a.duration > 0.0 {
@@ -1198,7 +1743,17 @@ impl Engine {
             }
         }
         // Finished animations without forwards fill stop affecting style.
-        page.anim.animations.retain(|a| !(a.finished && !(a.fill == "forwards" || a.fill == "both")));
+        let ended = &mut page.anim.ended;
+        page.anim.animations.retain(|a| {
+            let keep = !(a.finished && !(a.fill == "forwards" || a.fill == "both"));
+            if !keep {
+                ended.insert(a.id);
+            }
+            keep
+        });
+        if ended.len() > 100_000 {
+            ended.clear();
+        }
         nodes.sort_unstable();
         nodes.dedup();
         let before = page.incr.generation();
@@ -1239,21 +1794,105 @@ impl Engine {
     }
 }
 
+/// Is `node` connected and rendered (not `display: none`)?
+fn rendered(page: &Page, node: NodeId) -> bool {
+    page.doc.is_connected(node) && page.styles.get(node).is_some_and(|s| !s.display.is_none())
+}
+
+/// `under` composited with `v` (`add` / `accumulate`).
+fn add_values(under: &Val, v: &Val) -> Val {
+    match (under, v) {
+        (Val::F(a), Val::F(b)) => Val::F(a + b),
+        (Val::L(a), Val::L(b)) => add_lp(*a, *b).map(Val::L).unwrap_or_else(|| v.clone()),
+        (Val::T(a), Val::T(b)) => Val::T(a.iter().chain(b.iter()).cloned().collect()),
+        (Val::C(a), Val::C(b)) => {
+            let ch = |p: u8, q: u8| (p as u16 + q as u16).min(255) as u8;
+            Val::C(Color { r: ch(a.r, b.r), g: ch(a.g, b.g), b: ch(a.b, b.b), a: ch(a.a, b.a) })
+        }
+        (Val::Fl(a), Val::Fl(b)) => Val::Fl(a.iter().chain(b.iter()).cloned().collect()),
+        _ => v.clone(),
+    }
+}
+
+/// Keyframe easing, extrapolating cubic Béziers linearly outside [0, 1]
+/// (the timing function's output may overshoot).
+fn ease_ext(e: &Easing, x: f32) -> f32 {
+    if (0.0..=1.0).contains(&x) {
+        return ease(e, x);
+    }
+    match e {
+        Easing::Steps(..) => ease(e, x),
+        _ => x,
+    }
+}
+
+/// Values of a script keyframe effect at (eased) iteration `progress`
+/// over the underlying style `under` (Web Animations §5.3).
+fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Composite, under: &ComputedStyle) -> Vec<(Prop, Val)> {
+    let p = progress as f32;
+    let mut props: Vec<Prop> = Vec::new();
+    for f in frames {
+        for (pr, _) in &f.values {
+            if !props.contains(pr) {
+                props.push(*pr);
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(props.len());
+    for pr in props {
+        let underlying = get(under, pr);
+        // Property-specific keyframes, composited with the underlying value;
+        // neutral keyframes at 0 / 1 where missing.
+        let mut ks: Vec<(f32, &Easing, Val)> = Vec::new();
+        for f in frames {
+            let Some((_, v)) = f.values.iter().find(|(q, _)| *q == pr) else { continue };
+            let v = match f.composite.unwrap_or(composite) {
+                Composite::Replace => v.clone(),
+                Composite::Add => add_values(&underlying, v),
+            };
+            ks.push((f.offset, &f.easing, v));
+        }
+        if ks.is_empty() {
+            continue;
+        }
+        if ks[0].0 != 0.0 {
+            ks.insert(0, (0.0, &Easing::Linear, underlying.clone()));
+        }
+        if ks[ks.len() - 1].0 != 1.0 {
+            ks.push((1.0, &Easing::Linear, underlying.clone()));
+        }
+        let n = ks.len();
+        let value = if p < 0.0 && ks.iter().filter(|k| k.0 == 0.0).count() > 1 {
+            ks[0].2.clone()
+        } else if p >= 1.0 && ks.iter().filter(|k| k.0 == 1.0).count() > 1 {
+            ks[n - 1].2.clone()
+        } else if n == 1 {
+            ks[0].2.clone()
+        } else {
+            let i = if p < 0.0 {
+                0
+            } else if p >= 1.0 {
+                n - 2
+            } else {
+                ks.iter().rposition(|k| k.0 <= p && k.0 < 1.0).unwrap_or(0).min(n - 2)
+            };
+            let (o0, e0, v0) = &ks[i];
+            let (o1, _, v1) = &ks[i + 1];
+            let span = o1 - o0;
+            let t = if span.abs() < 1e-9 { 0.0 } else { (p - o0) / span };
+            interpolate(v0, v1, ease_ext(e0, t))
+        };
+        out.push((pr, value));
+    }
+    out
+}
+
 /// Can `a` and `b` be interpolated (not just swapped at 50%)?
 fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::F(_), Val::F(_)) | (Val::C(_), Val::C(_)) | (Val::V(_), Val::V(_)) => true,
         (Val::L(x), Val::L(y)) => lerp_len(x, y, 0.5).is_some(),
-        (Val::T(x), Val::T(y)) => {
-            let (x, y): (Vec<TransformOp>, Vec<TransformOp>) = if x.is_empty() {
-                (y.iter().map(identity_of).collect(), y.clone())
-            } else if y.is_empty() {
-                (x.clone(), x.iter().map(identity_of).collect())
-            } else {
-                (x.clone(), y.clone())
-            };
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| lerp_op(p, q, 0.5).is_some())
-        }
+        (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),
         (Val::Cp(Some(x)), Val::Cp(Some(y))) => lerp_clip(x, y, 0.5).is_some(),
         _ => false,
     }
@@ -1262,7 +1901,8 @@ fn interpolable(a: &Val, b: &Val) -> bool {
 /// Values of animation `a` at time `now` (base values fill keyframes that
 /// do not declare a property).
 fn animation_values(a: &Animation, base: &ComputedStyle, now: f64) -> Vec<(Prop, Val)> {
-    let local = a.time(now) - a.start - a.delay;
+    let Some(local) = a.clock.local(now) else { return Vec::new() };
+    let local = local - a.delay;
     let active = match a.iterations {
         Some(n) => a.duration * n,
         None => f64::INFINITY,
@@ -1342,6 +1982,10 @@ mod tests {
         assert_eq!(parse_easing("cubic-bezier(0.4, 0, 0.2, 1)"), Easing::Bezier(0.4, 0.0, 0.2, 1.0));
         assert_eq!(ease(&parse_easing("steps(4, end)"), 0.3), 0.25);
         assert_eq!(ease(&parse_easing("step-start"), 0.01), 1.0);
+        assert_eq!(ease(&parse_easing("steps(3, jump-none)"), 0.5), 0.5);
+        assert_eq!(ease(&parse_easing("steps(1, jump-both)"), 0.5), 0.5);
+        // Linear-equivalent Béziers stay linear.
+        assert!((ease(&parse_easing("cubic-bezier(0, 0, 0, 0)"), 0.25) - 0.25).abs() < 1e-6);
     }
 
     #[test]
@@ -1352,5 +1996,37 @@ mod tests {
         let t = interpolate(&Val::T(vec![]), &Val::T(vec![TransformOp::Rotate(1.0)]), 0.5);
         assert_eq!(t, Val::T(vec![TransformOp::Rotate(0.5)]));
         assert_eq!(interpolate(&Val::V(Visibility::Visible), &Val::V(Visibility::Hidden), 0.9), Val::V(Visibility::Visible));
+        // Mixed units interpolate through calc().
+        let t = interpolate(&Val::T(vec![TransformOp::Translate(Length::Px(50.0), Length::Px(0.0))]), &Val::T(vec![TransformOp::Translate(Length::Percent(50.0), Length::Px(0.0))]), 0.5);
+        assert_eq!(t, Val::T(vec![TransformOp::Translate(Length::Calc(25.0, 25.0), Length::Px(0.0))]));
+        // Different functions: decomposed matrices, the short way around.
+        let Val::T(ops) = interpolate(&Val::T(vec![TransformOp::Matrix([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])]), &Val::T(vec![TransformOp::Rotate(std::f32::consts::FRAC_PI_2)]), 0.5) else { panic!() };
+        let TransformOp::Matrix(m) = ops[0] else { panic!("{ops:?}") };
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        for (x, y) in m.iter().zip([h, h, -h, h, 0.0, 0.0]) {
+            assert!((x - y).abs() < 1e-5, "{m:?}");
+        }
+        // Lists padded with identity functions.
+        let t = interpolate(&Val::T(vec![TransformOp::Scale(2.0, 2.0)]), &Val::T(vec![TransformOp::Scale(4.0, 4.0), TransformOp::Rotate(1.0)]), 0.5);
+        assert_eq!(t, Val::T(vec![TransformOp::Scale(3.0, 3.0), TransformOp::Rotate(0.5)]));
+    }
+
+    #[test]
+    fn script_keyframe_intervals_and_composite() {
+        let base = ComputedStyle::initial();
+        let kf = |offset: f32, v: f32, easing: Easing, composite: Option<Composite>| ScriptKeyframe { offset, easing, composite, values: vec![(Prop::Opacity, Val::F(v))] };
+        let frames = vec![kf(0.0, 0.0, Easing::Linear, None), kf(0.5, 1.0, Easing::Steps(1, false, 0), None), kf(1.0, 0.0, Easing::Linear, None)];
+        let at = |p: f64, c: Composite| script_effect_values(&frames, p, c, &base)[0].1.clone();
+        assert_eq!(at(0.25, Composite::Replace), Val::F(0.5));
+        // steps(1) on the second interval holds its start value.
+        assert_eq!(at(0.75, Composite::Replace), Val::F(1.0));
+        assert_eq!(at(1.0, Composite::Replace), Val::F(0.0));
+        // Extrapolated below 0 from the first interval.
+        assert_eq!(at(-0.5, Composite::Replace), Val::F(-1.0));
+        // add: composited with the underlying value (opacity 1).
+        assert_eq!(at(0.25, Composite::Add), Val::F(1.5));
+        // A missing 0% keyframe takes the underlying value.
+        let single = vec![kf(1.0, 0.0, Easing::Linear, None)];
+        assert_eq!(script_effect_values(&single, 0.5, Composite::Replace, &base)[0].1, Val::F(0.5));
     }
 }

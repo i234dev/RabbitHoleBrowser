@@ -366,6 +366,7 @@ pub(crate) fn install(realm: &mut Realm) {
     crate::media::install(realm, o);
     crate::canvas2d::install(realm, o);
     crate::webgl::install(realm, o);
+    crate::webanim::install(realm, o);
     realm.define_method(o, "setScriptFontFaces", 1, set_script_font_faces);
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
     realm.define_method(o, "imagePixels", 1, image_pixels);

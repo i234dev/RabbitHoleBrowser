@@ -21,6 +21,8 @@ mod node;
 mod canvas2d;
 mod webgl;
 mod natives;
+mod webanim;
+pub use webanim::{CssAnimationInfo, WebAnimEffect, WebAnimKeyframe, WebAnimRegistry, WebAnimations};
 mod sockets;
 mod observers;
 mod shadow;
@@ -350,6 +352,7 @@ impl ScriptHost {
             modules: Default::default(),
             shadow: Default::default(),
             render: Default::default(),
+            webanim: Default::default(),
             factories: HashMap::default(),
             blob_urls: HashMap::default(),
             sockets: Default::default(),
@@ -767,7 +770,7 @@ impl ScriptHost {
             let frame_due = {
                 let st = state();
                 let st = st.borrow();
-                !st.rafs.is_empty() && now_ms - st.last_frame >= 16.0
+                (!st.rafs.is_empty() || st.webanim.active) && now_ms - st.last_frame >= 16.0
             };
             if frame_due {
                 let rafs = {
@@ -777,6 +780,14 @@ impl ScriptHost {
                     std::mem::take(&mut st.rafs)
                 };
                 let origin = state().borrow().time_origin;
+                // Update animations and send their events, then the
+                // animation frame callbacks (HTML "update the rendering").
+                if webanim::frame(realm, now_ms - origin) {
+                    ran = true;
+                    realm.begin_task();
+                    shadow::flush(realm);
+                    realm.run_jobs();
+                }
                 for r in rafs {
                     ran = true;
                     realm.begin_task();
@@ -827,7 +838,7 @@ impl ScriptHost {
     pub fn next_due(&self) -> Option<f64> {
         let st = self.state.borrow();
         let mut due = st.timers.iter().map(|t| t.due).fold(None, |acc: Option<f64>, d| Some(acc.map(|a| a.min(d)).unwrap_or(d)));
-        if !st.rafs.is_empty() {
+        if !st.rafs.is_empty() || st.webanim.active {
             let frame = st.last_frame + 16.0;
             due = Some(due.map(|d| d.min(frame)).unwrap_or(frame));
         }

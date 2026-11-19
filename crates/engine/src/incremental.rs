@@ -402,8 +402,25 @@ impl Engine {
                 }
             }
         }
+        // Elements with animation effects whose style attribute changed to
+        // values equal to the animated ones (`commitStyles`) are not
+        // reported as changed: their base style is stale.
+        let restyled_bases: Vec<NodeId> = if page.anim.is_idle() {
+            Vec::new()
+        } else {
+            log.entries
+                .iter()
+                .filter_map(|m| match m {
+                    rabbithole_dom::Mutation::Attr { node, name, .. } if name == "style" && !anim_changes.iter().any(|c| c.0 == *node) => Some(*node),
+                    _ => None,
+                })
+                .collect()
+        };
         if anim_full || !anim_changes.is_empty() {
             self.animations_after_style(page, anim_changes, anim_full);
+        }
+        if !restyled_bases.is_empty() && !anim_full {
+            self.refresh_animation_bases(page, &restyled_bases);
         }
     }
 

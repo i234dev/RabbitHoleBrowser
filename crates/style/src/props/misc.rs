@@ -98,7 +98,13 @@ fn parse_animations(comps: &[&[Token]]) -> Vec<Animation> {
                     "normal" | "reverse" | "alternate" | "alternate-reverse" => a.direction = kw,
                     "none" | "forwards" | "backwards" | "both" => a.fill_mode = kw,
                     "running" | "paused" => a.paused = kw == "paused",
-                    _ => a.name = kw,
+                    // Keyframes names are case-sensitive.
+                    _ => {
+                        a.name = match c {
+                            [Token::Ident(s)] => s.clone(),
+                            _ => kw,
+                        }
+                    }
                 }
             } else if let [Token::String(s)] = c {
                 a.name = s.clone();

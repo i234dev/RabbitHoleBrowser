@@ -891,6 +891,10 @@ pub enum TransformOp {
     Rotate(f32),
     /// radians (x, y)
     Skew(f32, f32),
+    /// `skewX()`, radians (interpolates only with itself)
+    SkewX(f32),
+    /// `skewY()`, radians
+    SkewY(f32),
     /// `matrix(a, b, c, d, e, f)`
     Matrix([f32; 6]),
 }
@@ -1183,6 +1187,8 @@ pub fn transform_matrix(ops: &[TransformOp], width: f32, height: f32, font_size:
             TransformOp::Scale(x, y) => [*x, 0.0, 0.0, *y, 0.0, 0.0],
             TransformOp::Rotate(a) => [a.cos(), a.sin(), -a.sin(), a.cos(), 0.0, 0.0],
             TransformOp::Skew(x, y) => [1.0, y.tan(), x.tan(), 1.0, 0.0, 0.0],
+            TransformOp::SkewX(x) => [1.0, 0.0, x.tan(), 1.0, 0.0, 0.0],
+            TransformOp::SkewY(y) => [1.0, y.tan(), 0.0, 1.0, 0.0, 0.0],
             TransformOp::Matrix(mm) => *mm,
         };
         m = multiply_matrix(m, o);
