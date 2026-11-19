@@ -808,10 +808,46 @@ impl<'a> Layouter<'a> {
                 a
             }
         }
-        const CELL: u8 = 4;
-        const ROW: u8 = 3;
-        const GROUP: u8 = 2;
-        const TABLE: u8 = 0;
+        const CELL: u8 = 6;
+        const ROW: u8 = 5;
+        const GROUP: u8 = 4;
+        const COL: u8 = 3;
+        const COLGROUP: u8 = 2;
+        const TABLE: u8 = 1;
+        // Column and column-group styles per column (their boxes carry no
+        // borders: read them from the cascade).
+        let mut col_style: Vec<Option<Rc<ComputedStyle>>> = vec![None; ncols];
+        let mut colgroup: Vec<Option<(usize, Rc<ComputedStyle>)>> = vec![None; ncols];
+        for x in &g.col_boxes {
+            let bx = match x.path.1 {
+                Some(j) => &table.children[x.path.0].children[j],
+                None => &table.children[x.path.0],
+            };
+            let st = orig(bx);
+            let is_group = x.path.1.is_none() && bx.style.display == Display::TableColumnGroup;
+            for k in x.first..(x.first + x.span).min(ncols) {
+                if is_group {
+                    colgroup[k] = Some((x.path.0, st.clone()));
+                } else {
+                    col_style[k] = Some(st.clone());
+                }
+            }
+        }
+        let has_cols = !g.col_boxes.is_empty();
+        let group_id = |k: usize| colgroup[k].as_ref().map(|(i, _)| *i);
+        let col_side = |cand: Cand, k: usize, sd: usize| -> Cand {
+            let mut cand = cand;
+            if let Some(cs) = &col_style[k] {
+                cand = better(cand, side(cs, sd, COL));
+            }
+            cand
+        };
+        let group_side = |cand: Cand, k: usize, sd: usize| -> Cand {
+            match &colgroup[k] {
+                Some((_, gs)) => better(cand, side(gs, sd, COLGROUP)),
+                None => cand,
+            }
+        };
         let mut new_cells: Vec<[Cand; 4]> = Vec::with_capacity(g.cells.len());
         for (i, c) in g.cells.iter().enumerate() {
             let s = &cell_styles[i];
@@ -837,6 +873,11 @@ impl<'a> Layouter<'a> {
                 }
             }
             if c.row == 0 {
+                if has_cols {
+                    for k in c.col..=last_col.min(ncols - 1) {
+                        top = group_side(col_side(top, k, 0), k, 0);
+                    }
+                }
                 top = better(top, side(&tstyle, 0, TABLE));
             }
             // Bottom.
@@ -859,10 +900,27 @@ impl<'a> Layouter<'a> {
                 }
             }
             if last_row + 1 == nrows {
+                if has_cols {
+                    for k in c.col..=last_col.min(ncols - 1) {
+                        bottom = group_side(col_side(bottom, k, 2), k, 2);
+                    }
+                }
                 bottom = better(bottom, side(&tstyle, 2, TABLE));
             }
             // Left.
             let mut left = side(s, 3, CELL);
+            if has_cols && c.col < ncols {
+                left = col_side(left, c.col, 3);
+                if c.col > 0 {
+                    left = col_side(left, c.col - 1, 1);
+                }
+                if c.col == 0 || group_id(c.col - 1) != group_id(c.col) {
+                    left = group_side(left, c.col, 3);
+                    if c.col > 0 {
+                        left = group_side(left, c.col - 1, 1);
+                    }
+                }
+            }
             if c.col > 0 {
                 if let Some(j) = g.slots[c.row][c.col - 1] {
                     left = better(left, side(&cell_styles[j], 1, CELL));
@@ -876,6 +934,18 @@ impl<'a> Layouter<'a> {
             }
             // Right.
             let mut right = side(s, 1, CELL);
+            if has_cols && last_col < ncols {
+                right = col_side(right, last_col, 1);
+                if last_col + 1 < ncols {
+                    right = col_side(right, last_col + 1, 3);
+                }
+                if last_col + 1 == ncols || group_id(last_col + 1) != group_id(last_col) {
+                    right = group_side(right, last_col, 1);
+                    if last_col + 1 < ncols {
+                        right = group_side(right, last_col + 1, 3);
+                    }
+                }
+            }
             if last_col + 1 < ncols {
                 if let Some(j) = g.slots[c.row][last_col + 1] {
                     right = better(right, side(&cell_styles[j], 3, CELL));
