@@ -447,3 +447,51 @@ fn block_in_relative_inline_is_offset() {
     let r = fx.rect(&tree, "b");
     assert!(close(r.x, 30.0) && close(r.y, 20.0), "{r:?}");
 }
+
+fn box_of<'t>(fx: &Fx, tree: &'t LayoutTree, id: &str) -> &'t LayoutBox {
+    let node = fx.doc.element_by_id(id).unwrap();
+    fn find(b: &LayoutBox, n: usize) -> Option<&LayoutBox> {
+        if b.node == Some(n) && b.kind != BoxKind::Text && b.pseudo.is_none() {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| find(c, n))
+    }
+    find(&tree.root, node).unwrap()
+}
+
+/// Column-group borders take part in collapsed border resolution.
+#[test]
+fn collapsed_borders_include_column_groups() {
+    let fx = Fx::new(
+        "<table style='border-collapse:collapse'><colgroup style='border:4px solid green'><col><col></colgroup><tr><td id=a>x</td><td id=b>y</td></tr></table>",
+        "",
+    );
+    let tree = fx.layout();
+    let a = box_of(&fx, &tree, "a");
+    assert!(a.style.border_width.left > 0.0 && a.style.border_width.top > 0.0, "{:?}", a.style.border_width);
+    // No border between the two columns of the group.
+    assert_eq!(a.style.border_width.right, 0.0);
+}
+
+/// A table with an auto width goes beside a float, narrowed to the space
+/// left; an atomic inline starting a line clears floats over its height.
+#[test]
+fn tables_and_atomics_beside_floats() {
+    let fx = Fx::new(
+        "<div style='width:300px'><div style='float:left;width:100px;height:50px'></div>\
+         <table id=t style='border-spacing:0'><tr><td style='padding:0'><span style='display:inline-block;width:150px;height:10px'></span> <span style='display:inline-block;width:150px;height:10px'></span></td></tr></table></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    let t = fx.rect(&tree, "t");
+    assert!(close(t.x, 100.0) && t.w <= 200.01, "{t:?}");
+
+    let fx = Fx::new(
+        "<div style='width:400px'><div style='float:left;clear:left;width:50px;height:75px'></div><div style='float:left;clear:left;width:100px;height:75px'></div>\
+         <span style='display:inline-block;vertical-align:top;width:200px;height:50px'></span><span id=s style='display:inline-block;vertical-align:top;width:200px;height:50px'></span></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    let s = fx.rect(&tree, "s");
+    assert!(close(s.x, 100.0) && close(s.y, 50.0), "{s:?}");
+}
