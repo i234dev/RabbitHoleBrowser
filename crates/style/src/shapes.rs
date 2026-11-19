@@ -353,6 +353,25 @@ pub fn inset_contour(points: &[Point], widths: [f32; 4]) -> Vec<Point> {
         .collect()
 }
 
+/// A superellipse corner from `s` to `e` around the inner point `o`
+/// (CSS Borders 4 §5.2): the points `o + (s - o)·a + (e - o)·b` with
+/// `a^c + b^c = 1`, `c = 2^K`; concave curves (`K < 0`) mirror the convex
+/// curve of `-K` towards the corner.
+fn superellipse_corner(p: &mut Vec<PathSeg>, s: Point, e: Point, o: Point, k: f32) {
+    let at = |a: f32, b: f32| Point::new(o.x + (s.x - o.x) * a + (e.x - o.x) * b, o.y + (s.y - o.y) * a + (e.y - o.y) * b);
+    let c = 2f32.powf(k.abs());
+    const STEPS: usize = 64;
+    for i in 1..=STEPS {
+        // Sample by angle for an even spread along the curve.
+        let th = i as f32 / STEPS as f32 * std::f32::consts::FRAC_PI_2;
+        let (cs, sn) = (th.cos(), th.sin());
+        let a = cs.signum() * cs.abs().powf(2.0 / c);
+        let b = sn.signum() * sn.abs().powf(2.0 / c);
+        let (a, b) = if k < 0.0 { (1.0 - b, 1.0 - a) } else { (a, b) };
+        p.push(PathSeg::LineTo(if i == STEPS { e } else { at(a, b) }));
+    }
+}
+
 pub fn corner_shaped_path(rect: Rect, radii: Radii, shapes: [crate::computed::CornerShape; 4]) -> Vec<PathSeg> {
     use crate::computed::CornerShape;
     let r = clamp_radii(rect, radii);
@@ -378,7 +397,6 @@ pub fn corner_shaped_path(rect: Rect, radii: Radii, shapes: [crate::computed::Co
         let o = Point::new(s.x + e.x - c.x, s.y + e.y - c.y);
         match shapes[i] {
             CornerShape::Round => p.push(PathSeg::CubicTo(lerp(s, c, KAPPA), lerp(e, c, KAPPA), e)),
-            CornerShape::Squircle => p.push(PathSeg::CubicTo(lerp(s, c, 0.8), lerp(e, c, 0.8), e)),
             CornerShape::Square => {
                 p.push(PathSeg::LineTo(c));
                 p.push(PathSeg::LineTo(e));
@@ -389,6 +407,7 @@ pub fn corner_shaped_path(rect: Rect, radii: Radii, shapes: [crate::computed::Co
                 p.push(PathSeg::LineTo(e));
             }
             CornerShape::Scoop => p.push(PathSeg::CubicTo(lerp(s, o, KAPPA), lerp(e, o, KAPPA), e)),
+            shape => superellipse_corner(&mut p, s, e, o, shape.parameter()),
         }
     }
     p.push(PathSeg::Close);

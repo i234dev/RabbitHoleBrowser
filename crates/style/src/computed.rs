@@ -1207,7 +1207,7 @@ pub enum BasicShape {
 
 /// `corner-shape` of one corner (CSS Borders 4 §5.2): the curve drawn
 /// between the ends of the corner's border radius.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CornerShape {
     #[default]
     Round,
@@ -1216,6 +1216,24 @@ pub enum CornerShape {
     Notch,
     Scoop,
     Squircle,
+    /// `superellipse(K)` for other `K`: the curve `x^c + y^c = 1` with
+    /// `c = 2^K` (concave curves mirror the convex ones).
+    Superellipse(f32),
+}
+
+impl CornerShape {
+    /// The superellipse parameter `K` of the shape.
+    pub fn parameter(self) -> f32 {
+        match self {
+            CornerShape::Round => 1.0,
+            CornerShape::Square => f32::INFINITY,
+            CornerShape::Bevel => 0.0,
+            CornerShape::Notch => f32::NEG_INFINITY,
+            CornerShape::Scoop => -1.0,
+            CornerShape::Squircle => 2.0,
+            CornerShape::Superellipse(k) => k,
+        }
+    }
 }
 
 /// Computed `clip-path` (other than `none`).

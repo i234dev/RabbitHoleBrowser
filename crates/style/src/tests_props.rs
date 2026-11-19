@@ -811,6 +811,8 @@ fn border_shape_and_corner_shape() {
         [CornerShape::Notch, CornerShape::Scoop, CornerShape::Notch, CornerShape::Scoop]
     );
     assert_eq!(one("corner-shape: superellipse(0)").corner_shape, [CornerShape::Bevel; 4]);
+    assert_eq!(one("corner-shape: superellipse(1.5)").corner_shape, [CornerShape::Superellipse(1.5); 4]);
+    assert_eq!(one("corner-shape: superellipse(-infinity)").corner_shape, [CornerShape::Notch; 4]);
     assert_eq!(one("corner-shape: round; corner-top-left-shape: square").corner_shape[0], CornerShape::Square);
 }
 
