@@ -52,7 +52,10 @@ pub enum Pseudo {
     NthLastOfType(i32, i32),
     /// `:has(> a, b)` relative selectors.
     Has(Vec<(Combinator, Selector)>),
-    Lang(String),
+    /// `:lang()` language ranges (lower case; extended filtering).
+    Lang(Vec<String>),
+    /// `:dir(rtl)` (true) / `:dir(ltr)`.
+    Dir(bool),
     Enabled,
     Disabled,
     Checked,
@@ -696,16 +699,32 @@ impl<'a> SelectorParser<'a> {
                         sub.in_has = true;
                         Pseudo::Has(sub.parse_relative_list())
                     }
-                    "lang" => Pseudo::Lang(
-                        inner
-                            .iter()
-                            .find_map(|t| match t {
-                                Token::Ident(s) | Token::String(s) => Some(s.to_ascii_lowercase()),
-                                _ => None,
-                            })
-                            .unwrap_or_default(),
-                    ),
-                    "dir" => Pseudo::Never,
+                    "lang" => {
+                        // A comma-separated list of language ranges
+                        // (identifiers or strings).
+                        let mut ranges = Vec::new();
+                        for part in inner.split(|t| *t == Token::Comma) {
+                            let toks: Vec<&Token> = part.iter().filter(|t| !matches!(t, Token::Whitespace)).collect();
+                            match toks.as_slice() {
+                                [Token::Ident(s)] | [Token::String(s)] => ranges.push(s.to_ascii_lowercase()),
+                                _ => return None,
+                            }
+                        }
+                        if ranges.is_empty() {
+                            return None;
+                        }
+                        Pseudo::Lang(ranges)
+                    }
+                    "dir" => {
+                        let toks: Vec<&Token> = inner.iter().filter(|t| !matches!(t, Token::Whitespace)).collect();
+                        match toks.as_slice() {
+                            [Token::Ident(d)] if d.eq_ignore_ascii_case("rtl") => Pseudo::Dir(true),
+                            [Token::Ident(d)] if d.eq_ignore_ascii_case("ltr") => Pseudo::Dir(false),
+                            // Other directions are valid but match nothing.
+                            [Token::Ident(_)] => Pseudo::NeverState,
+                            _ => return None,
+                        }
+                    }
                     _ => Pseudo::Never,
                 }))
             }
@@ -857,9 +876,14 @@ pub struct MatchState {
     /// Links (`<a>` / `<area>` with `href`) whose destination was visited:
     /// they match `:visited` instead of `:link`.
     pub visited: std::sync::Arc<std::collections::HashSet<NodeId>>,
+    /// Query containers measured by the last layout (`@container`, `cq*`
+    /// units).
+    pub containers: std::sync::Arc<std::collections::HashMap<NodeId, crate::container::ContainerInfo>>,
 }
 
 impl MatchState {
+    /// Is `node` `ancestor` or one of its shadow-including ancestors (a
+    /// shadow host contains what its shadow tree contains)?
     fn is_or_contains(doc: &Document, ancestor: Option<NodeId>, node: NodeId) -> bool {
         let Some(mut cur) = ancestor else { return false };
         loop {
@@ -867,7 +891,8 @@ impl MatchState {
                 return true;
             }
             match doc.parent(cur) {
-                Some(p) => cur = p,
+                Some(p) if doc.shadow_roots.is_empty() => cur = p,
+                Some(p) => cur = doc.shadow_host(p).unwrap_or(p),
                 None => return false,
             }
         }
@@ -1181,19 +1206,11 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
             Pseudo::Nesting(list) => list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, node)),
             Pseudo::NthLastOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, true)),
             Pseudo::Has(list) => list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node, state, matcher)),
-            Pseudo::Lang(lang) => {
-                let mut cur = Some(node);
-                let mut found = false;
-                while let Some(n) = cur {
-                    if let Some(l) = doc.attr(n, "lang") {
-                        let l = l.to_ascii_lowercase();
-                        found = l == *lang || l.starts_with(&format!("{lang}-"));
-                        break;
-                    }
-                    cur = doc.parent(n);
-                }
-                found
-            }
+            Pseudo::Lang(ranges) => match element_language(doc, node) {
+                Some(tag) => ranges.iter().any(|r| lang_range_matches(r, &tag)),
+                None => false,
+            },
+            Pseudo::Dir(rtl) => is_rtl(doc, node) == *rtl,
             Pseudo::Enabled | Pseudo::Disabled => {
                 let disabled = match el.tag.as_str() {
                     "input" | "button" | "select" | "textarea" | "fieldset" => Some(is_disabled_control(doc, node)),
@@ -1541,6 +1558,37 @@ mod tests {
     }
 
     #[test]
+    fn focus_within_and_hover_reach_shadow_hosts() {
+        let mut doc = rabbithole_html::parse("<div id=host></div>");
+        let host = doc.element_by_id("host").unwrap();
+        let root = doc.attach_shadow(host);
+        let inner = doc.create_element("input", Vec::new());
+        doc.append_child(root, inner);
+        let state = MatchState { focused: Some(inner), hovered: Some(inner), ..MatchState::default() };
+        assert!(matches_with(&parse(":focus-within")[0], &doc, host, &state));
+        assert!(matches_with(&parse(":hover")[0], &doc, host, &state));
+    }
+
+    #[test]
+    fn dir_and_lang_pseudo_classes() {
+        let doc = rabbithole_html::parse(
+            "<div id=r dir=rtl><p id=p>x</p><span id=a dir=auto>abc</span><bdi id=b>\u{5d0}</bdi><i id=bad dir=foo></i></div>\
+             <div lang=fr-Latn-CH><p id=f></p></div><div lang=de-CH><p id=d></p></div><p id=n></p>",
+        );
+        let id = |s: &str| doc.element_by_id(s).unwrap();
+        let m = |sel: &str, n: &str| matches(&parse(sel)[0], &doc, id(n));
+        assert!(m(":dir(rtl)", "r") && m(":dir(rtl)", "p") && m(":dir(rtl)", "bad"));
+        assert!(m(":dir(ltr)", "a") && !m(":dir(rtl)", "a"));
+        assert!(m(":dir(rtl)", "b"));
+        assert!(m(":dir(ltr)", "n"));
+        assert!(!m(":dir(foopy)", "n"));
+        assert!(m(":lang(fr)", "f") && m(":lang(\"fr-CH\")", "f") && m(":lang(\"*-CH\")", "d"));
+        assert!(m(":lang(\"*-Latn\")", "f") && !m(":lang(\"*-Latn\")", "d"));
+        assert!(m(":lang(en, de)", "d") && !m(":lang(fr)", "n"));
+        assert!(lang_range_matches("de-de", "de-latn-de") && !lang_range_matches("de-de", "de-x-de"));
+    }
+
+    #[test]
     fn parse_and_specificity() {
         let sels = parse("div#main > p.intro.big a[href^='http'], *:not(.x)");
         assert_eq!(sels.len(), 2);
@@ -1639,4 +1687,136 @@ mod tests {
         assert_eq!(sel[0].pseudo_element, Some(PseudoElement::Before));
         assert!(matches(&sel[0], &doc, ps[0]));
     }
+}
+
+/// The parent element for inherited properties of the DOM: the parent, or
+/// the host of a shadow root.
+fn shadow_including_parent(doc: &Document, node: NodeId) -> Option<NodeId> {
+    let p = doc.parent(node)?;
+    if doc.is_shadow_root(p) {
+        return doc.shadow_host(p);
+    }
+    doc.element(p).map(|_| p)
+}
+
+/// The language of an element (HTML "language"): the nearest `lang` /
+/// `xml:lang` attribute (shadow-including), else the document's
+/// `Content-Language` pragma; lower case.
+pub fn element_language(doc: &Document, node: NodeId) -> Option<String> {
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if let Some(l) = doc.attr(n, "xml:lang").or_else(|| doc.attr(n, "lang")) {
+            return Some(l.trim().to_ascii_lowercase());
+        }
+        cur = shadow_including_parent(doc, n);
+    }
+    // `<meta http-equiv="content-language" content="...">`: only a single
+    // language counts.
+    let html = doc.children(Document::ROOT).find(|&c| doc.is_element(c, "html"))?;
+    let head = doc.children(html).find(|&c| doc.is_element(c, "head"))?;
+    let meta = doc.children(head).find(|&m| {
+        doc.is_element(m, "meta") && doc.attr(m, "http-equiv").is_some_and(|v| v.trim().eq_ignore_ascii_case("content-language"))
+    })?;
+    let v = doc.attr(meta, "content")?.trim();
+    (!v.is_empty() && !v.contains(',')).then(|| v.to_ascii_lowercase())
+}
+
+/// RFC 4647 §3.3.2 extended filtering of a language tag by a range
+/// (both lower case); `*` matches any subtag sequence.
+pub fn lang_range_matches(range: &str, tag: &str) -> bool {
+    if range.is_empty() {
+        return tag.is_empty();
+    }
+    if tag.is_empty() {
+        return false;
+    }
+    let r: Vec<&str> = range.split('-').collect();
+    let t: Vec<&str> = tag.split('-').collect();
+    if r[0] != "*" && r[0] != t[0] {
+        return false;
+    }
+    let (mut i, mut j) = (1, 1);
+    while i < r.len() {
+        if r[i] == "*" {
+            i += 1;
+            continue;
+        }
+        if j >= t.len() {
+            return false;
+        }
+        if r[i] == t[j] {
+            i += 1;
+            j += 1;
+        } else if t[j].len() == 1 {
+            return false;
+        } else {
+            j += 1;
+        }
+    }
+    true
+}
+
+/// First strong directional character of a string: `Some(true)` for RTL.
+pub fn first_strong_rtl(s: &str) -> Option<bool> {
+    for c in s.chars() {
+        let cp = c as u32;
+        if matches!(cp, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF) && c.is_alphabetic() {
+            return Some(true);
+        }
+        if c.is_alphabetic() {
+            return Some(false);
+        }
+    }
+    None
+}
+
+/// The auto direction of an element's content: its first strong
+/// character, skipping `bdi`, `script`, `style`, `textarea` and elements
+/// with a valid `dir`.
+pub fn auto_direction(doc: &Document, node: NodeId) -> Option<bool> {
+    for c in doc.children(node) {
+        if let Some(t) = doc.text(c) {
+            if let Some(d) = first_strong_rtl(t) {
+                return Some(d);
+            }
+        } else if let Some(e) = doc.element(c) {
+            if matches!(e.tag.as_str(), "bdi" | "script" | "style" | "textarea")
+                || e.attr("dir").is_some_and(|d| ["ltr", "rtl", "auto"].iter().any(|v| d.trim().eq_ignore_ascii_case(v)))
+            {
+                continue;
+            }
+            if let Some(d) = auto_direction(doc, c) {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
+/// The directionality of an element (HTML §3.2.6.4): `true` for RTL.
+pub fn is_rtl(doc: &Document, node: NodeId) -> bool {
+    let mut cur = node;
+    loop {
+        let Some(el) = doc.element(cur) else { return false };
+        let dir = el.attr("dir").map(|d| d.trim().to_ascii_lowercase());
+        match dir.as_deref() {
+            Some("rtl") => return true,
+            Some("ltr") => return false,
+            Some("auto") => return auto_rtl(doc, cur),
+            _ if el.tag == "bdi" => return auto_rtl(doc, cur),
+            _ => {}
+        }
+        match shadow_including_parent(doc, cur) {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
+
+fn auto_rtl(doc: &Document, node: NodeId) -> bool {
+    let Some(el) = doc.element(node) else { return false };
+    if el.tag == "textarea" || (el.tag == "input" && el.attr("type").is_none_or(|t| matches!(t.to_ascii_lowercase().as_str(), "text" | "search" | "tel" | "url" | "email"))) {
+        return el.attr("value").and_then(first_strong_rtl).unwrap_or(false);
+    }
+    auto_direction(doc, node).unwrap_or(false)
 }

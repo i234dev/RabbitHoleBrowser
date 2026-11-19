@@ -811,6 +811,8 @@ fn border_shape_and_corner_shape() {
         [CornerShape::Notch, CornerShape::Scoop, CornerShape::Notch, CornerShape::Scoop]
     );
     assert_eq!(one("corner-shape: superellipse(0)").corner_shape, [CornerShape::Bevel; 4]);
+    assert_eq!(one("corner-shape: superellipse(1.5)").corner_shape, [CornerShape::Superellipse(1.5); 4]);
+    assert_eq!(one("corner-shape: superellipse(-infinity)").corner_shape, [CornerShape::Notch; 4]);
     assert_eq!(one("corner-shape: round; corner-top-left-shape: square").corner_shape[0], CornerShape::Square);
 }
 
@@ -1016,4 +1018,146 @@ fn perspective_and_preserve_3d() {
     assert!(!one("transform-style: preserve-3d; overflow: hidden").preserves_3d());
     assert!(!one("transform-style: preserve-3d; isolation: isolate").preserves_3d());
     assert!(!one("perspective: none").is_stacking_context());
+
+#[test]
+fn supports_declaration_validation() {
+    use crate::cascade::supports_declaration as check;
+    let v = |name: &str, value: &str| check(name, &rabbithole_css::Tokenizer::tokenize(value));
+    // Properties the engine implements are never reported unsupported.
+    for (n, val) in [
+        ("display", "grid"), ("display", "inline"), ("display", "flex"), ("margin", "0"), ("padding", "0"), ("color", "red"), ("color", "black"),
+        ("background", "none"), ("background", "green"), ("background-image", "linear-gradient(red, blue)"), ("border", "1px solid red"),
+        ("border-radius", "4px"), ("box-shadow", "none"), ("transform", "rotate(1deg)"), ("transition", "opacity 1s"), ("animation-name", "x"),
+        ("animation", "x 1s"), ("opacity", "1"), ("gap", "1rem"), ("grid-template-columns", "1fr 1fr"), ("position", "sticky"),
+        ("position", "static"), ("aspect-ratio", "16 / 9"), ("inset", "0"), ("object-fit", "cover"), ("filter", "blur(2px)"),
+        ("backdrop-filter", "blur(2px)"), ("-webkit-backdrop-filter", "blur(2px)"), ("mask-image", "none"), ("-webkit-mask-image", "none"),
+        ("clip-path", "inset(0)"), ("text-decoration", "underline"), ("text-overflow", "ellipsis"), ("font", "12px serif"),
+        ("font-size", "12px"), ("font-family", "serif"), ("font-weight", "bold"), ("font-weight", "400"), ("line-height", "1.5"),
+        ("font-variant-numeric", "tabular-nums"), ("font-feature-settings", "'liga' 0"), ("writing-mode", "vertical-rl"),
+        ("contain", "paint"), ("content-visibility", "auto"), ("container-type", "inline-size"), ("will-change", "transform"),
+        ("touch-action", "none"), ("user-select", "none"), ("-webkit-user-select", "none"), ("appearance", "none"),
+        ("scroll-behavior", "smooth"), ("overscroll-behavior", "contain"), ("accent-color", "red"), ("color-scheme", "dark"),
+        ("isolation", "isolate"), ("mix-blend-mode", "multiply"), ("hyphens", "auto"), ("word-break", "break-all"),
+        ("overflow-wrap", "anywhere"), ("text-wrap", "balance"), ("tab-size", "4"), ("caret-color", "red"), ("cursor", "pointer"),
+        ("outline", "none"), ("outline-offset", "2px"), ("list-style", "none"), ("counter-reset", "x"), ("content", "'x'"),
+        ("quotes", "none"), ("vertical-align", "middle"), ("z-index", "auto"), ("overflow", "clip"), ("visibility", "visible"),
+        ("float", "none"), ("clear", "none"), ("width", "auto"), ("width", "fit-content"), ("height", "100dvh"), ("max-width", "none"),
+        ("margin-inline", "auto"), ("padding-block", "1em"), ("inset-inline-start", "0"), ("place-items", "center"), ("order", "1"),
+        ("flex", "1"), ("flex-basis", "auto"), ("align-self", "end"), ("justify-self", "start"), ("columns", "2"), ("column-gap", "1em"),
+        ("table-layout", "fixed"), ("border-collapse", "collapse"), ("text-align", "start"), ("text-indent", "1em"),
+        ("letter-spacing", "normal"), ("word-spacing", "1px"), ("white-space", "nowrap"), ("text-transform", "none"),
+        ("text-shadow", "1px 1px red"), ("box-sizing", "content-box"), ("resize", "both"), ("pointer-events", "none"),
+        ("scrollbar-width", "thin"), ("scrollbar-gutter", "stable"), ("translate", "1px"), ("rotate", "1deg"), ("scale", "2"),
+        ("perspective", "100px"), ("transform-origin", "0 0"), ("background-clip", "text"), ("-webkit-background-clip", "text"),
+        ("-webkit-line-clamp", "2"), ("line-clamp", "2"), ("-webkit-box-orient", "vertical"), ("text-underline-offset", "2px"),
+        ("shape-outside", "none"), ("image-rendering", "pixelated"), ("unicode-bidi", "isolate"), ("direction", "rtl"),
+    ] {
+        assert_ne!(v(n, val), Some(false), "{n}: {val}");
+    }
+    assert_eq!(v("yadayada", "x"), Some(false));
+    assert_eq!(v("foo", "baz"), Some(false));
+    assert_eq!(v("color", "rainbow"), Some(false));
+    assert_eq!(v("margin", "0 or padding: 0"), Some(false));
+    assert_eq!(v("--foo", "whatever"), Some(true));
+}
+
+#[test]
+fn gradients_of_css4_colors_default_to_oklab() {
+    let interp = |css: &str| match &one(css).background_layers[0].image {
+        BackgroundImage::LinearGradient { interp, stops, .. } => (*interp, stops.iter().any(|s| s.wide.is_some())),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(interp("background-image: linear-gradient(red, blue)"), (crate::ColorInterp::default(), false));
+    let oklab = crate::ColorInterp { space: crate::InterpSpace::Oklab, hue: crate::HueMethod::Shorter };
+    assert_eq!(interp("background-image: linear-gradient(red, oklch(50% 0.1 30))"), (oklab, true));
+    assert_eq!(interp("background-image: linear-gradient(in srgb, red, color(srgb 0 0 1))").0, crate::ColorInterp::default());
+}
+
+#[test]
+fn revert_and_revert_layer_roll_back_the_cascade() {
+    let green = rabbithole_gfx::Color::rgb(0, 128, 0);
+    let bg = |css: &str, html: &str| {
+        let (doc, t) = styled(html, css);
+        style_of(&doc, &t, "p").background_color
+    };
+    let p = "<p>x</p>";
+    assert_eq!(bg("@layer a { p { background-color: green } } @layer b { p { background-color: red; background-color: revert-layer } }", p), green);
+    // !important revert-layer rolls back to earlier layers only.
+    assert_eq!(
+        bg("@layer a { p { background-color: green } } @layer b { p { background-color: red !important; background-color: revert-layer !important } } @layer c { p { background-color: red !important } }", p),
+        green
+    );
+    // The style attribute is a layer above the style sheets.
+    assert_eq!(bg("p { background-color: green }", "<p style='background-color: revert-layer'>x</p>"), green);
+    assert_eq!(bg("@layer a { p { background-color: green } } @layer b { p { background-color: red; width: 1px } p { all: revert-layer } }", p), green);
+    // revert rolls back to the user-agent origin.
+    let (doc, t) = styled("<div>x</div>", "div { display: inline; display: revert }");
+    assert_eq!(style_of(&doc, &t, "div").display, Display::Block);
+}
+
+#[test]
+fn container_queries_and_units() {
+    let css = ".c { container: card / inline-size; --theme: dark } \
+               @container card (min-width: 300px) { p { width: 10cqw } } \
+               @container (width < 300px) { p { height: 7px } } \
+               @container style(--theme: dark) { p { color: green } } \
+               @container style(--theme: light) { p { color: red } }";
+    let doc = rabbithole_html::parse("<div class=c><p>x</p></div>");
+    let sheets = vec![parse_stylesheet(css)];
+    let div = doc.find_element("div").unwrap();
+    // Before layout measured the container, size queries are unknown.
+    let t = style_tree(&doc, &sheets, &env());
+    let p = style_of(&doc, &t, "p");
+    assert_eq!(p.color, rabbithole_gfx::Color::rgb(0, 128, 0));
+    assert!(style_of(&doc, &t, "div").container_inline);
+    assert_eq!(p.width, Length::Auto);
+    let mut state = MatchState::default();
+    let info = rabbithole_css::container::ContainerInfo { width: 400.0, height: 50.0, names: vec!["card".into()], font_size: 16.0, ..Default::default() };
+    state.containers = std::sync::Arc::new([(div, info)].into_iter().collect());
+    let resolve = |_: &str, raw: &str| Some(raw.to_string());
+    let opts = StyleOptions { state: &state, resolve_url: &resolve, document_base: "" };
+    let t = style_tree_with(&doc, &sheets, &env(), &opts);
+    let p = style_of(&doc, &t, "p");
+    assert_eq!(p.width, Length::Px(40.0));
+    assert_eq!(p.height, Length::Auto);
+}
+
+#[test]
+fn typed_attr_substitution() {
+    let (doc, t) = styled(
+        "<div data-c=green data-w=40 data-l='3px'><p data-c=nonsense>x</p><span>y</span></div>",
+        "div { background-color: attr(data-c type(<color>)); width: attr(data-w px); height: attr(data-l type(<length>)); --s: attr(data-c) } \
+         p { background-color: attr(data-c type(<color>), blue) } \
+         span { content: attr(data-missing, 'fb') }",
+    );
+    let d = style_of(&doc, &t, "div");
+    assert_eq!(d.background_color, rabbithole_gfx::Color::rgb(0, 128, 0));
+    assert_eq!(d.width, Length::Px(40.0));
+    assert_eq!(d.height, Length::Px(3.0));
+    assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn stepped_and_trigonometric_math_functions() {
+    assert_eq!(one("width: round(12.4px, 5px)").width, Length::Px(10.0));
+    assert_eq!(one("width: round(up, 12.4px, 5px)").width, Length::Px(15.0));
+    assert_eq!(one("width: calc(mod(17px, 5px) * 2)").width, Length::Px(4.0));
+    assert_eq!(one("margin-left: rem(-7px, 3px)").margin.left, Length::Px(-1.0));
+    assert_eq!(one("margin-left: calc(100px * sign(-3px) + abs(-20px))").margin.left, Length::Px(-80.0));
+    assert_eq!(one("width: calc(sin(30deg) * 100px)").width, Length::Px(50.0));
+    assert_eq!(one("width: calc(pow(2, 3) * 1px + sqrt(16) * 1px)").width, Length::Px(12.0));
+    assert_eq!(one("width: hypot(3px, 4px)").width, Length::Px(5.0));
+    assert!(matches!(one("opacity: round(0.26, 0.1)").opacity, o if (o - 0.3).abs() < 1e-6));
+}
+
+#[test]
+fn inherited_currentcolor_values_use_the_childs_color() {
+    let (doc, t) = styled(
+        "<div id=o><section><p>x</p></section></div>",
+        "div { color: red; background-color: lch(from currentColor l c h) } section { background-color: inherit } p { color: rgb(0, 128, 0); background-color: inherit }",
+    );
+    assert_eq!(style_of(&doc, &t, "section").background_color, rabbithole_gfx::Color::rgb(255, 0, 0));
+    assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(0, 128, 0));
+    let (doc, t) = styled("<p>x</p>", "p { color: rgb(255, 0, 0); background-color: color-mix(in srgb, currentColor, rgb(0, 0, 255)) }");
+    assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(128, 0, 128));
 }

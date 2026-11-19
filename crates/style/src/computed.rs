@@ -312,6 +312,12 @@ pub enum TextAlign {
     Justify,
 }
 
+/// `margin-trim` bits.
+pub const MARGIN_TRIM_BLOCK_START: u8 = 1;
+pub const MARGIN_TRIM_BLOCK_END: u8 = 2;
+pub const MARGIN_TRIM_INLINE_START: u8 = 4;
+pub const MARGIN_TRIM_INLINE_END: u8 = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhiteSpace {
     Normal,
@@ -810,6 +816,9 @@ pub struct GradientStop {
     /// A color interpolation hint (`position` only; `color` is unused):
     /// the midpoint of the transition between its neighbouring stops.
     pub hint: bool,
+    /// The unclipped color of a stop written in a CSS Color 4 notation
+    /// (`color` is its sRGB clip); `None` for legacy sRGB colors.
+    pub wide: Option<crate::Wide>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1276,7 +1285,7 @@ pub enum BasicShape {
 
 /// `corner-shape` of one corner (CSS Borders 4 §5.2): the curve drawn
 /// between the ends of the corner's border radius.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CornerShape {
     #[default]
     Round,
@@ -1285,6 +1294,24 @@ pub enum CornerShape {
     Notch,
     Scoop,
     Squircle,
+    /// `superellipse(K)` for other `K`: the curve `x^c + y^c = 1` with
+    /// `c = 2^K` (concave curves mirror the convex ones).
+    Superellipse(f32),
+}
+
+impl CornerShape {
+    /// The superellipse parameter `K` of the shape.
+    pub fn parameter(self) -> f32 {
+        match self {
+            CornerShape::Round => 1.0,
+            CornerShape::Square => f32::INFINITY,
+            CornerShape::Bevel => 0.0,
+            CornerShape::Notch => f32::NEG_INFINITY,
+            CornerShape::Scoop => -1.0,
+            CornerShape::Squircle => 2.0,
+            CornerShape::Superellipse(k) => k,
+        }
+    }
 }
 
 /// Computed `clip-path` (other than `none`).
@@ -1807,8 +1834,27 @@ pub struct ComputedStyle {
     pub contain_paint: bool,
     pub contain_layout: bool,
     pub contain_size: bool,
+    /// `margin-trim` (`MARGIN_TRIM_*` bits).
+    pub margin_trim: u8,
+    /// Color longhands whose value uses `currentcolor` (in `color-mix()`,
+    /// a relative color or alone), with that value: a child inheriting
+    /// them explicitly resolves it against its own color.
+    pub current_color_deps: Option<std::rc::Rc<Vec<(&'static str, std::rc::Rc<[rabbithole_css::Token]>)>>>,
+    /// `contain: inline-size`.
+    pub contain_inline_size: bool,
+    /// `contain: style` (also implied by `content`, `strict` and query
+    /// containers).
+    pub contain_style: bool,
+    /// `display: run-in` (computed as `block`): the box becomes the first
+    /// inline box of the block that follows it, when there is one.
+    pub run_in: bool,
     /// `container-type: size`: a size container, which is size-contained.
     pub container_size: bool,
+    /// `container-type: inline-size` or `size`: a query container (and
+    /// inline-size contained).
+    pub container_inline: bool,
+    /// `container-name`s.
+    pub container_names: Option<std::rc::Rc<Vec<String>>>,
     /// `contain-intrinsic-width` / `-height` (px; `None` = `none`): the
     /// size a size-contained box is laid out as.
     pub contain_intrinsic_width: Option<f32>,
@@ -2065,7 +2111,14 @@ impl ComputedStyle {
             contain_paint: false,
             contain_layout: false,
             contain_size: false,
+            contain_inline_size: false,
+            margin_trim: 0,
+            current_color_deps: None,
+            contain_style: false,
+            run_in: false,
             container_size: false,
+            container_inline: false,
+            container_names: None,
             contain_intrinsic_width: None,
             contain_intrinsic_height: None,
             line_clamp_prefixed: false,
@@ -2113,6 +2166,13 @@ impl ComputedStyle {
 
     /// A fresh style for a child: inherited properties copied from
     /// `parent`, everything else at its initial value.
+    /// Any containment (layout, paint, size, inline-size or style): stops
+    /// the propagation of the root's and body's background and overflow to
+    /// the viewport (CSS Contain 2 §3).
+    pub fn has_containment(&self) -> bool {
+        self.contain_layout || self.contain_paint || self.contain_size || self.contain_inline_size || self.contain_style || self.container_inline
+    }
+
     pub fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         ComputedStyle {
             color: parent.color,

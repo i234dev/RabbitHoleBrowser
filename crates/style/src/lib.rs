@@ -17,12 +17,20 @@ pub mod values;
 mod color_spaces;
 
 pub use computed::*;
-pub use color_spaces::{interpolate as interpolate_color, ColorInterp, HueMethod, InterpSpace};
+pub use color_spaces::{color_to_wide, interpolate as interpolate_color, interpolate_wide, wide_to_color, ColorInterp, HueMethod, InterpSpace, Wide};
 pub use restyle::{RestyleOutcome, StyleChange, StyleEngine};
 pub use rabbithole_css::{Declaration, MatchState, MediaEnv, PseudoElement, Stylesheet};
 
 use rabbithole_dom::{Document, NodeId};
 use std::collections::HashMap;
+
+pub use props::misc::take_containers_seen;
+
+/// Let `@supports` (parsed by `rabbithole_css`) check declarations
+/// against the property grammars of this crate.
+pub fn install_supports_validator() {
+    rabbithole_css::supports::set_declaration_validator(cascade::supports_declaration);
+}
 use std::rc::Rc;
 
 /// One `src` entry of an `@font-face` rule.

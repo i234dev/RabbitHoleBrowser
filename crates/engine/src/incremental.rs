@@ -47,6 +47,9 @@ pub struct IncrementalStats {
 #[derive(Default)]
 pub struct IncrementalState {
     style: Option<StyleEngine>,
+    /// Some element was styled as a query container: layout measures them
+    /// for container queries and `cq*` units.
+    has_containers: bool,
     /// Revision of this document view and the shared host catalog.
     fonts_seen: Option<(u64, u64)>,
     /// (DOM epoch, visited history size, base URL) the `:visited` link set
@@ -426,8 +429,27 @@ impl Engine {
 
     /// Bring `page.layout` up to date (incrementally when possible). The
     /// display list is left stale (see [`Engine::flush_display_list`]).
+    /// Query containers measured by layout feed back into style: when
+    /// their sizes changed, style and layout run again (a few times at
+    /// most, as container queries cannot change their containers' sizes in
+    /// ways that loop for long).
     pub fn flush_layout(&self, page: &mut Page) {
+        for _ in 0..4 {
+            self.flush_layout_once(page);
+            if !page.incr.has_containers {
+                return;
+            }
+            let found = collect_containers(&page.layout.root);
+            if *page.state.containers == found {
+                return;
+            }
+            page.state.containers = Arc::new(found);
+        }
+    }
+
+    fn flush_layout_once(&self, page: &mut Page) {
         self.flush_style(page);
+        page.incr.has_containers |= rabbithole_style::take_containers_seen();
         let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
         let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, .. } = page;
         // Inputs changed outside the style system: images, background
@@ -689,6 +711,32 @@ impl Engine {
 
 fn se_state_differs(se: &StyleEngine, state: &rabbithole_css::MatchState) -> bool {
     se.state() != state
+}
+
+/// The query containers of a layout tree with their content-box sizes.
+fn collect_containers(root: &rabbithole_layout::LayoutBox) -> HashMap<NodeId, rabbithole_css::container::ContainerInfo> {
+    let mut out = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(b) = stack.pop() {
+        let s = &b.style;
+        if s.container_inline {
+            if let Some(n) = b.node {
+                // Vertical subtrees are laid out transposed (logical
+                // width = inline size).
+                let (width, height) = if s.layout_transposed { (b.content_rect.h, b.content_rect.w) } else { (b.content_rect.w, b.content_rect.h) };
+                out.entry(n).or_insert_with(|| rabbithole_css::container::ContainerInfo {
+                    width,
+                    height,
+                    both_axes: s.container_size,
+                    vertical: s.writing_mode.is_vertical(),
+                    names: s.container_names.as_deref().cloned().unwrap_or_default(),
+                    font_size: s.font_size,
+                });
+            }
+        }
+        stack.extend(b.children.iter());
+    }
+    out
 }
 
 /// Layout damage implied by DOM mutations (independent of style changes):

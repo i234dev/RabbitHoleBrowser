@@ -589,6 +589,10 @@ impl<'a> Layouter<'a> {
     /// top margin chain.
     fn leading_child_margins(&self, b: &LayoutBox, inner_w: f32, inner_h: Option<f32>) -> Margins {
         let mut m = Margins::default();
+        if b.style.margin_trim & rabbithole_style::MARGIN_TRIM_BLOCK_START != 0 {
+            // `margin-trim: block-start`: they are trimmed to zero.
+            return m;
+        }
         for c in b.children.iter().filter(|c| c.is_in_flow()) {
             if !matches!(c.kind, BoxKind::Block | BoxKind::AnonymousBlock | BoxKind::Table | BoxKind::Image) {
                 break;
@@ -610,7 +614,8 @@ impl<'a> Layouter<'a> {
     /// (empty) descendants'.
     fn all_margins(&self, b: &LayoutBox, cbw: f32, cb_h: Option<f32>) -> Margins {
         let mut m = Margins::of(b.style.margin.top.resolve_or_zero(cbw)).add(b.style.margin.bottom.resolve_or_zero(cbw));
-        if b.formatting == Formatting::Block {
+        // (Trimmed children's margins are zero.)
+        if b.formatting == Formatting::Block && b.style.margin_trim & (rabbithole_style::MARGIN_TRIM_BLOCK_START | rabbithole_style::MARGIN_TRIM_BLOCK_END) == 0 {
             let inner_w = self.inner_width_estimate(b, cbw);
             let inner_h = self.inner_height_estimate(b, cb_h);
             for c in b.children.iter().filter(|c| c.is_in_flow()) {
@@ -1216,6 +1221,11 @@ impl<'a> Layouter<'a> {
         let mut pending = Margins::default();
         let mut at_top = top_collapsible;
         let mb = b.margin.bottom;
+        // `margin-trim`: the margins of the leading children (empty ones,
+        // then the first non-empty one) and of the trailing ones are zero.
+        let trim_start = b.style.margin_trim & rabbithole_style::MARGIN_TRIM_BLOCK_START != 0;
+        let trim_end = b.style.margin_trim & rabbithole_style::MARGIN_TRIM_BLOCK_END != 0;
+        let mut leading = true;
         for i in 0..b.children.len() {
             match b.children[i].flow {
                 Flow::Absolute => {
@@ -1270,7 +1280,7 @@ impl<'a> Layouter<'a> {
                 Flow::InFlow => {
                     b.children[i].clamped = false;
                     let empty = self.collapses_through(&b.children[i], cb.height);
-                    let child_top = self.top_margins(&b.children[i], cb.width, cb.height);
+                    let child_top = if trim_start && leading { Margins::default() } else { self.top_margins(&b.children[i], cb.width, cb.height) };
                     // Hypothetical position of the border edge (no clearance).
                     let mut top = if at_top { content_y } else { cursor + pending.join(child_top).resolve() };
                     let mut clearance = false;
@@ -1294,11 +1304,15 @@ impl<'a> Layouter<'a> {
                         }
                     } else {
                         at_top = false;
+                        leading = false;
                         cursor = child.rect.bottom();
                         pending = if empty { Margins::of(child.margin.bottom) } else { Margins::from_pair(child.bottom_margins) };
                     }
                 }
             }
+        }
+        if trim_end {
+            pending = Margins::default();
         }
         if at_top {
             // No in-flow content separated the parent's margins.

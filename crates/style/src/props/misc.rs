@@ -152,6 +152,55 @@ fn single_list<'a, T>(comps: &[&'a [Token]], f: impl Fn(&'a [Token]) -> Option<T
     values::split_commas(comps).iter().map(|l| if l.len() == 1 { f(l[0]) } else { None }).collect()
 }
 
+thread_local! {
+    static CONTAINERS_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn note_container(inline: bool) {
+    if inline {
+        CONTAINERS_SEEN.with(|c| c.set(true));
+    }
+}
+
+/// Whether some element was styled as a query container since the last
+/// call (the engine then measures containers after layout).
+pub fn take_containers_seen() -> bool {
+    CONTAINERS_SEEN.with(|c| c.replace(false))
+}
+
+/// `container-type`: (size container, query container); `normal` is
+/// neither. `scroll-state` queries are not supported.
+fn container_type(comps: &[&[Token]]) -> Option<(bool, bool)> {
+    match comps {
+        [c] if values::is_ident(c, "normal") => Some((false, false)),
+        [c] if values::is_ident(c, "size") => Some((true, true)),
+        [c] if values::is_ident(c, "inline-size") => Some((false, true)),
+        [c] if values::is_ident(c, "scroll-state") => Some((false, false)),
+        _ => None,
+    }
+}
+
+/// `container-name`: `none` or identifiers.
+fn container_names(comps: &[&[Token]]) -> Option<Option<std::rc::Rc<Vec<String>>>> {
+    if let [c] = comps {
+        if values::is_ident(c, "none") {
+            return Some(None);
+        }
+    }
+    let mut names = Vec::new();
+    for c in comps {
+        let n = values::ident(c)?;
+        if matches!(n.as_str(), "none" | "and" | "or" | "not" | "initial" | "inherit" | "unset" | "default") {
+            return None;
+        }
+        match c {
+            [Token::Ident(raw)] => names.push(raw.clone()),
+            _ => return None,
+        }
+    }
+    (!names.is_empty()).then(|| Some(std::rc::Rc::new(names)))
+}
+
 pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) -> bool {
     let name = match name {
         "-webkit-user-select" | "-moz-user-select" | "-ms-user-select" => "user-select",
@@ -463,11 +512,53 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         }
         // Only the size containment of size containers matters to layout.
         "container-type" => {
-            style.container_size = comps.iter().any(|c| values::is_ident(c, "size"));
+            if let Some((size, inline)) = container_type(comps) {
+                style.container_size = size;
+                style.container_inline = inline;
+                note_container(inline);
+            }
+        }
+        "margin-trim" => {
+            // `none | block | inline | [block-start || inline-start ||
+            // block-end || inline-end]`
+            let kws: Option<Vec<String>> = comps.iter().map(|c| values::ident(c)).collect();
+            let Some(kws) = kws else { return true };
+            let bits = match kws.as_slice() {
+                [k] if k == "none" => Some(0),
+                [k] if k == "block" => Some(MARGIN_TRIM_BLOCK_START | MARGIN_TRIM_BLOCK_END),
+                [k] if k == "inline" => Some(MARGIN_TRIM_INLINE_START | MARGIN_TRIM_INLINE_END),
+                _ => kws.iter().try_fold(0u8, |acc, k| {
+                    let bit = match k.as_str() {
+                        "block-start" => MARGIN_TRIM_BLOCK_START,
+                        "block-end" => MARGIN_TRIM_BLOCK_END,
+                        "inline-start" => MARGIN_TRIM_INLINE_START,
+                        "inline-end" => MARGIN_TRIM_INLINE_END,
+                        _ => return None,
+                    };
+                    (acc & bit == 0).then_some(acc | bit)
+                }),
+            };
+            if let Some(b) = bits {
+                style.margin_trim = b;
+            }
+        }
+        "container-name" => {
+            if let Some(names) = container_names(comps) {
+                style.container_names = names;
+            }
         }
         "container" => {
+            // `<container-name> [ / <container-type> ]?`
             let slash = comps.iter().position(|c| matches!(c, [Token::Delim('/')]));
-            style.container_size = slash.is_some_and(|i| comps[i + 1..].iter().any(|c| values::is_ident(c, "size")));
+            let (names, ty) = match slash {
+                Some(i) => (&comps[..i], Some(&comps[i + 1..])),
+                None => (comps, None),
+            };
+            let (Some(names), Some((size, inline))) = (container_names(names), ty.map_or(Some((false, false)), container_type)) else { return true };
+            style.container_names = names;
+            style.container_size = size;
+            style.container_inline = inline;
+            note_container(inline);
         }
         "columns" | "column-count" | "column-width" => {
             style.multicol = !comps.iter().all(|c| values::is_ident(c, "auto"));
@@ -480,7 +571,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color"
         | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"
         | "-ms-touch-action" | "speak" | "orphans" | "widows" | "page" | "size" | "marks" | "quotes-x" | "all-x"
-        | "container-name" | "view-transition-name"
+        | "view-transition-name"
         | "anchor-name" | "position-anchor" | "field-sizing" | "forced-color-adjust" | "interpolate-size" | "math-style"
         | "-webkit-box-sizing" | "-moz-box-sizing" | "-webkit-user-drag" | "-webkit-user-modify" | "-webkit-locale"
         | "-webkit-margin-before" | "-webkit-margin-after" | "-webkit-margin-start" | "-webkit-margin-end"

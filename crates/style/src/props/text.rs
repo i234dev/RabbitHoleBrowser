@@ -645,6 +645,9 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             },
             _ => return true,
         },
+        // Bold is never synthesized: `auto` and `none` both render as
+        // `none` does.
+        "font-synthesis-weight" => {}
         "font-synthesis-style" => match comps {
             [c] => match values::ident(c).as_deref() {
                 Some("auto") => style.font_synthesis_style = true,

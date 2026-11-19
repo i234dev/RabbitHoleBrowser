@@ -28,10 +28,12 @@ fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext, c
     };
     for arg in args {
         let mut col = None;
+        let mut wide = None;
         let mut positions = Vec::new();
         for c in arg {
             if let (None, Some(cc)) = (col, color(c, current)) {
                 col = Some(cc);
+                wide = crate::color_spaces::parse_wide(c);
             } else if let Some(l) = position(c) {
                 positions.push(l);
             } else {
@@ -44,10 +46,10 @@ fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext, c
                     return None;
                 }
                 if positions.is_empty() {
-                    stops.push(GradientStop { color: col, position: None, hint: false });
+                    stops.push(GradientStop { color: col, position: None, hint: false, wide });
                 }
                 for p in positions {
-                    stops.push(GradientStop { color: col, position: Some(p), hint: false });
+                    stops.push(GradientStop { color: col, position: Some(p), hint: false, wide });
                 }
             }
             None => {
@@ -55,7 +57,7 @@ fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext, c
                 if positions.len() != 1 || stops.last().is_none_or(|s| s.hint) {
                     return None;
                 }
-                stops.push(GradientStop { color: Color::TRANSPARENT, position: Some(positions[0]), hint: true });
+                stops.push(GradientStop { color: Color::TRANSPARENT, position: Some(positions[0]), hint: true, wide: None });
             }
         }
     }
@@ -91,6 +93,16 @@ fn parse_interpolation(toks: &[&[Token]], i: &mut usize) -> Option<crate::ColorI
     None
 }
 
+/// Gradients interpolate legacy sRGB colors in sRGB and anything else in
+/// Oklab unless they say otherwise (CSS Images 4 §3.1, CSS Color 4 §12.1).
+fn default_interpolation(stops: &[GradientStop]) -> crate::ColorInterp {
+    if stops.iter().any(|s| s.wide.is_some()) {
+        crate::ColorInterp { space: crate::InterpSpace::Oklab, hue: crate::HueMethod::Shorter }
+    } else {
+        crate::ColorInterp::default()
+    }
+}
+
 /// Is the first argument a prelude (no color in it)?
 fn is_prelude(first: &[&[Token]], current: Color) -> bool {
     !first.is_empty() && first.iter().all(|t| color(t, current).is_none())
@@ -117,7 +129,7 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
     match kind {
         "linear" => {
             let mut direction = GradientDirection::Corner(0, 1);
-            let mut interp = crate::ColorInterp::default();
+            let mut interp: Option<crate::ColorInterp> = None;
             let mut stop_start = 0;
             let first = &args[0];
             if is_prelude(first, current) {
@@ -128,7 +140,7 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                 while i < first.len() {
                     if !seen_interp {
                         if let Some(m) = parse_interpolation(first, &mut i) {
-                            interp = m;
+                            interp = Some(m);
                             seen_interp = true;
                             continue;
                         }
@@ -181,13 +193,14 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                 }
             }
             let stops = gradient_stops(&args[stop_start..], current, ctx, false)?;
+            let interp = interp.unwrap_or_else(|| default_interpolation(&stops));
             Some(BackgroundImage::LinearGradient { direction, stops, repeating, interp })
         }
         "radial" => {
             let mut shape = RadialShape::Ellipse;
             let mut size = RadialSize::FarthestCorner;
             let mut position = (Length::Percent(50.0), Length::Percent(50.0));
-            let mut interp = crate::ColorInterp::default();
+            let mut interp: Option<crate::ColorInterp> = None;
             let mut stop_start = 0;
             let first = &args[0];
             // A first argument without a color is the shape/size/position prelude.
@@ -198,7 +211,7 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                 let mut keyword_size = false;
                 while i < first.len() {
                     if let Some(m) = parse_interpolation(first, &mut i) {
-                        interp = m;
+                        interp = Some(m);
                         continue;
                     }
                     let t = first[i];
@@ -258,13 +271,14 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                 stop_start = 1;
             }
             let stops = gradient_stops(&args[stop_start..], current, ctx, false)?;
+            let interp = interp.unwrap_or_else(|| default_interpolation(&stops));
             Some(BackgroundImage::RadialGradient { shape, size, position, stops, repeating, interp })
         }
         _ => {
             let first = &args[0];
             let mut angle = 0.0;
             let mut position = (Length::Percent(50.0), Length::Percent(50.0));
-            let mut interp = crate::ColorInterp::default();
+            let mut interp: Option<crate::ColorInterp> = None;
             let mut stop_start = 0;
             if first.iter().all(|t| color(t, current).is_none()) && first.first().is_some_and(|t| values::ident(t).is_some()) {
                 stop_start = 1;
@@ -272,7 +286,7 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                 let (mut seen_from, mut seen_at) = (false, false);
                 while i < first.len() {
                     if let Some(m) = parse_interpolation(first, &mut i) {
-                        interp = m;
+                        interp = Some(m);
                         continue;
                     }
                     if values::is_ident(first[i], "from") && !seen_from {
@@ -293,6 +307,7 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                 }
             }
             let stops = gradient_stops(&args[stop_start..], current, ctx, true)?;
+            let interp = interp.unwrap_or_else(|| default_interpolation(&stops));
             Some(BackgroundImage::ConicGradient { angle, position, stops, repeating, interp })
         }
     }
@@ -329,7 +344,7 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
                 }
             }
             if let Some(col) = args.last().filter(|a| a.len() == 1).and_then(|a| color(a[0], current)) {
-                let stop = GradientStop { color: col, position: None, hint: false };
+                let stop = GradientStop { color: col, position: None, hint: false, wide: None };
                 return Some(BackgroundImage::LinearGradient { direction: GradientDirection::Corner(0, 1), stops: vec![stop.clone(), stop], repeating: false, interp: crate::ColorInterp::default() });
             }
             return None;

@@ -86,7 +86,8 @@ fn max_px_radius(radii: &[(Length, Length); 4], font_size: f32) -> f32 {
     m
 }
 
-/// A `<corner-shape-value>`; `superellipse(k)` maps to the nearest keyword.
+/// A `<corner-shape-value>`; `superellipse(k)` of a keyword's `k` is that
+/// keyword.
 fn corner_shape(c: &[Token]) -> Option<CornerShape> {
     if let Some(k) = values::ident(c) {
         return Some(match k.as_str() {
@@ -110,13 +111,17 @@ fn corner_shape(c: &[Token]) -> Option<CornerShape> {
         Some("-infinity") => f32::NEG_INFINITY,
         _ => values::number(a)?,
     };
+    if k.is_nan() {
+        return None;
+    }
     Some(match k {
-        k if k >= 4.0 => CornerShape::Square,
-        k if k >= 1.5 => CornerShape::Squircle,
-        k if k >= 0.5 => CornerShape::Round,
-        k if k > -0.5 => CornerShape::Bevel,
-        k if k > -4.0 => CornerShape::Scoop,
-        _ => CornerShape::Notch,
+        f32::INFINITY => CornerShape::Square,
+        2.0 => CornerShape::Squircle,
+        1.0 => CornerShape::Round,
+        0.0 => CornerShape::Bevel,
+        -1.0 => CornerShape::Scoop,
+        f32::NEG_INFINITY => CornerShape::Notch,
+        k => CornerShape::Superellipse(k),
     })
 }
 
@@ -606,6 +611,8 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.contain_paint = has("paint") || has("strict") || has("content");
                 style.contain_layout = has("layout") || has("strict") || has("content");
                 style.contain_size = has("size") || has("strict");
+                style.contain_inline_size = has("inline-size");
+                style.contain_style = has("style") || has("strict") || has("content");
             }
             if name == "will-change" && kws.iter().any(|k| matches!(k.as_str(), "transform" | "opacity")) {
                 style.creates_stacking_context = true;

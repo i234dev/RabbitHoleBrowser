@@ -1110,6 +1110,7 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Engine {
+        rabbithole_style::install_supports_validator();
         let fonts = FontContext::new();
         fonts.load_system_fonts();
         let fonts = Rc::new(fonts);
@@ -1132,6 +1133,7 @@ impl Engine {
 
     /// Engine without system font discovery (faster startup for tests/CLI).
     pub fn new_bundled_fonts_only() -> Engine {
+        rabbithole_style::install_supports_validator();
         let fonts = Rc::new(FontContext::new());
         Engine {
             service_workers: Default::default(),
@@ -1918,16 +1920,17 @@ fn sheet_has_dynamic_rules(sheet: &Stylesheet) -> bool {
 /// The canvas background comes from `html`, or from `body` when `html`
 /// has none (CSS 2.1 §14.2).
 fn canvas_background(doc: &Document, styles: &StyledTree) -> Color {
-    if let Some(html) = doc.html_element() {
-        if let Some(s) = styles.get(html) {
-            if !s.background_color.is_transparent() {
-                return s.background_color;
-            }
+    let root = doc.html_element().and_then(|html| styles.get(html));
+    if let Some(s) = root {
+        if !s.background_color.is_transparent() {
+            return s.background_color;
         }
     }
+    // The body's background propagates unless the root or the body has
+    // containment (CSS Contain 2 §3).
     if let Some(body) = doc.body() {
         if let Some(s) = styles.get(body) {
-            if !s.background_color.is_transparent() {
+            if !s.background_color.is_transparent() && !s.has_containment() && !root.is_some_and(|r| r.has_containment()) {
                 return s.background_color;
             }
         }

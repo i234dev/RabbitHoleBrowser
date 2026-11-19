@@ -516,11 +516,25 @@ fn bg_position(l: Length, area: f32, tile: f32) -> f32 {
     }
 }
 
+/// A resolved stop with the full-precision color it was written with.
+#[derive(Clone, Copy)]
+struct WideStop {
+    offset: f32,
+    color: Color,
+    wide: rabbithole_style::Wide,
+}
+
 /// Resolve gradient stops to offsets along a line of length `len` (1.0
 /// = the end of the gradient line; offsets may lie outside 0..=1) per CSS
 /// Images 3 §3.4.3, expanding color interpolation hints (CSS Images 4
 /// §3.5.3) into intermediate stops.
 pub(crate) fn resolve_stops(stops: &[GradientStop], len: f32) -> Vec<ColorStop> {
+    resolve_wide_stops(stops, len, None).into_iter().map(|s| ColorStop { offset: s.offset, color: s.color }).collect()
+}
+
+/// [`resolve_stops`] keeping full-precision colors; hint transitions are
+/// interpolated in `interp` (sRGB when `None`).
+fn resolve_wide_stops(stops: &[GradientStop], len: f32, interp: Option<ColorInterp>) -> Vec<WideStop> {
     if stops.is_empty() {
         return Vec::new();
     }
@@ -575,17 +589,19 @@ pub(crate) fn resolve_stops(stops: &[GradientStop], len: f32) -> Vec<ColorStop> 
             i += 1;
         }
     }
-    let mut out: Vec<ColorStop> = Vec::with_capacity(n);
+    let stop = |offset: f32, s: &GradientStop| WideStop { offset, color: s.color, wide: s.wide.unwrap_or_else(|| rabbithole_style::color_to_wide(s.color)) };
+    let mut out: Vec<WideStop> = Vec::with_capacity(n);
     for k in 0..n {
         let offset = pos[k].unwrap_or(0.0);
         if !stops[k].hint {
-            out.push(ColorStop { offset, color: stops[k].color });
+            out.push(stop(offset, &stops[k]));
             continue;
         }
         // A hint between the previous and next color stops: the color
         // at fraction f between them is mix(f ^ (ln 0.5 / ln h)).
         let (Some(prev), Some(next)) = (out.last().copied(), stops.get(k + 1)) else { continue };
         let b = pos[k + 1].unwrap_or(offset);
+        let next = stop(b, next);
         let a = prev.offset;
         if b - a <= 1e-6 {
             continue;
@@ -593,11 +609,11 @@ pub(crate) fn resolve_stops(stops: &[GradientStop], len: f32) -> Vec<ColorStop> 
         let h = ((offset - a) / (b - a)).clamp(0.0, 1.0);
         if h <= 1e-6 {
             // The transition happens at the first stop.
-            out.push(ColorStop { offset: a, color: next.color });
+            out.push(WideStop { offset: a, ..next });
             continue;
         }
         if h >= 1.0 - 1e-6 {
-            out.push(ColorStop { offset: b, color: prev.color });
+            out.push(WideStop { offset: b, ..prev });
             continue;
         }
         if (h - 0.5).abs() < 1e-4 {
@@ -608,7 +624,17 @@ pub(crate) fn resolve_stops(stops: &[GradientStop], len: f32) -> Vec<ColorStop> 
         for step in 1..SAMPLES {
             let f = step as f32 / SAMPLES as f32;
             let w = f.powf(exp);
-            out.push(ColorStop { offset: a + (b - a) * f, color: rabbithole_gfx::paint::lerp_premul(prev.color, next.color, w) });
+            let (color, wide) = match interp {
+                Some(m) => {
+                    let wide = rabbithole_style::interpolate_wide(prev.wide, next.wide, w, m);
+                    (rabbithole_style::wide_to_color(wide), wide)
+                }
+                None => {
+                    let color = rabbithole_gfx::paint::lerp_premul(prev.color, next.color, w);
+                    (color, rabbithole_style::color_to_wide(color))
+                }
+            };
+            out.push(WideStop { offset: a + (b - a) * f, color, wide });
         }
     }
     out
@@ -622,36 +648,50 @@ fn degenerate_repeat(stops: &[ColorStop]) -> Option<Paint> {
     (last.offset - first <= 1e-6).then(|| Paint::Solid(last.color))
 }
 
-/// Stops for a gradient interpolated in another color space: each
-/// segment is sampled (the paint interpolates in sRGB between samples).
-fn expand_interpolation(stops: &[ColorStop], interp: ColorInterp) -> Vec<ColorStop> {
+/// Stops for a gradient interpolated in another color space, or between
+/// colors outside the sRGB gamut: each segment is sampled from the
+/// unclipped colors (the paint interpolates in sRGB between samples).
+fn expand_interpolation(stops: &[WideStop], interp: ColorInterp) -> Vec<ColorStop> {
     // Samples at a uniform density along the gradient line, so splitting
     // a segment at an intermediate stop samples the same offsets.
     let mut out = Vec::with_capacity(stops.len() * 64);
-    out.push(stops[0]);
+    // Stop colors are clipped like the samples between them.
+    let clip = |s: &WideStop| rabbithole_style::wide_to_color(s.wide);
+    out.push(ColorStop { offset: stops[0].offset, color: clip(&stops[0]) });
     for w in stops.windows(2) {
         let (a, b) = (w[0], w[1]);
-        if b.offset - a.offset <= 1e-6 || a.color == b.color {
-            out.push(b);
+        if b.offset - a.offset <= 1e-6 || a.wide == b.wide {
+            out.push(ColorStop { offset: b.offset, color: clip(&b) });
             continue;
         }
         let samples = ((b.offset - a.offset) * 256.0).ceil().clamp(4.0, 1024.0) as usize;
         for k in 1..=samples {
             let f = k as f32 / samples as f32;
-            let color = if k == samples { b.color } else { rabbithole_style::interpolate_color(a.color, b.color, f, interp) };
+            let color = if k == samples { clip(&b) } else { rabbithole_style::wide_to_color(rabbithole_style::interpolate_wide(a.wide, b.wide, f, interp)) };
             out.push(ColorStop { offset: a.offset + (b.offset - a.offset) * f, color });
         }
     }
     out
 }
 
+/// Is a full-precision color outside the sRGB gamut?
+fn out_of_gamut(w: &rabbithole_style::Wide) -> bool {
+    w[..3].iter().any(|v| !(-1e-4..=1.0001).contains(v))
+}
+
 /// Stops ready for a paint: at least two, average color for degenerate
 /// repeating gradients.
 fn prepare_stops(stops: &[GradientStop], len: f32, repeating: bool, interp: ColorInterp) -> Result<Vec<ColorStop>, Paint> {
-    let mut resolved = resolve_stops(stops, len);
-    if !interp.is_srgb() && resolved.len() > 1 {
-        resolved = expand_interpolation(&resolved, interp);
-    }
+    let mut resolved = if !interp.is_srgb() || stops.iter().any(|s| s.wide.as_ref().is_some_and(out_of_gamut)) {
+        let wide = resolve_wide_stops(stops, len, Some(interp));
+        if wide.len() > 1 {
+            expand_interpolation(&wide, interp)
+        } else {
+            wide.into_iter().map(|s| ColorStop { offset: s.offset, color: s.color }).collect()
+        }
+    } else {
+        resolve_stops(stops, len)
+    };
     if resolved.is_empty() {
         return Err(Paint::Solid(Color::TRANSPARENT));
     }
@@ -829,15 +869,15 @@ mod tests {
     #[test]
     fn stops_distribute_evenly() {
         let stops = vec![
-            GradientStop { color: Color::BLACK, position: None, hint: false },
-            GradientStop { color: Color::WHITE, position: None, hint: false },
-            GradientStop { color: Color::BLACK, position: None, hint: false },
+            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None },
+            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None },
+            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None },
         ];
         let r = resolve_stops(&stops, 100.0);
         assert_eq!(r.iter().map(|s| s.offset).collect::<Vec<_>>(), vec![0.0, 0.5, 1.0]);
         let stops = vec![
-            GradientStop { color: Color::BLACK, position: Some(Length::Px(20.0)), hint: false },
-            GradientStop { color: Color::WHITE, position: Some(Length::Percent(10.0)), hint: false },
+            GradientStop { color: Color::BLACK, position: Some(Length::Px(20.0)), hint: false, wide: None },
+            GradientStop { color: Color::WHITE, position: Some(Length::Percent(10.0)), hint: false, wide: None },
         ];
         let r = resolve_stops(&stops, 100.0);
         assert_eq!(r[1].offset, 0.2, "never decreasing");
@@ -846,9 +886,9 @@ mod tests {
     #[test]
     fn color_hints_curve_the_transition() {
         let stops = vec![
-            GradientStop { color: Color::BLACK, position: None, hint: false },
-            GradientStop { color: Color::TRANSPARENT, position: Some(Length::Percent(20.0)), hint: true },
-            GradientStop { color: Color::WHITE, position: None, hint: false },
+            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None },
+            GradientStop { color: Color::TRANSPARENT, position: Some(Length::Percent(20.0)), hint: true, wide: None },
+            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None },
         ];
         let r = resolve_stops(&stops, 100.0);
         // Expanded into intermediate stops; halfway in color at the hint.
@@ -886,8 +926,8 @@ mod tests {
     fn linear_geometry() {
         let tile = Rect::new(0.0, 0.0, 100.0, 50.0);
         let stops = vec![
-            GradientStop { color: Color::BLACK, position: None, hint: false },
-            GradientStop { color: Color::WHITE, position: None, hint: false },
+            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None },
+            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None },
         ];
         match linear_paint(&GradientDirection::Angle(std::f32::consts::FRAC_PI_2), &stops, false, ColorInterp::default(), tile).unwrap() {
             Paint::Linear { start, end, .. } => {

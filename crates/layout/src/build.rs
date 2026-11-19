@@ -24,6 +24,9 @@ pub(crate) struct Builder<'a> {
     ops: std::cell::Cell<u64>,
     /// Record counter state around element subtrees (for reuse).
     snapshot: bool,
+    /// Run-in boxes waiting to become the first inline box of the block
+    /// (keyed by its element) they run into.
+    run_ins: RefCell<HashMap<NodeId, LayoutBox>>,
 }
 
 /// Counter and quote state around a box's subtree.
@@ -43,6 +46,7 @@ impl<'a> Builder<'a> {
             used_counters: std::cell::Cell::new(false),
             ops: std::cell::Cell::new(0),
             snapshot: reuse.map(|r| r.uses_counters).unwrap_or(false),
+            run_ins: RefCell::new(HashMap::new()),
         }
     }
 
@@ -227,9 +231,28 @@ impl<'a> Builder<'a> {
         let summary = if closed_details { doc.child_elements(node).find(|&c| doc.is_element(c, "summary")) } else { None };
         // Flat tree: shadow trees replace their host's children and slots
         // render their assigned nodes.
-        for child in doc.flat_children(node) {
+        let children = doc.flat_children(node);
+        let block_container = matches!(
+            parent_style.display,
+            Display::Block | Display::ListItem | Display::FlowRoot | Display::InlineBlock | Display::TableCell | Display::TableCaption
+        );
+        for (i, &child) in children.iter().enumerate() {
             if closed_details && Some(child) != summary {
                 continue;
+            }
+            if block_container {
+                if let Some(target) = self.run_in_target(child, &children[i + 1..], parent_style.white_space) {
+                    // Built as an inline box, inserted into the target.
+                    let Some(style) = self.ctx.styles.get(child) else { continue };
+                    let mut inline = (**style).clone();
+                    inline.display = Display::Inline;
+                    let mut boxes = Vec::new();
+                    self.build_element_inner(child, &Rc::new(inline), false, &mut boxes);
+                    if let Some(b) = boxes.into_iter().next() {
+                        self.run_ins.borrow_mut().insert(target, b);
+                        continue;
+                    }
+                }
             }
             match &doc.node(child).data {
                 NodeData::Text(t) => {
@@ -249,6 +272,53 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// The block element a run-in `node` runs into (CSS 2.1 §9.2.3): the
+    /// next in-flow sibling, past whitespace, comments, `display: none` and
+    /// out-of-flow elements, when it is a block container that is not
+    /// itself a run-in, and the run-in holds no block-level boxes.
+    fn run_in_target(&self, node: NodeId, following: &[NodeId], white_space: rabbithole_style::WhiteSpace) -> Option<NodeId> {
+        let doc = self.doc();
+        let styles = &self.ctx.styles;
+        let style = styles.get(node)?;
+        if !style.run_in || style.display != Display::Block || style.float != rabbithole_style::Float::None || matches!(style.position, Position::Absolute | Position::Fixed) {
+            return None;
+        }
+        // In-flow block-level boxes inside it, also inside its inlines.
+        fn holds_block(doc: &Document, styles: &rabbithole_style::StyledTree, node: NodeId) -> bool {
+            doc.flat_children(node).into_iter().any(|c| match styles.get(c) {
+                Some(cs) if cs.float != rabbithole_style::Float::None || matches!(cs.position, Position::Absolute | Position::Fixed) => false,
+                Some(cs) if cs.display.is_block_level() => true,
+                Some(cs) if matches!(cs.display, Display::Inline | Display::Contents) => holds_block(doc, styles, c),
+                _ => false,
+            })
+        }
+        if holds_block(doc, styles, node) {
+            return None;
+        }
+        for &n in following {
+            match &doc.node(n).data {
+                // Collapsible white space only.
+                NodeData::Text(t)
+                    if t.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}'))
+                        && (white_space.collapses() && (white_space != rabbithole_style::WhiteSpace::PreLine || !t.contains('\n'))) =>
+                {
+                    continue
+                }
+                NodeData::Text(_) => return None,
+                NodeData::Element(_) => {
+                    let Some(ns) = styles.get(n) else { continue };
+                    if ns.display == Display::None || ns.float != rabbithole_style::Float::None || matches!(ns.position, Position::Absolute | Position::Fixed) {
+                        continue;
+                    }
+                    let replaced = matches!(doc.tag(n), Some("img" | "input" | "select" | "textarea" | "button" | "video" | "canvas" | "iframe" | "object" | "embed" | "svg"));
+                    return (matches!(ns.display, Display::Block | Display::ListItem) && !ns.run_in && !replaced).then_some(n);
+                }
+                _ => continue,
+            }
+        }
+        None
+    }
+
     fn build_element(&self, node: NodeId, _parent_style: &Rc<ComputedStyle>, in_table_row: bool, out: &mut Vec<LayoutBox>) {
         let doc = self.doc();
         let style = match self.ctx.styles.get(node) {
@@ -262,7 +332,14 @@ impl<'a> Builder<'a> {
             if let Some(r) = self.reuse {
                 r.open(node);
             }
-            out.extend(self.build_children(node, &style, in_table_row));
+            // The element has no box, but its `::before` / `::after` do
+            // (CSS Display 3 §2.5).
+            let before = self.build_pseudo(node, PseudoElement::Before, in_table_row);
+            let children = self.build_children(node, &style, in_table_row);
+            let after = self.build_pseudo(node, PseudoElement::After, in_table_row);
+            out.extend(before);
+            out.extend(children);
+            out.extend(after);
             return;
         }
         if matches!(style.display, Display::TableColumn | Display::TableColumnGroup) {
@@ -287,8 +364,9 @@ impl<'a> Builder<'a> {
             out.push(b);
             return;
         }
-        if let Some(r) = self.reuse.filter(|_| !matches!(doc.tag(node),Some("frame"|"frameset"))) {
-            if let Some(b) = r.take(node, &style) {
+        let has_run_in = !self.run_ins.borrow().is_empty() && self.run_ins.borrow().contains_key(&node);
+        if let Some(r) = self.reuse.filter(|_| !has_run_in && !matches!(doc.tag(node),Some("frame"|"frameset"))) {
+            if let Some(b) = r.take(node, &style).and_then(|b| if b.run_in_host { r.give_back(b); None } else { Some(b) }) {
                 if !b.counter_touch {
                     out.push(b);
                     return;
@@ -407,8 +485,13 @@ impl<'a> Builder<'a> {
         }
         // The body's overflow propagates to the viewport when the root's is
         // visible (CSS Overflow 3 §3.3); its used value is then `visible`.
+        // (Not when the root or the body has containment: the body then
+        // clips its own overflow.)
+        let contained_root_or_body = tag == "body"
+            && (style.has_containment() || doc.parent(node).and_then(|p| self.ctx.styles.get(p)).is_some_and(|root| root.has_containment()));
         let overflow_propagated = tag == "body"
-            && doc.parent(node).filter(|&p| doc.tag(p) == Some("html")).and_then(|p| self.ctx.styles.get(p)).is_some_and(|root| !root.overflow_x.clips() && !root.overflow_y.clips());
+            && !style.has_containment()
+            && doc.parent(node).filter(|&p| doc.tag(p) == Some("html")).and_then(|p| self.ctx.styles.get(p)).is_some_and(|root| !root.overflow_x.clips() && !root.overflow_y.clips() && !root.has_containment());
         b.bfc_root = out_of_flow
             || floated
             || matches!(kind, BoxKind::InlineBlock | BoxKind::TableCell | BoxKind::Table)
@@ -418,7 +501,7 @@ impl<'a> Builder<'a> {
             // is an independent formatting context (CSS Align §5.4).
             || (style.align_content != rabbithole_style::ContentDistribution::Stretch && style.display.is_block_level());
         let contained = !matches!(style.display, Display::Inline | Display::Contents) && !matches!(tag, "html" | "body");
-        b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && !matches!(tag, "html" | "body");
+        b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && (!matches!(tag, "html" | "body") || (tag == "body" && contained_root_or_body));
         if contained && (style.contain_paint || style.contain_layout) {
             b.bfc_root = true;
         }
@@ -498,6 +581,12 @@ impl<'a> Builder<'a> {
         self.counters.borrow_mut().leave();
         if let Some(bf) = before {
             children.insert(0, bf);
+        }
+        // A run-in is the first inline box of the block it runs into.
+        let run_in = if self.run_ins.borrow().is_empty() { None } else { self.run_ins.borrow_mut().remove(&node) };
+        if let Some(r) = run_in {
+            children.insert(0, r);
+            b.run_in_host = true;
         }
         if let Some(af) = after {
             children.push(af);

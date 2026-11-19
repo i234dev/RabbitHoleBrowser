@@ -349,7 +349,9 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
     let mut bg = root.style.background_color;
     let mut root_bg_painted = false;
     if bg.is_transparent() {
-        if let Some(body) = root.children.iter().find(|c| c.is_in_flow()) {
+        // (Not when the root or the body has containment.)
+        let body = root.children.iter().find(|c| c.is_in_flow() && c.node.is_some_and(|n| ctx.doc.is_element(n, "body")));
+        if let Some(body) = body.filter(|b| !root.style.has_containment() && !b.style.has_containment()) {
             bg = body.style.background_color;
         }
     } else {
@@ -1404,6 +1406,15 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // `border-shape` / `corner-shape`: the background and border are
         // clipped to the shape (the border is not drawn along it).
         let shaped = self.push_border_shape(b, shaped_radii, true);
+        // A border along shaped corners. An opaque one is painted first, as
+        // the whole shape, with the backgrounds over it inside its inner
+        // edge (no background shows through the antialiased edges).
+        let shaped_border = if shaped && style.has_visible_border() && style.border_image.is_none() { self.shaped_border(b, shaped_radii) } else { None };
+        let border_first = shaped_border.as_ref().is_some_and(|sb| sb.2.a == 255) && widget.is_none() && !skip_bg;
+        if let Some((_, inner, color)) = shaped_border.as_ref().filter(|_| border_first) {
+            self.list.push(DisplayItem::Rect { rect, color: *color, radius: 0.0 });
+            self.list.push(DisplayItem::PushClipPath { bounds: rect, path: Arc::new(Self::polygon_path(inner)), evenodd: false, anchor: Point::new(rect.x, rect.y), rounded: None });
+        }
         if let Some(crate::widgets::Widget::Replace(items)) = widget {
             // Native checkbox / radio / slider / progress / meter.
             for it in items {
@@ -1471,12 +1482,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
         }
+        if border_first {
+            self.list.push(DisplayItem::PopClip);
+        }
         background::paint_box_shadows(self.list, &geom, &style.box_shadow, true);
         // A border image replaces the border styles (CSS Backgrounds 3 §6).
         let border_image = style.border_image.as_deref().is_some_and(|bi| {
             crate::border_image::paint_border_image(self.list, &geom, bi, self.ctx.background_images, style)
         });
-        if style.has_visible_border() && !border_image {
+        if let Some(sb) = shaped_border.filter(|_| !border_image) {
+            if !border_first {
+                self.paint_shaped_border(b, sb);
+            }
+        } else if style.has_visible_border() && !border_image {
             let bw = style.border_width;
             let bs = style.border_style;
             let bc = style.border_color;
@@ -1496,6 +1514,50 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if shaped {
             self.list.push(DisplayItem::PopClip);
         }
+    }
+
+    /// A solid one-color border along shaped corners (`corner-shape`):
+    /// the shaped outer edge, that edge inset by the border widths (each
+    /// edge by the widths of the sides it faces), and the color. `None`
+    /// when the border is not of that kind.
+    fn shaped_border(&self, b: &LayoutBox, radii: Radii) -> Option<(Vec<PathSeg>, Vec<Point>, Color)> {
+        let style = &b.style;
+        if style.border_shape.is_some() || !style.corner_shape.iter().any(|c| *c != rabbithole_style::CornerShape::Round) || !background::has_radii(&radii) {
+            return None;
+        }
+        let (bc, bs, bw) = (style.border_color, style.border_style, style.border_width);
+        let colors = [bc.top, bc.right, bc.bottom, bc.left];
+        let styles = [bs.top, bs.right, bs.bottom, bs.left];
+        let widths = [bw.top, bw.right, bw.bottom, bw.left];
+        let visible = |i: usize| widths[i] > 0.0 && styles[i].is_visible();
+        let first = (0..4).find(|&i| visible(i))?;
+        if (0..4).any(|i| visible(i) && (colors[i] != colors[first] || styles[i] != rabbithole_style::BorderStyle::Solid)) {
+            return None;
+        }
+        let widths = [0, 1, 2, 3].map(|i| if visible(i) { widths[i] } else { 0.0 });
+        let outer = rabbithole_style::shapes::corner_shaped_path(b.rect, radii, style.corner_shape);
+        let flat = rabbithole_gfx::path::flatten(&outer, &rabbithole_gfx::IDENTITY, 0.1);
+        let inner = rabbithole_style::shapes::inset_contour(&flat.contours.first()?.points, widths);
+        (inner.len() >= 3).then_some((outer, inner, colors[first]))
+    }
+
+    fn polygon_path(points: &[Point]) -> Vec<PathSeg> {
+        let mut p = Vec::with_capacity(points.len() + 2);
+        if let Some((first, rest)) = points.split_first() {
+            p.push(PathSeg::MoveTo(*first));
+            p.extend(rest.iter().map(|q| PathSeg::LineTo(*q)));
+            p.push(PathSeg::Close);
+        }
+        p
+    }
+
+    /// Paint a [`Self::shaped_border`] as the band between its edges.
+    fn paint_shaped_border(&mut self, b: &LayoutBox, (outer, inner, color): (Vec<PathSeg>, Vec<Point>, Color)) {
+        let mut ring = outer;
+        ring.extend(Self::polygon_path(&inner));
+        self.list.push(DisplayItem::PushClipPath { bounds: b.rect, path: Arc::new(ring), evenodd: true, anchor: Point::new(b.rect.x, b.rect.y), rounded: None });
+        self.list.push(DisplayItem::Rect { rect: b.rect, color, radius: 0.0 });
+        self.list.push(DisplayItem::PopClip);
     }
 
     /// Clip the box's own painting to its `border-shape` or shaped corners

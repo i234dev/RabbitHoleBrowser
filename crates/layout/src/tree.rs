@@ -343,6 +343,9 @@ pub struct LayoutBox {
     pub(crate) no_abs_below: bool,
     /// Building the box's subtree used CSS counters / quotes.
     pub(crate) counter_touch: bool,
+    /// A run-in became this box's first inline box (the box is rebuilt
+    /// rather than reused: the run-in depends on its siblings).
+    pub(crate) run_in_host: bool,
     /// Computed style of the element this box was built for (the box's own
     /// style may differ); identifies reusable boxes.
     pub(crate) built_from: Option<Rc<ComputedStyle>>,
@@ -433,6 +436,7 @@ impl LayoutBox {
             reused_layout: false,
             no_abs_below: false,
             counter_touch: false,
+            run_in_host: false,
             built_from: None,
             counter_io: None,
             wm_wrapper: false,

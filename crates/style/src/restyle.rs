@@ -155,6 +155,8 @@ struct InvalidationMap {
     classes: HashMap<String, u8>,
     ids: HashMap<String, u8>,
     attrs: HashMap<String, u8>,
+    /// Relation of `:dir()` to the content of `dir=auto` elements.
+    dir_auto: u8,
     /// Compounds using `:hover` / `:active` / `:focus`, so a state change
     /// only restyles elements that can match the rest of the compound.
     hover: StateDeps,
@@ -342,7 +344,16 @@ impl InvalidationMap {
                     *self.attrs.entry("selected".into()).or_default() |= rel;
                 }
                 // `:lang()` looks at the nearest ancestor with `lang`.
-                Pseudo::Lang(_) => *self.attrs.entry("lang".into()).or_default() |= rel | R_DESC,
+                Pseudo::Lang(_) => {
+                    *self.attrs.entry("lang".into()).or_default() |= rel | R_DESC;
+                    *self.attrs.entry("xml:lang".into()).or_default() |= rel | R_DESC;
+                }
+                // `:dir()` looks at the nearest ancestor with `dir`, and at
+                // the text of `dir=auto` elements.
+                Pseudo::Dir(_) => {
+                    *self.attrs.entry("dir".into()).or_default() |= rel | R_DESC;
+                    self.dir_auto |= rel | R_DESC;
+                }
                 Pseudo::Not(list) | Pseudo::Is(list) | Pseudo::Where(list) => {
                     for s in list {
                         self.add_selector(s, rel, in_has);
@@ -366,6 +377,22 @@ impl InvalidationMap {
                 _ => {}
             }
         }
+    }
+}
+
+/// The nearest inclusive ancestor whose direction comes from its content
+/// (`dir=auto`, `bdi`), stopping at an explicit `dir`.
+fn auto_dir_ancestor(doc: &Document, mut node: NodeId) -> Option<NodeId> {
+    loop {
+        if let Some(el) = doc.element(node) {
+            match el.attr("dir").map(|d| d.trim().to_ascii_lowercase()).as_deref() {
+                Some("auto") => return Some(node),
+                Some("ltr") | Some("rtl") => return None,
+                _ if el.tag == "bdi" => return Some(node),
+                _ => {}
+            }
+        }
+        node = doc.parent(node)?;
     }
 }
 
@@ -597,7 +624,8 @@ fn state_chain(doc: &Document, node: Option<NodeId>) -> Vec<NodeId> {
     let mut current = node.filter(|&node| node < doc.nodes.len());
     while let Some(node) = current {
         chain.push(node);
-        current = doc.parent(node);
+        // Shadow-including ancestors (as `:hover` / `:focus-within` match).
+        current = doc.parent(node).map(|p| if doc.shadow_roots.is_empty() { p } else { doc.shadow_host(p).unwrap_or(p) });
     }
     chain
 }
@@ -919,6 +947,12 @@ impl StyleEngine {
                     if inval.empty != 0 {
                         m.apply(parent, inval.empty);
                     }
+                    if inval.dir_auto != 0 {
+                        // Content of a `dir=auto` element: its direction.
+                        if let Some(a) = auto_dir_ancestor(doc, parent) {
+                            m.apply(a, inval.dir_auto);
+                        }
+                    }
                     if doc.element(child).is_none() && doc.element(parent).is_some() {
                         // Text inserted/removed: only `:empty` can notice.
                         continue;
@@ -928,6 +962,11 @@ impl StyleEngine {
                     if let Some(p) = doc.parent(*node) {
                         if inval.empty != 0 && doc.is_connected(p) {
                             m.apply(p, inval.empty);
+                        }
+                        if inval.dir_auto != 0 && doc.is_connected(p) {
+                            if let Some(a) = auto_dir_ancestor(doc, p) {
+                                m.apply(a, inval.dir_auto);
+                            }
                         }
                     }
                 }
@@ -980,6 +1019,11 @@ impl StyleEngine {
                     m.apply(e, R_SELF | R_DESC | R_SIB);
                 }
             }
+        }
+        if old_state.containers != new_state.containers {
+            // Query containers were (re)measured: container queries and
+            // `cq*` units may resolve differently anywhere.
+            m.global = true;
         }
         if old_state.target_id != new_state.target_id && inval.target != 0 {
             for id in [old_state.target_id.as_deref(), new_state.target_id.as_deref()].into_iter().flatten() {
@@ -1129,7 +1173,8 @@ impl StyleEngine {
             let mut root_fs = root_fs;
             let (style, vars) = if recompute {
                 recomputed += 1;
-                let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: Some(&bloom) };
+                let so_far = crate::cascade::StyledSoFar { styles: &tree.styles, vars: &self.vars };
+                let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: Some(&bloom), style_source: Some(&so_far) };
                 let out: ElementOut = compute_element(doc, node, &parent, &pvars, root_fs, &cx, &mut decls, Some(&mut share), &mut candidates, &mut matched, Some(&mut self.vars_memo[node]));
                 self.inherit_dep[node] = out.inherit_dep;
                 if node == html {
@@ -1281,7 +1326,15 @@ impl StyleEngine {
             None => (Rc::new(ComputedStyle::initial()), Rc::new(HashMap::new()), 16.0),
         };
         let matcher = SelectorMatcher::new(doc, opts.state);
-        let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: None };
+        let so_far = tree.map(|t| crate::cascade::StyledSoFar { styles: &t.styles, vars: &self.vars });
+        let cx = MatchCtx {
+            scopes: &self.index,
+            env: &self.env,
+            opts,
+            matcher: &matcher,
+            bloom: None,
+            style_source: so_far.as_ref().map(|s| s as &dyn rabbithole_css::container::StyleSource),
+        };
         for &node in &chain {
             let out = compute_element(doc, node, &parent, &vars, root_fs, &cx, &mut decls, None, &mut candidates, &mut matched, None);
             if node == html {
