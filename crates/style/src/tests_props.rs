@@ -1105,3 +1105,15 @@ fn stepped_and_trigonometric_math_functions() {
     assert_eq!(one("width: hypot(3px, 4px)").width, Length::Px(5.0));
     assert!(matches!(one("opacity: round(0.26, 0.1)").opacity, o if (o - 0.3).abs() < 1e-6));
 }
+
+#[test]
+fn inherited_currentcolor_values_use_the_childs_color() {
+    let (doc, t) = styled(
+        "<div id=o><section><p>x</p></section></div>",
+        "div { color: red; background-color: lch(from currentColor l c h) } section { background-color: inherit } p { color: rgb(0, 128, 0); background-color: inherit }",
+    );
+    assert_eq!(style_of(&doc, &t, "section").background_color, rabbithole_gfx::Color::rgb(255, 0, 0));
+    assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(0, 128, 0));
+    let (doc, t) = styled("<p>x</p>", "p { color: rgb(255, 0, 0); background-color: color-mix(in srgb, currentColor, rgb(0, 0, 255)) }");
+    assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(128, 0, 128));
+}

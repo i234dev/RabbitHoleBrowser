@@ -857,6 +857,46 @@ fn layer_index(m: &Matched) -> u32 {
     }
 }
 
+/// The single-color longhands whose `currentcolor`-relative values
+/// inherit as such.
+fn current_color_longhand(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "background-color" => "background-color",
+        "border-top-color" => "border-top-color",
+        "border-right-color" => "border-right-color",
+        "border-bottom-color" => "border-bottom-color",
+        "border-left-color" => "border-left-color",
+        "outline-color" => "outline-color",
+        "text-decoration-color" => "text-decoration-color",
+        _ => return None,
+    })
+}
+
+/// Record (or forget) that `prop`'s value depends on `currentcolor`;
+/// `inherit` takes over the parent's dependency.
+fn track_current_color(style: &mut ComputedStyle, parent: &ComputedStyle, prop: &'static str, value: &[Token]) {
+    let inherited = matches!(wide_keyword(value), Some(Wide::Inherit));
+    let dep: Option<Rc<[Token]>> = if inherited {
+        parent.current_color_deps.as_ref().and_then(|d| d.iter().find(|(n, _)| *n == prop).map(|(_, v)| v.clone()))
+    } else if value.iter().any(|t| matches!(t, Token::Ident(s) if s.eq_ignore_ascii_case("currentcolor"))) {
+        Some(Rc::from(value))
+    } else {
+        None
+    };
+    let had = style.current_color_deps.as_ref().is_some_and(|d| d.iter().any(|(n, _)| *n == prop));
+    if dep.is_none() && !had {
+        return;
+    }
+    let deps = Rc::make_mut(style.current_color_deps.get_or_insert_with(|| Rc::new(Vec::new())));
+    deps.retain(|(n, _)| *n != prop);
+    if let Some(v) = dep {
+        deps.push((prop, v));
+    }
+    if deps.is_empty() {
+        style.current_color_deps = None;
+    }
+}
+
 /// `revert` / `revert-layer` as a declaration's whole value.
 fn rollback_keyword(d: &Declaration) -> Option<bool> {
     match d.value.as_slice() {
@@ -1055,13 +1095,15 @@ fn apply_declarations(
     };
     // `color` first: `currentcolor` in every other property (borders,
     // backgrounds, shadows...) is the element's final color, whatever the
-    // declaration order.
+    // declaration order. (In `color` itself it is the parent's.)
+    crate::values::set_current_color(Some(parent.color));
     for (name, value, base) in &resolved {
         if matches!(*name, "color" | "writing-mode" | "-webkit-writing-mode" | "direction") {
             let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
             apply_property(name, value, &mut style, parent, &ctx);
         }
     }
+    crate::values::set_current_color(Some(style.color));
     // `border-*-color` is not inherited; its initial value is currentcolor.
     // `border-*-width` starts as `medium`; the computed width is zero
     // where the style is none/hidden (resolved after all declarations).
@@ -1073,6 +1115,9 @@ fn apply_declarations(
         }
         let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
         apply_property(name, value, &mut style, parent, &ctx);
+        if let Some(prop) = current_color_longhand(name) {
+            track_current_color(&mut style, parent, prop, value);
+        }
         if *name == "all" {
             for (n2, v2, b2) in &resolved[i + 1..] {
                 if *n2 == "color" {
@@ -1085,6 +1130,17 @@ fn apply_declarations(
         }
     }
 
+    // Inherited values computed from the parent's `currentcolor` take this
+    // element's color instead.
+    if let Some(deps) = style.current_color_deps.clone() {
+        for (prop, value) in deps.iter() {
+            if parent.current_color_deps.as_ref().is_some_and(|p| p.iter().any(|(n, v)| n == prop && Rc::ptr_eq(v, value))) {
+                let ctx = ApplyCtx { len, pseudo, base: None, document_base: opts.document_base, resolve: opts.resolve_url };
+                apply_property(prop, value, &mut style, parent, &ctx);
+            }
+        }
+    }
+    crate::values::set_current_color(None);
     // `text-align: match-parent` on the root computes to `start`.
     if is_root && style.text_align != TextAlign::Start && resolved.iter().any(|(n, v, _)| *n == "text-align" && values::components(v).first().is_some_and(|c| values::is_ident(c, "match-parent"))) {
         style.text_align = TextAlign::Start;

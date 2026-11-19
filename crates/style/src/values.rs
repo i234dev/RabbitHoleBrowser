@@ -994,6 +994,25 @@ pub fn parse_color(toks: &[Token]) -> Option<ColorValue> {
     parse_color_component(comps[0])
 }
 
+thread_local! {
+    /// The value of `currentcolor` while a cascade applies declarations
+    /// (for `color-mix()` and relative colors, which need it at once).
+    static CURRENT_COLOR: std::cell::Cell<Option<Color>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_current_color(c: Option<Color>) {
+    CURRENT_COLOR.with(|v| v.set(c));
+}
+
+/// A color value with `currentcolor` replaced by the current color, when
+/// known.
+pub fn resolve_current(v: ColorValue) -> Option<Color> {
+    match v {
+        ColorValue::Color(c) => Some(c),
+        ColorValue::CurrentColor => CURRENT_COLOR.with(|v| v.get()),
+    }
+}
+
 pub fn parse_color_component(c: &[Token]) -> Option<ColorValue> {
     match c {
         [Token::Ident(name)] => {

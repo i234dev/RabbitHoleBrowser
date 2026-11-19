@@ -1675,6 +1675,10 @@ pub struct ComputedStyle {
     pub contain_size: bool,
     /// `margin-trim` (`MARGIN_TRIM_*` bits).
     pub margin_trim: u8,
+    /// Color longhands whose value uses `currentcolor` (in `color-mix()`,
+    /// a relative color or alone), with that value: a child inheriting
+    /// them explicitly resolves it against its own color.
+    pub current_color_deps: Option<std::rc::Rc<Vec<(&'static str, std::rc::Rc<[rabbithole_css::Token]>)>>>,
     /// `contain: inline-size`.
     pub contain_inline_size: bool,
     /// `contain: style` (also implied by `content`, `strict` and query
@@ -1943,6 +1947,7 @@ impl ComputedStyle {
             contain_size: false,
             contain_inline_size: false,
             margin_trim: 0,
+            current_color_deps: None,
             contain_style: false,
             run_in: false,
             container_size: false,

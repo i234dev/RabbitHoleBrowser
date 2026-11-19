@@ -112,7 +112,9 @@ const D65_TO_D50: [f64; 9] = [
 ];
 
 fn to_color(lin: Rgb, a: f64) -> Color {
-    let c = |v: f64| (gamma_encode(v).clamp(0.0, 1.0) * 255.0).round() as u8;
+    // (A small bias keeps halves that went through linear light rounding
+    // up, as they do when computed in 8-bit sRGB.)
+    let c = |v: f64| (gamma_encode(v).clamp(0.0, 1.0) * 255.0 + 1e-4).round() as u8;
     Color::rgba(c(lin[0]), c(lin[1]), c(lin[2]), (a * 255.0).round() as u8)
 }
 
@@ -354,10 +356,7 @@ fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
             let [comp] = comps.as_slice() else { return None };
             let lin = match parse_wide(comp) {
                 Some(w) => [w[0] as f64, w[1] as f64, w[2] as f64],
-                None => match crate::values::parse_color_component(comp)? {
-                    ColorValue::Color(col) => linear_of(col),
-                    ColorValue::CurrentColor => return None,
-                },
+                None => linear_of(crate::values::resolve_current(crate::values::parse_color_component(comp)?)?),
             };
             let lin = lin.map(|v| v.clamp(0.0, 1.0));
             let y = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
@@ -382,10 +381,10 @@ pub fn relative(f: &str, c: &[Token]) -> Option<Color> {
     }
     let (lin, alpha) = match parse_wide(origin) {
         Some(w) => ([w[0] as f64, w[1] as f64, w[2] as f64], w[3] as f64),
-        None => match crate::values::parse_color_component(origin)? {
-            ColorValue::Color(col) => (linear_of(col), col.a as f64 / 255.0),
-            ColorValue::CurrentColor => return None,
-        },
+        None => {
+            let col = crate::values::resolve_current(crate::values::parse_color_component(origin)?)?;
+            (linear_of(col), col.a as f64 / 255.0)
+        }
     };
     let srgb = lin.map(gamma_encode);
     let polar = |lab: Rgb| {
@@ -758,10 +757,8 @@ fn color_mix(c: &[Token]) -> Option<(Rgb, f64)> {
             } else if let Some(w) = parse_wide(comp) {
                 color = Some(([w[0] as f64, w[1] as f64, w[2] as f64], w[3] as f64));
             } else {
-                match crate::values::parse_color_component(comp)? {
-                    ColorValue::Color(c) => color = Some((linear_of(c), c.a as f64 / 255.0)),
-                    ColorValue::CurrentColor => return None,
-                }
+                let c = crate::values::resolve_current(crate::values::parse_color_component(comp)?)?;
+                color = Some((linear_of(c), c.a as f64 / 255.0));
             }
         }
         Some((color?, pct))
@@ -830,6 +827,10 @@ mod tests {
         assert!(close(color("lch(from blue l 0 h)").unwrap(), color("lch(29.57 0 0)").unwrap()));
         assert!(close(color("color(from red srgb r g b / alpha)").unwrap(), red));
         assert!(color("rgb(from currentcolor r g b)").is_none());
+        crate::values::set_current_color(Some(Color::rgb(0, 128, 0)));
+        assert!(close(color("lch(from currentcolor l c h)").unwrap(), Color::rgb(0, 128, 0)));
+        assert!(close(color("color-mix(in srgb, currentcolor, white 0%)").unwrap(), Color::rgb(0, 128, 0)));
+        crate::values::set_current_color(None);
     }
 
     #[test]
