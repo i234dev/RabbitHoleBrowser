@@ -1048,7 +1048,7 @@ impl<'a> Layouter<'a> {
         }
         // An auto-width block aligned by `justify-self` is fit-content
         // sized (CSS Align §6.1, Sizing §3.3).
-        if specified.is_none() && matches!(mode, WidthMode::Fill) && style.width.is_auto() && style.justify_self != ItemAlign::Auto
+        if specified.is_none() && matches!(mode, WidthMode::Fill) && style.width.is_auto() && !matches!(style.justify_self, ItemAlign::Auto | ItemAlign::Baseline)
             && b.kind == BoxKind::Block
             && abs_align_fraction(style.justify_self, style.justify_self_mods, false, false, true).is_some()
         {
@@ -1108,7 +1108,8 @@ impl<'a> Layouter<'a> {
                         }
                         (None, Some(r)) => (w, (rem - r).max(0.0), r),
                         (Some(l), None) => (w, l, rem - l),
-                        (Some(l), Some(r)) if style.justify_self != ItemAlign::Auto => {
+                        // (Baseline self-alignment does not apply to blocks.)
+                        (Some(l), Some(r)) if !matches!(style.justify_self, ItemAlign::Auto | ItemAlign::Baseline) => {
                             // `justify-self` aligns a sized block in its
                             // containing block (CSS Align §6.1).
                             let own_rtl = style.direction == rabbithole_style::Direction::Rtl;
