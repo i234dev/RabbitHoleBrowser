@@ -334,10 +334,24 @@ fn hover_state_matching() {
 }
 
 #[test]
+fn font_stretch_property_and_shorthand() {
+    let (doc, t) = styled(
+        "<p>x</p><span>y</span><b>z</b><i>w</i>",
+        "p { font-stretch: semi-expanded } span { font-width: 60% } b { font: condensed bold 12px serif } i { font-stretch: 75%; font: 10px serif } body { font-stretch: expanded }",
+    );
+    assert_eq!(style_of(&doc, &t, "p").font_stretch, 112);
+    assert_eq!(style_of(&doc, &t, "span").font_stretch, 60);
+    assert_eq!(style_of(&doc, &t, "b").font_stretch, 75);
+    assert_eq!(style_of(&doc, &t, "b").font_weight, 700);
+    assert_eq!(style_of(&doc, &t, "i").font_stretch, 100, "the shorthand resets the width");
+    assert_eq!(style_of(&doc, &t, "body").font_stretch, 125);
+}
+
+#[test]
 fn font_faces_collected_and_resolved() {
     let doc = rabbithole_html::parse("<p>x</p>");
     let mut sheet = parse_stylesheet(
-        "@font-face { font-family: 'My Font'; src: local('x'), url(fonts/my.woff2) format('woff2'), url('my.woff') format(woff); font-weight: 300 700; font-style: italic; font-display: swap; unicode-range: U+0000-00FF, U+4??; } \
+        "@font-face { font-family: 'My Font'; src: local('x'), url(fonts/my.woff2) format('woff2'), url('my.woff') format(woff); font-weight: 300 700; font-style: italic; font-stretch: 125% condensed; font-display: swap; unicode-range: U+0000-00FF, U+4??; } \
          @media (min-width: 10px) { @font-face { font-family: Other; src: url(o.ttf) } } @keyframes spin { from { transform: rotate(0) } to { transform: rotate(360deg) } }",
     );
     sheet.base_url = Some("https://cdn.example/css/site.css".into());
@@ -353,9 +367,11 @@ fn font_faces_collected_and_resolved() {
     assert_eq!(f.sources[0].format.as_deref(), Some("woff2"));
     assert_eq!(f.weight, (300, 700));
     assert!(f.italic);
+    assert_eq!(f.stretch, (75, 125));
     assert_eq!(f.display, "swap");
     assert_eq!(f.unicode_range, Some(vec![(0, 0xff), (0x400, 0x4ff)]));
     assert_eq!(t.font_faces[1].family, "Other");
+    assert_eq!(t.font_faces[1].stretch, (100, 100));
     assert_eq!(t.keyframes.get("spin").map(|f| f.len()), Some(2));
     assert_eq!(t.root_font_size, 16.0);
 }

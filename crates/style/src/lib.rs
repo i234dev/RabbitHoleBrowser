@@ -40,6 +40,8 @@ pub struct FontFace {
     /// Weight range (min, max); a single weight has min == max.
     pub weight: (u16, u16),
     pub italic: bool,
+    /// `font-stretch` range in percent (min, max); `normal` is (100, 100).
+    pub stretch: (u16, u16),
     /// `font-display` (`auto` when unspecified).
     pub display: String,
     /// `unicode-range` as inclusive code point ranges.

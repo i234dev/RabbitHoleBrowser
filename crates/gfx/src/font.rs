@@ -100,6 +100,8 @@ pub(crate) struct FaceSlot {
     pub family_lower: String,
     pub weight: u16,
     pub italic: bool,
+    /// `font-stretch` range in percent (min, max); 100 for host faces.
+    pub stretch: (u16, u16),
     /// Generic family for bundled faces (used for fallback preference).
     pub generic: Option<Family>,
     pub source: FaceSource,
@@ -286,6 +288,7 @@ impl FontContext {
                 family_lower: family.to_ascii_lowercase(),
                 weight,
                 italic,
+                stretch: (100, 100),
                 generic: Some(generic),
                 source: FaceSource::Bytes(Rc::new(bytes.to_vec())),
                 font: RefCell::new(None),
@@ -813,6 +816,13 @@ impl FontContext {
     /// Among candidate faces, the one best matching weight/style (CSS font
     /// matching).
     pub(crate) fn best_of(&self, ids: &[usize], weight: u16, italic: bool) -> Option<usize> {
+        self.best_of_stretch(ids, weight, italic, 100)
+    }
+
+    /// CSS Fonts 4 §5.2 matching: width first (narrower faces first for a
+    /// desired width at or below 100%, wider ones above), then style, then
+    /// weight.
+    pub(crate) fn best_of_stretch(&self, ids: &[usize], weight: u16, italic: bool, stretch: u16) -> Option<usize> {
         let faces = self.faces.borrow();
         let mut best: Option<(i32, usize)> = None;
         for &idx in ids {
@@ -837,7 +847,18 @@ impl FontContext {
                     1000 + (d - w)
                 }
             };
-            let score = style_penalty + weight_penalty;
+            let (lo, hi) = (s.stretch.0 as i32, s.stretch.1 as i32);
+            let want = stretch as i32;
+            let stretch_penalty = if want >= lo && want <= hi {
+                0
+            } else if want <= 100 {
+                if hi < want { want - hi } else { 1000 + (lo - want) }
+            } else if lo > want {
+                lo - want
+            } else {
+                1000 + (want - hi)
+            };
+            let score = stretch_penalty * 100_000 + style_penalty + weight_penalty;
             if best.map(|(b, _)| score < b).unwrap_or(true) {
                 best = Some((score, idx));
             }
@@ -921,6 +942,29 @@ mod tests {
                 assert_ne!(face.lookup_glyph_index(ch), 0, "chosen face lacks {ch:?}");
             }
         }
+    }
+
+    /// Faces of one family differing only in width are kept apart and
+    /// ranked by `font-stretch` (narrower first at or below 100%).
+    #[test]
+    fn web_faces_match_font_stretch() {
+        let fc = FontContext::new();
+        let sans = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+        let serif = include_bytes!("../../../assets/fonts/DejaVuSerif.ttf");
+        let mono = include_bytes!("../../../assets/fonts/DejaVuSansMono.ttf");
+        let normal = fc.add_font_data_stretch("W", 400, false, (100, 100), sans).unwrap();
+        let condensed = fc.add_font_data_stretch("W", 400, false, (75, 75), serif).unwrap();
+        let expanded = fc.add_font_data_stretch("W", 400, false, (125, 150), mono).unwrap();
+        let family = ["W".to_string()];
+        let pick = |stretch| fc.select_family_stretch(&family, Family::Sans, 400, false, stretch);
+        assert_eq!(pick(100), normal);
+        assert_eq!(pick(75), condensed);
+        assert_eq!(pick(50), condensed, "narrower first, then wider");
+        assert_eq!(pick(87), condensed);
+        assert_eq!(pick(112), expanded, "wider first above 100%");
+        assert_eq!(pick(140), expanded, "inside a range");
+        assert_eq!(pick(200), expanded);
+        assert_eq!(fc.select_family(&family, Family::Sans, 400, false), normal);
     }
 
     #[test]

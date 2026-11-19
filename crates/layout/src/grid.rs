@@ -1411,7 +1411,10 @@ impl<'a> Layouter<'a> {
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
             let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column);
             let baseline = it.align == ItemAlign::Baseline;
-            let h = match resolve_size(child.style.height, cbh, bb, it.edges.pb_v) {
+            // A percentage height refers to the grid area, which is still
+            // indefinite while rows are sized: it contributes as `auto`.
+            let height_base = if child.style.height.has_percent() { None } else { cbh };
+            let h = match resolve_size(child.style.height, height_base, bb, it.edges.pb_v) {
                 Some(h) if !baseline => h + extras_v,
                 _ => {
                     let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,true));

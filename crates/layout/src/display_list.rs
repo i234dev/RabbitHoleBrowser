@@ -998,7 +998,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let Some(text) = b.text.as_deref() else { return };
         let r = b.content_rect;
         let st = &b.style;
-        let font = self.ctx.fonts.select_family(&st.font_family_list, st.font_family, st.font_weight, st.is_italic());
+        let font = self.ctx.fonts.select_family_stretch(&st.font_family_list, st.font_family, st.font_weight, st.is_italic(), st.font_stretch);
         let metrics = self.ctx.fonts.metrics(font, st.font_size);
         self.list.push(DisplayItem::PushClip(r));
         self.list.push(DisplayItem::Text {

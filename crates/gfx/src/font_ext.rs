@@ -68,6 +68,12 @@ impl FontContext {
     /// `family` with the given weight/style (from the `@font-face`
     /// descriptors). Returns None when the data cannot be decoded.
     pub fn add_font_data(&self, family: &str, weight: u16, italic: bool, data: &[u8]) -> Option<FontId> {
+        self.add_font_data_stretch(family, weight, italic, (100, 100), data)
+    }
+
+    /// [`FontContext::add_font_data`] with the face's `font-stretch` range
+    /// in percent (min, max).
+    pub fn add_font_data_stretch(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), data: &[u8]) -> Option<FontId> {
         // Raw SFNT can be compared against the store without first copying it.
         let sfnt = match data.get(..4) {
             Some([0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true") => std::borrow::Cow::Borrowed(data),
@@ -91,7 +97,7 @@ impl FontContext {
                     continue;
                 }
                 data = Some((bytes.clone(), slot.font.borrow().clone()));
-                if slot.generic.is_none() && slot.family_lower == family_lower && slot.weight == weight && slot.italic == italic {
+                if slot.generic.is_none() && slot.family_lower == family_lower && slot.weight == weight && slot.italic == italic && slot.stretch == stretch {
                     binding = Some(idx);
                     break;
                 }
@@ -122,6 +128,7 @@ impl FontContext {
             family,
             weight,
             italic,
+            stretch,
             generic: None,
             source: FaceSource::Bytes(bytes),
             font: RefCell::new(Some(font)),
@@ -155,6 +162,7 @@ impl FontContext {
                 family: f.family,
                 weight: f.weight,
                 italic: f.italic,
+                stretch: (100, 100),
                 generic: None,
                 source: FaceSource::Path(f.path, f.index),
                 font: RefCell::new(None),
@@ -175,6 +183,13 @@ impl FontContext {
     /// Pick the best face for a CSS family list, falling back to the
     /// bundled face for `generic`.
     pub fn select_family(&self, families: &[String], generic: Family, weight: u16, italic: bool) -> FontId {
+        self.select_family_stretch(families, generic, weight, italic, 100)
+    }
+
+    /// [`FontContext::select_family`] for a `font-stretch` in percent. Width
+    /// only ranks faces within a family, so host faces (all `normal`) are
+    /// unaffected.
+    pub fn select_family_stretch(&self, families: &[String], generic: Family, weight: u16, italic: bool, stretch: u16) -> FontId {
         for fam in families {
             let name = fam.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase();
             if name.is_empty() {
@@ -194,7 +209,7 @@ impl FontContext {
                 };
                 return self.select(g, weight, italic);
             }
-            if let Some(id) = self.select_exact_family(&name, weight, italic) {
+            if let Some(id) = self.select_exact_family_stretch(&name, weight, italic, stretch) {
                 return id;
             }
         }
@@ -216,8 +231,12 @@ impl FontContext {
     /// Select a literal family name without interpreting generic keywords.
     /// A quoted CSS family such as `"serif"` uses this path.
     pub fn select_exact_family(&self, family_lower: &str, weight: u16, italic: bool) -> Option<FontId> {
+        self.select_exact_family_stretch(family_lower, weight, italic, 100)
+    }
+
+    fn select_exact_family_stretch(&self, family_lower: &str, weight: u16, italic: bool, stretch: u16) -> Option<FontId> {
         let ids = self.family_faces(&family_lower.to_ascii_lowercase())?;
-        let idx = self.best_of(&ids, weight, italic)?;
+        let idx = self.best_of_stretch(&ids, weight, italic, stretch)?;
         // Make sure the face actually loads.
         self.try_face(idx)?;
         Some(FontId(idx))

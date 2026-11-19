@@ -819,6 +819,34 @@ fn background_layers_and_gradient() {
 }
 
 #[test]
+fn content_images_stay_inline_in_floated_pseudo_elements() {
+    let fx = Fixture::new("<div>x</div>", "body{margin:0;font:20px/30px serif} div::before{content:'1' url(x.png) '2';float:left}");
+    let mut bgs: Bgs = HashMap::new();
+    bgs.insert("x.png".into(), fake_image(10, 10));
+    let images = HashMap::new();
+    let ctx = fx.ctx(&images, &bgs);
+    let t = layout(&ctx);
+    fn image_boxes<'t>(b: &'t LayoutBox, out: &mut Vec<&'t LayoutBox>) {
+        if b.kind == BoxKind::Image {
+            out.push(b);
+        }
+        for c in &b.children {
+            image_boxes(c, out);
+        }
+    }
+    let mut found = Vec::new();
+    image_boxes(&t.root, &mut found);
+    if found.is_empty() {
+        eprintln!("content url() not resolved against the fixture's images; skipping");
+        return;
+    }
+    for img in found {
+        assert!(img.is_inline_level(), "{:?}", img.style.display);
+        assert!(img.rect.y < 30.0 && img.rect.x > 0.0, "on the first line after '1': {:?}", img.rect);
+    }
+}
+
+#[test]
 fn radii_shadow_outline_order() {
     let html = "<div style='width:100px;height:50px;background:#0a0a0a;border:2px solid #0b0b0b;border-radius:10px 0 5px 0;box-shadow:2px 2px 4px #0c0c0c;outline:1px solid #0d0d0d'>x</div>";
     let fx = Fixture::new(html, "");
@@ -1042,6 +1070,45 @@ fn inline_relative_offsets_move_absolute_static_positions() {
     let absolute = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
     assert!((absolute.x - 0.0).abs() < 0.01, "{absolute:?}");
     assert!((absolute.y - 25.0).abs() < 0.01, "{absolute:?}");
+}
+
+#[test]
+fn hypothetical_absolute_block_after_text_starts_below_its_line() {
+    let fx = Fixture::new(
+        "<div>Text <b id=block></b><i id=inline></i></div><div><b id=first></b>Text</div>",
+        "body{margin:0;font:20px/30px serif} b,i{position:absolute;width:30px;height:40px} b{display:block} i{display:inline}",
+    );
+    let t = fx.layout();
+    let rect = |id| t.box_of(&fx.doc, fx.doc.element_by_id(id).unwrap()).unwrap().rect;
+    let block = rect("block");
+    assert!((block.x - 0.0).abs() < 0.01 && (block.y - 30.0).abs() < 0.01, "{block:?}");
+    let inline = rect("inline");
+    assert!(inline.x > 0.0 && (inline.y - 0.0).abs() < 0.01, "{inline:?}");
+    let first = rect("first");
+    assert!((first.x - 0.0).abs() < 0.01 && (first.y - 30.0).abs() < 0.01, "an empty line keeps its top: {first:?}");
+}
+
+#[test]
+fn filtered_inline_contains_absolute_descendants() {
+    let fx = Fixture::new(
+        "<div>xxxx<span id=filtered>a<b id=absolute></b></span></div>",
+        "body{margin:0;font:20px/30px serif} span{filter:blur(0px)} #absolute{position:absolute;left:10px;top:5px;width:30px;height:40px}",
+    );
+    let t = fx.layout();
+    let absolute = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+    // The inline's padding box starts after `xxxx`, and below the half-leading.
+    assert!(absolute.x > 10.5 && absolute.y > 5.5, "relative to the filtered inline, not the page: {absolute:?}");
+}
+
+#[test]
+fn percentage_height_grid_items_do_not_size_their_rows_from_the_container() {
+    let fx = Fixture::new(
+        "<div id=grid><i id=item></i></div>",
+        "body{margin:0} #grid{display:grid;height:40px;width:40px;grid-template-rows:auto auto} #item{grid-row:2;height:100%;align-self:start}",
+    );
+    let t = fx.layout();
+    let item = t.box_of(&fx.doc, fx.doc.element_by_id("item").unwrap()).unwrap().rect;
+    assert!((item.y - 20.0).abs() < 0.01 && (item.h - 20.0).abs() < 0.01, "{item:?}");
 }
 
 #[test]

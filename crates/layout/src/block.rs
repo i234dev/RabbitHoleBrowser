@@ -42,7 +42,7 @@ pub(crate) struct Layouter<'a> {
     /// Whether `FontContext::select_family` & co. are implemented.
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
-    font_cache: HashMap<(String, u16, bool), FontId>,
+    font_cache: HashMap<(String, u16, bool, u16), FontId>,
     /// Containing blocks of absolutely positioned grid children placed by
     /// grid lines (their grid area), set by the grid layout.
     pub(crate) abs_cb: HashMap<rabbithole_dom::NodeId, Rect>,
@@ -209,11 +209,11 @@ impl<'a> Layouter<'a> {
     /// (web fonts / system fonts) or the generic fallback.
     pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
         if self.font_ext && !style.font_family_list.is_empty() {
-            let key = (style.font_family_list.join(","), style.font_weight, style.is_italic());
+            let key = (style.font_family_list.join(","), style.font_weight, style.is_italic(), style.font_stretch);
             if let Some(f) = self.font_cache.get(&key) {
                 return *f;
             }
-            let f = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            let f = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             self.font_cache.insert(key, f);
             return f;
         }
@@ -997,7 +997,7 @@ impl<'a> Layouter<'a> {
         // image arrives, so loading causes no layout shift).
         let natural = b.image.as_ref().filter(|i| !i.broken).map(|img| img.natural_size());
         let fallback = if let Some(text) = b.text.as_deref().filter(|_| b.image.is_none()) {
-            let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             let width = self.ctx.fonts.shape(font, style.font_size, text, style.letter_spacing).last().map(|g| g.x + g.advance).unwrap_or(0.0);
             (width, style.line_height_px())
         } else {
@@ -1137,7 +1137,7 @@ impl<'a> Layouter<'a> {
         if let Some(&ancestor) = cache.get(&node) {
             return ancestor;
         }
-        let ancestor = if self.ctx.styles.get(node).is_some_and(|s| s.position != Position::Static) {
+        let ancestor = if self.ctx.styles.get(node).is_some_and(|s| contains_absolutes(s)) {
             Some(node)
         } else {
             self.ctx.doc.flat_parent(node).and_then(|parent| self.positioned_ancestor(parent, cache))
@@ -1384,6 +1384,15 @@ impl<'a> Layouter<'a> {
     }
 }
 
+/// Does an element whose inline fragments are flattened into lines contain
+/// its absolutely positioned descendants? Positioned inlines do, and so do
+/// filtered ones (Filter Effects §5: `filter` / `backdrop-filter` other than
+/// `none` establish a containing block for absolute descendants).
+fn contains_absolutes(style: &rabbithole_style::ComputedStyle) -> bool {
+    style.position != Position::Static
+        || (style.display == rabbithole_style::Display::Inline && (!style.filters.is_empty() || !style.backdrop_filters.is_empty()))
+}
+
 fn has_abs_descendants(b: &LayoutBox) -> bool {
     b.children.iter().any(|child| {
         child.flow == Flow::Absolute
@@ -1405,7 +1414,7 @@ fn inline_containing_blocks(b: &LayoutBox) -> HashMap<rabbithole_dom::NodeId, Re
         for line in &b.lines {
             for fragment in &line.fragments {
                 let (Some(node), FragmentKind::InlineBox { style, left_edge, right_edge }) = (fragment.node, &fragment.kind) else { continue };
-                if style.position == Position::Static {
+                if !contains_absolutes(style) {
                     continue;
                 }
                 // Inline background fragments include their horizontal

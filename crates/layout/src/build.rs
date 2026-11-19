@@ -120,7 +120,18 @@ impl<'a> Builder<'a> {
                 ContentItem::Url(url) => {
                     flush_text(&mut text, &mut children);
                     if let Some(img) = self.ctx.background_images.get(url) {
-                        let mut b = LayoutBox::new(BoxKind::Image, Some(node), style.clone());
+                        // An image of the content list is an anonymous inline
+                        // replaced box: the pseudo-element's own outer display
+                        // (block when floated or positioned) must not make it
+                        // block-level within the pseudo's lines.
+                        let image_style = if style.display == Display::Inline {
+                            style.clone()
+                        } else {
+                            let mut s = (*style).clone();
+                            s.display = Display::Inline;
+                            Rc::new(s)
+                        };
+                        let mut b = LayoutBox::new(BoxKind::Image, Some(node), image_style);
                         b.image = Some(img.clone());
                         b.bfc_root = true;
                         children.push(b);
@@ -746,7 +757,7 @@ impl<'a> Builder<'a> {
                 return (rows, None);
             }
             // Wide enough for the longest option and a scroll bar.
-            let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             let widest = options.iter().map(|&o| self.ctx.fonts.measure(font, style.font_size, &label(o))).fold(0.0f32, f32::max);
             let mut w = widest.ceil() + 4.0 + 16.0;
             if style.box_sizing == rabbithole_style::BoxSizing::BorderBox {
@@ -761,7 +772,7 @@ impl<'a> Builder<'a> {
         if !style.width.is_auto() {
             return (vec![t], None);
         }
-        let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+        let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
         let widest = options.iter().map(|&o| self.ctx.fonts.measure(font, style.font_size, &label(o))).fold(0.0f32, f32::max);
         let arrow = if style.appearance == rabbithole_style::Appearance::None { 0.0 } else { SELECT_ARROW_WIDTH };
         let mut w = widest.ceil() + arrow;
