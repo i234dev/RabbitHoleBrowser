@@ -927,11 +927,14 @@ impl<'a> Layouter<'a> {
         self.forced_content_height = None;
         // Baselines relative to the margin box; an item without one has
         // a baseline synthesized from its border box's bottom edge.
+        // (Vertical containers align central baselines: synthesized
+        // halfway across the border box.)
         let margin_top = child.rect.y - it.edges.margin.top;
         let margin_bottom = child.rect.bottom() + it.edges.margin.bottom;
-        it.ascent = child.first_baseline().unwrap_or(child.rect.bottom()) - margin_top;
+        let synthesized = if b.style.central_baseline() { child.rect.y + child.rect.h / 2.0 } else { child.rect.bottom() };
+        it.ascent = child.first_baseline().unwrap_or(synthesized) - margin_top;
         if it.last_baseline {
-            it.below = margin_bottom - child.last_baseline().unwrap_or(child.rect.bottom());
+            it.below = margin_bottom - child.last_baseline().unwrap_or(synthesized);
         }
     }
 

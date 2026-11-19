@@ -160,3 +160,17 @@ fn orthogonal_children_do_not_give_an_inline_block_its_baseline() {
     // Aligned by its "bbb" line: its top is the line's top.
     assert!(close(fx.rect(&t, "ib").y, 0.0), "{}", t.dump());
 }
+
+#[test]
+fn right_to_left_inline_absolutes_end_at_their_static_position() {
+    // After a 50px inline-block in a right-to-left line, the hypothetical
+    // box would start (on the right) where the inline-block ends.
+    let fx = Fx::new("<div style='direction:rtl;width:200px;position:relative'><span style='display:inline-block;width:50px;height:10px'></span><span id=a style='position:absolute;width:10px;height:10px'></span></div>", RESET);
+    let t = fx.layout();
+    assert_rect!(fx.rect(&t, "a"), 140.0, 0.0, 10.0, 10.0, t);
+    // The same in a vertical line (inline axis downwards).
+    let fx = Fx::new("<div style='writing-mode:vertical-rl;direction:rtl;height:200px;width:20px;position:relative'><span style='display:inline-block;height:50px;width:10px'></span><span id=a style='position:absolute;width:10px;height:10px'></span></div>", RESET);
+    let t = fx.layout();
+    let a = fx.rect(&t, "a");
+    assert!(close(a.y, 140.0) && close(a.h, 10.0), "{a:?}\n{}", t.dump());
+}

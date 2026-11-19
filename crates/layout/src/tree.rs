@@ -674,7 +674,7 @@ impl LayoutBox {
         if self.formatting == Formatting::Flex && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
             // An item without a baseline has one synthesized from its
             // border box's bottom edge.
-            return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(c.rect.bottom()));
+            return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(self.synthesized_baseline_of(c)));
         }
         if let Some(l) = self.lines.first() {
             return Some(l.baseline);
@@ -684,6 +684,16 @@ impl LayoutBox {
             .filter(|c| c.is_in_flow())
             .find_map(|c| c.first_baseline())
             .or_else(|| self.synthesized_item_baseline(false))
+    }
+
+    /// The baseline synthesized from an item's border box: its bottom
+    /// edge, or its middle in a vertical container (central baseline).
+    fn synthesized_baseline_of(&self, c: &LayoutBox) -> f32 {
+        if self.style.central_baseline() {
+            c.rect.y + c.rect.h / 2.0
+        } else {
+            c.rect.bottom()
+        }
     }
 
     /// A grid container whose items have no baseline synthesizes one from
@@ -704,7 +714,7 @@ impl LayoutBox {
             return None;
         }
         if self.formatting == Formatting::Flex && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
-            return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(c.rect.bottom()));
+            return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(self.synthesized_baseline_of(c)));
         }
         if let Some(l) = self.lines.last() {
             return Some(l.baseline);

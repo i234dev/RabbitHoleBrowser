@@ -742,6 +742,7 @@ impl<'a> Layouter<'a> {
                 cur: Line::default(),
                 pending_floats: Vec::new(),
                 pending_abs: Vec::new(),
+                line_abs: Vec::new(),
                 first_line: true,
                 after_forced: false,
                 join_next: false,
@@ -891,6 +892,9 @@ struct InlineLayout<'l, 'a> {
     /// Hypothetical block-level absolutes met after inline content: their
     /// static position is below the line they would have broken.
     pending_abs: Vec<usize>,
+    /// Inline-level absolutes met on the current line, with their static
+    /// x before the line is aligned (and mirrored, right to left).
+    line_abs: Vec<(usize, f32)>,
     first_line: bool,
     /// The previous line ended with a forced break.
     after_forced: bool,
@@ -1105,6 +1109,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     self.children[*c].static_pos = (x + rx, y + ry);
                     if block && self.cur.has_content {
                         self.pending_abs.push(*c);
+                    }
+                    if !block {
+                        self.line_abs.push((*c, x));
                     }
                     self.children[*c].static_align = None;
                 }
@@ -2074,6 +2081,22 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.frags = units.into_iter().map(|u| u.0).collect();
     }
 
+    /// The static positions of the line's inline-level absolutes, moved
+    /// with the line's content: mirrored in a right-to-left line (where
+    /// the position is the hypothetical box's right edge), then aligned.
+    fn place_line_abs(&mut self, shift_x: f32) {
+        if self.line_abs.is_empty() {
+            return;
+        }
+        let rtl = self.cstyle.direction == Direction::Rtl;
+        let (l, r) = (self.cur.left, self.cur.right);
+        for (c, x) in std::mem::take(&mut self.line_abs) {
+            let rx = self.rel_kids.get(c).map_or(0.0, |r| r.0);
+            let x = if rtl { r - (x - l) } else { x };
+            self.children[c].static_pos.0 = x + shift_x + rx;
+        }
+    }
+
     fn mirror_line(&mut self) {
         let (l, r) = (self.cur.left, self.cur.right);
         let used = self.cur.x - l;
@@ -2325,6 +2348,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     fn finish_line(&mut self, forced: bool) {
         if !self.cur.has_content && !forced {
             if self.cur.frags.is_empty() {
+                self.place_line_abs(0.0);
                 return;
             }
         }
@@ -2444,7 +2468,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     let child = &self.children[*c];
                     let mr = child.margin_rect();
                     let h = mr.h;
-                    let base = if central { h / 2.0 } else { child.baseline.map(|bo| child.margin.top + bo).unwrap_or(h) };
+                    // (Without a baseline of its own, a box's central
+                    // baseline is synthesized halfway across its margin box.)
+                    let base = child.baseline.map(|bo| child.margin.top + bo).unwrap_or(if central { h / 2.0 } else { h });
                     let fs = self
                         .cur
                         .open
@@ -2560,6 +2586,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             }
         };
 
+        self.place_line_abs(shift_x);
         let mut fragments: Vec<Fragment> = Vec::with_capacity(self.cur.frags.len() + self.cur.bg.len());
         for bg in &self.cur.bg {
             let style = self.style(bg.item).clone();

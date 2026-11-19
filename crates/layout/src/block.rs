@@ -1878,7 +1878,9 @@ impl<'a> Layouter<'a> {
                         .or_else(|| self.abs_cb.get(&n).copied())
                 });
                 let block_level = matches!(b.formatting, Formatting::Block | Formatting::Inline) && !b.children[i].style.display_before_blockification.is_inline_level();
-                let static_right = (block_level || b.formatting == Formatting::Block) && b.style.direction == rabbithole_style::Direction::Rtl;
+                // (Inline-level static positions of right-to-left lines are
+                // the hypothetical box's right edge too.)
+                let static_right = matches!(b.formatting, Formatting::Block | Formatting::Inline) && b.style.direction == rabbithole_style::Direction::Rtl;
                 // The static-position rectangle of a block-level box: the
                 // parent's content box in the inline axis, its static
                 // position in the block axis (CSS Position §4.1).
