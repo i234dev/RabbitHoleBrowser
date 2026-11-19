@@ -274,13 +274,14 @@ impl<'a> Layouter<'a> {
                             start = end;
                         }
                         pending_space = 0.0;
-                        trail = 0.0;
+                        trail = if cstyle.line_height_tight { 0.0 } else { st.letter_spacing.max(0.0) };
                         continue;
                     }
                     run += pending_space + width;
                     pending_space = 0.0;
-                    // Other space separators ending a line hang.
-                    trail = if text.chars().next_back().is_some_and(crate::linebreak::is_space_separator) && st.white_space != rabbithole_style::WhiteSpace::BreakSpaces {
+                    // Other space separators ending a line hang; no
+                    // letter-spacing at a line end.
+                    trail = if cstyle.line_height_tight { 0.0 } else { st.letter_spacing.max(0.0) } + if text.chars().next_back().is_some_and(crate::linebreak::is_space_separator) && st.white_space != rabbithole_style::WhiteSpace::BreakSpaces {
                         let font = self.font_for(st);
                         let sep: String = text.chars().rev().take_while(|c| crate::linebreak::is_space_separator(*c)).collect();
                         (self.measurer.width(font, st.font_size, &sep) + st.letter_spacing * sep.chars().count() as f32).min(*width)

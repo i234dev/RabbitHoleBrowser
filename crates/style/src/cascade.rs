@@ -853,6 +853,7 @@ fn apply_declarations(
             style.line_clamp = None;
         }
     }
+    style.resolve_spacing_pct();
     // A unitless line height scales with this element's font size (also
     // when inherited).
     if let Some(n) = style.line_height_number {
@@ -962,8 +963,10 @@ pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declara
     if decls.iter().any(|d| d.name.starts_with("text-") || d.name == "color") {
         apply_decorations(&mut style, parent);
     }
+    style.resolve_spacing_pct();
     style
 }
+
 
 // ---------------------------------------------------------------- font-face
 
@@ -1622,8 +1625,14 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.line_height = from.line_height;
             to.line_height_number = from.line_height_number;
         }
-        "letter-spacing" => to.letter_spacing = from.letter_spacing,
-        "word-spacing" => to.word_spacing = from.word_spacing,
+        "letter-spacing" => {
+            to.letter_spacing = from.letter_spacing;
+            set_spacing_pct(to, 0, from.spacing_pct.map(|p| p[0]));
+        }
+        "word-spacing" => {
+            to.word_spacing = from.word_spacing;
+            set_spacing_pct(to, 1, from.spacing_pct.map(|p| p[1]));
+        }
         "text-align" => {
             to.text_align = from.text_align;
             to.text_align_webkit_center = from.text_align_webkit_center;
@@ -2881,16 +2890,22 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "letter-spacing" | "word-spacing" => {
+            // (px, percent of the font size)
             let v = if values::is_ident(c0, "normal") {
-                Some(0.0)
+                Some((0.0, 0.0))
             } else {
                 match resolve_len_no_auto(c0, ctx) {
-                    Some(Length::Px(v)) => Some(v),
+                    Some(Length::Px(v)) => Some((v, 0.0)),
+                    Some(Length::Percent(p)) => Some((0.0, p)),
+                    Some(Length::Calc(px, p)) => Some((px, p)),
                     _ => None,
                 }
             };
-            if let Some(v) = v {
-                if name == "letter-spacing" {
+            if let Some((px, pct)) = v {
+                let i = if name == "letter-spacing" { 0 } else { 1 };
+                set_spacing_pct(style, i, (pct != 0.0).then_some((px, pct)));
+                let v = px + pct / 100.0 * style.font_size;
+                if i == 0 {
                     style.letter_spacing = v;
                 } else {
                     style.word_spacing = v;
@@ -3102,6 +3117,13 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             props::apply(name, &comps, value, style, parent, ctx);
         }
     }
+}
+
+/// Record (or clear) the percentage part of letter (0) / word (1) spacing.
+fn set_spacing_pct(style: &mut ComputedStyle, i: usize, v: Option<(f32, f32)>) {
+    let mut p = style.spacing_pct.unwrap_or([(0.0, 0.0); 2]);
+    p[i] = v.unwrap_or((0.0, 0.0));
+    style.spacing_pct = if p.iter().all(|e| e.1 == 0.0) { None } else { Some(p) };
 }
 
 /// `match-parent`: the parent's alignment, `start` / `end` resolved

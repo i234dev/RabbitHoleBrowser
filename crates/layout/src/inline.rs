@@ -1128,7 +1128,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 let style = self.style(item).clone();
                 width = self.lay.tab_width(self.cstyle, &style, pos);
             }
-            let fits = self.cur.x + self.pending_w() + width <= self.cur.right + 0.01;
+            // (The letter-spacing after the word is dropped at a line end.)
+            let trailing_ls = if self.cstyle.line_height_tight { 0.0 } else { self.style(item).letter_spacing.max(0.0) };
+            let fits = self.cur.x + self.pending_w() + width - trailing_ls <= self.cur.right + 0.01;
             // Preserved spaces at the end of a `pre-wrap` line hang: they
             // never move to the next line (CSS Text 3 §4.1.3).
             let hangs = wraps && self.style(item).white_space != rabbithole_style::WhiteSpace::BreakSpaces && self.cur.has_content && !text.is_empty() && text.chars().all(|c| c == ' ' || c == '\t');
@@ -1991,6 +1993,15 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.trim_trailing_space();
         if !forced && !self.final_flush {
             self.show_hyphen();
+        }
+        // No letter-spacing at the end of a line (CSS Text 3 §8.2); the
+        // lines of ruby bases and annotations are not line ends.
+        if let Some(PF { kind: PFKind::Text { item, .. }, w, .. }) = self.cur.frags.last_mut().filter(|_| !self.cstyle.line_height_tight) {
+            let ls = item_style(self.items, self.cstyle, *item).letter_spacing;
+            if ls != 0.0 && *item != MARKER_ITEM {
+                *w -= ls;
+                self.cur.x -= ls;
+            }
         }
         self.merge_frags();
 

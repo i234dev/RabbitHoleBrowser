@@ -1292,6 +1292,10 @@ pub struct ComputedStyle {
     pub line_height_number: Option<f32>,
     pub letter_spacing: f32,
     pub word_spacing: f32,
+    /// Letter / word spacing with a percentage of the font size (px,
+    /// percent): inherited as such and resolved for each element's font
+    /// size (into `letter_spacing` / `word_spacing`).
+    pub spacing_pct: Option<[(f32, f32); 2]>,
     pub text_align: TextAlign,
     /// `text-align: -webkit-center` (`<center>`, `align=center`): also
     /// centers block-level children with non-auto margins. Inherited.
@@ -1602,6 +1606,7 @@ impl ComputedStyle {
             line_height_number: None,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            spacing_pct: None,
             text_align: TextAlign::Start,
             text_align_last: None,
             text_justify: 0,
@@ -1765,6 +1770,7 @@ impl ComputedStyle {
             line_height_number: parent.line_height_number,
             letter_spacing: parent.letter_spacing,
             word_spacing: parent.word_spacing,
+            spacing_pct: parent.spacing_pct,
             text_align: parent.text_align,
             text_align_webkit_center: parent.text_align_webkit_center,
             text_align_last: parent.text_align_last,
@@ -1818,6 +1824,19 @@ impl ComputedStyle {
         }
     }
 
+    /// Resolve percentage letter / word spacings against the font size
+    /// (after it changes: inheritance, animations).
+    pub fn resolve_spacing_pct(&mut self) {
+        if let Some(p) = self.spacing_pct {
+            if p[0].1 != 0.0 {
+                self.letter_spacing = p[0].0 + p[0].1 / 100.0 * self.font_size;
+            }
+            if p[1].1 != 0.0 {
+                self.word_spacing = p[1].0 + p[1].1 / 100.0 * self.font_size;
+            }
+        }
+    }
+
     /// Do two styles agree on every field [`ComputedStyle::inherit_from`]
     /// copies (keep both lists in sync)? Children of an element whose
     /// inherited part did not change need no restyle for inheritance.
@@ -1832,6 +1851,7 @@ impl ComputedStyle {
             && self.line_height_number == o.line_height_number
             && self.letter_spacing == o.letter_spacing
             && self.word_spacing == o.word_spacing
+            && self.spacing_pct == o.spacing_pct
             && self.text_align == o.text_align
             && self.text_align_webkit_center == o.text_align_webkit_center
             && self.text_align_last == o.text_align_last

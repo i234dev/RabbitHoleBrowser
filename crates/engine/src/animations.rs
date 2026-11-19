@@ -244,7 +244,10 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         (Transform, Val::T(t)) => s.transform = t.clone(),
         (Visibility, Val::V(v)) => s.visibility = *v,
         (LetterSpacing, Val::F(f)) => s.letter_spacing = *f,
-        (FontSize, Val::F(f)) => s.font_size = f.max(0.0),
+        (FontSize, Val::F(f)) => {
+            s.font_size = f.max(0.0);
+            s.resolve_spacing_pct();
+        }
         (BorderRadius, Val::F(f)) => s.border_radius = f.max(0.0),
         (Filter, Val::Fl(f)) => {
             s.filters = f.clone();
