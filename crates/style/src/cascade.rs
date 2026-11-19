@@ -8,7 +8,7 @@ use crate::values::{self, ColorValue, LengthContext};
 use crate::{FontFace, FontSource, MediaEnv, StyleOptions, StyledTree, Stylesheet};
 use rabbithole_css::selector::{Compound, Pseudo, Selector, SelectorMatcher, Specificity};
 use rabbithole_css::selector::{is_host_selector, is_slotted_selector, matches_slotted};
-use rabbithole_css::{parse_declaration_list, parse_stylesheet, Declaration, PseudoElement, StyleRule, Token};
+use rabbithole_css::{declaration_uses_attr as uses_attr, parse_declaration_list, parse_stylesheet, rollback_keyword, Declaration, PseudoElement, StyleRule, Token};
 use rabbithole_dom::{Document, NodeId};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -127,11 +127,8 @@ impl RuleIndex {
         for rule in rules {
             let layer = rule.layer.as_ref().and_then(|l| layers.get(&layer_key(l, sheet)).copied()).unwrap_or(0);
             let decls: Rc<[Declaration]> = Rc::from(rule.declarations.as_slice());
-            let (uses_attr, uses_rollback) = if is_ua {
-                (false, false)
-            } else {
-                (decls.iter().any(uses_attr), decls.iter().any(|d| rollback_keyword(d).is_some()))
-            };
+            let uses_attr = rule.flags & rabbithole_css::RULE_USES_ATTR != 0;
+            let uses_rollback = rule.flags & rabbithole_css::RULE_USES_ROLLBACK != 0;
             for sel in &rule.selectors {
                 let idx = self.rules.len();
                 self.rules.push(IndexedRule {
@@ -916,15 +913,6 @@ fn track_current_color(style: &mut ComputedStyle, parent: &ComputedStyle, prop: 
     }
 }
 
-/// `revert` / `revert-layer` as a declaration's whole value.
-fn rollback_keyword(d: &Declaration) -> Option<bool> {
-    match d.value.as_slice() {
-        [Token::Ident(s)] if s.eq_ignore_ascii_case("revert-layer") => Some(true),
-        [Token::Ident(s)] if s.eq_ignore_ascii_case("revert") => Some(false),
-        _ => None,
-    }
-}
-
 /// Resolve winning `revert` / `revert-layer` declarations in a sorted
 /// declaration list (CSS Cascade 5 §7.3): drop the property's
 /// declarations of the same cascade layer (`revert-layer`) or origin
@@ -1502,23 +1490,6 @@ impl Drop for AttrScope {
     fn drop(&mut self) {
         ELEMENT_ATTRS.with(|a| *a.borrow_mut() = None);
     }
-}
-
-/// Does a declaration need `attr()` substituted at computed-value time?
-/// (`content: attr(name)` without type or fallback is resolved by layout,
-/// which keeps such rules shareable.)
-fn uses_attr(d: &Declaration) -> bool {
-    let mut calls = d.value.iter().enumerate().filter(|(_, t)| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("attr"))).peekable();
-    if calls.peek().is_none() {
-        return false;
-    }
-    if d.name != "content" {
-        return true;
-    }
-    calls.any(|(i, _)| {
-        let inner: Vec<&Token> = d.value[i + 1..].iter().take_while(|t| **t != Token::CloseParen).filter(|t| !matches!(t, Token::Whitespace)).collect();
-        !matches!(inner.as_slice(), [Token::Ident(_)])
-    })
 }
 
 /// `attr()` can be substituted (an element's attributes are in scope).

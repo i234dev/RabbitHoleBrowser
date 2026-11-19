@@ -28,6 +28,52 @@ pub struct StyleRule {
     pub layer: Option<std::sync::Arc<str>>,
     /// Enclosing `@container` queries (all must hold).
     pub container: Option<std::sync::Arc<Vec<container::ContainerQuery>>>,
+    /// `RULE_USES_*` bits of the declarations, found once at parse time.
+    pub flags: u8,
+}
+
+/// Some declaration uses `attr()` substituted at computed-value time.
+pub const RULE_USES_ATTR: u8 = 1;
+/// Some declaration is `revert` or `revert-layer`.
+pub const RULE_USES_ROLLBACK: u8 = 2;
+
+/// Does a declaration need `attr()` substituted at computed-value time?
+/// (`content: attr(name)` without type or fallback is left to layout.)
+pub fn declaration_uses_attr(d: &Declaration) -> bool {
+    let mut calls = d.value.iter().enumerate().filter(|(_, t)| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("attr"))).peekable();
+    if calls.peek().is_none() {
+        return false;
+    }
+    if d.name != "content" {
+        return true;
+    }
+    calls.any(|(i, _)| {
+        let inner: Vec<&Token> = d.value[i + 1..].iter().take_while(|t| **t != Token::CloseParen).filter(|t| !matches!(t, Token::Whitespace)).collect();
+        !matches!(inner.as_slice(), [Token::Ident(_)])
+    })
+}
+
+/// `revert` / `revert-layer` as a declaration's whole value: `Some(true)`
+/// for `revert-layer`.
+pub fn rollback_keyword(d: &Declaration) -> Option<bool> {
+    match d.value.as_slice() {
+        [Token::Ident(s)] if s.eq_ignore_ascii_case("revert-layer") => Some(true),
+        [Token::Ident(s)] if s.eq_ignore_ascii_case("revert") => Some(false),
+        _ => None,
+    }
+}
+
+fn rule_flags(decls: &[Declaration]) -> u8 {
+    let mut f = 0;
+    for d in decls {
+        if declaration_uses_attr(d) {
+            f |= RULE_USES_ATTR;
+        }
+        if rollback_keyword(d).is_some() {
+            f |= RULE_USES_ROLLBACK;
+        }
+    }
+    f
 }
 
 #[derive(Debug, Clone)]
@@ -502,7 +548,7 @@ impl<'a> Parser<'a> {
                                         format!("#anon{n}")
                                     });
                                     // Register the layer even when it is empty.
-                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(name.as_str())), container: None }));
+                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(name.as_str())), container: None, flags: 0 }));
                                     assign_layer(&mut inner_rules, &name);
                                     rules.extend(inner_rules);
                                 }
@@ -559,7 +605,7 @@ impl<'a> Parser<'a> {
                             if name == "layer" && parent.is_none() {
                                 // `@layer a, b;` fixes the order of layers.
                                 for n in layer_names(prelude) {
-                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(n.as_str())), container: None }));
+                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(n.as_str())), container: None, flags: 0 }));
                                 }
                             }
                         }
@@ -608,7 +654,9 @@ impl<'a> Parser<'a> {
             let mut sub = Parser { toks: &self.toks[start..end], pos: 0 };
             if at_rule || block {
                 if !declarations.is_empty() {
-                    rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations: std::mem::take(&mut declarations), layer: None, container: None }));
+                    let declarations = std::mem::take(&mut declarations);
+                    let flags = rule_flags(&declarations);
+                    rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations, layer: None, container: None, flags }));
                 }
                 rules.extend(sub.parse_rule_context(false, Some(parent.clone()), depth + 1));
             } else {
@@ -616,7 +664,8 @@ impl<'a> Parser<'a> {
             }
         }
         if !declarations.is_empty() {
-            rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations, layer: None, container: None }));
+            let flags = rule_flags(&declarations);
+            rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations, layer: None, container: None, flags }));
         }
         rules
     }
