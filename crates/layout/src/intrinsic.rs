@@ -268,14 +268,30 @@ impl<'a> Layouter<'a> {
                     line += pending_space + width;
                     // `overflow-wrap: anywhere` / `word-break: break-word`:
                     // every grapheme cluster may end a line (min-content).
-                    if wraps && (st.overflow_wrap == rabbithole_style::OverflowWrap::Anywhere || st.word_break == rabbithole_style::WordBreak::BreakWord) && text.chars().nth(1).is_some() {
+                    // `word-break: break-all` / `line-break: anywhere`: the
+                    // word's opportunities (kept whole in the pieces).
+                    let rules = crate::inline::line_rules(st);
+                    let cut_all = wraps && (rules.word_break == 3 || rules.line_break == 3) && text.chars().nth(1).is_some();
+                    if cut_all || wraps && (st.overflow_wrap == rabbithole_style::OverflowWrap::Anywhere || st.word_break == rabbithole_style::WordBreak::BreakWord) && text.chars().nth(1).is_some() {
                         let font = self.font_for(st);
                         let mut first = true;
                         let mut start = 0;
+                        let mut points = Vec::new();
+                        let mut pi = 0;
+                        if cut_all {
+                            crate::linebreak::split_points(&rules, text, &mut points);
+                        }
                         let mut it = text.char_indices().peekable();
                         while it.next().is_some() {
                             let end = it.peek().map_or(text.len(), |n| n.0);
-                            if it.peek().is_some_and(|n| matches!(crate::linebreak::class(n.1), crate::linebreak::Lb::CM | crate::linebreak::Lb::ZWJ)) {
+                            if cut_all {
+                                while points.get(pi).is_some_and(|p| *p < end) {
+                                    pi += 1;
+                                }
+                                if end != text.len() && points.get(pi) != Some(&end) {
+                                    continue;
+                                }
+                            } else if it.peek().is_some_and(|n| matches!(crate::linebreak::class(n.1), crate::linebreak::Lb::CM | crate::linebreak::Lb::ZWJ)) {
                                 continue;
                             }
                             let cw = self.measurer.width(font, st.font_size, &text[start..end]) + st.letter_spacing * text[start..end].chars().count() as f32;

@@ -21,9 +21,32 @@ enum BreakPolicy {
     /// `overflow-wrap: anywhere|break-word` / `word-break: break-word`:
     /// split only when the word does not fit on a line of its own.
     IfNeeded,
+    /// `word-break: break-all` / `line-break: anywhere`: the words are cut
+    /// at their (many) opportunities only where a line ends, rather than
+    /// laid out in pieces.
+    Anywhere,
+}
+
+/// The line breaking rules of a text's style.
+pub(crate) fn line_rules(style: &ComputedStyle) -> lb::Rules {
+    lb::Rules {
+        line_break: if style.line_break == 3 && style.wrap_inside_avoid { 0 } else { style.line_break },
+        word_break: match style.word_break {
+            WordBreak::KeepAll => 1,
+            WordBreak::AutoPhrase => 2,
+            WordBreak::BreakAll => 3,
+            _ => 0,
+        },
+        cjk: matches!(style.lang, rabbithole_style::LANG_JA | rabbithole_style::LANG_ZH),
+        break_spaces: style.white_space == rabbithole_style::WhiteSpace::BreakSpaces,
+    }
 }
 
 fn break_policy(style: &ComputedStyle) -> BreakPolicy {
+    let r = line_rules(style);
+    if r.word_break == 3 || r.line_break == 3 {
+        return BreakPolicy::Anywhere;
+    }
     match style.word_break {
         WordBreak::BreakWord | WordBreak::AutoPhrase => BreakPolicy::IfNeeded,
         _ => match style.overflow_wrap {
@@ -385,7 +408,8 @@ impl<'a> Layouter<'a> {
         if tab <= 0.0 {
             return 0.0;
         }
-        let half_ch = 0.5 * block.font_size * rabbithole_style::values::font_units(block).0;
+        // (The block's `ch`: the advance of its "0".)
+        let half_ch = 0.5 * self.measurer.width(font, block.font_size, "0");
         let mut next = ((pos + 0.01) / tab).floor() * tab + tab;
         if next - pos < half_ch {
             next = ((pos + half_ch) / tab).ceil() * tab;
@@ -440,17 +464,7 @@ impl<'a> Layouter<'a> {
                     let keep_shy = style.hyphens != 0;
                     segment_tabs(&t, ws, &mut col, &mut segs, keep_shy);
                     let ls = style.letter_spacing;
-                    let rules = lb::Rules {
-                        line_break: if style.line_break == 3 && style.wrap_inside_avoid { 0 } else { style.line_break },
-                        word_break: match style.word_break {
-                            rabbithole_style::WordBreak::KeepAll => 1,
-                            rabbithole_style::WordBreak::AutoPhrase => 2,
-                            rabbithole_style::WordBreak::BreakAll => 3,
-                            _ => 0,
-                        },
-                        cjk: matches!(style.lang, rabbithole_style::LANG_JA | rabbithole_style::LANG_ZH),
-                        break_spaces: ws == rabbithole_style::WhiteSpace::BreakSpaces,
-                    };
+                    let rules = line_rules(style);
                     let anywhere = rules.line_break == 3;
 
                     let full_width = style.text_transform_extra & 1 != 0;
@@ -488,8 +502,10 @@ impl<'a> Layouter<'a> {
                                 let prev_before = prev_char;
                                 prev_char = w.chars().rev().find(|&c| !attaches_to_previous(c)).or(w.chars().last());
                                 let mut parts: Vec<(String, bool)> = Vec::new();
-                                if wraps && !is_space_word {
+                                if wraps && !is_space_word && rules.word_break != 3 && !anywhere && {
                                     lb::split_points(&rules, &w, &mut points);
+                                    !points.is_empty()
+                                } {
                                     let mut start = 0;
                                     for &p in points.iter().chain(std::iter::once(&w.len())) {
                                         parts.push((w[start..p].to_string(), start > 0));
@@ -1195,10 +1211,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 self.push_text(text, width, item, break_before);
                 return;
             }
-            if self.cur.has_content {
+            if self.cur.has_content && policy != BreakPolicy::Anywhere {
                 if break_before {
                     self.finish_line(false);
                     break_before = false;
+                    continue;
+                }
+                if self.split_last_anywhere() {
                     continue;
                 }
                 if let Some(idx) = self.cur.break_at.filter(|i| *i > 0) {
@@ -1213,11 +1232,25 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             }
             // Split the word by characters.
             let avail = self.cur.right - self.cur.x - self.pending_w();
-            let (head, head_w, tail) = self.split_to_fit(&text, item, avail, !self.cur.has_content);
+            let (head, head_w, tail) = self.split_to_fit(&text, item, avail, !self.cur.has_content, policy == BreakPolicy::Anywhere);
             if head.is_empty() {
                 if self.cur.has_content {
-                    self.finish_line(false);
-                    continue;
+                    if break_before || policy != BreakPolicy::Anywhere {
+                        self.finish_line(false);
+                        break_before = false;
+                        continue;
+                    }
+                    if self.split_last_anywhere() {
+                        continue;
+                    }
+                    if let Some(idx) = self.cur.break_at.filter(|i| *i > 0) {
+                        self.carry_over(idx);
+                        continue;
+                    }
+                    // Glued to what precedes with no opportunity: it
+                    // overflows.
+                    self.push_text(text, width, item, break_before);
+                    return;
                 }
                 // Cannot happen (split forces one char on an empty line).
                 self.push_text(text, width, item, break_before);
@@ -1245,7 +1278,41 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.lay.measurer.width(font, style.font_size, text) + style.letter_spacing * text.chars().count() as f32
     }
 
-    fn split_to_fit(&mut self, text: &str, item: usize, avail: f32, force: bool) -> (String, f32, String) {
+    /// Content glued to the end of the line does not fit: when the line
+    /// ends with a `break-all` / `anywhere` word (kept whole), cut it at its
+    /// last opportunity and carry the rest to the next line with what
+    /// follows. Returns whether it did.
+    fn split_last_anywhere(&mut self) -> bool {
+        let n = self.cur.frags.len();
+        if n == 0 || self.cur.pending_space.is_some() {
+            return false;
+        }
+        let Some(PF { x, kind: PFKind::Text { text, item }, .. }) = self.cur.frags.last() else { return false };
+        let (x, item) = (*x, *item);
+        if item == MARKER_ITEM || break_policy(self.style(item)) != BreakPolicy::Anywhere || !self.style(item).white_space.wraps() {
+            return false;
+        }
+        let text = text.clone();
+        let mut points = Vec::new();
+        lb::split_points(&line_rules(self.style(item)), &text, &mut points);
+        let Some(&p) = points.last() else { return false };
+        let head = text[..p].to_string();
+        let tail = text[p..].to_string();
+        let head_w = self.text_width(&head, item);
+        let tail_w = self.text_width(&tail, item);
+        if let Some(PF { w, kind: PFKind::Text { text, .. }, .. }) = self.cur.frags.last_mut() {
+            *text = head;
+            *w = head_w;
+        }
+        self.cur.frags.push(PF { x: x + head_w, w: tail_w, kind: PFKind::Text { text: tail, item } });
+        self.cur.x = x + head_w + tail_w;
+        self.carry_over(n);
+        true
+    }
+
+    /// `opportunities`: cut only at the word's line break opportunities
+    /// (`break-all`, `anywhere`), not between any characters.
+    fn split_to_fit(&mut self, text: &str, item: usize, avail: f32, force: bool, opportunities: bool) -> (String, f32, String) {
         let style = self.style(item).clone();
         let font = self.lay.font_for(&style);
         let size = style.font_size;
@@ -1253,9 +1320,28 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let mut best_end = 0;
         let mut best_w = 0.0;
         let mut count = 0;
+        let mut points = Vec::new();
+        if opportunities {
+            lb::split_points(&line_rules(&style), text, &mut points);
+            points.push(text.len());
+        }
+        let mut next_point = 0;
         for (i, ch) in text.char_indices() {
             let end = i + ch.len_utf8();
             count += 1;
+            if opportunities {
+                if points.get(next_point) != Some(&end) {
+                    continue;
+                }
+                next_point += 1;
+                let w = self.lay.measurer.width(font, size, &text[..end]) + ls * count as f32;
+                if w <= avail + 0.01 || (force && best_end == 0) {
+                    best_end = end;
+                    best_w = w;
+                    continue;
+                }
+                break;
+            }
             let w = self.lay.measurer.width(font, size, &text[..end]) + ls * count as f32;
             if w <= avail + 0.01 || (force && count == 1) {
                 best_end = end;
@@ -1683,7 +1769,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // CSS Overflow keeps the first character on the line, clipping
             // the marker itself if there is not enough room for both.
             let keep_first = !clamp && self.cur.frags.len() == 1;
-            let (mut head, mut head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, keep_first);
+            let (mut head, mut head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, keep_first, false);
             // No space before the ellipsis.
             if head.ends_with(' ') && !head.trim().is_empty() {
                 let trimmed = head.trim_end().to_string();
@@ -2008,6 +2094,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     /// there is none or the line is right-to-left.
     fn decoration_space_skips(&mut self) -> Vec<(f32, f32)> {
         let is_space = |c: char| c == ' ' || c == '\t' || lb::is_space_separator(c) || matches!(c, '\u{2007}' | '\u{202F}');
+        // (Most lines neither start nor end with a space.)
+        let starts = matches!(self.cur.frags.first(), Some(PF { kind: PFKind::Text { text, .. }, .. }) if text.chars().next().is_some_and(is_space));
+        let ends = matches!(self.cur.frags.last(), Some(PF { kind: PFKind::Text { text, .. }, .. }) if text.chars().next_back().is_some_and(is_space));
+        if !starts && !ends {
+            return Vec::new();
+        }
         if self.cstyle.direction == Direction::Rtl || !self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { item, .. } if *item != MARKER_ITEM && !self.style(*item).applied_decorations.is_empty())) {
             return Vec::new();
         }
@@ -2406,7 +2498,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         // line, and other space separators (U+3000...) at the end of any
         // line but `break-spaces` ones, hang: they do not count.
         let mut hang = 0.0;
-        if let Some(PF { kind: PFKind::Text { text, item }, w, .. }) = self.cur.frags.last() {
+        if let Some(PF { kind: PFKind::Text { text, item }, w, .. }) = self.cur.frags.last().filter(|f| matches!(&f.kind, PFKind::Text { text, .. } if text.chars().next_back().is_some_and(|c| c == ' ' || lb::is_space_separator(c)))) {
             let st = self.style(*item).clone();
             let ws = st.white_space;
             let pre_wrap = ws == rabbithole_style::WhiteSpace::PreWrap;
@@ -2515,7 +2607,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                         kind: FragmentKind::Text {
-                            text: if text.contains(['\t', '\u{ad}']) { Rc::from(text.replace('\t', " ").replace('\u{ad}', "").as_str()) } else { Rc::from(text.as_str()) },
+                            text: if text.bytes().any(|b| b == b'\t' || b == 0xAD) && text.contains(['\t', '\u{ad}']) { Rc::from(text.replace('\t', " ").replace('\u{ad}', "").as_str()) } else { Rc::from(text.as_str()) },
                             font: tm.font,
                             size: tm.size,
                             color: style.text_fill_color.unwrap_or(style.color),

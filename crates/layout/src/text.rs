@@ -303,6 +303,8 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
     };
     let preserve_spaces = matches!(ws, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces);
     let preserve_newlines = ws.preserves_newlines();
+    // Segment breaks may vanish only in texts that have one.
+    let collapses_nl = !preserve_newlines && text.as_bytes().contains(&b'\n');
     for (i, ch) in text.char_indices() {
         match ch {
             '\u{ad}' => {
@@ -343,17 +345,17 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
                 st.prev_space = false;
             }
             c if is_collapsible_ws(c) => {
-                if let Some(l) = word.chars().rev().find(|c| !ignorable(*c)) {
-                    st.last = Some(l);
+                if let Some(l) = word.chars().next_back() {
+                    st.last = if ignorable(l) { word.chars().rev().find(|c| !ignorable(*c)).or(st.last) } else { Some(l) };
                 }
                 flush(&mut word, out);
                 if !st.prev_space {
                     // A white space run with a segment break may vanish.
-                    let rest = &text[i..];
-                    let run = rest.find(|c: char| !is_collapsible_ws(c)).unwrap_or(rest.len());
-                    let removed = !preserve_newlines
-                        && rest[..run].contains('\n')
-                        && segment_break_removed(st.last, rest[run..].chars().find(|c| !ignorable(*c)));
+                    let removed = collapses_nl && {
+                        let rest = &text[i..];
+                        let run = rest.find(|c: char| !is_collapsible_ws(c)).unwrap_or(rest.len());
+                        rest[..run].contains('\n') && segment_break_removed(st.last, rest[run..].chars().find(|c| !ignorable(*c)))
+                    };
                     if !removed {
                         out.push(Seg::Space);
                     }

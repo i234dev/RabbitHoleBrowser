@@ -195,3 +195,18 @@ fn justified_lines_keep_whole_fragments_with_word_spacing() {
     assert!(texts[0].0 > 0.0);
     assert!((texts[0].1.right() - 200.0).abs() < 0.5, "{texts:?}");
 }
+
+#[test]
+fn break_all_cuts_words_where_lines_end() {
+    // 20px monospace: about 12px per character; 5 fit on a line.
+    let fx = Fx::new("<div id=d style='width:61px;word-break:break-all'>abcdefgh ijklm</div>");
+    let t = fx.layout();
+    let ls = lines(fx.block(&t, "d"));
+    let texts: Vec<String> = ls.iter().map(|l| l.iter().map(|f| f.0.as_str()).collect::<String>()).collect();
+    assert_eq!(texts.len(), 3, "{texts:?}");
+    assert!(texts[0].starts_with("abcde"), "{texts:?}");
+    // No break before a comma (it overflows with its letter).
+    let fx = Fx::new("<div id=d style='width:12px;word-break:break-all'>a,</div>");
+    let t = fx.layout();
+    assert_eq!(lines(fx.block(&t, "d")).len(), 1);
+}

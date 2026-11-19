@@ -1764,7 +1764,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         };
         // Ink of the glyphs crossing underlines and overlines (skipped),
         // computed once per fragment.
-        let mut ink: Option<Vec<(f32, f32, f32, f32)>> = None;
+        let mut ink: Option<std::rc::Rc<Vec<(f32, f32, f32, f32)>>> = None;
         let text_baseline = baseline;
         let fm = self.ctx.fonts.decoration_metrics(font, size, &info.variations);
         let asc = baseline - rect.y;
@@ -1792,10 +1792,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             let (x0, x1) = (x0.round(), x1.round());
             // (Not for a decoration propagated across a baseline shift: its
             // line does not follow these glyphs.)
-            let skip = !through && info.skip_ink != 1 && bo.abs() < 0.01;
+            let skip = !through && info.skip_ink != 1 && bo.abs() < 0.01 && (d.lines.underline || d.lines.overline);
             if skip && ink.is_none() {
-                ink = Some(glyph_ink(self.ctx.fonts, font, size, text.0, (text.1, text.2), rect.x, text_baseline, info.skip_ink == 2));
+                ink = Some(glyph_ink(self.ctx.fonts, font, size, text.0, (text.1, text.2), info.skip_ink == 2));
             }
+            let (ink_x, ink_y) = (rect.x, text_baseline);
             let list = &mut self.list;
             let mut line = |top: f32, t: f32| {
                 if t <= 0.0 || x1 <= x0 {
@@ -1815,7 +1816,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         // `text-decoration-skip-ink`: gaps where glyphs
                         // cross the line, padded by its thickness.
                         let mut gaps: Vec<(f32, f32)> = Vec::new();
-                        for &(gx0, gx1, gy0, gy1) in ink {
+                        for &(gx0, gx1, gy0, gy1) in ink.iter() {
+                            let (gx0, gx1, gy0, gy1) = (gx0 + ink_x, gx1 + ink_x, gy0 + ink_y, gy1 + ink_y);
                             if gy1 < top || gy0 > top + t {
                                 continue;
                             }
@@ -1872,30 +1874,32 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 /// skips where the glyph actually crosses it. Ideographs are skipped
 /// only with `all`.
 #[allow(clippy::too_many_arguments)]
-fn glyph_ink(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, (letter_spacing, word_spacing): (f32, f32), x: f32, baseline: f32, all: bool) -> Vec<(f32, f32, f32, f32)> {
+fn glyph_ink(fonts: &rabbithole_gfx::FontContext, font: rabbithole_gfx::FontId, size: f32, text: &str, (letter_spacing, word_spacing): (f32, f32), all: bool) -> std::rc::Rc<Vec<(f32, f32, f32, f32)>> {
     // The ink relative to the origin is cached across display list builds
-    // (the same link texts are decorated again on every rebuild).
-    type Key = (usize, u32, u32, u32, bool, Box<str>);
+    // (the same texts are decorated again on every rebuild), looked up by
+    // a hash of the run without allocating.
+    type Key = (usize, u32, u32, u32, bool, u64);
+    type Ink = std::rc::Rc<Vec<(f32, f32, f32, f32)>>;
     thread_local! {
-        static INK: std::cell::RefCell<std::collections::HashMap<Key, std::rc::Rc<Vec<(f32, f32, f32, f32)>>>> = Default::default();
+        static INK: std::cell::RefCell<std::collections::HashMap<Key, (Box<str>, Ink)>> = Default::default();
     }
-    let key: Key = (font.0 ^ ((fonts as *const rabbithole_gfx::FontContext as usize) << 20), size.to_bits(), letter_spacing.to_bits(), word_spacing.to_bits(), all, Box::from(text));
-    let cached = INK.with(|c| c.borrow().get(&key).cloned());
-    let rel = match cached {
-        Some(r) => r,
-        None => {
-            let r = std::rc::Rc::new(glyph_ink_rel(fonts, font, size, text, letter_spacing, word_spacing, all));
-            INK.with(|c| {
-                let mut c = c.borrow_mut();
-                if c.len() > 2048 {
-                    c.clear();
-                }
-                c.insert(key, r.clone());
-            });
-            r
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
+    }
+    let key: Key = (font.0 ^ ((fonts as *const rabbithole_gfx::FontContext as usize) << 20), size.to_bits(), letter_spacing.to_bits(), word_spacing.to_bits(), all, h);
+    if let Some(r) = INK.with(|c| c.borrow().get(&key).filter(|e| &*e.0 == text).map(|e| e.1.clone())) {
+        return r;
+    }
+    let r = std::rc::Rc::new(glyph_ink_rel(fonts, font, size, text, letter_spacing, word_spacing, all));
+    INK.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 2048 {
+            c.clear();
         }
-    };
-    rel.iter().map(|&(a, b, c, d)| (x + a, x + b, baseline + c, baseline + d)).collect()
+        c.insert(key, (Box::from(text), r.clone()));
+    });
+    r
 }
 
 /// [`glyph_ink`] relative to the run's origin on its baseline.
