@@ -1693,7 +1693,7 @@ pub struct ComputedStyle {
     /// inline-size contained).
     pub container_inline: bool,
     /// `container-name`s.
-    pub container_names: Option<std::rc::Rc<[String]>>,
+    pub container_names: Option<std::rc::Rc<Vec<String>>>,
     /// `contain-intrinsic-width` / `-height` (px; `None` = `none`): the
     /// size a size-contained box is laid out as.
     pub contain_intrinsic_width: Option<f32>,

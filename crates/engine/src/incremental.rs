@@ -729,7 +729,7 @@ fn collect_containers(root: &rabbithole_layout::LayoutBox) -> HashMap<NodeId, ra
                     height,
                     both_axes: s.container_size,
                     vertical: s.writing_mode.is_vertical(),
-                    names: s.container_names.as_deref().map(<[String]>::to_vec).unwrap_or_default(),
+                    names: s.container_names.as_deref().cloned().unwrap_or_default(),
                     font_size: s.font_size,
                 });
             }

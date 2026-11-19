@@ -181,7 +181,7 @@ fn container_type(comps: &[&[Token]]) -> Option<(bool, bool)> {
 }
 
 /// `container-name`: `none` or identifiers.
-fn container_names(comps: &[&[Token]]) -> Option<Option<std::rc::Rc<[String]>>> {
+fn container_names(comps: &[&[Token]]) -> Option<Option<std::rc::Rc<Vec<String>>>> {
     if let [c] = comps {
         if values::is_ident(c, "none") {
             return Some(None);
@@ -198,7 +198,7 @@ fn container_names(comps: &[&[Token]]) -> Option<Option<std::rc::Rc<[String]>>> 
             _ => return None,
         }
     }
-    (!names.is_empty()).then(|| Some(std::rc::Rc::from(names)))
+    (!names.is_empty()).then(|| Some(std::rc::Rc::new(names)))
 }
 
 pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) -> bool {

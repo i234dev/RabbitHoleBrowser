@@ -127,6 +127,11 @@ impl RuleIndex {
         for rule in rules {
             let layer = rule.layer.as_ref().and_then(|l| layers.get(&layer_key(l, sheet)).copied()).unwrap_or(0);
             let decls: Rc<[Declaration]> = Rc::from(rule.declarations.as_slice());
+            let (uses_attr, uses_rollback) = if is_ua {
+                (false, false)
+            } else {
+                (decls.iter().any(uses_attr), decls.iter().any(|d| rollback_keyword(d).is_some()))
+            };
             for sel in &rule.selectors {
                 let idx = self.rules.len();
                 self.rules.push(IndexedRule {
@@ -138,8 +143,8 @@ impl RuleIndex {
                     ancestor_hashes: crate::restyle::ancestor_hashes(sel),
                     layer,
                     container: rule.container.clone(),
-                    uses_attr: decls.iter().any(uses_attr),
-                    uses_rollback: decls.iter().any(|d| rollback_keyword(d).is_some()),
+                    uses_attr,
+                    uses_rollback,
                 });
                 if is_slotted_selector(sel) {
                     self.slotted.push(idx);
@@ -462,7 +467,7 @@ pub(crate) struct StyledSoFar<'a> {
 impl rabbithole_css::container::StyleSource for StyledSoFar<'_> {
     fn container_names(&self, n: NodeId) -> Option<Vec<String>> {
         let s = self.styles.get(n)?.as_ref()?;
-        Some(s.container_names.as_deref().map(<[String]>::to_vec).unwrap_or_default())
+        Some(s.container_names.as_deref().cloned().unwrap_or_default())
     }
 
     fn custom_property(&self, n: NodeId, name: &str) -> Option<Option<Vec<Token>>> {
