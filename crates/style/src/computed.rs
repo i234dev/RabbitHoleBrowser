@@ -1284,6 +1284,15 @@ pub struct ComputedStyle {
     /// `text-align: -webkit-center` (`<center>`, `align=center`): also
     /// centers block-level children with non-auto margins. Inherited.
     pub text_align_webkit_center: bool,
+    /// `text-align-last` (inherited); `None` = `auto`.
+    pub text_align_last: Option<TextAlign>,
+    /// `text-justify` (inherited): 0 auto, 1 none, 2 inter-word,
+    /// 3 inter-character (`distribute`).
+    pub text_justify: u8,
+    /// `hyphens` (inherited): 0 none, 1 manual (initial), 2 auto.
+    pub hyphens: u8,
+    /// `hyphenate-character` (inherited); `None` = `auto` (U+2010).
+    pub hyphenate_character: Option<std::rc::Rc<str>>,
     pub text_decoration: TextDecoration,
     pub text_transform: TextTransform,
     pub text_indent: Length,
@@ -1462,6 +1471,9 @@ pub struct ComputedStyle {
     /// its logical (horizontal) layout space.
     pub layout_transposed: bool,
     pub tab_size: f32,
+    /// `tab-size` is a length (`tab_size` in px) rather than a number of
+    /// spaces (inherited with it).
+    pub tab_size_length: bool,
     /// `-webkit-line-clamp`
     pub line_clamp: Option<u32>,
     /// `content-visibility: hidden`: the contents are not rendered.
@@ -1576,6 +1588,10 @@ impl ComputedStyle {
             letter_spacing: 0.0,
             word_spacing: 0.0,
             text_align: TextAlign::Start,
+            text_align_last: None,
+            text_justify: 0,
+            hyphens: 1,
+            hyphenate_character: None,
             text_align_webkit_center: false,
             text_decoration: TextDecoration::default(),
             text_transform: TextTransform::None,
@@ -1677,6 +1693,7 @@ impl ComputedStyle {
             unicode_bidi: UnicodeBidi::Normal,
             layout_transposed: false,
             tab_size: 8.0,
+            tab_size_length: false,
             line_clamp: None,
             content_visibility_hidden: false,
             contain_paint: false,
@@ -1734,6 +1751,10 @@ impl ComputedStyle {
             word_spacing: parent.word_spacing,
             text_align: parent.text_align,
             text_align_webkit_center: parent.text_align_webkit_center,
+            text_align_last: parent.text_align_last,
+            text_justify: parent.text_justify,
+            hyphens: parent.hyphens,
+            hyphenate_character: parent.hyphenate_character.clone(),
             // `text-decoration-line` is not inherited; the decorations it
             // draws propagate through `applied_decorations`.
             applied_decorations: parent.applied_decorations.clone(),
@@ -1762,6 +1783,7 @@ impl ComputedStyle {
             direction: parent.direction,
             writing_mode: parent.writing_mode,
             tab_size: parent.tab_size,
+            tab_size_length: parent.tab_size_length,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
             font_variation_settings: parent.font_variation_settings.clone(),
@@ -1795,6 +1817,10 @@ impl ComputedStyle {
             && self.word_spacing == o.word_spacing
             && self.text_align == o.text_align
             && self.text_align_webkit_center == o.text_align_webkit_center
+            && self.text_align_last == o.text_align_last
+            && self.text_justify == o.text_justify
+            && self.hyphens == o.hyphens
+            && self.hyphenate_character == o.hyphenate_character
             && self.applied_decorations == o.applied_decorations
             && self.text_underline_offset == o.text_underline_offset
             && self.text_emphasis_style == o.text_emphasis_style
@@ -1821,6 +1847,7 @@ impl ComputedStyle {
             && self.direction == o.direction
             && self.writing_mode == o.writing_mode
             && self.tab_size == o.tab_size
+            && self.tab_size_length == o.tab_size_length
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
             && self.font_variation_settings == o.font_variation_settings

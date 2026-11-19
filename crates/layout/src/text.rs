@@ -67,7 +67,7 @@ pub(crate) fn segment(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut 
 }
 
 /// Like [`segment`], with the `tab-size` (in spaces) for preserved tabs.
-pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut Vec<Seg>, tab_size: usize) {
+pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut Vec<Seg>, _tab_size: usize) {
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut Vec<Seg>| {
         if !word.is_empty() {
@@ -98,8 +98,10 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
                 st.prev_space = true;
             }
             '\t' if preserve_spaces => {
+                // A preserved tab: its width (up to the next tab stop) is
+                // known only when it is placed on a line.
                 flush(&mut word, out);
-                out.push(Seg::Word(" ".repeat(tab_size.max(1))));
+                out.push(Seg::Word("\t".into()));
                 st.prev_space = false;
             }
             c if preserve_spaces && c == ' ' => {

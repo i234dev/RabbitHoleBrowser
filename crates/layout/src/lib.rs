@@ -31,6 +31,8 @@ mod tests;
 mod tests_flexgrid;
 #[cfg(test)]
 mod tests_css21;
+#[cfg(test)]
+mod tests_text;
 
 pub use damage::{damage as display_list_damage, merge_rects as merge_damage};
 pub use incremental::{layout_incremental, take_cache_stats, LayoutDamage};

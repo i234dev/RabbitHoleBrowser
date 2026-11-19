@@ -232,6 +232,39 @@ fn autospace_between(a: char, b: char) -> bool {
     (ideo(a) && other(b)) || (other(a) && ideo(b))
 }
 
+/// Word-separator characters (CSS Text 3 §4.1.1): expanded by
+/// `inter-word` justification.
+fn is_word_separator(c: char) -> bool {
+    matches!(c, ' ' | '\u{a0}' | '\u{1361}' | '\u{10100}' | '\u{10101}' | '\u{1039f}' | '\u{1091f}')
+}
+
+/// Default-ignorable format characters (bidi controls, joiners): they
+/// form no justification opportunity of their own.
+fn is_default_ignorable(c: char) -> bool {
+    matches!(c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0xFEFF | 0xAD)
+}
+
+/// Scripts whose letters join: never separated by inter-character
+/// justification (CSS Text 3 §7.4).
+fn is_cursive(c: char) -> bool {
+    matches!(c as u32, 0x0600..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF | 0x1800..=0x18AF | 0xA840..=0xA87F | 0x10D00..=0x10D3F)
+}
+
+/// Is there a justification opportunity between the letter units `p` and
+/// `c` under `text-justify` `mode` (0 auto, 1 none, 2 inter-word,
+/// 3 inter-character)? `auto` also expands around ideographs.
+fn justify_between(p: char, c: char, mode: u8) -> bool {
+    fn ideo(c: char) -> bool {
+        matches!(c as u32, 0x2E80..=0x2FFF | 0x3001..=0x303F | 0x3041..=0x33FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFF01..=0xFF60 | 0x20000..=0x3FFFD)
+    }
+    match mode {
+        1 => false,
+        2 => is_word_separator(p),
+        3 => !(is_cursive(p) && is_cursive(c)),
+        _ => is_word_separator(p) || ((ideo(p) || ideo(c)) && !is_word_separator(c)),
+    }
+}
+
 /// Split a word after hyphens so `foo-bar` can wrap after the dash.
 fn split_hyphens(w: &str) -> Vec<(String, bool)> {
     if w.len() < 3 || !w.contains('-') {
@@ -274,6 +307,26 @@ impl<'a> Layouter<'a> {
         }
     }
 
+    /// The advance of a preserved tab at `pos` (from the line start) to
+    /// the next tab stop (CSS Text 3 §4.2): stops are `tab-size` apart,
+    /// a number of spaces measuring the block container's space advance
+    /// with its letter and word spacing; a stop closer than 0.5ch is
+    /// skipped.
+    pub(crate) fn tab_width(&mut self, block: &ComputedStyle, style: &ComputedStyle, pos: f32) -> f32 {
+        let font = self.font_for(block);
+        let space = self.measurer.space_width(font, block.font_size) + block.letter_spacing + block.word_spacing;
+        let tab = if style.tab_size_length { style.tab_size } else { style.tab_size * space };
+        if tab <= 0.0 {
+            return 0.0;
+        }
+        let half_ch = 0.5 * block.font_size * rabbithole_style::values::font_units(block).0;
+        let mut next = ((pos + 0.01) / tab).floor() * tab + tab;
+        if next - pos < half_ch {
+            next = ((pos + half_ch) / tab).ceil() * tab;
+        }
+        (next - pos).max(0.0)
+    }
+
     /// Build (and cache) the measured pieces of an inline container.
     pub(crate) fn ensure_pieces(&mut self, b: &mut LayoutBox) {
         if b.pieces.is_some() {
@@ -314,7 +367,7 @@ impl<'a> Layouter<'a> {
                     for seg in segs.drain(..) {
                         match seg {
                             Seg::Word(w) => {
-                                let is_space_word = w.chars().all(|c| c == ' ');
+                                let is_space_word = w.chars().all(|c| c == ' ' || c == '\t');
                                 // A break between the previous word and this
                                 // one (ideographs break without spaces).
                                 if wraps && !prev_break_opp {
@@ -376,7 +429,11 @@ impl<'a> Layouter<'a> {
                                         pieces.push(Piece::Gap(gap));
                                         continue;
                                     }
-                                    let width = self.measurer.width(font, size, &part) + ls * part.chars().count() as f32;
+                                    let width = if part == "\t" {
+                                        self.tab_width(container, style, 0.0)
+                                    } else {
+                                        self.measurer.width(font, size, &part) + ls * part.chars().count() as f32
+                                    };
                                     // A break opportunity before a word comes from the
                                     // preceding whitespace (owned by whatever element
                                     // produced it); `nowrap` on this word only forbids
@@ -628,6 +685,8 @@ struct Line {
     /// The line's end for alignment (`right` may be narrower when lines
     /// are balanced).
     align_right: f32,
+    /// Space added by justification.
+    justified: f32,
 }
 
 struct InlineLayout<'l, 'a> {
@@ -788,6 +847,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.pending_space = None;
         self.cur.has_content = false;
         self.cur.break_at = None;
+        self.cur.justified = 0.0;
         let x = self.cur.x;
         for o in &mut self.cur.open {
             o.start_x = x;
@@ -889,6 +949,16 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.x = end;
     }
 
+    /// Distance from the content box's start edge to the line's start
+    /// (floats shorten lines; tab stops are measured from the content box).
+    fn line_start_offset(&self) -> f32 {
+        if self.cstyle.direction == Direction::Rtl {
+            (self.content_x + self.content_w - self.cur.align_right).max(0.0)
+        } else {
+            (self.cur.left - self.content_x).max(0.0)
+        }
+    }
+
     fn pending_w(&self) -> f32 {
         self.cur.pending_space.map(|p| p.0).unwrap_or(0.0)
     }
@@ -903,6 +973,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
         let mut text: String = text.to_string();
         let mut width = width;
+        let tab = text == "\t";
         let mut break_before = break_before;
         let mut guard = 0;
         loop {
@@ -910,10 +981,15 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             if self.done {
                 return;
             }
+            if tab {
+                let pos = self.cur.x + self.pending_w() - self.cur.left + self.line_start_offset();
+                let style = self.style(item).clone();
+                width = self.lay.tab_width(self.cstyle, &style, pos);
+            }
             let fits = self.cur.x + self.pending_w() + width <= self.cur.right + 0.01;
             // Preserved spaces at the end of a `pre-wrap` line hang: they
             // never move to the next line (CSS Text 3 §4.1.3).
-            let hangs = wraps && self.style(item).white_space != rabbithole_style::WhiteSpace::BreakSpaces && self.cur.has_content && !text.is_empty() && text.chars().all(|c| c == ' ');
+            let hangs = wraps && self.style(item).white_space != rabbithole_style::WhiteSpace::BreakSpaces && self.cur.has_content && !text.is_empty() && text.chars().all(|c| c == ' ' || c == '\t');
             if fits || hangs || (!wraps && !break_before) || guard > 10_000 {
                 self.push_text(text, width, item, break_before);
                 return;
@@ -1026,7 +1102,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     kind: PFKind::Text { text: t, item: it },
                     w,
                     x,
-                }) if *it == item && !(spaced && (t.ends_with(' ') || text.starts_with(' '))) && (*x + *w - cur_x).abs() < 0.01 => {
+                }) if *it == item && !(spaced && (t.ends_with(' ') || text.starts_with(' '))) && text != "\t" && !t.ends_with('\t') && (*x + *w - cur_x).abs() < 0.01 => {
                     t.push_str(&text);
                     *w += width;
                     true
@@ -1182,7 +1258,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 // With word-spacing the painter cannot place the words of
                 // one run: keep the words apart.
                 let spaced = (pt.ends_with(' ') || text.starts_with(' ')) && item_style(self.items, self.cstyle, *item).word_spacing.abs() > 0.001;
-                if *pi == *item && (*px + *pw - f.x).abs() < 0.05 && !spaced {
+                // A tab is placed on its own (its advance is not the glyph's).
+                let tab = text.ends_with('\t') || pt.ends_with('\t') || text.starts_with('\t');
+                if *pi == *item && (*px + *pw - f.x).abs() < 0.05 && !spaced && !tab {
                     pt.push_str(text);
                     *pw += f.w;
                     continue;
@@ -1569,6 +1647,158 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.x = l + used;
     }
 
+    /// The alignment of the current line: `text-align-last` applies to
+    /// the last line of the block and lines ending in a forced break.
+    fn line_align(&self, last: bool) -> TextAlign {
+        let a = self.cstyle.text_align;
+        if !last {
+            return a;
+        }
+        match self.cstyle.text_align_last {
+            Some(l) => l,
+            None if a == TextAlign::Justify => TextAlign::Start,
+            None => a,
+        }
+    }
+
+    /// Distribute the free space of the line over its justification
+    /// opportunities (CSS Text 3 §7.3): after word separators, and between
+    /// typographic letter units for `text-justify: inter-character` (with
+    /// `auto`, around ideographs). Trailing (hanging) spaces are not
+    /// expanded. Text fragments are cut at the opportunities and moved.
+    fn justify(&mut self) {
+        if self.cur.frags.is_empty() {
+            return;
+        }
+        // Trailing preserved spaces hang outside the line.
+        let mut trailing_w = 0.0;
+        let mut trailing_n = 0;
+        if let Some(PF { kind: PFKind::Text { text, item }, w, .. }) = self.cur.frags.last() {
+            let n = text.chars().rev().take_while(|c| *c == ' ').count();
+            if n > 0 && *item != MARKER_ITEM {
+                let st = self.style(*item).clone();
+                let font = self.lay.font_for(&st);
+                let sw = self.lay.measurer.space_width(font, st.font_size) + st.letter_spacing;
+                trailing_w = (sw * n as f32).min(*w);
+                trailing_n = n;
+            }
+        }
+        let free = self.cur.align_right - self.cur.x + trailing_w;
+        if free <= 0.01 {
+            return;
+        }
+        // Opportunities after each character (by fragment and char index).
+        let nfr = self.cur.frags.len();
+        // Tab stops must keep lining up: only what follows the last tab
+        // is expanded.
+        let after_tab = self.cur.frags.iter().rposition(|f| matches!(&f.kind, PFKind::Text { text, .. } if text.contains('\t'))).map_or(0, |i| i + 1);
+        let mut opp: Vec<Vec<bool>> = Vec::with_capacity(nfr);
+        let mut count = 0usize;
+        // The previous letter unit: fragment, char index, char, `text-justify`.
+        let mut prev: Option<(usize, usize, char, u8)> = None;
+        for (fi, f) in self.cur.frags.iter().enumerate() {
+            let (chars, mode): (Vec<char>, u8) = match &f.kind {
+                PFKind::Text { text, item } if *item != MARKER_ITEM => (text.chars().collect(), self.style(*item).text_justify),
+                PFKind::Text { text, .. } => {
+                    opp.push(vec![false; text.chars().count()]);
+                    prev = None;
+                    continue;
+                }
+                // An atomic inline is one letter unit.
+                PFKind::Box(_) => (vec!['\u{FFFC}'], self.cstyle.text_justify),
+            };
+            let mut v = vec![false; chars.len()];
+            if fi < after_tab {
+                opp.push(v);
+                prev = None;
+                continue;
+            }
+            let limit = if fi + 1 == nfr { chars.len() - trailing_n.min(chars.len()) } else { chars.len() };
+            for (k, &c) in chars.iter().enumerate() {
+                if k >= limit {
+                    break;
+                }
+                if attaches_to_previous(c) || is_default_ignorable(c) {
+                    continue;
+                }
+                if let Some((pf, pk, p, pmode)) = prev {
+                    if justify_between(p, c, pmode) || justify_between(p, c, mode) {
+                        if pf == fi {
+                            v[pk] = true;
+                        } else {
+                            opp[pf][pk] = true;
+                        }
+                        count += 1;
+                    }
+                }
+                prev = Some((fi, k, c, mode));
+            }
+            opp.push(v);
+        }
+        if count == 0 {
+            return;
+        }
+        let extra = free / count as f32;
+        // Old x of each opportunity, for moving inline box edges.
+        let mut marks: Vec<f32> = Vec::with_capacity(count);
+        let frags = std::mem::take(&mut self.cur.frags);
+        let mut out: Vec<PF> = Vec::with_capacity(frags.len() + count);
+        let mut shift = 0.0;
+        for (fi, f) in frags.into_iter().enumerate() {
+            match f.kind {
+                PFKind::Text { text, item } if opp[fi].iter().any(|o| *o) => {
+                    let style = self.style(item).clone();
+                    let font = self.lay.font_for(&style);
+                    let ls = style.letter_spacing;
+                    let mut x = f.x;
+                    let mut start = 0;
+                    let n = opp[fi].len();
+                    for (k, (bi, ch)) in text.char_indices().enumerate() {
+                        let end = bi + ch.len_utf8();
+                        if !opp[fi][k] && k + 1 < n {
+                            continue;
+                        }
+                        let piece = &text[start..end];
+                        let w = if end == text.len() {
+                            (f.x + f.w - x).max(0.0)
+                        } else {
+                            self.lay.measurer.width(font, style.font_size, piece) + ls * piece.chars().count() as f32
+                        };
+                        out.push(PF { x: x + shift, w, kind: PFKind::Text { text: piece.to_string(), item } });
+                        x += w;
+                        if opp[fi][k] {
+                            marks.push(x);
+                            shift += extra;
+                        }
+                        start = end;
+                    }
+                }
+                kind => {
+                    let opened = opp[fi].iter().any(|o| *o);
+                    out.push(PF { x: f.x + shift, w: f.w, kind });
+                    if opened {
+                        marks.push(f.x + f.w);
+                        shift += extra;
+                    }
+                }
+            }
+        }
+        self.cur.frags = out;
+        let map = |x: f32| x + extra * marks.iter().take_while(|m| **m <= x + 0.01).count() as f32;
+        for bg in &mut self.cur.bg {
+            let (a, b) = (map(bg.x), map(bg.x + bg.w));
+            bg.x = a;
+            bg.w = (b - a).max(0.0);
+        }
+        for o in &mut self.cur.open {
+            if o.start_x <= self.cur.x + 0.01 {
+                o.start_x = map(o.start_x);
+            }
+        }
+        self.cur.x += shift;
+        self.cur.justified = shift;
+    }
+
     fn finish_line(&mut self, forced: bool) {
         if !self.cur.has_content && !forced {
             if self.cur.frags.is_empty() {
@@ -1588,6 +1818,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
         if clamp_hit {
             self.done = true;
+        }
+        let align = self.line_align(forced || self.final_flush);
+        if align == TextAlign::Justify && !overflows {
+            self.justify();
         }
         // Complete open inline fragments in the same coordinates as closed
         // ones. Bidi mirroring must transform their full widths, before it
@@ -1738,19 +1972,19 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             }
         }
         let used = self.cur.x - self.cur.left - hang;
-        self.max_used = self.max_used.max(used);
+        self.max_used = self.max_used.max(used - self.cur.justified);
         let free = (self.cur.align_right - self.cur.left) - used;
         let rtl = self.cstyle.direction == Direction::Rtl;
         let shift_x = if rtl {
             // Content was mirrored to the right edge (start); `right` means
             // the end (left) edge.
-            match self.cstyle.text_align {
+            match align {
                 TextAlign::End | TextAlign::Left => -free.max(0.0),
                 TextAlign::Center => -(free / 2.0).max(0.0),
                 _ => 0.0,
             }
         } else {
-            match self.cstyle.text_align {
+            match align {
                 TextAlign::End | TextAlign::Right => free.max(0.0),
                 TextAlign::Center => (free / 2.0).max(0.0),
                 _ => 0.0,
@@ -1814,7 +2048,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                         kind: FragmentKind::Text {
-                            text: Rc::from(text.as_str()),
+                            text: if text.contains('\t') { Rc::from(text.replace('\t', " ").as_str()) } else { Rc::from(text.as_str()) },
                             font: tm.font,
                             size: tm.size,
                             color: style.color,

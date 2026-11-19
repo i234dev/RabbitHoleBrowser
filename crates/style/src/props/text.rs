@@ -315,10 +315,15 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         }
         "tab-size" => {
             if let Some(n) = values::number(c0) {
-                style.tab_size = n.max(0.0);
+                if n >= 0.0 {
+                    style.tab_size = n;
+                    style.tab_size_length = false;
+                }
             } else if let Some(px) = super::px(c0, ctx) {
-                // length: approximate in spaces (0.5em per space)
-                style.tab_size = (px / (style.font_size * 0.5).max(1.0)).max(0.0);
+                if px >= 0.0 {
+                    style.tab_size = px;
+                    style.tab_size_length = true;
+                }
             }
         }
         "-webkit-line-clamp" | "line-clamp" => {
@@ -473,8 +478,30 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 };
             }
         }
-        "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
-        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
+        "hyphens" => {
+            style.hyphens = match values::ident(c0).as_deref() {
+                Some("none") => 0,
+                Some("manual") => 1,
+                Some("auto") => 2,
+                _ => return true,
+            };
+        }
+        "hyphenate-character" => match c0 {
+            [Token::String(s)] => style.hyphenate_character = Some(std::rc::Rc::from(&**s)),
+            _ if values::is_ident(c0, "auto") => style.hyphenate_character = None,
+            _ => return true,
+        },
+        "text-justify" => {
+            style.text_justify = match values::ident(c0).as_deref() {
+                Some("auto") => 0,
+                Some("none") => 1,
+                Some("inter-word") => 2,
+                Some("inter-character") | Some("distribute") => 3,
+                _ => return true,
+            };
+        }
+        "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
+        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
         | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"
         | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"

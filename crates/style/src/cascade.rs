@@ -828,6 +828,10 @@ fn apply_declarations(
         }
     }
 
+    // `text-align: match-parent` on the root computes to `start`.
+    if is_root && style.text_align != TextAlign::Start && resolved.iter().any(|(n, v, _)| *n == "text-align" && values::components(v).first().is_some_and(|c| values::is_ident(c, "match-parent"))) {
+        style.text_align = TextAlign::Start;
+    }
     for (w, st) in [
         (&mut style.border_width.top, style.border_style.top),
         (&mut style.border_width.right, style.border_style.right),
@@ -1516,7 +1520,7 @@ fn is_inherited(name: &str) -> bool {
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
-            | "font-synthesis" | "font-synthesis-style"
+            | "font-synthesis" | "font-synthesis-style" | "text-justify" | "hyphenate-character"
     )
 }
 
@@ -1603,7 +1607,12 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "text-align" => {
             to.text_align = from.text_align;
             to.text_align_webkit_center = from.text_align_webkit_center;
+            to.text_align_last = from.text_align_last;
         }
+        "text-align-last" => to.text_align_last = from.text_align_last,
+        "text-justify" => to.text_justify = from.text_justify,
+        "hyphens" => to.hyphens = from.hyphens,
+        "hyphenate-character" => to.hyphenate_character = from.hyphenate_character.clone(),
         "text-decoration" => {
             to.text_decoration = from.text_decoration;
             to.text_decoration_color = from.text_decoration_color;
@@ -1791,7 +1800,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "direction" => to.direction = from.direction,
         "writing-mode" | "-webkit-writing-mode" => to.writing_mode = from.writing_mode,
         "unicode-bidi" => to.unicode_bidi = from.unicode_bidi,
-        "tab-size" => to.tab_size = from.tab_size,
+        "tab-size" => {
+            to.tab_size = from.tab_size;
+            to.tab_size_length = from.tab_size_length;
+        }
         "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
         "container-type" | "container" => to.container_size = from.container_size,
         "contain" => {
@@ -2867,6 +2879,8 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         }
         "text-align" => {
             if let Some(kw) = values::ident(c0) {
+                // `text-align` is a shorthand of `text-align-all` and
+                // `text-align-last` (CSS Text 3 §7.1).
                 style.text_align = match kw.as_str() {
                     "start" => TextAlign::Start,
                     "end" => TextAlign::End,
@@ -2874,9 +2888,33 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     "right" | "-webkit-right" | "-moz-right" => TextAlign::Right,
                     "center" | "-webkit-center" | "-moz-center" => TextAlign::Center,
                     "justify" | "justify-all" => TextAlign::Justify,
+                    "match-parent" => match_parent(parent.text_align, parent.direction),
                     _ => return,
                 };
+                style.text_align_last = match kw.as_str() {
+                    "justify-all" => Some(TextAlign::Justify),
+                    "match-parent" => parent.text_align_last.map(|a| match_parent(a, parent.direction)),
+                    _ => None,
+                };
                 style.text_align_webkit_center = matches!(kw.as_str(), "-webkit-center" | "-moz-center");
+            }
+        }
+        "text-align-last" => {
+            if let Some(kw) = values::ident(c0) {
+                style.text_align_last = match kw.as_str() {
+                    "auto" => None,
+                    "start" => Some(TextAlign::Start),
+                    "end" => Some(TextAlign::End),
+                    "left" => Some(TextAlign::Left),
+                    "right" => Some(TextAlign::Right),
+                    "center" => Some(TextAlign::Center),
+                    "justify" => Some(TextAlign::Justify),
+                    "match-parent" => Some(match_parent(parent.text_align_last.unwrap_or(match parent.text_align {
+                        TextAlign::Justify => TextAlign::Start,
+                        a => a,
+                    }), parent.direction)),
+                    _ => return,
+                };
             }
         }
         "text-transform" => {
@@ -3043,6 +3081,17 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         _ => {
             props::apply(name, &comps, value, style, parent, ctx);
         }
+    }
+}
+
+/// `match-parent`: the parent's alignment, `start` / `end` resolved
+/// against the parent's direction.
+fn match_parent(a: TextAlign, dir: Direction) -> TextAlign {
+    let rtl = dir == Direction::Rtl;
+    match a {
+        TextAlign::Start => if rtl { TextAlign::Right } else { TextAlign::Left },
+        TextAlign::End => if rtl { TextAlign::Left } else { TextAlign::Right },
+        a => a,
     }
 }
 

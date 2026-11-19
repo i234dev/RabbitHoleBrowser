@@ -227,9 +227,17 @@ impl<'a> Layouter<'a> {
         for p in &pieces {
             match p {
                 Piece::Word {
-                    width, item, break_before, ..
+                    text, width, item, break_before,
                 } => {
                     let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
+                    let tab;
+                    let width = if &**text == "\t" {
+                        let st = item_style(&b.items, &cstyle, *item).clone();
+                        tab = self.tab_width(&cstyle, &st, line + pending_space - indent);
+                        &tab
+                    } else {
+                        width
+                    };
                     if *break_before && wraps && !lead {
                         min = min.max(run);
                         run = 0.0;
