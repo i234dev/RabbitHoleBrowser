@@ -78,6 +78,44 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
 }
 
+/// Longest lifetime of a cookie (RFC 6265bis §5.6.1/§5.6.2: 400 days).
+const MAX_COOKIE_AGE: u64 = 400 * 86400;
+/// Largest name + value accepted (RFC 6265bis §5.6, step 4).
+const MAX_NAME_VALUE: usize = 4096;
+/// Largest attribute value accepted (RFC 6265bis §5.6, step 7).
+const MAX_ATTRIBUTE_VALUE: usize = 1024;
+/// Cookies kept per registrable domain and in total (Chrome's limits).
+const MAX_PER_SITE: usize = 180;
+const MAX_TOTAL: usize = 3300;
+
+/// Is `url` a secure context for cookies: `https`/`wss`, or a
+/// potentially trustworthy loopback origin (`localhost`, `*.localhost`,
+/// `127.0.0.0/8`, `[::1]`), as in Chrome?
+pub fn is_secure_url(url: &Url) -> bool {
+    match url.scheme.as_str() {
+        "https" | "wss" => true,
+        "http" | "ws" => is_loopback_host(&url.host),
+        _ => false,
+    }
+}
+
+/// `localhost`, `*.localhost` or a loopback IP address.
+pub fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    let bare = h.trim_start_matches('[').trim_end_matches(']');
+    h == "localhost" || h.ends_with(".localhost") || bare.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn is_ip_host(host: &str) -> bool {
+    host.starts_with('[') || host.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Control characters that make a cookie line invalid (RFC 6265bis
+/// §5.6, step 2: %x00-08 / %x0A-1F / %x7F; HTAB is allowed).
+fn has_forbidden_ctl(s: &str) -> bool {
+    s.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f)
+}
+
 /// Default cookie path per RFC 6265 §5.1.4.
 pub fn default_path(url_path: &str) -> String {
     if !url_path.starts_with('/') {
@@ -159,22 +197,40 @@ pub fn parse_http_date(s: &str) -> Option<u64> {
 }
 
 impl Cookie {
-    /// Parse one `Set-Cookie` header value received from `url`.
+    /// Parse one `Set-Cookie` header value received from `url`
+    /// (RFC 6265bis §5.6 and the storage requirements of §5.7 that only
+    /// depend on the cookie and the request URL).
     pub fn parse(header: &str, url: &Url) -> Option<Cookie> {
-        let mut parts = header.split(';');
-        let nv = parts.next()?.trim();
-        let (name, value) = match nv.find('=') {
-            Some(i) => (nv[..i].trim(), nv[i + 1..].trim()),
-            None => return None,
+        // A CR, LF or NUL truncates the line; other controls void it.
+        let header = match header.find(['\r', '\n', '\0']) {
+            Some(i) => &header[..i],
+            None => header,
         };
-        if name.is_empty() {
+        let (nv, attrs) = match header.find(';') {
+            Some(i) => (&header[..i], &header[i + 1..]),
+            None => (header, ""),
+        };
+        if has_forbidden_ctl(nv) {
             return None;
         }
-        let value = value.trim_matches('"');
+        // A pair without `=` is a nameless cookie (the whole text is the
+        // value), as in RFC 6265bis and browsers.
+        let (name, value) = match nv.find('=') {
+            Some(i) => (nv[..i].trim_matches([' ', '\t']), nv[i + 1..].trim_matches([' ', '\t'])),
+            None => ("", nv.trim_matches([' ', '\t'])),
+        };
+        if name.is_empty() && value.is_empty() {
+            return None;
+        }
+        if name.len() + value.len() > MAX_NAME_VALUE {
+            return None;
+        }
+        let host = url.host.to_ascii_lowercase();
         let mut c = Cookie {
             name: name.to_string(),
+            // Quotes are part of the value (RFC 6265bis keeps them).
             value: value.to_string(),
-            domain: url.host.to_ascii_lowercase(),
+            domain: host.clone(),
             host_only: true,
             path: default_path(&url.path),
             secure: false,
@@ -187,38 +243,36 @@ impl Cookie {
         let mut partitioned = false;
         let mut max_age: Option<i64> = None;
         let mut expires: Option<u64> = None;
-        for attr in parts {
-            let attr = attr.trim();
+        let mut domain_attr: Option<String> = None;
+        for attr in attrs.split(';') {
+            let attr = attr.trim_matches([' ', '\t']);
+            if attr.is_empty() {
+                continue;
+            }
             let (k, v) = match attr.find('=') {
-                Some(i) => (attr[..i].trim().to_ascii_lowercase(), attr[i + 1..].trim()),
+                Some(i) => (attr[..i].trim_matches([' ', '\t']).to_ascii_lowercase(), attr[i + 1..].trim_matches([' ', '\t'])),
                 None => (attr.to_ascii_lowercase(), ""),
             };
+            if v.len() > MAX_ATTRIBUTE_VALUE || has_forbidden_ctl(v) {
+                continue;
+            }
             match k.as_str() {
                 "domain" => {
-                    let d = v.trim_start_matches('.').to_ascii_lowercase();
-                    if d.is_empty() {
-                        continue;
+                    // The last Domain attribute wins; an empty one is ignored.
+                    let d = v.strip_prefix('.').unwrap_or(v).to_ascii_lowercase();
+                    if !d.is_empty() {
+                        domain_attr = Some(d);
                     }
-                    // Reject cookies for unrelated domains or public suffixes (approx: must contain a dot or be localhost).
-                    if !domain_matches(&d, &url.host) {
-                        return None;
-                    }
-                    if !d.contains('.') && d != "localhost" {
-                        return None;
-                    }
-                    c.domain = d;
-                    c.host_only = false;
                 }
                 "path" => {
-                    if v.starts_with('/') {
-                        c.path = v.to_string();
-                    }
+                    c.path = if v.starts_with('/') { v.to_string() } else { default_path(&url.path) };
                 }
                 "secure" => c.secure = true,
                 "httponly" => c.http_only = true,
                 "max-age" => {
-                    if let Ok(n) = v.parse::<i64>() {
-                        max_age = Some(n);
+                    let digits = v.strip_prefix('-').unwrap_or(v);
+                    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                        max_age = Some(v.parse::<i64>().unwrap_or(if v.starts_with('-') { i64::MIN } else { i64::MAX }));
                     }
                 }
                 "expires" => {
@@ -238,7 +292,27 @@ impl Cookie {
                 _ => {}
             }
         }
-        let secure_origin = url.scheme == "https" || matches!(url.host.as_str(), "localhost" | "127.0.0.1" | "[::1]");
+        if let Some(d) = domain_attr {
+            if is_ip_host(&host) {
+                // IP hosts only domain-match themselves.
+                if d != host.trim_start_matches('[').trim_end_matches(']') && d != host {
+                    return None;
+                }
+            } else {
+                if !domain_matches(&d, &host) {
+                    return None;
+                }
+                // A Domain shorter than the registrable domain is (part
+                // of) a public suffix (RFC 6265bis §5.7, step 9).
+                let site = crate::url::site_of(&host);
+                if d.len() < site.len() {
+                    return None;
+                }
+                c.host_only = false;
+                c.domain = d;
+            }
+        }
+        let secure_origin = is_secure_url(url);
         // Secure cookies only from secure origins; SameSite=None and
         // Partitioned need Secure; cookie prefixes (RFC 6265bis 4.1.3).
         if c.secure && !secure_origin {
@@ -247,22 +321,40 @@ impl Cookie {
         if (c.same_site == "None" || partitioned) && !c.secure {
             return None;
         }
-        if c.name.starts_with("__Secure-") && !c.secure {
+        let lower = c.name.to_ascii_lowercase();
+        if lower.starts_with("__secure-") && !c.secure {
             return None;
         }
-        if c.name.starts_with("__Host-") && (!c.secure || !c.host_only || c.path != "/") {
+        if lower.starts_with("__host-") && (!c.secure || !c.host_only || c.path != "/") {
             return None;
+        }
+        if c.name.is_empty() {
+            let v = c.value.to_ascii_lowercase();
+            if v.starts_with("__secure-") || v.starts_with("__host-") {
+                return None;
+            }
         }
         if partitioned {
             // Filled in by the jar from the request context.
             c.partition_key = Some(String::new());
         }
+        let t = now();
         if let Some(n) = max_age {
-            c.expires = Some(if n <= 0 { 0 } else { now() + n as u64 });
-        } else if let Some(t) = expires {
-            c.expires = Some(t);
+            c.expires = Some(if n <= 0 { 0 } else { t + (n as u64).min(MAX_COOKIE_AGE) });
+        } else if let Some(e) = expires {
+            c.expires = Some(e.min(t + MAX_COOKIE_AGE));
         }
         Some(c)
+    }
+
+    /// The `name=value` pair as sent in a `Cookie` header (a nameless
+    /// cookie is just its value).
+    pub fn pair(&self) -> String {
+        if self.name.is_empty() {
+            self.value.clone()
+        } else {
+            format!("{}={}", self.name, self.value)
+        }
     }
 
     pub fn is_expired(&self) -> bool {
@@ -286,22 +378,104 @@ impl CookieJar {
         CookieJar::default()
     }
 
-    /// Store a cookie (replacing one with the same name/domain/path);
-    /// expired cookies delete.
+    /// Store a cookie received over HTTP (replacing one with the same
+    /// name/domain/path); expired cookies delete.
     pub fn store(&mut self, cookie: Cookie) {
-        self.cookies.retain(|c| !(c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path && c.partition_key == cookie.partition_key));
-        if !cookie.is_expired() {
-            self.cookies.push(cookie);
-        }
-        self.dirty = true;
+        self.store_checked(cookie, true, true);
     }
 
-    /// Apply every `Set-Cookie` header of a response from `url`.
-    pub fn store_from_headers(&mut self, url: &Url, set_cookie_values: &[String]) {
-        for v in set_cookie_values {
-            if let Some(c) = Cookie::parse(v, url) {
-                self.store(c);
+    /// RFC 6265bis §5.7 storage: `from_http` is false for `document.cookie`
+    /// (which can neither create nor replace HttpOnly cookies);
+    /// `secure_origin` false applies "leave secure cookies alone". Returns
+    /// whether the jar changed.
+    fn store_checked(&mut self, mut cookie: Cookie, from_http: bool, secure_origin: bool) -> bool {
+        if !from_http && cookie.http_only {
+            return false;
+        }
+        if !cookie.secure && !secure_origin {
+            let shadows = self.cookies.iter().any(|c| {
+                c.secure
+                    && c.name == cookie.name
+                    && (domain_matches(&c.domain, &cookie.domain) || domain_matches(&cookie.domain, &c.domain))
+                    && path_matches(&c.path, &cookie.path)
+            });
+            if shadows {
+                return false;
             }
+        }
+        let old = self.cookies.iter().position(|c| c.name == cookie.name && c.domain == cookie.domain && c.host_only == cookie.host_only && c.path == cookie.path && c.partition_key == cookie.partition_key);
+        if let Some(i) = old {
+            if self.cookies[i].http_only && !from_http {
+                return false;
+            }
+            // Keep the original creation time (and so the cookie order).
+            cookie.created = self.cookies[i].created;
+            if cookie.is_expired() {
+                self.cookies.remove(i);
+            } else {
+                self.cookies[i] = cookie;
+            }
+            self.dirty = true;
+            return true;
+        }
+        if cookie.is_expired() {
+            return false;
+        }
+        let site = crate::url::site_of(&cookie.domain);
+        self.cookies.push(cookie);
+        self.evict(&site);
+        self.dirty = true;
+        true
+    }
+
+    /// Enforce the per-site and global limits: expired cookies go first,
+    /// then the least recently created ones.
+    fn evict(&mut self, site: &str) {
+        let per_site = self.cookies.iter().filter(|c| crate::url::site_of(&c.domain) == site).count();
+        if per_site <= MAX_PER_SITE && self.cookies.len() <= MAX_TOTAL {
+            return;
+        }
+        self.cookies.retain(|c| !c.is_expired());
+        while self.cookies.iter().filter(|c| crate::url::site_of(&c.domain) == site).count() > MAX_PER_SITE {
+            let oldest = self.cookies.iter().enumerate().filter(|(_, c)| crate::url::site_of(&c.domain) == site).min_by_key(|(_, c)| c.created).map(|(i, _)| i);
+            match oldest {
+                Some(i) => {
+                    self.cookies.remove(i);
+                }
+                None => break,
+            }
+        }
+        while self.cookies.len() > MAX_TOTAL {
+            let oldest = self.cookies.iter().enumerate().min_by_key(|(_, c)| c.created).map(|(i, _)| i).unwrap_or(0);
+            self.cookies.remove(oldest);
+        }
+    }
+
+    /// Apply every `Set-Cookie` header of a response from `url`
+    /// (no SameSite context: treated as same-site).
+    pub fn store_from_headers(&mut self, url: &Url, set_cookie_values: &[String]) {
+        let secure = is_secure_url(url);
+        for v in set_cookie_values {
+            if let Some(mut c) = Cookie::parse(v, url) {
+                if c.partition_key.is_some() {
+                    c.partition_key = Some(format!("{}://{}", url.scheme, crate::url::site_of(&url.host)));
+                }
+                self.store_checked(c, true, secure);
+            }
+        }
+    }
+
+    /// `document.cookie = value` for a document at `url`: HttpOnly
+    /// cookies can be neither created nor overwritten.
+    pub fn store_from_script(&mut self, url: &Url, value: &str) {
+        if !url.is_http() {
+            return;
+        }
+        if let Some(mut c) = Cookie::parse(value, url) {
+            if c.partition_key.is_some() {
+                c.partition_key = Some(format!("{}://{}", url.scheme, crate::url::site_of(&url.host)));
+            }
+            self.store_checked(c, false, is_secure_url(url));
         }
     }
 
@@ -313,6 +487,7 @@ impl CookieJar {
         if self.block_third_party && !same_site && !ctx.top_level_navigation {
             return;
         }
+        let secure = is_secure_url(url);
         for v in set_cookie_values {
             let Some(mut c) = Cookie::parse(v, url) else { continue };
             if !same_site && !ctx.top_level_navigation && c.same_site != "None" {
@@ -321,7 +496,7 @@ impl CookieJar {
             if c.partition_key.is_some() {
                 c.partition_key = Some(ctx.partition_site(url));
             }
-            self.store(c);
+            self.store_checked(c, true, secure);
         }
     }
 
@@ -362,25 +537,32 @@ impl CookieJar {
         self.header_filtered(url, |c| c.partition_key.as_ref().map(|p| *p == partition).unwrap_or(true))
     }
 
-    fn header_filtered(&self, url: &Url, keep: impl Fn(&Cookie) -> bool) -> Option<String> {
+    /// Cookies matching `url` (domain, path, Secure, expiry), in the
+    /// RFC 6265bis §5.8.3 order: longer paths first, then earlier creation.
+    fn matching<'a>(&'a self, url: &Url, keep: impl Fn(&Cookie) -> bool) -> Vec<&'a Cookie> {
         let host = url.host.to_ascii_lowercase();
         let path = if url.path.is_empty() { "/" } else { url.path.as_str() };
-        let secure = url.scheme == "https" || matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]");
+        let secure = is_secure_url(url);
         let mut matched: Vec<&Cookie> = self
             .cookies
             .iter()
             .filter(|c| !c.is_expired())
-            .filter(|c| keep(c))
             .filter(|c| if c.host_only { c.domain == host } else { domain_matches(&c.domain, &host) })
             .filter(|c| path_matches(&c.path, path))
             .filter(|c| !c.secure || secure)
+            .filter(|c| keep(c))
             .collect();
+        // Stable: equal paths and times keep the storage order.
+        matched.sort_by(|a, b| b.path.len().cmp(&a.path.len()).then(a.created.cmp(&b.created)));
+        matched
+    }
+
+    fn header_filtered(&self, url: &Url, keep: impl Fn(&Cookie) -> bool) -> Option<String> {
+        let matched = self.matching(url, keep);
         if matched.is_empty() {
             return None;
         }
-        // Longer paths first, then creation time.
-        matched.sort_by(|a, b| b.path.len().cmp(&a.path.len()).then(a.created.cmp(&b.created)));
-        Some(matched.iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>().join("; "))
+        Some(matched.iter().map(|c| c.pair()).collect::<Vec<_>>().join("; "))
     }
 
     pub fn cookies(&self) -> &[Cookie] {
@@ -413,19 +595,15 @@ impl CookieJar {
         self.cookies.retain(|c| c.expires.is_some() && !c.is_expired());
     }
 
-    /// Cookies visible to scripts for `url` (`document.cookie`): excludes HttpOnly.
+    /// Cookies visible to scripts of a top-level document at `url`
+    /// (`document.cookie`): excludes HttpOnly, and Partitioned cookies of
+    /// other top-level sites.
     pub fn script_cookies(&self, url: &Url) -> String {
-        let host = url.host.to_ascii_lowercase();
-        let path = if url.path.is_empty() { "/" } else { url.path.as_str() };
-        let secure = url.scheme == "https";
-        self.cookies
-            .iter()
-            .filter(|c| !c.is_expired() && !c.http_only)
-            .filter(|c| if c.host_only { c.domain == host } else { domain_matches(&c.domain, &host) })
-            .filter(|c| path_matches(&c.path, path) && (!c.secure || secure))
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect::<Vec<_>>()
-            .join("; ")
+        if !url.is_http() {
+            return String::new();
+        }
+        let partition = format!("{}://{}", url.scheme, crate::url::site_of(&url.host));
+        self.matching(url, |c| !c.http_only && c.partition_key.as_ref().is_none_or(|p| *p == partition)).iter().map(|c| c.pair()).collect::<Vec<_>>().join("; ")
     }
 
     /// Serialize in Netscape `cookies.txt` format (persistent cookies only).
@@ -439,6 +617,10 @@ impl CookieJar {
         self.netscape(true)
     }
 
+    /// The seven Netscape columns. Attributes the format lacks (SameSite,
+    /// creation time) go in a preceding `#RabbitHole-Cookie:` comment that
+    /// other tools ignore; Partitioned cookies are written as a whole
+    /// comment line so tools without partitioning never send them.
     fn netscape(&self, session: bool) -> String {
         let mut out = String::from("# Netscape HTTP Cookie File\n# Written by RabbitHole\n\n");
         for c in &self.cookies {
@@ -447,12 +629,13 @@ impl CookieJar {
                 None if session => 0,
                 None => continue,
             };
-            if c.is_expired() || c.partition_key.is_some() {
+            if c.is_expired() {
                 continue;
             }
             let domain = if c.host_only { c.domain.clone() } else { format!(".{}", c.domain) };
             let name = if c.http_only { format!("#HttpOnly_{}", domain) } else { domain };
-            out.push_str(&format!(
+            out.push_str(&format!("#RabbitHole-Cookie: samesite={}; created={}\n", if c.same_site.is_empty() { "Unspecified" } else { &c.same_site }, c.created));
+            let line = format!(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 name,
                 if c.host_only { "FALSE" } else { "TRUE" },
@@ -461,14 +644,36 @@ impl CookieJar {
                 exp,
                 c.name,
                 c.value
-            ));
+            );
+            match &c.partition_key {
+                Some(p) => out.push_str(&format!("#RabbitHole-Partitioned: {p}\t{line}")),
+                None => out.push_str(&line),
+            }
         }
         out
     }
 
     pub fn from_netscape(text: &str) -> CookieJar {
         let mut jar = CookieJar::new();
-        for line in text.lines() {
+        let mut meta: Option<(String, Option<u64>)> = None;
+        for raw in text.lines() {
+            if let Some(m) = raw.strip_prefix("#RabbitHole-Cookie:") {
+                let mut same_site = String::new();
+                let mut created = None;
+                for part in m.split(';') {
+                    match part.trim().split_once('=') {
+                        Some(("samesite", v)) => same_site = if matches!(v, "Strict" | "Lax" | "None") { v.to_string() } else { String::new() },
+                        Some(("created", v)) => created = v.parse::<u64>().ok(),
+                        _ => {}
+                    }
+                }
+                meta = Some((same_site, created));
+                continue;
+            }
+            let (partition_key, line) = match raw.strip_prefix("#RabbitHole-Partitioned: ").and_then(|r| r.split_once('\t')) {
+                Some((p, rest)) => (Some(p.to_string()), rest),
+                None => (None, raw),
+            };
             let (http_only, line) = match line.strip_prefix("#HttpOnly_") {
                 Some(rest) => (true, rest),
                 None => (false, line),
@@ -476,6 +681,7 @@ impl CookieJar {
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
             }
+            let (same_site, created) = meta.take().unwrap_or_default();
             let f: Vec<&str> = line.split('\t').collect();
             if f.len() < 7 {
                 continue;
@@ -485,16 +691,16 @@ impl CookieJar {
             let expires = f[4].parse::<u64>().ok().filter(|&e| e != 0);
             let c = Cookie {
                 name: f[5].to_string(),
-                value: f[6].to_string(),
+                value: f[6..].join("\t"),
                 domain: f[0].trim_start_matches('.').to_ascii_lowercase(),
                 host_only,
                 path: f[2].to_string(),
                 secure: f[3].eq_ignore_ascii_case("TRUE"),
                 http_only,
                 expires,
-                same_site: String::new(),
-                created: now(),
-                partition_key: None,
+                same_site,
+                created: created.unwrap_or_else(now),
+                partition_key,
             };
             if !c.is_expired() {
                 jar.cookies.push(c);
@@ -655,5 +861,142 @@ mod tests {
         assert!(jar.header_for_context(&tracker, &sub).is_none(), "not sent cross-site");
         jar.block_third_party = false;
         assert!(jar.header_for_context(&tracker, &sub).is_some());
+    }
+
+    #[test]
+    fn rfc6265bis_parsing() {
+        let u = url("https://www.example.com/a/b");
+        // Quotes belong to the value; whitespace around the pair goes.
+        assert_eq!(Cookie::parse(" q = \"a b\" ; Path=/", &u).unwrap().value, "\"a b\"");
+        // Nameless cookie.
+        let c = Cookie::parse("justvalue", &u).unwrap();
+        assert_eq!((c.name.as_str(), c.value.as_str()), ("", "justvalue"));
+        assert_eq!(c.pair(), "justvalue");
+        assert!(Cookie::parse("=", &u).is_none());
+        assert!(Cookie::parse("__Host-x", &u).is_none(), "nameless value with a prefix");
+        // Controls: CR/LF truncate, others void the cookie.
+        assert_eq!(Cookie::parse("a=1\r\nSet-Cookie: b=2", &u).unwrap().value, "1");
+        assert!(Cookie::parse("a=1\x01", &u).is_none());
+        // Size limits.
+        assert!(Cookie::parse(&format!("a={}", "v".repeat(4096)), &u).is_none());
+        assert!(Cookie::parse(&format!("a={}", "v".repeat(4095)), &u).is_some());
+        let long_path = format!("a=1; Path=/{}", "p".repeat(1100));
+        assert_eq!(Cookie::parse(&long_path, &u).unwrap().path, "/a", "oversized attribute ignored");
+        // Max-Age wins over Expires in either order; invalid Max-Age ignored.
+        let c = Cookie::parse("a=1; Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT", &u).unwrap();
+        assert!(!c.is_expired());
+        let c = Cookie::parse("a=1; Max-Age=+60; Expires=Thu, 01 Jan 1970 00:00:01 GMT", &u).unwrap();
+        assert!(c.is_expired(), "'+60' is not a valid Max-Age");
+        assert!(Cookie::parse("a=1; Max-Age=-5", &u).unwrap().is_expired());
+        // Lifetimes are capped at 400 days.
+        let c = Cookie::parse("a=1; Expires=Fri, 31 Dec 9999 23:59:59 GMT", &u).unwrap();
+        assert!(c.expires.unwrap() <= now() + MAX_COOKIE_AGE);
+        let c = Cookie::parse("a=1; Max-Age=999999999999999999999", &u).unwrap();
+        assert!(c.expires.unwrap() <= now() + MAX_COOKIE_AGE);
+        // Path: non-absolute values fall back to the default path.
+        assert_eq!(Cookie::parse("a=1; Path=rel", &u).unwrap().path, "/a");
+        assert_eq!(Cookie::parse("a=1; Path=", &u).unwrap().path, "/a");
+        // Domain: last one wins, leading dot ignored, public suffixes rejected.
+        let c = Cookie::parse("a=1; Domain=other.org; Domain=.Example.com", &u).unwrap();
+        assert_eq!((c.domain.as_str(), c.host_only), ("example.com", false));
+        assert!(Cookie::parse("a=1; Domain=com", &u).is_none());
+        assert!(Cookie::parse("a=1; Domain=co.uk", &url("https://shop.example.co.uk/")).is_none());
+        // IP hosts: Domain must be the host itself.
+        let ip = url("http://127.0.0.1:8080/");
+        assert!(Cookie::parse("a=1; Domain=0.0.1", &ip).is_none());
+        assert!(Cookie::parse("a=1; Domain=127.0.0.1", &ip).unwrap().host_only);
+        // Prefixes are case-insensitive.
+        assert!(Cookie::parse("__secure-a=1", &u).is_none());
+        assert!(Cookie::parse("__HOST-a=1; Secure; Path=/a", &u).is_none());
+        // SameSite=None and Partitioned need Secure; unknown SameSite is unspecified.
+        assert!(Cookie::parse("a=1; SameSite=None", &u).is_none());
+        assert!(Cookie::parse("a=1; Partitioned", &u).is_none());
+        assert_eq!(Cookie::parse("a=1; SameSite=bogus", &u).unwrap().same_site, "");
+    }
+
+    #[test]
+    fn localhost_is_a_secure_context() {
+        for (u, secure) in [("http://localhost/", true), ("http://app.localhost:8080/", true), ("http://127.0.0.2/", true), ("http://[::1]/", true), ("https://x.test/", true), ("http://x.test/", false), ("http://localhost.example/", false)] {
+            assert_eq!(is_secure_url(&url(u)), secure, "{u}");
+        }
+        let app = url("http://app.localhost:8080/");
+        let mut jar = CookieJar::new();
+        jar.store_from_headers(&app, &["s=1; Secure; SameSite=None".into()]);
+        assert_eq!(jar.header_for(&app).as_deref(), Some("s=1"));
+        assert_eq!(jar.script_cookies(&app), "s=1");
+    }
+
+    #[test]
+    fn replacement_keeps_creation_order() {
+        let u = url("https://www.example.com/");
+        let mut jar = CookieJar::new();
+        jar.store_from_headers(&u, &["a=1".into(), "b=2".into(), "c=3; Path=/x".into()]);
+        jar.cookies[0].created -= 10;
+        jar.store_from_headers(&u, &["a=9".into()]);
+        assert_eq!(jar.header_for(&url("https://www.example.com/x/y")).unwrap(), "c=3; a=9; b=2");
+        // Several Set-Cookie headers of one response, all applied in order.
+        jar.store_from_headers(&u, &["b=3".into(), "b=4".into()]);
+        assert_eq!(jar.header_for(&u).unwrap(), "a=9; b=4");
+    }
+
+    #[test]
+    fn scripts_cannot_touch_http_only_or_secure_cookies() {
+        let u = url("https://www.example.com/");
+        let mut jar = CookieJar::new();
+        jar.store_from_headers(&u, &["sid=1; HttpOnly; Path=/".into(), "vis=1".into()]);
+        jar.store_from_script(&u, "sid=evil; path=/");
+        jar.store_from_script(&u, "new=1; HttpOnly");
+        jar.store_from_script(&u, "vis=2");
+        assert_eq!(jar.header_for(&u).unwrap(), "sid=1; vis=2");
+        assert_eq!(jar.script_cookies(&u), "vis=2");
+        // Leave secure cookies alone: an insecure origin cannot shadow them.
+        let mut jar = CookieJar::new();
+        jar.store_from_headers(&u, &["tok=s; Secure; Domain=example.com; Path=/".into()]);
+        jar.store_from_headers(&url("http://www.example.com/"), &["tok=plain; Path=/".into()]);
+        assert_eq!(jar.len(), 1);
+        assert_eq!(jar.cookies()[0].value, "s");
+    }
+
+    #[test]
+    fn persistence_keeps_same_site_partition_and_creation() {
+        let u = url("https://team.example.com/");
+        let mut jar = CookieJar::new();
+        let top = CookieContext::new(None, &u, true, "GET");
+        jar.store_from_response(&u, &["n=1; Max-Age=999; Secure; SameSite=None; HttpOnly".into(), "s=2; Max-Age=999; SameSite=Strict".into(), "p=3; Max-Age=999; Secure; SameSite=None; Partitioned".into(), "d=4; Max-Age=999".into()], &top);
+        jar.cookies[3].created -= 1000;
+        let text = jar.to_netscape();
+        // Partitioned cookies are invisible to tools that do not know them.
+        assert!(text.lines().filter(|l| l.contains("\tp\t")).all(|l| l.starts_with('#')));
+        let back = CookieJar::from_netscape(&text);
+        assert_eq!(back.len(), 4);
+        let get = |n: &str| back.cookies().iter().find(|c| c.name == n).unwrap().clone();
+        assert_eq!(get("n").same_site, "None");
+        assert!(get("n").http_only);
+        assert_eq!(get("s").same_site, "Strict");
+        assert_eq!(get("d").same_site, "");
+        assert_eq!(get("d").created, jar.cookies()[3].created);
+        assert_eq!(get("p").partition_key.as_deref(), Some("https://example.com"));
+        // A cross-site POST still carries the SameSite=None cookie after a restart.
+        let other = url("https://idp.other.org/");
+        let ctx = CookieContext::new(Some(&other), &u, true, "POST");
+        assert_eq!(back.header_for_context(&u, &ctx).unwrap(), "n=1; p=3");
+        // Old seven-column files still load.
+        let plain = CookieJar::from_netscape(".example.com\tTRUE\t/\tFALSE\t9999999999\tk\tv\twith\ttabs\n");
+        assert_eq!(plain.cookies()[0].value, "v\twith\ttabs");
+    }
+
+    #[test]
+    fn per_site_limit_evicts_oldest() {
+        let u = url("https://www.example.com/");
+        let mut jar = CookieJar::new();
+        for i in 0..(MAX_PER_SITE + 5) {
+            jar.store_from_headers(&u, &[format!("c{i}=1")]);
+            if let Some(c) = jar.cookies.iter_mut().find(|c| c.name == format!("c{i}")) {
+                c.created = i as u64;
+            }
+        }
+        assert_eq!(jar.len(), MAX_PER_SITE);
+        assert!(!jar.cookies().iter().any(|c| c.name == "c0"));
+        assert!(jar.cookies().iter().any(|c| c.name == format!("c{}", MAX_PER_SITE + 4)));
     }
 }

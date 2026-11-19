@@ -434,7 +434,7 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn set_cookie(&mut self, value: &str) {
         if let Some(jar) = &self.engine.loader.fetcher.cookies {
-            jar.lock().unwrap().store_from_headers(&self.page.url, &[value.to_string()]);
+            jar.lock().unwrap().store_from_script(&self.page.url, value);
         }
     }
     fn storage_get(&mut self, local: bool, key: &str) -> Option<String> {

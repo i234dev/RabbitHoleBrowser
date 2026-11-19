@@ -59,7 +59,14 @@ pub fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     if let Ok(ip) = host_clean.parse::<std::net::IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
-    let key = (host_clean.to_ascii_lowercase(), port);
+    let lower = host_clean.trim_end_matches('.').to_ascii_lowercase();
+    // "Let localhost be localhost": `localhost` and `*.localhost` always
+    // resolve to loopback, never through DNS (RFC 6761 §6.3, as Chrome
+    // and Firefox do). Local multi-site setups and tests rely on it.
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return Ok(vec![SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port), SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), port)]);
+    }
+    let key = (lower, port);
     if let Some((addrs, t)) = dns_cache().lock().unwrap().get(&key) {
         if t.elapsed() < DNS_TTL {
             return Ok(addrs.clone());
@@ -145,7 +152,7 @@ pub fn proxy_for(scheme: &str, host: &str) -> Option<Proxy> {
             }
         }
     }
-    if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
+    if crate::cookies::is_loopback_host(host) {
         return None;
     }
     let rest = raw.trim();
