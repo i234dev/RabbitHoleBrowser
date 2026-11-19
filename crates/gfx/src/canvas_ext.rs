@@ -254,7 +254,10 @@ impl Canvas {
         }
         // Solid (and non-uniform dashed/dotted drawn solid).
         let same_color = visible.iter().all(|&i| side_colors[i] == side_colors[visible[0]]);
-        if !has_radius && same_color && (is_identity(&self.transform()) || is_axis_aligned(&self.transform())) {
+        // Transparent sides with a width still own their half of the
+        // corners (mitred: CSS triangles).
+        let no_hidden_sides = (0..4).all(|i| widths[i] == 0.0 || visible.contains(&i));
+        if !has_radius && same_color && no_hidden_sides && (is_identity(&self.transform()) || is_axis_aligned(&self.transform())) {
             // Fast path: four bands.
             let [wt, wr, wb, wl] = widths;
             let c = side_colors[visible[0]];

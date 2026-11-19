@@ -246,15 +246,44 @@ pub fn transform_rect_bounds(m: &Matrix, r: Rect) -> Rect {
 }
 
 /// Parse an SVG `transform` attribute (list of functions) into a matrix.
+/// The arguments of a transform function: numbers separated by commas
+/// and/or whitespace (SVG 1.1 grammar; a stray comma or a unit makes the
+/// list invalid).
+fn strict_number_list(s: &str) -> Option<Vec<f32>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Some(Vec::new());
+    }
+    if s.starts_with(',') || s.ends_with(',') || s.contains(",,") || s.split(',').any(|p| p.trim().is_empty()) {
+        return None;
+    }
+    let v = parse_number_list(s);
+    // Every character must belong to a number or a separator.
+    let ok = s.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E' | ',') || c.is_whitespace());
+    ok.then_some(v)
+}
+
+/// Parse an SVG `transform` attribute (list of functions) into a matrix;
+/// an invalid list is the identity (the attribute is ignored).
 pub fn parse_transform(s: &str) -> Matrix {
+    parse_transform_strict(s).unwrap_or(IDENTITY)
+}
+
+fn parse_transform_strict(s: &str) -> Option<Matrix> {
     let mut m = IDENTITY;
     let mut rest = s.trim();
     while !rest.is_empty() {
-        let Some(open) = rest.find('(') else { break };
-        let name = rest[..open].trim().trim_start_matches(',').trim().to_ascii_lowercase();
-        let Some(close) = rest[open..].find(')') else { break };
-        let args = parse_number_list(&rest[open + 1..open + close]);
-        rest = rest[open + close + 1..].trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        let open = rest.find('(')?;
+        let name = rest[..open].trim().to_ascii_lowercase();
+        let close = rest[open..].find(')')?;
+        let args = strict_number_list(&rest[open + 1..open + close])?;
+        rest = rest[open + close + 1..].trim_start_matches(|c: char| c.is_whitespace());
+        if let Some(r) = rest.strip_prefix(',') {
+            rest = r.trim_start();
+            if rest.is_empty() {
+                return None;
+            }
+        }
         let f: Matrix = match (name.as_str(), args.len()) {
             ("matrix", 6) => [args[0], args[1], args[2], args[3], args[4], args[5]],
             ("translate", 1) => [1.0, 0.0, 0.0, 1.0, args[0], 0.0],
@@ -271,11 +300,11 @@ pub fn parse_transform(s: &str) -> Matrix {
             }
             ("skewx", 1) => [1.0, 0.0, args[0].to_radians().tan(), 1.0, 0.0, 0.0],
             ("skewy", 1) => [1.0, args[0].to_radians().tan(), 0.0, 1.0, 0.0, 0.0],
-            _ => continue,
+            _ => return None,
         };
         m = multiply(&m, &f);
     }
-    m
+    Some(m)
 }
 
 fn rotation(a: f32) -> Matrix {

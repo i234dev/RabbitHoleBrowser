@@ -974,7 +974,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { flow_cb };
                 let clips = if c.flow == Flow::Absolute { abs_clips.to_vec() } else { flow_clips.to_vec() };
                 out.push(Deferred {
-                    z: if c.is_stacking_context() || c.is_positioned() { c.style.z_index.unwrap_or(0) } else { 0 },
+                    z: Self::z_index(b, c),
                     order: *order,
                     b: c,
                     cb: cb_rect,
@@ -1044,7 +1044,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             let deferred = Self::is_deferred(c);
             let clips = if c.flow == Flow::Absolute { abs_clips } else { flow_clips };
             if deferred && c.is_stacking_context() {
-                let z = c.style.z_index.unwrap_or(0);
+                let z = Self::z_index(b, c);
                 if z != 0 {
                     *order += 1;
                     self.hoisted.insert(c as *const LayoutBox as usize);
@@ -1066,6 +1066,17 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 self.collect_hoisted(c, cb_for_children, out, order, flow_clips, abs_clips);
             }
+        }
+    }
+
+    /// The used `z-index` of `c` (a child of `b`): it applies to
+    /// positioned boxes and to flex and grid items only (CSS 2.1 §9.9.1,
+    /// Flexbox §4.3, Grid §9.5).
+    fn z_index(b: &LayoutBox, c: &LayoutBox) -> i32 {
+        if c.is_positioned() || matches!(b.formatting, Formatting::Flex | Formatting::Grid) {
+            c.style.z_index.unwrap_or(0)
+        } else {
+            0
         }
     }
 
