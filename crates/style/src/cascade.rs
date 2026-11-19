@@ -353,6 +353,8 @@ pub(crate) struct ElementOut {
     pub(crate) marker: Option<Rc<ComputedStyle>>,
     /// `::first-letter` style (when any `::first-letter` rule matched).
     pub(crate) first_letter: Option<Rc<ComputedStyle>>,
+    /// `::first-line` style (when any `::first-line` rule matched).
+    pub(crate) first_line: Option<Rc<ComputedStyle>>,
     /// The element uses `inherit` for a non-inherited property, so it must
     /// be restyled whenever its parent's style changes at all.
     pub(crate) inherit_dep: bool,
@@ -683,7 +685,7 @@ fn cascade_matched(
     let style = Rc::new(apply_declarations(&local, &vars, parent, root_font_size, env, opts, is_root, false));
 
     let inherit_dep = local.iter().any(|m| !m.decl.name.starts_with("--") && (m.decl.name == "all" || !is_inherited(&m.decl.name)) && wide_keyword(&m.decl.value) == Some(Wide::Inherit));
-    let mut out = ElementOut { style, vars, before: None, after: None, marker: None, first_letter: None, inherit_dep };
+    let mut out = ElementOut { style, vars, before: None, after: None, marker: None, first_letter: None, first_line: None, inherit_dep };
     if out.style.display.is_none() || pseudo_local.is_empty() {
         return out;
     }
@@ -691,7 +693,7 @@ fn cascade_matched(
     // Form controls never have markers: their marker slot carries the
     // style of their own pseudo-element (`::placeholder`, ...).
     let slot_pseudo = slot.unwrap_or(PseudoElement::Marker);
-    let pseudos = [PseudoElement::Before, PseudoElement::After, slot_pseudo, PseudoElement::FirstLetter];
+    let pseudos = [PseudoElement::Before, PseudoElement::After, slot_pseudo, PseudoElement::FirstLetter, PseudoElement::FirstLine];
     for which in pseudos {
         let decls: Vec<Matched> = pseudo_local
             .iter()
@@ -714,6 +716,7 @@ fn cascade_matched(
                 }
             }
             PseudoElement::FirstLetter => out.first_letter = Some(Rc::new(ps)),
+            PseudoElement::FirstLine => out.first_line = Some(Rc::new(ps)),
             _ => out.marker = Some(Rc::new(ps)),
         }
     }

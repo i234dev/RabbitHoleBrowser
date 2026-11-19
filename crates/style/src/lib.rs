@@ -62,6 +62,8 @@ pub struct StyledTree {
     pub marker: Vec<Option<Rc<ComputedStyle>>>,
     /// `::first-letter` styles; `Some` when any `::first-letter` rule matched.
     pub first_letter: Vec<Option<Rc<ComputedStyle>>>,
+    /// `::first-line` styles; `Some` when any `::first-line` rule matched.
+    pub first_line: Vec<Option<Rc<ComputedStyle>>>,
     pub font_faces: Vec<FontFace>,
     /// `@keyframes` by name: (offsets, declarations) per frame, raw.
     pub keyframes: HashMap<String, Vec<(Vec<f32>, Vec<Declaration>)>>,
@@ -81,6 +83,7 @@ impl StyledTree {
             PseudoElement::After => &self.after,
             PseudoElement::Marker => &self.marker,
             PseudoElement::FirstLetter => &self.first_letter,
+            PseudoElement::FirstLine => &self.first_line,
             _ => return None,
         };
         v.get(id).and_then(|s| s.as_ref())
@@ -93,6 +96,7 @@ impl StyledTree {
             after: Vec::new(),
             marker: Vec::new(),
             first_letter: Vec::new(),
+            first_line: Vec::new(),
             font_faces: Vec::new(),
             keyframes: HashMap::new(),
             root_font_size: 16.0,

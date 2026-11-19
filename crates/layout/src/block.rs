@@ -867,6 +867,9 @@ impl<'a> Layouter<'a> {
         }
         b.fixed = style.position == Position::Fixed;
         self.finish_scroll_container(b);
+        if let Some(fl) = b.node.and_then(|n| self.ctx.styles.pseudo(n, rabbithole_css::PseudoElement::FirstLine)) {
+            crate::first_letter::apply_first_line_color(b, fl);
+        }
         if recheck_floats && b.rect.h > 1.0 {
             self.refit_beside_floats(b, cb, bfc, mode);
         }

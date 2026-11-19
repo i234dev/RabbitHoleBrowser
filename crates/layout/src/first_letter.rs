@@ -281,3 +281,51 @@ mod tests {
         assert_eq!(letter_range("e\u{301}t", WhiteSpace::Normal), Extent::Letter(0, 3));
     }
 }
+
+/// `::first-line` (CSS 2.1 §5.12.1), for its color: the text of the first
+/// formatted line of `b` (possibly inside a descendant block) whose color
+/// is inherited from `b` takes the pseudo-element's color.
+pub(crate) fn apply_first_line_color(b: &mut LayoutBox, fl: &ComputedStyle) {
+    let origin = b.style.color;
+    if fl.color == origin {
+        return;
+    }
+    if let Some(line) = first_line_mut(b) {
+        for f in &mut line.fragments {
+            if let crate::tree::FragmentKind::Text { color, .. } = &mut f.kind {
+                if *color == origin {
+                    *color = fl.color;
+                }
+            }
+        }
+    }
+}
+
+fn first_line_mut(b: &mut LayoutBox) -> Option<&mut crate::tree::LineBox> {
+    match b.formatting {
+        Formatting::Inline => b.lines.first_mut(),
+        Formatting::Block => {
+            for c in b.children.iter_mut() {
+                if !c.flow.is_in_flow() {
+                    continue;
+                }
+                if !matches!(c.kind, BoxKind::Block | BoxKind::AnonymousBlock) || !matches!(c.formatting, Formatting::Inline | Formatting::Block) {
+                    return None;
+                }
+                if has_line(c) {
+                    return first_line_mut(c);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn has_line(b: &LayoutBox) -> bool {
+    match b.formatting {
+        Formatting::Inline => !b.lines.is_empty(),
+        Formatting::Block => b.children.iter().any(|c| c.flow.is_in_flow() && (!matches!(c.formatting, Formatting::Inline | Formatting::Block) || has_line(c))),
+        _ => true,
+    }
+}

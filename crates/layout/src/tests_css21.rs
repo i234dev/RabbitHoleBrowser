@@ -508,3 +508,33 @@ fn absolute_table_between_insets_shrinks_to_fit() {
     let t = fx.rect(&tree, "t");
     assert!(close(t.x, 1.0) && close(t.w, 50.0), "{t:?}");
 }
+
+/// `::first-line` colors the text of the first formatted line only.
+#[test]
+fn first_line_color_applies_to_first_line() {
+    use crate::tree::FragmentKind;
+    let fx = Fx::new(
+        "<div id=d style='width:60px'><p id=p>aaa bbb ccc ddd eee fff</p></div>",
+        "body { margin: 0 } p { margin: 0; color: rgb(255, 0, 0) } div::first-line { color: rgb(0, 128, 0) }",
+    );
+    let tree = fx.layout();
+    let p = box_of(&fx, &tree, "p");
+    assert!(p.lines.len() > 1);
+    let colors = |i: usize| -> Vec<rabbithole_gfx::Color> {
+        p.lines[i].fragments.iter().filter_map(|f| match &f.kind { FragmentKind::Text { color, .. } => Some(*color), _ => None }).collect()
+    };
+    // The paragraph sets its own color: the div's first line does not
+    // override it.
+    assert!(colors(0).iter().all(|c| *c == rabbithole_gfx::Color::rgb(255, 0, 0)));
+
+    let fx = Fx::new(
+        "<p id=p style='width:60px'>aaa bbb ccc ddd eee fff</p>",
+        "body { margin: 0 } p { margin: 0; color: rgb(255, 0, 0) } p::first-line { color: rgb(0, 128, 0) }",
+    );
+    let tree = fx.layout();
+    let p = box_of(&fx, &tree, "p");
+    let first: Vec<_> = p.lines[0].fragments.iter().filter_map(|f| match &f.kind { FragmentKind::Text { color, .. } => Some(*color), _ => None }).collect();
+    let second: Vec<_> = p.lines[1].fragments.iter().filter_map(|f| match &f.kind { FragmentKind::Text { color, .. } => Some(*color), _ => None }).collect();
+    assert!(!first.is_empty() && first.iter().all(|c| *c == rabbithole_gfx::Color::rgb(0, 128, 0)));
+    assert!(second.iter().all(|c| *c == rabbithole_gfx::Color::rgb(255, 0, 0)));
+}

@@ -1244,7 +1244,7 @@ impl Engine {
             title: loaded.title,
             status: loaded.status,
             sheets: loaded.sheets,
-            styles: StyledTree { styles: Vec::new(), before: Vec::new(), after: Vec::new(), marker: Vec::new(), first_letter: Vec::new(), font_faces: Vec::new(), keyframes: HashMap::new(), root_font_size: 16.0 },
+            styles: StyledTree { styles: Vec::new(), before: Vec::new(), after: Vec::new(), marker: Vec::new(), first_letter: Vec::new(), first_line: Vec::new(), font_faces: Vec::new(), keyframes: HashMap::new(), root_font_size: 16.0 },
             layout: empty_layout(),
             display_list: DisplayList::default(),
             images: loaded.images.into_iter().collect(),
