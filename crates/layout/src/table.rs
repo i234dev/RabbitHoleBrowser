@@ -94,6 +94,25 @@ fn span_attr(doc: &rabbithole_dom::Document, b: &LayoutBox, name: &str) -> Optio
     digits.parse::<u32>().ok()
 }
 
+/// The width of a column (group) clamped by its `min-width` /
+/// `max-width` (CSS 2.1 §10.4 applies them to columns): a fixed length
+/// within the limits, or the minimum when the width is auto.
+fn column_width(style: &ComputedStyle, width: Length) -> Length {
+    let px = |l: Length| match l {
+        Length::Px(v) => Some(v),
+        _ => None,
+    };
+    let (min, max) = (px(style.min_width), px(style.max_width));
+    match width {
+        Length::Px(w) => Length::Px(w.min(max.unwrap_or(f32::INFINITY)).max(min.unwrap_or(0.0))),
+        Length::Auto => match min {
+            Some(m) if m > 0.0 => Length::Px(m),
+            _ => width,
+        },
+        other => other,
+    }
+}
+
 /// Build the slot grid of a table (HTML table model, simplified).
 fn build_grid(table: &LayoutBox, doc: &rabbithole_dom::Document) -> Grid {
     let mut g = Grid::default();
@@ -131,14 +150,14 @@ fn build_grid(table: &LayoutBox, doc: &rabbithole_dom::Document) -> Grid {
             if cols.is_empty() {
                 let span = span_attr(doc, c, "span").unwrap_or(1).clamp(1, 1000) as usize;
                 for _ in 0..span {
-                    g.col_widths.push(c.style.width);
+                    g.col_widths.push(column_width(&c.style, c.style.width));
                 }
                 ncol_elems += span;
             } else {
                 for j in cols {
                     let k = &c.children[j];
                     let span = span_attr(doc, k, "span").unwrap_or(1).clamp(1, 1000) as usize;
-                    let w = if k.style.width.is_auto() { c.style.width } else { k.style.width };
+                    let w = if k.style.width.is_auto() { column_width(&c.style, c.style.width) } else { column_width(&k.style, k.style.width) };
                     for _ in 0..span {
                         g.col_widths.push(w);
                     }
@@ -150,7 +169,7 @@ fn build_grid(table: &LayoutBox, doc: &rabbithole_dom::Document) -> Grid {
         } else {
             let span = span_attr(doc, c, "span").unwrap_or(1).clamp(1, 1000) as usize;
             for _ in 0..span {
-                g.col_widths.push(c.style.width);
+                g.col_widths.push(column_width(&c.style, c.style.width));
             }
             g.col_boxes.push(ColBox { path: (i, None), first: ncol_elems, span });
             ncol_elems += span;
@@ -339,6 +358,16 @@ impl<'a> Layouter<'a> {
             let border_box = cell.style.box_sizing == BoxSizing::BorderBox;
             let (cmin, cmax) = self.intrinsic(cell);
             let (mut cmin, mut cmax) = (cmin + ex, cmax + ex);
+            // `max-width` / `min-width` limit a cell's fixed width.
+            let width = match width {
+                Length::Px(w) => Length::Px(match (cell.style.max_width, cell.style.min_width) {
+                    (Length::Px(m), Length::Px(n)) => w.min(m).max(n),
+                    (Length::Px(m), _) => w.min(m),
+                    (_, Length::Px(n)) => w.max(n),
+                    _ => w,
+                }),
+                other => other,
+            };
             let fixed = match width {
                 Length::Px(w) => {
                     let w = if border_box { w.max(ex) } else { w + ex };
