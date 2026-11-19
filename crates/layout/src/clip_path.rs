@@ -71,6 +71,11 @@ pub fn geometry(b: &LayoutBox, cp: &ClipPath) -> Option<ClipGeometry> {
     match cp {
         ClipPath::Box(which) => {
             let (r, radii) = reference_box(b, *which);
+            // Shaped corners (`corner-shape`) shape the box edges too.
+            if b.style.corner_shape.iter().any(|c| *c != rabbithole_style::CornerShape::Round) && crate::background::has_radii(&radii) {
+                let path = rabbithole_style::shapes::corner_shaped_path(r, radii, b.style.corner_shape);
+                return Some(ClipGeometry { path, rule: FillRule::NonZero, rounded: None });
+            }
             Some(ClipGeometry { path: rounded_rect_path(r, radii), rule: FillRule::NonZero, rounded: Some((r, radii)) })
         }
         ClipPath::Shape(shape, which) => {

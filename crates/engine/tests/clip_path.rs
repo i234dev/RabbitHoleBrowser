@@ -151,3 +151,16 @@ fn corner_shape_and_border_shape_clip_the_background() {
     assert_eq!(rgb(&e, &p, 50, 150), GREEN);
     assert_eq!(rgb(&e, &p, 10, 110), WHITE);
 }
+
+#[test]
+fn geometry_box_follows_corner_shape() {
+    let mut e = engine(false);
+    let p = load(
+        &mut e,
+        r#"<!doctype html><style>body { margin: 0 } #c { width: 100px; height: 100px; border-radius: 50px; corner-shape: bevel; clip-path: border-box }
+        #c > div { width: 200px; height: 200px; background: green }</style><div id=c><div></div></div>"#,
+    );
+    assert_eq!(rgb(&e, &p, 50, 50), GREEN);
+    assert_eq!(rgb(&e, &p, 20, 20), WHITE);
+    assert_eq!(rgb(&e, &p, 150, 50), WHITE);
+}
