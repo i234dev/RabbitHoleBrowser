@@ -239,3 +239,24 @@ fn combined_upright_text_is_one_squeezed_em_square() {
     // `digits 2` combines only runs of at most two digits.
     assert_eq!(crate::wm::combined_runs_for_test("a12b345c6", 3), vec![(0, 1, false), (1, 3, true), (3, 8, false), (8, 9, true)]);
 }
+
+#[test]
+fn vertical_tables_turn_and_resolve_colour_ties_towards_the_start() {
+    // The table (no wrapper box) is laid out vertically, and the cells'
+    // conflicting borders, equal but for colour, go to the earlier cell.
+    let fx = Fx::new(
+        "<table id=t style='writing-mode:vertical-rl;border-collapse:collapse'><tr><td id=a style='padding:0;border-bottom:10px solid lime;height:20px;width:20px'></td><td style='padding:0;border-top:10px solid red;width:20px;height:20px'></td></tr></table>",
+        RESET,
+    );
+    let t = fx.layout();
+    assert!(find_box(&t.root, &|b| b.wm_wrapper).is_some(), "{}", t.dump());
+    let red = rabbithole_gfx::Color::rgb(255, 0, 0);
+    let list = fx.display_list(&HashMap::new());
+    for it in &list.items {
+        if let DisplayItem::Border { colors, widths, .. } = it {
+            for (c, w) in colors.iter().zip(widths) {
+                assert!(*w == 0.0 || *c != red, "{:#?}", list.items);
+            }
+        }
+    }
+}

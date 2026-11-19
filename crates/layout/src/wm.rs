@@ -213,7 +213,7 @@ fn transpose_subtree(b: &mut LayoutBox, cache: &mut Cache, mode: WritingMode) {
         // Images stay upright: they are wrapped like horizontal blocks.
         let image = c.kind == BoxKind::Image && !c.style.layout_transposed;
         let orthogonal = image
-            || (!c.style.writing_mode.is_vertical() && !c.style.layout_transposed && !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Inline) && !table_internal(c));
+            || (!c.style.writing_mode.is_vertical() && !c.style.layout_transposed && !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Inline) && !table_internal(b, c));
         if orthogonal {
             let mut c = std::mem::replace(&mut b.children[i], LayoutBox::new(BoxKind::Block, None, b.style.clone()));
             if image {
@@ -333,8 +333,10 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
 
 /// Table rows, cells and the table inside its wrapper must stay where
 /// they are (their parents lay them out as table parts).
-fn table_internal(b: &LayoutBox) -> bool {
-    matches!(b.kind, BoxKind::TableRow | BoxKind::TableCell | BoxKind::Table) || matches!(b.formatting, Formatting::TableRow | Formatting::Table) || crate::table::is_row_group(b)
+fn table_internal(parent: &LayoutBox, b: &LayoutBox) -> bool {
+    let table = b.kind == BoxKind::Table || b.formatting == Formatting::Table;
+    // (A table box outside a table wrapper box is the table itself.)
+    (table && parent.formatting == Formatting::TableWrapper) || matches!(b.kind, BoxKind::TableRow | BoxKind::TableCell) || b.formatting == Formatting::TableRow || crate::table::is_row_group(b)
 }
 
 /// Find the vertical subtrees below `b` (whose mode is `mode`) and wrap them.
@@ -346,7 +348,7 @@ fn prepare_children(b: &mut LayoutBox, cache: &mut Cache) {
         }
         let vertical = c.style.writing_mode.is_vertical() && !c.style.layout_transposed;
         // Images are not turned; table parts cannot leave their table.
-        let element = !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Image) && !table_internal(c);
+        let element = !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Image) && !table_internal(b, c);
         if vertical && element {
             let c = std::mem::replace(&mut b.children[i], LayoutBox::new(BoxKind::Block, None, b.style.clone()));
             b.children[i] = wrap(c, cache, false, WritingMode::HorizontalTb);
