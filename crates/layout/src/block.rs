@@ -70,6 +70,12 @@ pub(crate) struct Layouter<'a> {
     /// Intrinsic sizing: the stretched definite height of the next box
     /// measured (a flex item in a container with a definite height).
     pub(crate) intrinsic_forced_h: Option<f32>,
+    /// Floats: the height of the band beside floats that the next
+    /// auto-height formatting context laid out must fit (a retry after its
+    /// first layout came out taller than the space it was given).
+    float_band: Option<f32>,
+    /// A box is being refitted beside floats (nested layouts do not refit).
+    refitting: bool,
     /// Pooled working storage of flex layout.
     pub(crate) flex_scratch: Vec<crate::flex::FlexScratch>,
     /// Whether `FontContext::select_family` & co. are implemented.
@@ -186,7 +192,8 @@ fn avoid_floats(style: &ComputedStyle, bfc: &Bfc, cb: &Cb, (mut x, mut y, mut co
         // containing block; next to floats only its own margins count.
         let (sml, smr) = (style.margin.left.resolve(cbw).unwrap_or(0.0), style.margin.right.resolve(cbw).unwrap_or(0.0));
         let outer = content_w + pb_h + sml + smr;
-        if style.width.is_auto() || rabbithole_style::is_stretch(style.width) {
+        if (style.width.is_auto() || rabbithole_style::is_stretch(style.width)) && (r - l - ml - mr > 0.0 || bfc.next_y(y).is_none()) {
+            // (No room at all beside the floats: further down.)
             content_w = (r - l - ml - mr - pb_h).max(0.0);
             x = l + ml;
             break;
@@ -340,6 +347,8 @@ impl<'a> Layouter<'a> {
             width_intrinsic: None,
             intrinsic_cb_used: false,
             intrinsic_forced_h: None,
+            float_band: None,
+            refitting: false,
             flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
@@ -641,8 +650,13 @@ impl<'a> Layouter<'a> {
         // A BFC root placed next to floats narrows (or moves below them).
         // (Block-level tables too: they are as wide as their contents.)
         let table = matches!(b.formatting, Formatting::Table | Formatting::TableWrapper) && b.kind != BoxKind::InlineBlock && style.display.is_block_level();
+        // An auto-height formatting context placed beside floats is checked
+        // against them again once its height is known.
+        let mut recheck_floats = false;
         if b.bfc_root && b.flow.is_in_flow() && (matches!(mode, WidthMode::Fill) || table) && !bfc.is_empty() {
-            let band_h = self.resolve_height(&style, cb.height, pb_v).map_or(1.0, |h| h + pb_v);
+            let known_h = self.resolve_height(&style, cb.height, pb_v);
+            recheck_floats = known_h.is_none() && forced_h.is_none() && !self.refitting;
+            let band_h = known_h.map(|h| h + pb_v).or(self.float_band.take()).unwrap_or(1.0);
             if table {
                 (x, y, content_w) = self.table_beside_floats(b, bfc, cb, (x, y, content_w), pb_h, band_h, mode);
             } else {
@@ -853,6 +867,47 @@ impl<'a> Layouter<'a> {
         }
         b.fixed = style.position == Position::Fixed;
         self.finish_scroll_container(b);
+        if recheck_floats && b.rect.h > 1.0 {
+            self.refit_beside_floats(b, cb, bfc, mode);
+        }
+    }
+
+    /// An auto-height formatting context laid out beside floats must not
+    /// overlap the floats beside its whole border box (CSS 2.1 §9.5): lay
+    /// it out again in the space left over its height at the same place,
+    /// else below the next float edge.
+    #[cold]
+    #[inline(never)]
+    fn refit_beside_floats(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, mode: WidthMode) {
+        self.refitting = true;
+        self.refit_loop(b, cb, bfc, mode);
+        self.refitting = false;
+    }
+
+    fn refit_loop(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, mode: WidthMode) {
+        for _ in 0..8 {
+            let (y, h) = (b.rect.y, b.rect.h);
+            let (l, r) = bfc.available(y, h, cb.x, cb.width);
+            if l <= b.rect.x + 0.01 && r >= b.rect.right() - 0.01 {
+                return;
+            }
+            let (ml, mr) = (b.margin.left.max(0.0), b.margin.right.max(0.0));
+            let narrower = r - l - ml - mr;
+            if narrower > 0.01 && narrower + 0.01 < b.rect.w && b.style.width.is_auto() {
+                // Same place, in the space left beside its whole height.
+                self.float_band = Some(h);
+                self.layout_block(b, cb, y, bfc, mode);
+                self.float_band = None;
+                continue;
+            }
+            match bfc.next_y(y).filter(|ny| *ny < y + h) {
+                Some(ny) => {
+                    self.float_band = None;
+                    self.layout_block(b, cb, ny, bfc, mode);
+                }
+                None => return,
+            }
+        }
     }
 
     /// Center a form control's contents in its content box, or apply
