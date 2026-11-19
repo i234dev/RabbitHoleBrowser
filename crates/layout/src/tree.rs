@@ -353,6 +353,9 @@ pub struct LayoutBox {
     /// Anonymous wrapper of a vertical writing-mode subtree (its only
     /// child, laid out in logical space; see `wm.rs`).
     pub(crate) wm_wrapper: bool,
+    /// A wrapper holding a horizontal-in-vertical composition
+    /// (`text-combine-upright`): squeezed into 1em.
+    pub(crate) wm_tcy: bool,
     /// Logical → physical mapping of a wrapper's contents.
     pub(crate) wm_transform: Option<Matrix>,
     /// How a wrapper's contents are turned (see `wm.rs`).
@@ -433,6 +436,7 @@ impl LayoutBox {
             built_from: None,
             counter_io: None,
             wm_wrapper: false,
+            wm_tcy: false,
             ruby: 0,
             wm_transform: None,
             wm_kind: WmKind::Cw,
@@ -544,7 +548,10 @@ impl LayoutBox {
     pub fn transform_matrix(&self) -> Option<Matrix> {
         if let Some(m) = self.wm_transform {
             // Quarter turns map the pixel grid onto itself: keep the
-            // contents on whole pixels.
+            // contents on whole pixels (not a squeezed composition's).
+            if m[..4].iter().any(|v| *v != 0.0 && v.abs() != 1.0) {
+                return Some(m);
+            }
             return Some([m[0], m[1], m[2], m[3], m[4].round(), m[5].round()]);
         }
         if self.style.transform.is_empty() {

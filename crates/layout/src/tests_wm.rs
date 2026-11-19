@@ -218,3 +218,24 @@ fn no_break_spaces_neither_hang_nor_trim() {
     let t = fx.layout();
     assert_eq!(line_texts(&t), vec!["a   b".to_string()]);
 }
+
+fn find_box<'t>(b: &'t LayoutBox, f: &dyn Fn(&LayoutBox) -> bool) -> Option<&'t LayoutBox> {
+    if f(b) {
+        return Some(b);
+    }
+    b.children.iter().find_map(|c| find_box(c, f))
+}
+
+#[test]
+fn combined_upright_text_is_one_squeezed_em_square() {
+    let fx = Fx::new("<div style='writing-mode:vertical-rl;font-size:20px;line-height:1;height:300px'>a<span style='text-combine-upright:all'>12345</span>b</div>", RESET);
+    let t = fx.layout();
+    let w = find_box(&t.root, &|b| b.wm_tcy).unwrap_or_else(|| panic!("no composition\n{}", t.dump()));
+    // 1em along the line (logical width) and across it.
+    assert!(close(w.rect.w, 20.0) && close(w.rect.h, 20.0), "{:?}\n{}", w.rect, t.dump());
+    // Five digits are wider than 1em: the turn is combined with a squeeze.
+    let m = w.wm_transform.expect("mapping");
+    assert!(m[1].abs() < 1.0 && m[1] != 0.0 && m[2].abs() == 1.0, "{m:?}");
+    // `digits 2` combines only runs of at most two digits.
+    assert_eq!(crate::wm::combined_runs_for_test("a12b345c6", 3), vec![(0, 1, false), (1, 3, true), (3, 8, false), (8, 9, true)]);
+}

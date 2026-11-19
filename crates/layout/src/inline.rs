@@ -1683,7 +1683,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // to-left lines still drop one, their hanging is not modelled).
             let preserved = matches!(
                 item_style(self.items, self.cstyle, *item).white_space,
-                rabbithole_style::WhiteSpace::PreWrap | rabbithole_style::WhiteSpace::BreakSpaces
+                rabbithole_style::WhiteSpace::Pre | rabbithole_style::WhiteSpace::PreWrap | rabbithole_style::WhiteSpace::BreakSpaces
             ) && self.cstyle.direction != Direction::Rtl;
             if text.ends_with(' ') && text.len() > 1 && !preserved {
                 text.pop();
