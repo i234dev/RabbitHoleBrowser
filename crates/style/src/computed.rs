@@ -1316,7 +1316,13 @@ pub struct ComputedStyle {
     pub lang: u8,
     pub text_decoration: TextDecoration,
     pub text_transform: TextTransform,
+    /// `text-transform` keywords beyond the case (inherited with it):
+    /// bit 1 `full-width`, bit 2 `full-size-kana`.
+    pub text_transform_extra: u8,
     pub text_indent: Length,
+    /// `text-indent` keywords (inherited with it): bit 1 `each-line`,
+    /// bit 2 `hanging`.
+    pub text_indent_flags: u8,
     pub white_space: WhiteSpace,
     pub vertical_align: VerticalAlign,
 
@@ -1619,7 +1625,9 @@ impl ComputedStyle {
             text_align_webkit_center: false,
             text_decoration: TextDecoration::default(),
             text_transform: TextTransform::None,
+            text_transform_extra: 0,
             text_indent: Length::ZERO,
+            text_indent_flags: 0,
             white_space: WhiteSpace::Normal,
             vertical_align: VerticalAlign::Baseline,
             list_style_type: ListStyleType::Disc,
@@ -1798,7 +1806,9 @@ impl ComputedStyle {
             line_height_tight: parent.line_height_tight,
             text_underline_position: parent.text_underline_position,
             text_transform: parent.text_transform,
+            text_transform_extra: parent.text_transform_extra,
             text_indent: parent.text_indent,
+            text_indent_flags: parent.text_indent_flags,
             white_space: parent.white_space,
             list_style_type: parent.list_style_type,
             list_style_position: parent.list_style_position,
@@ -1878,7 +1888,9 @@ impl ComputedStyle {
             && self.line_height_tight == o.line_height_tight
             && self.text_underline_position == o.text_underline_position
             && self.text_transform == o.text_transform
+            && self.text_transform_extra == o.text_transform_extra
             && self.text_indent == o.text_indent
+            && self.text_indent_flags == o.text_indent_flags
             && self.white_space == o.white_space
             && self.list_style_type == o.list_style_type
             && self.list_style_position == o.list_style_position

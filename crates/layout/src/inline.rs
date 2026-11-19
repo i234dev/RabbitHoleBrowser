@@ -3,7 +3,7 @@
 use crate::block::{Cb, Layouter};
 use crate::float::Bfc;
 use crate::linebreak as lb;
-use crate::text::{segment_tabs, transform, Collapser, Seg};
+use crate::text::{segment_tabs, transform_style, Collapser, Seg};
 use crate::tree::{DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{FontId, Rect};
@@ -249,7 +249,7 @@ fn hyphenate_items(items: &[InlineItem]) -> Vec<Option<String>> {
     let texts: Vec<Option<String>> = items
         .iter()
         .map(|it| match it {
-            InlineItem::Text { text, style, .. } => Some(transform(text, style.text_transform)),
+            InlineItem::Text { text, style, .. } => Some(transform_style(text, style)),
             _ => None,
         })
         .collect();
@@ -439,7 +439,7 @@ impl<'a> Layouter<'a> {
                     let wraps = ws.wraps();
                     let t = match hyphenated.as_mut().and_then(|h| h[i].take()) {
                         Some(t) => t,
-                        None => transform(text, style.text_transform),
+                        None => transform_style(text, style),
                     };
                     segs.clear();
                     let keep_shy = style.hyphens != 0;
@@ -458,9 +458,13 @@ impl<'a> Layouter<'a> {
                     };
                     let anywhere = rules.line_break == 3;
 
+                    let full_width = style.text_transform_extra & 1 != 0;
                     for seg in segs.drain(..) {
+                        // `full-width` turns the collapsed spaces into U+3000.
+                        let seg = if full_width && seg == Seg::Space { Seg::Word("\u{3000}".into()) } else { seg };
                         match seg {
                             Seg::Word(w) => {
+                                let w = if style.text_transform_extra & 1 != 0 && w.contains(' ') { w.replace(' ', "\u{3000}") } else { w };
                                 let is_space_word = w.chars().all(|c| c == ' ' || c == '\t');
 
                                 // A break between the previous word and this
@@ -713,6 +717,7 @@ impl<'a> Layouter<'a> {
                 pending_floats: Vec::new(),
                 pending_abs: Vec::new(),
                 first_line: true,
+                after_forced: false,
                 indent,
                 ellipsis,
                 max_lines,
@@ -849,6 +854,8 @@ struct InlineLayout<'l, 'a> {
     /// static position is below the line they would have broken.
     pending_abs: Vec<usize>,
     first_line: bool,
+    /// The previous line ended with a forced break.
+    after_forced: bool,
     indent: f32,
     /// `text-overflow: ellipsis` applies (overflow clipped).
     ellipsis: bool,
@@ -980,10 +987,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.left = l;
         self.cur.align_right = r;
         self.cur.right = match self.wrap_limit {
-            Some(w) => r.min(l + w + if self.first_line { self.indent.max(0.0) } else { 0.0 }),
+            Some(w) => r.min(l + w + if self.indented() { self.indent.max(0.0) } else { 0.0 }),
             None => r,
         };
-        self.cur.x = l + if self.first_line { self.indent } else { 0.0 };
+        self.cur.x = l + if self.indented() { self.indent } else { 0.0 };
         self.cur.frags.clear();
         self.cur.bg.clear();
         self.cur.pending_space = None;
@@ -1099,6 +1106,14 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         } else {
             (self.cur.left - self.content_x).max(0.0)
         }
+    }
+
+    /// Is the current line indented (`text-indent`)? The first line, also
+    /// those after a forced break with `each-line`; `hanging` inverts it.
+    fn indented(&self) -> bool {
+        let flags = self.cstyle.text_indent_flags;
+        let first = self.first_line || (flags & 1 != 0 && self.after_forced);
+        first != (flags & 2 != 0)
     }
 
     fn pending_w(&self) -> f32 {
@@ -2383,6 +2398,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             fragments,
         });
         self.first_line = false;
+        self.after_forced = forced;
         let new_y = y + h;
         for c in std::mem::take(&mut self.pending_abs) {
             let ry = self.rel_kids.get(c).map_or(0.0, |r| r.1);

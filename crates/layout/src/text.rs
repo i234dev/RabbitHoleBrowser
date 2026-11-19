@@ -2,7 +2,7 @@
 //! and a width-measurement cache.
 
 use rabbithole_gfx::{FontContext, FontId};
-use rabbithole_style::{TextTransform, WhiteSpace};
+use rabbithole_style::{ComputedStyle, TextTransform, WhiteSpace, LANG_EL, LANG_NL, LANG_TR};
 use std::collections::HashMap;
 
 /// A unit of processed text.
@@ -60,28 +60,224 @@ fn segment_break_removed(prev: Option<char>, next: Option<char>) -> bool {
     }
 }
 
+/// Apply `text-transform` (the case, then `full-width` and
+/// `full-size-kana`), with the case tailorings of the content language.
+pub(crate) fn transform_style(text: &str, style: &ComputedStyle) -> String {
+    let mut out = match (style.text_transform, style.lang) {
+        (TextTransform::None, _) => text.to_string(),
+        (TextTransform::Uppercase, LANG_TR) => text.chars().map(|c| if c == 'i' { "\u{130}".to_string() } else { c.to_uppercase().collect() }).collect(),
+        (TextTransform::Uppercase, LANG_EL) => greek_upper(text),
+        (TextTransform::Lowercase, LANG_TR) => text
+            .chars()
+            .map(|c| match c {
+                'I' => "\u{131}".to_string(),
+                '\u{130}' => "i".to_string(),
+                c => c.to_lowercase().collect(),
+            })
+            .collect(),
+        (t, lang) => transform_lang(text, t, lang),
+    };
+    if style.text_transform_extra & 1 != 0 {
+        out = out.chars().map(full_width).collect();
+    }
+    if style.text_transform_extra & 2 != 0 {
+        out = out.chars().map(full_size_kana).collect();
+    }
+    out
+}
+
+#[cfg(test)]
 pub(crate) fn transform(text: &str, t: TextTransform) -> String {
+    transform_lang(text, t, 0)
+}
+
+fn transform_lang(text: &str, t: TextTransform, lang: u8) -> String {
     match t {
         TextTransform::None => text.to_string(),
         TextTransform::Uppercase => text.to_uppercase(),
         TextTransform::Lowercase => text.to_lowercase(),
         TextTransform::Capitalize => {
+            // The first typographic letter unit of each word in titlecase
+            // (punctuation before it is skipped).
             let mut out = String::with_capacity(text.len());
             let mut at_word_start = true;
-            for ch in text.chars() {
+            let mut chars = text.chars().peekable();
+            while let Some(ch) = chars.next() {
                 if ch.is_whitespace() {
                     at_word_start = true;
                     out.push(ch);
-                } else if at_word_start {
-                    out.extend(ch.to_uppercase());
+                } else if at_word_start && ch.is_alphabetic() {
                     at_word_start = false;
+                    match (lang, ch) {
+                        (LANG_TR, 'i') => out.push('\u{130}'),
+                        // Dutch: the IJ digraph capitalizes as a whole.
+                        (LANG_NL, 'i' | 'I') if matches!(chars.peek(), Some('j' | 'J')) => {
+                            chars.next();
+                            out.push_str("IJ");
+                        }
+                        _ => titlecase(ch, &mut out),
+                    }
                 } else {
+                    if ch.is_alphanumeric() {
+                        at_word_start = false;
+                    }
                     out.push(ch);
                 }
             }
             out
         }
     }
+}
+
+/// The titlecase form of `c` (digraphs and ligatures differ from the
+/// uppercase).
+fn titlecase(c: char, out: &mut String) {
+    match c {
+        '\u{1C4}'..='\u{1C6}' => out.push('\u{1C5}'),
+        '\u{1C7}'..='\u{1C9}' => out.push('\u{1C8}'),
+        '\u{1CA}'..='\u{1CC}' => out.push('\u{1CB}'),
+        '\u{1F1}'..='\u{1F3}' => out.push('\u{1F2}'),
+        'ß' => out.push_str("Ss"),
+        '\u{FB00}' => out.push_str("Ff"),
+        '\u{FB01}' => out.push_str("Fi"),
+        '\u{FB02}' => out.push_str("Fl"),
+        '\u{FB03}' => out.push_str("Ffi"),
+        '\u{FB04}' => out.push_str("Ffl"),
+        '\u{FB05}' | '\u{FB06}' => out.push_str("St"),
+        // Greek with ypogegrammeni: titlecase keeps it as prosgegrammeni.
+        '\u{1F80}'..='\u{1FAF}' => out.push(char::from_u32((c as u32 & !0xF) | 0x8 | (c as u32 & 0x7)).unwrap_or(c)),
+        '\u{1FB3}' | '\u{1FC3}' | '\u{1FF3}' => out.push(char::from_u32(c as u32 + 9).unwrap_or(c)),
+        _ => out.extend(c.to_uppercase()),
+    }
+}
+
+/// Greek uppercase (as in Greek typography): accents are dropped, a
+/// dialytika stays; an accented vowel followed by ι / υ marks it with a
+/// dialytika; the disjunctive ή keeps its accent.
+fn greek_upper(text: &str) -> String {
+    // (base uppercase, had an accent, had a dialytika)
+    fn strip(c: char) -> Option<(char, bool, bool)> {
+        Some(match c {
+            'ά' | 'Ά' => ('Α', true, false),
+            'έ' | 'Έ' => ('Ε', true, false),
+            'ή' | 'Ή' => ('Η', true, false),
+            'ί' | 'Ί' => ('Ι', true, false),
+            'ό' | 'Ό' => ('Ο', true, false),
+            'ύ' | 'Ύ' => ('Υ', true, false),
+            'ώ' | 'Ώ' => ('Ω', true, false),
+            'ΐ' => ('Ϊ', true, true),
+            'ΰ' => ('Ϋ', true, true),
+            'ϊ' | 'Ϊ' => ('Ϊ', false, true),
+            'ϋ' | 'Ϋ' => ('Ϋ', false, true),
+            _ => return None,
+        })
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // A word that is a lone ή keeps its tonos.
+        let lone = |k: usize| k >= chars.len() || !chars[k].is_alphabetic();
+        if (c == 'ή' || c == 'Ή') && (i == 0 || !chars[i - 1].is_alphabetic()) && lone(i + 1) {
+            out.push('Ή');
+            i += 1;
+            continue;
+        }
+        if c == '\u{301}' || c == '\u{300}' || c == '\u{342}' {
+            i += 1;
+            continue;
+        }
+        match strip(c) {
+            Some((base, accent, _)) => {
+                out.push(base);
+                // ά ι → ΑΪ: the accent showed the vowels are apart.
+                if accent && matches!(base, 'Α' | 'Ε' | 'Ο' | 'Υ') {
+                    if let Some(&n) = chars.get(i + 1) {
+                        if matches!(n, 'ι' | 'Ι') {
+                            out.push('Ϊ');
+                            i += 2;
+                            continue;
+                        }
+                        if matches!(n, 'υ' | 'Υ') && base != 'Υ' {
+                            out.push('Ϋ');
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+            }
+            None => out.extend(c.to_uppercase()),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `full-width`: the fullwidth form of ASCII and halfwidth characters.
+fn full_width(c: char) -> char {
+    let u = c as u32;
+    // (Spaces become U+3000 after white space collapsing.)
+    let m = match u {
+        0x21..=0x7E => u - 0x21 + 0xFF01,
+        0xA2 => 0xFFE0,
+        0xA3 => 0xFFE1,
+        0xAC => 0xFFE2,
+        0xAF => 0xFFE3,
+        0xA6 => 0xFFE4,
+        0xA5 => 0xFFE5,
+        0x20A9 => 0xFFE6,
+        0xFF61 => 0x3002,
+        0xFF62 => 0x300C,
+        0xFF63 => 0x300D,
+        0xFF64 => 0x3001,
+        0xFF65..=0xFF9F => {
+            const KANA: [u16; 59] = [
+                0x30FB, 0x30F2, 0x30A1, 0x30A3, 0x30A5, 0x30A7, 0x30A9, 0x30E3, 0x30E5, 0x30E7, 0x30C3, 0x30FC, 0x30A2, 0x30A4, 0x30A6, 0x30A8, 0x30AA, 0x30AB, 0x30AD, 0x30AF,
+                0x30B1, 0x30B3, 0x30B5, 0x30B7, 0x30B9, 0x30BB, 0x30BD, 0x30BF, 0x30C1, 0x30C4, 0x30C6, 0x30C8, 0x30CA, 0x30CB, 0x30CC, 0x30CD, 0x30CE, 0x30CF, 0x30D2, 0x30D5,
+                0x30D8, 0x30DB, 0x30DE, 0x30DF, 0x30E0, 0x30E1, 0x30E2, 0x30E4, 0x30E6, 0x30E8, 0x30E9, 0x30EA, 0x30EB, 0x30EC, 0x30ED, 0x30EF, 0x30F3, 0x3099, 0x309A,
+            ];
+            KANA[(u - 0xFF65) as usize] as u32
+        }
+        0xFFE8 => 0x2502,
+        0xFFE9 => 0x2190,
+        0xFFEA => 0x2191,
+        0xFFEB => 0x2192,
+        0xFFEC => 0x2193,
+        0xFFED => 0x25A0,
+        0xFFEE => 0x25CB,
+        _ => u,
+    };
+    char::from_u32(m).unwrap_or(c)
+}
+
+/// `full-size-kana`: small kana to their full-size forms.
+fn full_size_kana(c: char) -> char {
+    let m = match c as u32 {
+        u @ (0x3041 | 0x3043 | 0x3045 | 0x3047 | 0x3049 | 0x3063 | 0x3083 | 0x3085 | 0x3087 | 0x308E) => u + 1,
+        u @ (0x30A1 | 0x30A3 | 0x30A5 | 0x30A7 | 0x30A9 | 0x30C3 | 0x30E3 | 0x30E5 | 0x30E7 | 0x30EE) => u + 1,
+        0x3095 => 0x304B,
+        0x3096 => 0x3051,
+        0x30F5 => 0x30AB,
+        0x30F6 => 0x30B1,
+        u @ 0x31F0..=0x31FF => [0x30AF, 0x30B7, 0x30B9, 0x30C8, 0x30CC, 0x30CF, 0x30D2, 0x30D5, 0x30D8, 0x30DB, 0x30E0, 0x30E9, 0x30EA, 0x30EB, 0x30EC, 0x30ED][(u - 0x31F0) as usize],
+        u @ 0xFF67..=0xFF6B => u + 10,
+        0xFF6C => 0xFF94,
+        0xFF6D => 0xFF95,
+        0xFF6E => 0xFF96,
+        0xFF6F => 0xFF82,
+        0x1B132 => 0x3053,
+        0x1B150 => 0x3090,
+        0x1B151 => 0x3091,
+        0x1B152 => 0x3092,
+        0x1B155 => 0x30B3,
+        0x1B164 => 0x30F0,
+        0x1B165 => 0x30F1,
+        0x1B166 => 0x30F2,
+        0x1B167 => 0x30F3,
+        u => u,
+    };
+    char::from_u32(m).unwrap_or(c)
 }
 
 fn is_collapsible_ws(c: char) -> bool {
@@ -247,6 +443,21 @@ mod tests {
         let mut out = Vec::new();
         segment("中\n文 a\nb", WhiteSpace::Normal, &mut st, &mut out);
         assert_eq!(out, vec![Seg::Word("中".into()), Seg::Word("文".into()), Seg::Space, Seg::Word("a".into()), Seg::Space, Seg::Word("b".into())]);
+    }
+
+    #[test]
+    fn transform_tailorings() {
+        let mut st = ComputedStyle::initial();
+        st.text_transform = TextTransform::Uppercase;
+        st.lang = LANG_TR;
+        assert_eq!(transform_style("istanbul", &st), "İSTANBUL");
+        st.lang = LANG_EL;
+        assert_eq!(transform_style("καλημέρα", &st), "ΚΑΛΗΜΕΡΑ");
+        st.lang = 0;
+        st.text_transform = TextTransform::Capitalize;
+        assert_eq!(transform_style("(hello ǆx", &st), "(Hello ǅx");
+        st.text_transform_extra = 1;
+        assert_eq!(transform_style("ab c", &st), "Ａｂ Ｃ");
     }
 
     #[test]

@@ -211,8 +211,15 @@ impl<'a> Layouter<'a> {
         // text-indent widens the first line (percentages resolve against
         // a zero base here, as in browsers).
         let indent = cstyle.text_indent.resolve_or_zero(0.0);
-        line += indent;
-        run += indent;
+        // `hanging` indents all lines but the first; `each-line` the lines
+        // after forced breaks too.
+        let (each_line, hanging) = (cstyle.text_indent_flags & 1 != 0, cstyle.text_indent_flags & 2 != 0);
+        let soft_indent = if hanging { indent } else { 0.0 };
+        let forced_indent = if each_line != hanging { indent } else { 0.0 };
+        if !hanging {
+            line += indent;
+            run += indent;
+        }
         // Until the first word or atomic, break opportunities keep the
         // indent with the content that follows.
         let mut lead = true;
@@ -247,7 +254,7 @@ impl<'a> Layouter<'a> {
                     };
                     if *break_before && wraps && !lead {
                         min = min.max(run - trail);
-                        run = 0.0;
+                        run = soft_indent;
                     }
                     lead = false;
                     line += pending_space + width;
@@ -294,7 +301,7 @@ impl<'a> Layouter<'a> {
                     let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
                     if wraps && !lead {
                         min = min.max(run - trail);
-                        run = 0.0;
+                        run = soft_indent;
                     }
                     if line > 0.0 && !lead {
                         pending_space = *width;
@@ -316,7 +323,7 @@ impl<'a> Layouter<'a> {
                     let (cmin, cmax) = self.intrinsic(&mut b.children[*c]);
                     if container_wraps && before && !lead {
                         min = min.max(run - trail);
-                        run = 0.0;
+                        run = soft_indent;
                     }
                     run += cmin + ex;
                     if container_wraps {
@@ -336,9 +343,9 @@ impl<'a> Layouter<'a> {
                 Piece::Break => {
                     lead = false;
                     min = min.max(run - trail);
-                    run = 0.0;
+                    run = forced_indent;
                     max = max.max(line - trail);
-                    line = 0.0;
+                    line = forced_indent;
                     pending_space = 0.0;
                     trail = 0.0;
                 }

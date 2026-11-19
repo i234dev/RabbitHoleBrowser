@@ -1228,7 +1228,19 @@ fn auto_direction(doc: &Document, node: NodeId) -> Option<bool> {
 
 /// The [`ComputedStyle::lang`] code of a BCP 47 language tag.
 pub fn lang_code(tag: &str) -> u8 {
-    let primary = tag.split(['-', '_']).next().unwrap_or("").to_ascii_lowercase();
+    let mut parts = tag.split(['-', '_']);
+    let primary = parts.next().unwrap_or("").to_ascii_lowercase();
+    // An explicit script other than the language's own one disables its
+    // tailorings (tr-Cyrl is not cased like Turkish).
+    let script = parts.next().filter(|p| p.len() == 4 && p.bytes().all(|b| b.is_ascii_alphabetic())).map(|p| p.to_ascii_lowercase());
+    let own = match primary.as_str() {
+        "el" => "grek",
+        "ja" | "zh" | "ko" => "",
+        _ => "latn",
+    };
+    if script.as_deref().is_some_and(|s| !own.is_empty() && s != own) {
+        return 0;
+    }
     match primary.as_str() {
         "ja" => LANG_JA,
         "zh" => LANG_ZH,
@@ -1675,8 +1687,14 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "text-underline-position" => to.text_underline_position = from.text_underline_position,
         "text-decoration-inset" => to.text_decoration_inset = from.text_decoration_inset,
         "text-decoration-line" => to.text_decoration = from.text_decoration,
-        "text-transform" => to.text_transform = from.text_transform,
-        "text-indent" => to.text_indent = from.text_indent,
+        "text-transform" => {
+            to.text_transform = from.text_transform;
+            to.text_transform_extra = from.text_transform_extra;
+        }
+        "text-indent" => {
+            to.text_indent = from.text_indent;
+            to.text_indent_flags = from.text_indent_flags;
+        }
         "white-space" => to.white_space = from.white_space,
         "vertical-align" => to.vertical_align = from.vertical_align,
         "list-style" => {
@@ -2368,7 +2386,7 @@ const SINGLE_VALUE: &[&str] = &[
     "border-top-style", "border-right-style", "border-bottom-style", "border-left-style", "border-top-color",
     "border-right-color", "border-bottom-color", "border-left-color", "box-sizing", "top", "right", "bottom", "left",
     "color", "background-color", "opacity", "font-weight", "font-style", "line-height", "letter-spacing", "word-spacing",
-    "text-align", "text-transform", "text-indent", "white-space", "vertical-align", "list-style-type",
+    "text-align", "white-space", "vertical-align", "list-style-type",
     "list-style-position", "overflow-x", "overflow-y", "visibility", "z-index", "font-size",
     "border-collapse", "table-layout", "caption-side", "empty-cells",
 ];
@@ -2954,19 +2972,46 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "text-transform" => {
-            if let Some(kw) = values::ident(c0) {
-                style.text_transform = match kw.as_str() {
-                    "none" => TextTransform::None,
-                    "uppercase" => TextTransform::Uppercase,
-                    "lowercase" => TextTransform::Lowercase,
-                    "capitalize" => TextTransform::Capitalize,
-                    _ => return,
-                };
+            // none | [capitalize | uppercase | lowercase] || full-width ||
+            // full-size-kana
+            if comps.len() == 1 && values::is_ident(c0, "none") {
+                style.text_transform = TextTransform::None;
+                style.text_transform_extra = 0;
+                return;
             }
+            let (mut case, mut extra) = (None, 0u8);
+            for c in &comps {
+                match values::ident(c).as_deref() {
+                    Some("uppercase") if case.is_none() => case = Some(TextTransform::Uppercase),
+                    Some("lowercase") if case.is_none() => case = Some(TextTransform::Lowercase),
+                    Some("capitalize") if case.is_none() => case = Some(TextTransform::Capitalize),
+                    Some("full-width") if extra & 1 == 0 => extra |= 1,
+                    Some("full-size-kana") if extra & 2 == 0 => extra |= 2,
+                    _ => return,
+                }
+            }
+            style.text_transform = case.unwrap_or(TextTransform::None);
+            style.text_transform_extra = extra;
         }
         "text-indent" => {
-            if let Some(l) = resolve_len_no_auto(c0, ctx) {
+            // <length-percentage> && hanging? && each-line?
+            let mut len = None;
+            let mut flags = 0u8;
+            for c in &comps {
+                match values::ident(c).as_deref() {
+                    Some("each-line") if flags & 1 == 0 => flags |= 1,
+                    Some("hanging") if flags & 2 == 0 => flags |= 2,
+                    Some(_) => return,
+                    None if len.is_none() => match resolve_len_no_auto(c, ctx) {
+                        Some(l) => len = Some(l),
+                        None => return,
+                    },
+                    None => return,
+                }
+            }
+            if let Some(l) = len {
                 style.text_indent = l;
+                style.text_indent_flags = flags;
             }
         }
         "white-space" => {
