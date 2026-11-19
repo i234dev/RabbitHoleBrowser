@@ -39,9 +39,10 @@ was measured on source `fe3d71e` (0.1.34 JavaScript code) on 2026-11-18; the
 [0.1.11 run](../../docs/benchmarks/test262-2026-11-14-v0.1.11.json) on `baca2a7`
 stays as measured. The [functional framework checks](../../docs/benchmarks/frameworks-2026-11-14-v0.1.11.json)
 on source `b88c8ff`. Each retains its original date and conditions; a later build
-does not imply that those suites were repeated. The [CSS reftest run](../../docs/benchmarks/wpt-css-2026-11-19.md) was
-measured on 2026-11-19 on source `1cf6c03`; the [18 November run](../../docs/benchmarks/wpt-css-2026-11-18.md)
-on `68a3dd7` stays as measured. DOM and other WPT totals retain
+does not imply that those suites were repeated. The [CSS reftest run](../../docs/benchmarks/wpt-css-2026-11-19-v0.1.36.md) was
+measured on 2026-11-19 on source `890c370`, with the corrected multiple-reference
+rule; the earlier runs on `1cf6c03` ([0.1.35](../../docs/benchmarks/wpt-css-2026-11-19.md)) and
+`68a3dd7` ([18 November](../../docs/benchmarks/wpt-css-2026-11-18.md)) stay as measured. DOM and other WPT totals retain
 their previous measured baselines (2026-11-13).
 
 Historical records remain unchanged: [test262 on cc90](../../docs/benchmarks/test262-2026-11-14.json),
