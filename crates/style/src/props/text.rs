@@ -341,7 +341,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 style.line_clamp = Some(n as u32);
                 style.line_clamp_prefixed = true;
                 style.line_clamp_auto = false;
-                style.block_ellipsis = Some(Rc::from("\u{2026}"));
+                style.block_ellipsis = Some(default_block_ellipsis());
             }
         }
         // `line-clamp: none | auto | [<integer [1,∞]> || <'block-ellipsis'>]`
@@ -350,7 +350,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             if comps.len() == 1 && values::is_ident(c0, "none") {
                 style.line_clamp = None;
                 style.line_clamp_auto = false;
-                style.block_ellipsis = Some(Rc::from("\u{2026}"));
+                style.block_ellipsis = Some(default_block_ellipsis());
                 return true;
             }
             let mut count: Option<u32> = None;
@@ -376,7 +376,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                     if !auto && count.is_none() && ellipsis.is_none() {
                         auto = true;
                     } else if ellipsis.is_none() {
-                        ellipsis = Some(Some(Rc::from("\u{2026}")));
+                        ellipsis = Some(Some(default_block_ellipsis()));
                     } else {
                         return true;
                     }
@@ -390,7 +390,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                     return true;
                 }
                 auto = false;
-                ellipsis = Some(Some(Rc::from("\u{2026}")));
+                ellipsis = Some(Some(default_block_ellipsis()));
             }
             if count.is_none() && !auto {
                 // A block ellipsis alone: `line-clamp: "…"` has no clamp.
@@ -399,7 +399,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             style.line_clamp = Some(count.unwrap_or(u32::MAX));
             style.line_clamp_auto = auto;
             style.line_clamp_prefixed = false;
-            style.block_ellipsis = ellipsis.unwrap_or_else(|| Some(Rc::from("\u{2026}")));
+            style.block_ellipsis = ellipsis.unwrap_or_else(|| Some(default_block_ellipsis()));
         }
         "font-family" => {
             style.font_monospace_only = monospace_only(comps);

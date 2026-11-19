@@ -1029,9 +1029,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
 
     fn run(&mut self, pieces: &[Piece]) -> f32 {
         self.start_line(self.content_y);
-        for p in pieces {
-            if let Piece::Float(c) | Piece::Atomic(c, _) = p {
-                self.children[*c].clamped = false;
+        // Boxes hidden by an earlier clamped layout show again (only
+        // line-clamp sets the flag: skip the walk otherwise).
+        if self.max_lines.is_some() || self.children.iter().any(|c| c.clamped) {
+            for p in pieces {
+                if let Piece::Float(c) | Piece::Atomic(c, _) = p {
+                    self.children[*c].clamped = false;
+                }
             }
         }
         for (i, p) in pieces.iter().enumerate() {
@@ -1234,6 +1238,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
 
     /// Longest prefix of `text` fitting in `avail`. Forces at least one
     /// character when `force`.
+    /// Width of `text` in item `item`'s style (as `split_to_fit` measures).
+    fn text_width(&mut self, text: &str, item: usize) -> f32 {
+        let style = self.style(item).clone();
+        let font = self.lay.font_for(&style);
+        self.lay.measurer.width(font, style.font_size, text) + style.letter_spacing * text.chars().count() as f32
+    }
+
     fn split_to_fit(&mut self, text: &str, item: usize, avail: f32, force: bool) -> (String, f32, String) {
         let style = self.style(item).clone();
         let font = self.lay.font_for(&style);
@@ -1637,18 +1648,19 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 let only = self.cur.frags.len() == 1;
                 let mut fitted: Option<(String, f32)> = None;
                 let t = text.trim_end();
-                for (i, ch) in t.char_indices().rev() {
-                    if ch != ' ' {
-                        continue;
-                    }
-                    let head = t[..i].trim_end();
-                    if head.is_empty() {
-                        continue;
-                    }
-                    let w = self.split_to_fit(head, item, f32::MAX, false).1;
+                // Prefix widths grow with the prefix: binary search the
+                // last break (space) whose head fits.
+                let breaks: Vec<usize> = t.char_indices().filter(|&(i, ch)| ch == ' ' && !t[..i].trim_end().is_empty()).map(|(i, _)| i).collect();
+                let (mut lo, mut hi) = (0usize, breaks.len());
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    let head = t[..breaks[mid]].trim_end();
+                    let w = self.text_width(head, item);
                     if w <= avail + 0.01 {
                         fitted = Some((head.to_string(), w));
-                        break;
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
                     }
                 }
                 match fitted {
@@ -1675,7 +1687,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // No space before the ellipsis.
             if head.ends_with(' ') && !head.trim().is_empty() {
                 let trimmed = head.trim_end().to_string();
-                head_w = self.split_to_fit(&trimmed, item, f32::MAX, false).1;
+                head_w = self.text_width(&trimmed, item);
                 head = trimmed;
             }
             if head.trim().is_empty() {

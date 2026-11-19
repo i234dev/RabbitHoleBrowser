@@ -907,6 +907,16 @@ impl FontFeatureProps {
     }
 }
 
+thread_local! {
+    static DEFAULT_BLOCK_ELLIPSIS: std::rc::Rc<str> = std::rc::Rc::from("\u{2026}");
+}
+
+/// The shared `…` of `block-ellipsis: auto` (initial styles are built per
+/// element: no allocation each time).
+pub fn default_block_ellipsis() -> std::rc::Rc<str> {
+    DEFAULT_BLOCK_ELLIPSIS.with(|e| e.clone())
+}
+
 /// The font metric `font-size-adjust` keeps constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontSizeAdjust {
@@ -1894,7 +1904,7 @@ impl ComputedStyle {
             contain_intrinsic_height: None,
             line_clamp_prefixed: false,
             line_clamp_auto: false,
-            block_ellipsis: Some(std::rc::Rc::from("\u{2026}")),
+            block_ellipsis: Some(default_block_ellipsis()),
             webkit_box: false,
             font_family_list: Vec::new(),
             font_monospace_only: false,
