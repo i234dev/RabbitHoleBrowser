@@ -960,6 +960,9 @@ pub enum FilterOp {
 pub enum ShapeBox {
     Margin,
     Border,
+    /// `half-border-box` (`border-shape`): the border box inset by half
+    /// the border widths.
+    HalfBorder,
     Padding,
     Content,
     Fill,
@@ -1026,6 +1029,19 @@ pub enum BasicShape {
     /// `path()`: SVG path data in px from the box origin.
     Path { evenodd: bool, path: Vec<rabbithole_gfx::PathSeg> },
     Shape { evenodd: bool, from: (Length, Length), cmds: Vec<ShapeCommand> },
+}
+
+/// `corner-shape` of one corner (CSS Borders 4 §5.2): the curve drawn
+/// between the ends of the corner's border radius.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CornerShape {
+    #[default]
+    Round,
+    Square,
+    Bevel,
+    Notch,
+    Scoop,
+    Squircle,
 }
 
 /// Computed `clip-path` (other than `none`).
@@ -1349,6 +1365,11 @@ pub struct ComputedStyle {
     /// Names of the properties declared `!important` for an element with
     /// animations (they do not override them); `None` otherwise.
     pub important: Option<std::rc::Rc<Vec<String>>>,
+    /// `border-shape` with a single shape: the box's background and border
+    /// are clipped to it (`None` = `none`).
+    pub border_shape: Option<std::sync::Arc<ClipPath>>,
+    /// `corner-shape` (top-left, top-right, bottom-right, bottom-left).
+    pub corner_shape: [CornerShape; 4],
     /// Legacy `clip: rect(top, right, bottom, left)` offsets from the
     /// border box origin (`Length::Auto` = the box edge); `None` = `auto`.
     /// Only absolutely positioned boxes are clipped.
@@ -1597,6 +1618,8 @@ impl ComputedStyle {
             backdrop_filters: Vec::new(),
             clip_path: None,
             clip_rect: None,
+            border_shape: None,
+            corner_shape: [CornerShape::Round; 4],
             important: None,
             clip_overflow_text: false,
             text_overflow: TextOverflow::Clip,

@@ -86,6 +86,40 @@ fn max_px_radius(radii: &[(Length, Length); 4], font_size: f32) -> f32 {
     m
 }
 
+/// A `<corner-shape-value>`; `superellipse(k)` maps to the nearest keyword.
+fn corner_shape(c: &[Token]) -> Option<CornerShape> {
+    if let Some(k) = values::ident(c) {
+        return Some(match k.as_str() {
+            "round" => CornerShape::Round,
+            "square" => CornerShape::Square,
+            "bevel" => CornerShape::Bevel,
+            "notch" => CornerShape::Notch,
+            "scoop" => CornerShape::Scoop,
+            "squircle" => CornerShape::Squircle,
+            _ => return None,
+        });
+    }
+    if super::fn_name(c)? != "superellipse" {
+        return None;
+    }
+    let args = super::fn_args(c);
+    let [arg] = args.as_slice() else { return None };
+    let [a] = arg.as_slice() else { return None };
+    let k = match values::ident(a).as_deref() {
+        Some("infinity") => f32::INFINITY,
+        Some("-infinity") => f32::NEG_INFINITY,
+        _ => values::number(a)?,
+    };
+    Some(match k {
+        k if k >= 4.0 => CornerShape::Square,
+        k if k >= 1.5 => CornerShape::Squircle,
+        k if k >= 0.5 => CornerShape::Round,
+        k if k > -0.5 => CornerShape::Bevel,
+        k if k > -4.0 => CornerShape::Scoop,
+        _ => CornerShape::Notch,
+    })
+}
+
 fn radius_len(c: &[Token], ctx: &LengthContext) -> Option<Length> {
     let l = super::len_no_auto(c, ctx)?;
     Some(match l {
@@ -422,6 +456,27 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
         }
         "clip-path" | "-webkit-clip-path" => super::clip_path::apply(comps, style, ctx),
+        "border-shape" => {
+            // A single shape (the two-shape form is not supported).
+            match super::clip_path::parse_shape_value(comps, ctx, ShapeBox::HalfBorder) {
+                Some(None) => style.border_shape = None,
+                Some(Some(cp @ ClipPath::Shape(..))) => style.border_shape = Some(std::sync::Arc::new(cp)),
+                _ => {}
+            }
+        }
+        "corner-shape" => {
+            let kws: Option<Vec<CornerShape>> = comps.iter().map(|c| corner_shape(c)).collect();
+            if let Some(v) = kws.as_deref().and_then(super::four_corners) {
+                style.corner_shape = v;
+            }
+        }
+        "corner-top-left-shape" | "corner-top-right-shape" | "corner-bottom-right-shape" | "corner-bottom-left-shape" => {
+            if let ([c], Some(i)) = (comps, ["corner-top-left-shape", "corner-top-right-shape", "corner-bottom-right-shape", "corner-bottom-left-shape"].iter().position(|n| *n == name)) {
+                if let Some(k) = corner_shape(c) {
+                    style.corner_shape[i] = k;
+                }
+            }
+        }
         "clip" => {
             if let Some(v) = super::clip_path::parse_clip_rect(comps, ctx) {
                 style.clip_rect = v;

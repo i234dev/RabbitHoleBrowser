@@ -135,3 +135,19 @@ fn legacy_clip_applies_to_absolutely_positioned_boxes() {
     // Not absolutely positioned: not clipped.
     assert_eq!(rgb(&e, &p, 25, 200), GREEN);
 }
+
+#[test]
+fn corner_shape_and_border_shape_clip_the_background() {
+    let mut e = engine(false);
+    let p = load(
+        &mut e,
+        r#"<!doctype html><style>body { margin: 0 } div { width: 100px; height: 100px; background: green }
+        #a { border-radius: 50px; corner-shape: bevel } #b { border-shape: inset(20px) }</style><div id=a></div><div id=b></div>"#,
+    );
+    // Bevelled corners: a diamond.
+    assert_eq!(rgb(&e, &p, 50, 50), GREEN);
+    assert_eq!(rgb(&e, &p, 10, 10), WHITE);
+    assert_eq!(rgb(&e, &p, 90, 90), WHITE);
+    assert_eq!(rgb(&e, &p, 50, 150), GREEN);
+    assert_eq!(rgb(&e, &p, 10, 110), WHITE);
+}

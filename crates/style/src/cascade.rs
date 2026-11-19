@@ -1720,6 +1720,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.creates_stacking_context = from.creates_stacking_context;
         }
         "clip" => to.clip_rect = from.clip_rect,
+        "border-shape" => to.border_shape = from.border_shape.clone(),
+        "corner-shape" | "corner-top-left-shape" | "corner-top-right-shape" | "corner-bottom-right-shape" | "corner-bottom-left-shape" => {
+            to.corner_shape = from.corner_shape
+        }
         "clip-path" | "-webkit-clip-path" => {
             to.clip_path = from.clip_path.clone();
             to.creates_stacking_context = from.creates_stacking_context;

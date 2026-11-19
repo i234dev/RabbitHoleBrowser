@@ -295,3 +295,50 @@ fn shape_fn_path(from: (Length, Length), cmds: &[ShapeCommand], rb: Rect) -> Vec
     path
 }
 
+
+/// The outline of a box whose rounded corners have `corner-shape`s (CSS
+/// Borders 4 §5.2), clockwise from the top-left corner's end.
+/// Bézier approximation constant for a quarter ellipse.
+const KAPPA: f32 = 0.552_284_8;
+
+pub fn corner_shaped_path(rect: Rect, radii: Radii, shapes: [crate::computed::CornerShape; 4]) -> Vec<PathSeg> {
+    use crate::computed::CornerShape;
+    let r = clamp_radii(rect, radii);
+    let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right(), rect.bottom());
+    // (start, corner, end) of each corner, clockwise.
+    let corners = [
+        (Point::new(x0, y0 + r[0].1), Point::new(x0, y0), Point::new(x0 + r[0].0, y0)),
+        (Point::new(x1 - r[1].0, y0), Point::new(x1, y0), Point::new(x1, y0 + r[1].1)),
+        (Point::new(x1, y1 - r[2].1), Point::new(x1, y1), Point::new(x1 - r[2].0, y1)),
+        (Point::new(x0 + r[3].0, y1), Point::new(x0, y1), Point::new(x0, y1 - r[3].1)),
+    ];
+    let lerp = |a: Point, b: Point, t: f32| Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+    let mut p = vec![PathSeg::MoveTo(corners[0].2)];
+    for i in [1, 2, 3, 0] {
+        let (s, c, e) = corners[i];
+        p.push(PathSeg::LineTo(s));
+        if r[i].0 <= 0.0 || r[i].1 <= 0.0 {
+            p.push(PathSeg::LineTo(c));
+            p.push(PathSeg::LineTo(e));
+            continue;
+        }
+        // The corner's inner point (centre of the round corner).
+        let o = Point::new(s.x + e.x - c.x, s.y + e.y - c.y);
+        match shapes[i] {
+            CornerShape::Round => p.push(PathSeg::CubicTo(lerp(s, c, KAPPA), lerp(e, c, KAPPA), e)),
+            CornerShape::Squircle => p.push(PathSeg::CubicTo(lerp(s, c, 0.8), lerp(e, c, 0.8), e)),
+            CornerShape::Square => {
+                p.push(PathSeg::LineTo(c));
+                p.push(PathSeg::LineTo(e));
+            }
+            CornerShape::Bevel => p.push(PathSeg::LineTo(e)),
+            CornerShape::Notch => {
+                p.push(PathSeg::LineTo(o));
+                p.push(PathSeg::LineTo(e));
+            }
+            CornerShape::Scoop => p.push(PathSeg::CubicTo(lerp(s, o, KAPPA), lerp(e, o, KAPPA), e)),
+        }
+    }
+    p.push(PathSeg::Close);
+    p
+}

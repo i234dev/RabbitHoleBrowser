@@ -95,6 +95,9 @@ fn main() {
                 D::PushLayer(r) => eprintln!("{i}: PushLayer {r:?}"),
                 D::PushClip(r) => eprintln!("{i}: PushClip {r:?}"),
                 D::PushClipRounded(r, _) => eprintln!("{i}: PushClipRounded {r:?}"),
+                D::PushClipPath { bounds, rounded, .. } => eprintln!("{i}: PushClipPath {bounds:?} {rounded:?}"),
+                D::PopClip => eprintln!("{i}: PopClip"),
+                D::Rect { rect, .. } | D::RectRadii { rect, .. } => eprintln!("{i}: Fill {rect:?}"),
                 _ => {}
             }
         }
