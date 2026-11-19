@@ -174,3 +174,13 @@ fn right_to_left_inline_absolutes_end_at_their_static_position() {
     let a = fx.rect(&t, "a");
     assert!(close(a.y, 140.0) && close(a.h, 10.0), "{a:?}\n{}", t.dump());
 }
+
+#[test]
+fn orthogonal_flow_in_an_auto_sized_container_fills_the_icb_inline_size() {
+    // The vertical container's width (the horizontal box's inline axis)
+    // is indefinite: the available size is the viewport width (800px).
+    let fx = Fx::new("<div style='writing-mode:vertical-rl'><div id=h style='writing-mode:horizontal-tb'><span style='display:inline-block;width:500px'></span> <span style='display:inline-block;width:500px'></span></div></div>", RESET);
+    let t = fx.layout();
+    let h = fx.rect(&t, "h");
+    assert!(close(h.w, 800.0), "{h:?}\n{}", t.dump());
+}

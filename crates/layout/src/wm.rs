@@ -284,10 +284,12 @@ impl<'a> Layouter<'a> {
         let is_root = w.children.first().and_then(|r| r.node).is_some_and(|n| Some(n) == self.ctx.doc.html_element());
         let kind = w.wm_kind;
         let rl = kind == WmKind::Cw;
-        let vp_h = self.ctx.viewport_height.max(1.0);
-        // The available inline size is the physical height available.
-        let avail = if is_root { cb.height.unwrap_or(vp_h) } else { (cb.height.unwrap_or(vp_h) - mt - mb).max(0.0) };
         let Some(r) = w.children.first_mut() else { return };
+        // The available inline size is the wrapper's height available;
+        // without a definite one, the initial containing block's size in
+        // the orthogonal box's inline axis (CSS Writing Modes 3 §7.3).
+        let vp_h = icb_inline_size(self.ctx, &r.style);
+        let avail = if is_root { cb.height.unwrap_or(vp_h) } else { (cb.height.unwrap_or(vp_h) - mt - mb).max(0.0) };
         let inline_auto = r.style.width.is_auto();
         let pb_inline = r.style.padding.left.resolve_or_zero(cbw) + r.style.padding.right.resolve_or_zero(cbw) + r.style.border_width.left + r.style.border_width.right;
         let lmode = match mode {
@@ -345,8 +347,8 @@ impl<'a> Layouter<'a> {
     /// when laid out in the viewport height.
     pub(crate) fn wm_wrapper_intrinsic(&mut self, w: &mut LayoutBox) -> (f32, f32) {
         let _probe = self.grid_publication.probe();
-        let vp_h = self.ctx.viewport_height.max(1.0);
         let Some(r) = w.children.first_mut() else { return (0.0, 0.0) };
+        let vp_h = icb_inline_size(self.ctx, &r.style);
         let lcb = Cb { x: 0.0, width: vp_h, height: None };
         let mut bfc = Bfc::new();
         self.forced_content_height = None;
@@ -355,6 +357,12 @@ impl<'a> Layouter<'a> {
         let h = r.rect.h;
         (h, h)
     }
+}
+
+/// The initial containing block's size in the inline axis of a box of
+/// (physical) style `s`: the viewport height for vertical text.
+fn icb_inline_size(ctx: &crate::LayoutContext, s: &ComputedStyle) -> f32 {
+    if s.writing_mode.is_vertical() { ctx.viewport_height.max(1.0) } else { ctx.viewport_width.max(1.0) }
 }
 
 /// Map a physical rectangle into the logical space of a wrapper.
