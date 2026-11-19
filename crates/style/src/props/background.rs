@@ -312,7 +312,7 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
     }
     if let Some(f) = super::fn_name(c) {
         if f.ends_with("image-set") {
-            return Some(parse_image_set(c, ctx).map(BackgroundImage::Url).unwrap_or(BackgroundImage::None));
+            return parse_image_set_value(c, current, ctx);
         }
         if f == "image" || f == "cross-fade" {
             for arg in super::fn_args(c) {
@@ -329,6 +329,79 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
         }
     }
     None
+}
+
+/// `image-set()` as an image: candidates are URLs, strings or gradients
+/// with an optional resolution (`<number>x`, `dppx`, `dpi`, `dpcm`) and
+/// `type()`. A negative or zero resolution invalidates the whole value.
+/// The 1x (smallest resolution ≥ 1, else densest) supported candidate wins.
+fn parse_image_set_value(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<BackgroundImage> {
+    let mut best: Option<(f32, BackgroundImage)> = None;
+    let mut fallback: Option<(f32, BackgroundImage)> = None;
+    for arg in super::fn_args(c) {
+        let mut image = None;
+        let mut res = None;
+        let mut supported = true;
+        for t in arg {
+            if image.is_none() {
+                if let Some(u) = crate::cascade::url_of(t) {
+                    image = Some(BackgroundImage::Url(ctx.url(&u)));
+                    continue;
+                }
+                if let [Token::String(s)] = t {
+                    image = Some(BackgroundImage::Url(ctx.url(s)));
+                    continue;
+                }
+                if let Some(g) = parse_gradient(t, current, ctx) {
+                    image = Some(g);
+                    continue;
+                }
+            }
+            let resolution = |tok: &Token| match tok {
+                Token::Dimension(v, unit) => match unit.to_ascii_lowercase().as_str() {
+                    "x" | "dppx" => Some(*v),
+                    "dpi" => Some(*v / 96.0),
+                    "dpcm" => Some(*v * 2.54 / 96.0),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let r = match t {
+                [tok @ Token::Dimension(..)] => Some(resolution(tok)),
+                [Token::Function(f), ..] if f.eq_ignore_ascii_case("calc") || f.eq_ignore_ascii_case("min") || f.eq_ignore_ascii_case("max") || f.eq_ignore_ascii_case("clamp") => {
+                    Some(super::math_value(t, &resolution))
+                }
+                _ => None,
+            };
+            if let Some(r) = r {
+                let Some(r) = r.filter(|r| *r > 0.0) else { return None };
+                if res.is_some() {
+                    return None;
+                }
+                res = Some(r);
+            } else if super::fn_name(t).as_deref() == Some("type") {
+                match t.get(1) {
+                    Some(Token::String(m)) => supported = rabbithole_gfx::image::supports_mime(m),
+                    _ => return None,
+                }
+            } else {
+                return None;
+            }
+        }
+        let image = image?;
+        if !supported {
+            continue;
+        }
+        let res = res.unwrap_or(1.0);
+        if res + 1e-3 >= 1.0 {
+            if best.as_ref().map(|(r, _)| res < *r).unwrap_or(true) {
+                best = Some((res, image));
+            }
+        } else if fallback.as_ref().map(|(r, _)| res > *r).unwrap_or(true) {
+            fallback = Some((res, image));
+        }
+    }
+    Some(best.or(fallback).map(|(_, i)| i).unwrap_or(BackgroundImage::None))
 }
 
 /// `image-set()`: drop candidates whose `type()` we cannot decode, then
@@ -511,6 +584,11 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
         }
         if values::is_ident(c, "text") {
             out.clip_text = true;
+            i += 1;
+            continue;
+        }
+        if values::is_ident(c, "border-area") {
+            out.clip_border_area = true;
             i += 1;
             continue;
         }
@@ -858,6 +936,39 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
     if name.contains("mask") {
         return apply_mask(name, comps, style, ctx);
     }
+    if name == "object-view-box" {
+        // none | inset() | rect() | xywh(): stored as insets.
+        if comps.len() != 1 {
+            return true;
+        }
+        if values::is_ident(comps[0], "none") {
+            style.object_view_box = None;
+            return true;
+        }
+        let Some(f) = super::fn_name(comps[0]) else { return true };
+        let args: Vec<&[Token]> = super::fn_args(comps[0]).into_iter().flatten().collect();
+        // Lengths up to an optional `round` part.
+        let end = args.iter().position(|c| values::is_ident(c, "round")).unwrap_or(args.len());
+        let lens: Option<Vec<Length>> = args[..end].iter().map(|c| {
+            if values::is_ident(c, "auto") { Some(Length::Auto) } else { super::len_no_auto(c, ctx) }
+        }).collect();
+        let Some(lens) = lens else { return true };
+        let neg = |l: &Length| matches!(l, Length::Px(v) | Length::Percent(v) if *v < 0.0);
+        let inset = match (f.as_str(), lens.len()) {
+            ("inset", 1..=4) if !lens.iter().any(|l| l.is_auto()) => four(&lens),
+            // rect(top right bottom left): edges from the top-left corner.
+            ("rect", 4) => Some([lens[0], complement(lens[1]), complement(lens[2]), lens[3]]),
+            // xywh(x y w h): w and h must not be negative.
+            ("xywh", 4) if !neg(&lens[2]) && !neg(&lens[3]) && !lens.iter().any(|l| l.is_auto()) => {
+                Some([lens[1], complement(add(lens[0], lens[2])), complement(add(lens[1], lens[3])), lens[0]])
+            }
+            _ => None,
+        };
+        if let Some(i) = inset {
+            style.object_view_box = Some(i);
+        }
+        return true;
+    }
     if name == "image-orientation" {
         // from-image | none | [<angle> || flip] (angles are legacy: treated
         // as from-image).
@@ -1016,22 +1127,25 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
         }
         "background-clip" => {
-            let vals: Option<Vec<Option<BoxArea>>> = values::split_commas(comps)
+            let vals: Option<Vec<(Option<BoxArea>, bool)>> = values::split_commas(comps)
                 .iter()
                 .map(|l| {
                     if l.len() != 1 {
                         return None;
                     }
                     if values::is_ident(l[0], "text") {
-                        Some(None)
+                        Some((None, false))
+                    } else if values::is_ident(l[0], "border-area") {
+                        Some((None, true))
                     } else {
-                        parse_box(l[0]).map(Some)
+                        parse_box(l[0]).map(|b| (Some(b), false))
                     }
                 })
                 .collect();
             if let Some(v) = vals {
-                set_each(style, v, |l, b| {
-                    l.clip_text = b.is_none();
+                set_each(style, v, |l, (b, border_area)| {
+                    l.clip_text = b.is_none() && !border_area;
+                    l.clip_border_area = border_area;
                     l.clip = b.unwrap_or(BoxArea::BorderBox);
                 });
             }
@@ -1040,4 +1154,32 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         _ => return false,
     }
     true
+}
+
+/// `100% - l` (an edge position turned into an inset from the far edge).
+fn complement(l: Length) -> Length {
+    match l {
+        Length::Auto => Length::Percent(0.0),
+        Length::Px(v) => Length::Calc(-v, 100.0),
+        Length::Percent(p) => Length::Percent(100.0 - p),
+        Length::Calc(px, pct) => Length::Calc(-px, 100.0 - pct),
+        other => other,
+    }
+}
+
+/// `a + b` for lengths/percentages.
+fn add(a: Length, b: Length) -> Length {
+    let parts = |l: Length| match l {
+        Length::Px(v) => (v, 0.0),
+        Length::Percent(p) => (0.0, p),
+        Length::Calc(px, pct) => (px, pct),
+        _ => (0.0, 0.0),
+    };
+    let (ap, aq) = parts(a);
+    let (bp, bq) = parts(b);
+    match (ap + bp, aq + bq) {
+        (px, pct) if pct == 0.0 => Length::Px(px),
+        (px, pct) if px == 0.0 => Length::Percent(pct),
+        (px, pct) => Length::Calc(px, pct),
+    }
 }

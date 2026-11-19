@@ -892,3 +892,18 @@ fn font_feature_properties() {
     // `em` keeps the computed size.
     assert_eq!(s.width, Length::Px(20.0));
 }
+
+#[test]
+fn object_view_box_and_background_clip_values() {
+    assert_eq!(one("object-view-box: inset(10% 20px)").object_view_box, Some([Length::Percent(10.0), Length::Px(20.0), Length::Percent(10.0), Length::Px(20.0)]));
+    // xywh(x y w h) → insets from each edge.
+    assert_eq!(one("object-view-box: xywh(10px 20px 30% 40%)").object_view_box, Some([Length::Px(20.0), Length::Calc(-10.0, 70.0), Length::Calc(-20.0, 60.0), Length::Px(10.0)]));
+    assert_eq!(one("object-view-box: rect(1px 50% 60% 2px)").object_view_box, Some([Length::Px(1.0), Length::Percent(50.0), Length::Percent(40.0), Length::Px(2.0)]));
+    assert_eq!(one("object-view-box: xywh(0 0 -1px 5px)").object_view_box, None);
+    let s = one("background: red linear-gradient(red, blue) border-area; background-attachment: local");
+    let l = &s.background_layers[0];
+    assert!(l.clip_border_area && !l.clip_text && l.local);
+    let s = one("-webkit-background-clip: text; -webkit-text-fill-color: transparent");
+    assert!(s.background_layers[0].clip_text);
+    assert_eq!(s.text_fill_color, Some(rabbithole_gfx::Color::TRANSPARENT));
+}

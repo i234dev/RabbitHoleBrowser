@@ -1898,6 +1898,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "font-variation-settings" => to.font_variation_settings = from.font_variation_settings.clone(),
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
+        "object-view-box" => to.object_view_box = from.object_view_box,
         "aspect-ratio" => { to.aspect_ratio = from.aspect_ratio; to.aspect_ratio_auto = from.aspect_ratio_auto; }
         "image-rendering" => to.image_rendering_pixelated = from.image_rendering_pixelated,
         "image-orientation" => to.image_orientation_none = from.image_orientation_none,

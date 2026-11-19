@@ -980,6 +980,8 @@ pub struct BackgroundLayer {
     pub clip: BoxArea,
     /// `background-clip: text`: painted only inside the box's text.
     pub clip_text: bool,
+    /// `background-clip: border-area`: painted only where the border is.
+    pub clip_border_area: bool,
     /// `background-attachment: fixed`
     pub fixed: bool,
     /// `background-attachment: local`
@@ -996,6 +998,7 @@ impl Default for BackgroundLayer {
             origin: BoxArea::PaddingBox,
             clip: BoxArea::BorderBox,
             local: false,
+            clip_border_area: false,
             clip_text: false,
             fixed: false,
         }
@@ -1627,6 +1630,9 @@ pub struct ComputedStyle {
     // ---- replaced elements / sizing
     pub object_fit: ObjectFit,
     pub object_position: (Length, Length),
+    /// `object-view-box` (CSS Images 5): the part of the image shown, as
+    /// insets (top, right, bottom, left) from its natural edges.
+    pub object_view_box: Option<[Length; 4]>,
     pub aspect_ratio: Option<f32>,
     /// `aspect-ratio: auto <ratio>`: a replaced element's natural ratio
     /// wins, and the ratio relates content boxes.
@@ -1836,6 +1842,7 @@ impl ComputedStyle {
             font_size_unadjusted: None,
             font_features: None,
             font_variation_settings: Vec::new(),
+            object_view_box: None,
             object_fit: ObjectFit::Fill,
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
             aspect_ratio: None,

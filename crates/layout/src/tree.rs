@@ -470,6 +470,12 @@ impl LayoutBox {
         }
     }
 
+    /// A scroll container that users can scroll (not `overflow: hidden`).
+    pub fn user_scrollable(&self) -> bool {
+        use rabbithole_style::Overflow::{Auto, Scroll};
+        self.scroll_container && (matches!(self.style.overflow_x, Auto | Scroll) || matches!(self.style.overflow_y, Auto | Scroll))
+    }
+
     fn overflow_contains(&self, x: f32, y: f32) -> bool {
         let (clip_x, clip_y) = self.overflow_clip_axes();
         (!clip_x || (x >= self.rect.x && x < self.rect.right()))
@@ -804,7 +810,8 @@ impl LayoutTree {
             if b.fixed
                 || b.style.position == rabbithole_style::Position::Sticky
                 || b.style.background_layers.iter().any(|l| l.fixed)
-                || b.scroll_container
+                || b.user_scrollable()
+                || b.scroll_container && b.scroll_offset != (0.0, 0.0)
             {
                 return true;
             }
@@ -1060,7 +1067,7 @@ impl LayoutTree {
                     return Some(s);
                 }
             }
-            if b.scroll_container && b.rect.contains(x, y) {
+            if b.user_scrollable() && b.rect.contains(x, y) {
                 let pr = b.padding_rect();
                 if b.scroll_height > pr.h + 0.5 || b.scroll_width > pr.w + 0.5 {
                     return Some(ScrollInfo {

@@ -2283,11 +2283,14 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
             }
         }
         for c in &bx.children {
-            if c.fixed {
+            // Fixed boxes, and boxes hidden after a line-clamp point, add no
+            // scrollable overflow; a clamped container cuts its content.
+            if c.fixed || c.clamped {
                 continue;
             }
             add(u, &c.rect, dx, dy);
-            if !c.clips {
+            let clamp_cut = c.style.line_clamp.is_some() && c.children.iter().any(|x| x.clamped);
+            if !c.clips && !clamp_cut {
                 walk(c, u, dx, dy);
             }
         }

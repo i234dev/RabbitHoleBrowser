@@ -21,6 +21,18 @@ pub(crate) fn oriented(img: &Arc<Image>, style: &ComputedStyle) -> Arc<Image> {
     }
 }
 
+/// The `object-view-box` of an image of natural size `natural`: the shown
+/// region in natural CSS px (None: the whole image).
+pub(crate) fn object_view_box(style: &ComputedStyle, natural: (f32, f32)) -> Option<Rect> {
+    let [t, r, b, l] = style.object_view_box?;
+    let (w, h) = natural;
+    let at = |v: Length, base: f32| if v.is_auto() { 0.0 } else { v.resolve_or_zero(base) };
+    let (top, right, bottom, left) = (at(t, h), at(r, w), at(b, h), at(l, w));
+    // An empty view box is ignored.
+    let (vw, vh) = (w - left - right, h - top - bottom);
+    (vw > 0.0 && vh > 0.0).then(|| Rect::new(left, top, vw, vh))
+}
+
 /// The three boxes of an element plus its radii.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BoxGeometry {
@@ -244,10 +256,10 @@ fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLay
     // through the scrollport (CSS Backgrounds 3 §3.6).
     if layer.local && !layer.fixed {
         if let Some(scrolled) = geom.scrolled() {
+            // The scrolled contents never show under the borders.
             let port = area_rect(geom, BoxArea::PaddingBox);
-            let clip = if layer.clip == BoxArea::BorderBox { geom.border } else { port };
-            let radii = area_radii(geom, if layer.clip == BoxArea::BorderBox { BoxArea::BorderBox } else { BoxArea::PaddingBox });
-            list.items.push(if has_radii(&radii) { DisplayItem::PushClipRounded(clip, radii) } else { DisplayItem::PushClip(clip) });
+            let radii = area_radii(geom, BoxArea::PaddingBox);
+            list.items.push(if has_radii(&radii) { DisplayItem::PushClipRounded(port, radii) } else { DisplayItem::PushClip(port) });
             let mut inner = layer.clone();
             inner.local = false;
             if inner.clip == BoxArea::BorderBox {

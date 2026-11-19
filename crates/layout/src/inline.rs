@@ -813,7 +813,22 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     fn run(&mut self, pieces: &[Piece]) -> f32 {
         self.start_line(self.content_y);
         for p in pieces {
+            if let Piece::Float(c) | Piece::Atomic(c) = p {
+                self.children[*c].clamped = false;
+            }
+        }
+        for (i, p) in pieces.iter().enumerate() {
             if self.done {
+                // After the clamp point: floats and atomic inlines that were
+                // not placed are hidden.
+                for q in &pieces[i..] {
+                    if let Piece::Float(c) | Piece::Atomic(c) = q {
+                        self.children[*c].clamped = true;
+                    }
+                }
+                for c in std::mem::take(&mut self.pending_floats) {
+                    self.children[c].clamped = true;
+                }
                 break;
             }
             match p {

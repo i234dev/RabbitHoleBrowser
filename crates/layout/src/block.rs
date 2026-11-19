@@ -107,6 +107,9 @@ pub(crate) struct Layouter<'a> {
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
     font_cache: HashMap<(String, u16, bool, u16), FontId>,
+    /// (face, feature props by address, inter-character) → feature variant
+    /// (the computed styles outlive a layout pass).
+    feature_cache: HashMap<(usize, usize, bool), FontId>,
     /// Containing blocks of absolutely positioned grid children placed by
     /// grid lines (their grid area), set by the grid layout.
     pub(crate) abs_cb: HashMap<rabbithole_dom::NodeId, Rect>,
@@ -351,6 +354,7 @@ impl<'a> Layouter<'a> {
             flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
+            feature_cache: HashMap::new(),
             abs_cb: HashMap::new(),
             center_blocks: false,
             cb_rtl: false,
@@ -401,6 +405,10 @@ impl<'a> Layouter<'a> {
         if !self.font_ext || style.font_features.is_none() && !style.text_justify_inter_character {
             return font;
         }
+        let key = (font.0, style.font_features.as_ref().map_or(0, |f| std::rc::Rc::as_ptr(f) as usize), style.text_justify_inter_character);
+        if let Some(&f) = self.feature_cache.get(&key) {
+            return f;
+        }
         // OpenType features (font-feature-settings, font-variant-*); text
         // justified between characters forms no ligatures (CSS Text 3 §7.3).
         let mut feats = Vec::new();
@@ -413,7 +421,9 @@ impl<'a> Layouter<'a> {
                 feats.push(g);
             }
         }
-        self.ctx.fonts.with_features(font, &feats)
+        let f = self.ctx.fonts.with_features(font, &feats);
+        self.feature_cache.insert(key, f);
+        f
     }
 
     fn font_for_family(&mut self, style: &ComputedStyle) -> FontId {
@@ -958,12 +968,15 @@ impl<'a> Layouter<'a> {
             return;
         }
         let style = b.style.clone();
-        b.scroll_container = matches!(style.overflow_x, rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Scroll)
-            || matches!(style.overflow_y, rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Scroll);
+        // `overflow: hidden` boxes are scroll containers too: scripts can
+        // scroll them (`scrollTop`), users cannot (see `user_scrollable`).
+        use rabbithole_style::Overflow::{Auto, Hidden, Scroll};
+        b.scroll_container = matches!(style.overflow_x, Auto | Scroll | Hidden) || matches!(style.overflow_y, Auto | Scroll | Hidden);
         let pr = b.padding_rect();
         let mut max_r = pr.right();
         let mut max_b = pr.bottom();
-        for c in &b.children {
+        // Boxes hidden after a line-clamp point add no scrollable overflow.
+        for c in b.children.iter().filter(|c| !c.clamped) {
             let r = content_bounds(c);
             max_r = max_r.max(r.right());
             max_b = max_b.max(r.bottom());
@@ -1038,8 +1051,11 @@ impl<'a> Layouter<'a> {
             h = self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
             state = self.clamp.take().unwrap_or_default();
         }
-        if state.hit() {
-            // The box ends after the last line shown.
+        if state.hit() && b.formatting == Formatting::Inline {
+            // The box ends after the last line shown. (Block children after
+            // the clamp point were left out of a block container's height,
+            // which keeps the end padding and borders of the boxes holding
+            // the clamp line.)
             h = state.bottom.map_or(0.0, |bottom| (bottom - b.content_rect.y).max(0.0));
             b.collapsed_bottom_margin = b.margin.bottom;
             b.bottom_margins = Margins::of(b.margin.bottom).pair();
@@ -1492,7 +1508,11 @@ impl<'a> Layouter<'a> {
         // Natural size: the decoded image (in CSS px), else the `width` /
         // `height` attributes (which also give the aspect ratio before the
         // image arrives, so loading causes no layout shift).
-        let natural = b.image.as_ref().filter(|i| !i.broken).map(|img| img.natural_size());
+        // `object-view-box` makes the shown region the natural size.
+        let natural = b.image.as_ref().filter(|i| !i.broken).map(|img| {
+            let n = img.natural_size();
+            crate::background::object_view_box(style, n).map_or(n, |v| (v.w, v.h))
+        });
         let fallback = if let Some(text) = b.text.as_deref().filter(|_| b.image.is_none()) {
             let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             let width = self.ctx.fonts.shape(font, style.font_size, text, style.letter_spacing).last().map(|g| g.x + g.advance).unwrap_or(0.0);
@@ -2045,10 +2065,15 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
             r = r.union(&f.rect);
         }
     }
-    for c in &b.children {
+    for c in b.children.iter().filter(|c| !c.clamped) {
         r = r.union(&content_bounds(c));
     }
     let outer = b.margin_rect();
+    // A clamped line-clamp container cuts its content's overflow at its
+    // bottom edge (what is left after the clamp point is hidden).
+    if b.style.line_clamp.is_some() && b.children.iter().any(|c| c.clamped) && r.bottom() > outer.bottom() {
+        r.h = (outer.bottom() - r.y).max(0.0);
+    }
     if clip_x {
         r.x = outer.x;
         r.w = outer.w;

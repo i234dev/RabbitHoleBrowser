@@ -1097,14 +1097,17 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
             return;
         }
-        if !skip_bg && style.background_layers.iter().any(|l| l.clip_text) {
-            // `background-clip: text`: those layers (and the color when the
-            // last layer clips to text) show only through the glyphs.
+        if !skip_bg && style.background_layers.iter().any(|l| l.clip_text || l.clip_border_area) {
+            // `background-clip: text` / `border-area`: those layers (and the
+            // color when the last layer is one) show only through the glyphs
+            // or the painted border. (Mixing both kinds masks by the first.)
+            let by_text = style.background_layers.iter().any(|l| l.clip_text);
+            let masked = |l: &rabbithole_style::BackgroundLayer| if by_text { l.clip_text } else { l.clip_border_area };
             let mut boxed = (**style).clone();
             let mut texty = (**style).clone();
-            let text_color = style.background_layers.last().is_some_and(|l| l.clip_text);
-            boxed.background_layers.retain(|l| !l.clip_text);
-            texty.background_layers.retain(|l| l.clip_text);
+            let text_color = style.background_layers.last().is_some_and(|l| masked(l));
+            boxed.background_layers.retain(|l| !masked(l));
+            texty.background_layers.retain(|l| masked(l));
             for l in &mut texty.background_layers {
                 l.clip = rabbithole_style::BoxArea::BorderBox;
             }
@@ -1117,7 +1120,14 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 last.clip = rabbithole_style::BoxArea::BorderBox;
             }
             background::paint_backgrounds(self.list, &geom, &boxed, self.ctx.background_images, vp);
-            let mask = self.text_mask_items(b);
+            let mask = if by_text {
+                self.text_mask_items(b)
+            } else {
+                // The border's painted shape (styles, widths, radii), opaque.
+                let bw = style.border_width;
+                let bs = style.border_style;
+                vec![DisplayItem::Border { rect, widths: [bw.top, bw.right, bw.bottom, bw.left], colors: [Color::BLACK; 4], styles: [bs.top, bs.right, bs.bottom, bs.left], radii: geom.radii }]
+            };
             self.list.push(DisplayItem::PushLayer(rect));
             background::paint_backgrounds(self.list, &geom, &texty, self.ctx.background_images, vp);
             self.list.push(DisplayItem::LayerMask(mask));
@@ -1468,7 +1478,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let dest = b.content_rect;
         // Concrete object size (CSS Images 3 §5.5) from the natural
         // dimensions, with the content box as the default object size.
-        let natural = img.natural_dimensions();
+        let mut natural = img.natural_dimensions();
+        let view = img.natural_dimensions().0.zip(img.natural_dimensions().1).and_then(|n| crate::background::object_view_box(&b.style, n).map(|v| (v, n)));
+        if let Some((v, _)) = view {
+            natural = (Some(v.w), Some(v.h), (v.h > 0.0).then(|| v.w / v.h));
+        }
         let boxed = (dest.w, dest.h);
         let fit = b.style.object_fit;
         let contain = || match natural.2 {
@@ -1501,7 +1515,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             l @ (rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_)) => l.resolve_or_zero(dest.h - dh),
             other => other.resolve_or_zero(dest.h),
         };
-        let placed = Rect::new(dest.x + ox, dest.y + oy, dw, dh);
+        let mut placed = Rect::new(dest.x + ox, dest.y + oy, dw, dh);
+        // With a view box, the placed rect is the view box: the whole image
+        // extends around it and only the view box shows.
+        let mut view_clip: Option<Rect> = None;
+        if let Some((v, n)) = view {
+            if v.w <= 0.0 || v.h <= 0.0 {
+                return;
+            }
+            let (sx, sy) = (dw / v.w, dh / v.h);
+            view_clip = Some(placed);
+            placed = Rect::new(placed.x - v.x * sx, placed.y - v.y * sy, n.0 * sx, n.1 * sy);
+        }
+        let (dw, dh) = (placed.w, placed.h);
         // Clip the placed image to the overflow clip edge (the content box
         // by default: `overflow: clip; overflow-clip-margin: content-box`)
         // on clipped axes, and compute the source sub-rectangle shown.
@@ -1512,6 +1538,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             if b.style.overflow_x.clips() { edge.w } else { placed.w },
             if b.style.overflow_y.clips() { edge.h } else { placed.h },
         );
+        let clip = view_clip.map_or(clip, |v| v.intersect(&clip));
         let shown = placed.intersect(&clip);
         if shown.is_empty() || dw <= 0.0 || dh <= 0.0 {
             return;
