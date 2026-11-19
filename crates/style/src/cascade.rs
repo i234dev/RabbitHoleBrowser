@@ -3366,9 +3366,82 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         _ => {
-            props::apply(name, &comps, value, style, parent, ctx);
+            if !props::apply(name, &comps, value, style, parent, ctx) {
+                UNKNOWN_PROPERTY.with(|u| u.set(true));
+            }
         }
     }
+}
+
+thread_local! {
+    /// Set when `apply_property` meets a property name no handler knows
+    /// (read by the `@supports` validator).
+    static UNKNOWN_PROPERTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Declarations that move every field they set away from its initial
+/// value: a valid value of one of these properties changes either the
+/// initial style or this one.
+const SUPPORTS_PROBE: &[(&str, &str)] = &[
+    ("display", "table-cell"), ("position", "relative"), ("float", "left"), ("clear", "both"), ("visibility", "hidden"),
+    ("margin", "7px 8px 9px 10px"), ("padding", "7px 8px 9px 10px"), ("top", "7px"), ("right", "7px"), ("bottom", "7px"), ("left", "7px"),
+    ("width", "7px"), ("height", "7px"), ("min-width", "7px"), ("min-height", "7px"), ("max-width", "7px"), ("max-height", "7px"),
+    ("color", "rgb(1, 2, 3)"), ("background-color", "rgb(1, 2, 3)"), ("opacity", "0.5"), ("z-index", "7"),
+    ("overflow-x", "scroll"), ("overflow-y", "scroll"), ("box-sizing", "border-box"), ("text-align", "right"),
+    ("white-space", "pre"), ("text-transform", "uppercase"), ("font-style", "italic"), ("font-weight", "300"),
+    ("flex-direction", "column"), ("flex-wrap", "wrap"), ("border-top-width", "7px"), ("border-top-style", "dotted"),
+    ("border-top-color", "rgb(1, 2, 3)"),
+];
+
+/// Properties every value of which `SUPPORTS_PROBE` detects.
+const SUPPORTS_CHECKED: &[&str] = &[
+    "display", "position", "float", "clear", "visibility", "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", "padding",
+    "padding-top", "padding-right", "padding-bottom", "padding-left", "top", "right", "bottom", "left", "width", "height", "min-width",
+    "min-height", "max-width", "max-height", "color", "background-color", "opacity", "z-index", "box-sizing", "text-align", "white-space",
+    "text-transform", "font-style", "font-weight", "flex-direction", "flex-wrap", "border-top-width", "border-top-style", "border-top-color",
+];
+
+fn probe_apply(base: &ComputedStyle, name: &str, value: &[Token]) -> ComputedStyle {
+    let decl = Declaration { name: name.to_string(), value: value.to_vec(), important: false };
+    let initial = ComputedStyle::initial();
+    apply_over(base, &initial, std::slice::from_ref(&decl), 16.0, (800.0, 600.0))
+}
+
+/// The `@supports` validator: `Some(false)` for an unknown property or a
+/// value a checked property rejects; `None` when it cannot tell.
+pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
+    if name.starts_with("--") {
+        return Some(true);
+    }
+    if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
+        return None;
+    }
+    let initial = ComputedStyle::initial();
+    UNKNOWN_PROPERTY.with(|u| u.set(false));
+    let a = probe_apply(&initial, name, value);
+    if UNKNOWN_PROPERTY.with(|u| u.replace(false)) {
+        return Some(false);
+    }
+    if a != initial {
+        return Some(true);
+    }
+    thread_local! {
+        static PROBE: ComputedStyle = {
+            let decls: Vec<Declaration> = SUPPORTS_PROBE
+                .iter()
+                .map(|(n, v)| Declaration { name: n.to_string(), value: rabbithole_css::Tokenizer::tokenize(v), important: false })
+                .collect();
+            apply_over(&ComputedStyle::initial(), &ComputedStyle::initial(), &decls, 16.0, (800.0, 600.0))
+        };
+    }
+    let changed = PROBE.with(|b| probe_apply(b, name, value) != *b);
+    if changed {
+        return Some(true);
+    }
+    if SUPPORTS_CHECKED.contains(&name) {
+        return Some(false);
+    }
+    None
 }
 
 /// Record (or clear) the percentage part of letter (0) / word (1) spacing.

@@ -1110,6 +1110,7 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Engine {
+        rabbithole_style::install_supports_validator();
         let fonts = FontContext::new();
         fonts.load_system_fonts();
         let fonts = Rc::new(fonts);
@@ -1132,6 +1133,7 @@ impl Engine {
 
     /// Engine without system font discovery (faster startup for tests/CLI).
     pub fn new_bundled_fonts_only() -> Engine {
+        rabbithole_style::install_supports_validator();
         let fonts = Rc::new(FontContext::new());
         Engine {
             service_workers: Default::default(),

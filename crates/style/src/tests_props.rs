@@ -972,3 +972,57 @@ fn object_view_box_and_background_clip_values() {
     assert!(s.background_layers[0].clip_text);
     assert_eq!(s.text_fill_color, Some(rabbithole_gfx::Color::TRANSPARENT));
 }
+
+#[test]
+fn supports_declaration_validation() {
+    use crate::cascade::supports_declaration as check;
+    let v = |name: &str, value: &str| check(name, &rabbithole_css::Tokenizer::tokenize(value));
+    // Properties the engine implements are never reported unsupported.
+    for (n, val) in [
+        ("display", "grid"), ("display", "inline"), ("display", "flex"), ("margin", "0"), ("padding", "0"), ("color", "red"), ("color", "black"),
+        ("background", "none"), ("background", "green"), ("background-image", "linear-gradient(red, blue)"), ("border", "1px solid red"),
+        ("border-radius", "4px"), ("box-shadow", "none"), ("transform", "rotate(1deg)"), ("transition", "opacity 1s"), ("animation-name", "x"),
+        ("animation", "x 1s"), ("opacity", "1"), ("gap", "1rem"), ("grid-template-columns", "1fr 1fr"), ("position", "sticky"),
+        ("position", "static"), ("aspect-ratio", "16 / 9"), ("inset", "0"), ("object-fit", "cover"), ("filter", "blur(2px)"),
+        ("backdrop-filter", "blur(2px)"), ("-webkit-backdrop-filter", "blur(2px)"), ("mask-image", "none"), ("-webkit-mask-image", "none"),
+        ("clip-path", "inset(0)"), ("text-decoration", "underline"), ("text-overflow", "ellipsis"), ("font", "12px serif"),
+        ("font-size", "12px"), ("font-family", "serif"), ("font-weight", "bold"), ("font-weight", "400"), ("line-height", "1.5"),
+        ("font-variant-numeric", "tabular-nums"), ("font-feature-settings", "'liga' 0"), ("writing-mode", "vertical-rl"),
+        ("contain", "paint"), ("content-visibility", "auto"), ("container-type", "inline-size"), ("will-change", "transform"),
+        ("touch-action", "none"), ("user-select", "none"), ("-webkit-user-select", "none"), ("appearance", "none"),
+        ("scroll-behavior", "smooth"), ("overscroll-behavior", "contain"), ("accent-color", "red"), ("color-scheme", "dark"),
+        ("isolation", "isolate"), ("mix-blend-mode", "multiply"), ("hyphens", "auto"), ("word-break", "break-all"),
+        ("overflow-wrap", "anywhere"), ("text-wrap", "balance"), ("tab-size", "4"), ("caret-color", "red"), ("cursor", "pointer"),
+        ("outline", "none"), ("outline-offset", "2px"), ("list-style", "none"), ("counter-reset", "x"), ("content", "'x'"),
+        ("quotes", "none"), ("vertical-align", "middle"), ("z-index", "auto"), ("overflow", "clip"), ("visibility", "visible"),
+        ("float", "none"), ("clear", "none"), ("width", "auto"), ("width", "fit-content"), ("height", "100dvh"), ("max-width", "none"),
+        ("margin-inline", "auto"), ("padding-block", "1em"), ("inset-inline-start", "0"), ("place-items", "center"), ("order", "1"),
+        ("flex", "1"), ("flex-basis", "auto"), ("align-self", "end"), ("justify-self", "start"), ("columns", "2"), ("column-gap", "1em"),
+        ("table-layout", "fixed"), ("border-collapse", "collapse"), ("text-align", "start"), ("text-indent", "1em"),
+        ("letter-spacing", "normal"), ("word-spacing", "1px"), ("white-space", "nowrap"), ("text-transform", "none"),
+        ("text-shadow", "1px 1px red"), ("box-sizing", "content-box"), ("resize", "both"), ("pointer-events", "none"),
+        ("scrollbar-width", "thin"), ("scrollbar-gutter", "stable"), ("translate", "1px"), ("rotate", "1deg"), ("scale", "2"),
+        ("perspective", "100px"), ("transform-origin", "0 0"), ("background-clip", "text"), ("-webkit-background-clip", "text"),
+        ("-webkit-line-clamp", "2"), ("line-clamp", "2"), ("-webkit-box-orient", "vertical"), ("text-underline-offset", "2px"),
+        ("shape-outside", "none"), ("image-rendering", "pixelated"), ("unicode-bidi", "isolate"), ("direction", "rtl"),
+    ] {
+        assert_ne!(v(n, val), Some(false), "{n}: {val}");
+    }
+    assert_eq!(v("yadayada", "x"), Some(false));
+    assert_eq!(v("foo", "baz"), Some(false));
+    assert_eq!(v("color", "rainbow"), Some(false));
+    assert_eq!(v("margin", "0 or padding: 0"), Some(false));
+    assert_eq!(v("--foo", "whatever"), Some(true));
+}
+
+#[test]
+fn gradients_of_css4_colors_default_to_oklab() {
+    let interp = |css: &str| match &one(css).background_layers[0].image {
+        BackgroundImage::LinearGradient { interp, stops, .. } => (*interp, stops.iter().any(|s| s.wide.is_some())),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(interp("background-image: linear-gradient(red, blue)"), (crate::ColorInterp::default(), false));
+    let oklab = crate::ColorInterp { space: crate::InterpSpace::Oklab, hue: crate::HueMethod::Shorter };
+    assert_eq!(interp("background-image: linear-gradient(red, oklch(50% 0.1 30))"), (oklab, true));
+    assert_eq!(interp("background-image: linear-gradient(in srgb, red, color(srgb 0 0 1))").0, crate::ColorInterp::default());
+}
