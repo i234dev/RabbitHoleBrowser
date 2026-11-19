@@ -677,7 +677,14 @@ impl<'a> Layouter<'a> {
             }
         }
         let content = b.content_rect;
-        let strut = self.text_metrics(&cstyle);
+        let mut strut = self.text_metrics(&cstyle);
+        if cstyle.central_baseline() {
+            // Vertical lines align on the central baseline: the strut is
+            // centred on it.
+            let half = (strut.above + strut.below) / 2.0;
+            strut.above = half;
+            strut.below = half;
+        }
         let indent = cstyle.text_indent.resolve_or_zero(cb.width);
         let clips = cstyle.overflow_x.clips() || cstyle.overflow_y.clips();
         let ellipsis = cstyle.text_overflow != TextOverflow::Clip && clips;
@@ -2391,6 +2398,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             tm: Option<TextMetrics>,
         }
         let mut fms: Vec<FM> = Vec::with_capacity(self.cur.frags.len());
+        // Vertical text (not sideways) aligns on the central baseline,
+        // halfway between the ascent and descent: each text run's
+        // alphabetic baseline sits below it, each atomic inline is centred.
+        let central = self.cstyle.central_baseline();
+        let central_shift = |tm: &TextMetrics| if central { (tm.asc - tm.desc) / 2.0 } else { 0.0 };
         let mut a = self.strut.above;
         let mut d = self.strut.below;
         let mut extra_h: f32 = 0.0;
@@ -2408,7 +2420,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         VerticalAlign::Super => 0.35 * style.font_size,
                         VerticalAlign::Length(v) => v,
                         _ => 0.0,
-                    };
+                    } - central_shift(&tm);
                     let (mut above, mut below) = (tm.above + shift, tm.below - shift);
                     // Emphasis marks need room beside the glyphs.
                     if let Some(e) = emphasis_of(&style) {
@@ -2432,7 +2444,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     let child = &self.children[*c];
                     let mr = child.margin_rect();
                     let h = mr.h;
-                    let base = child.baseline.map(|bo| child.margin.top + bo).unwrap_or(h);
+                    let base = if central { h / 2.0 } else { child.baseline.map(|bo| child.margin.top + bo).unwrap_or(h) };
                     let fs = self
                         .cur
                         .open
@@ -2455,7 +2467,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             tm: None,
                         },
                         VerticalAlign::Middle => {
-                            let above = h / 2.0 + 0.25 * fs;
+                            let above = h / 2.0 + if central { 0.0 } else { 0.25 * fs };
                             FM { above, below: h - above, mode: 0, shift: 0.0, tm: None }
                         }
                         VerticalAlign::TextTop => {
@@ -2487,8 +2499,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         for bg in &self.cur.bg {
             let style = self.style(bg.item).clone();
             let tm = self.lay.text_metrics(&style);
-            a = a.max(tm.above);
-            d = d.max(tm.below);
+            let c = central_shift(&tm);
+            a = a.max(tm.above - c);
+            d = d.max(tm.below + c);
         }
         let h = (a + d).max(extra_h).max(0.0);
         let y = self.cur.y;
@@ -2556,7 +2569,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             let pb = style.padding.bottom.resolve_or_zero(cw) + style.border_width.bottom;
             let (rx, ry) = self.rel_of(bg.item);
             fragments.push(Fragment {
-                rect: Rect::new(bg.x + shift_x + rx, baseline - tm.asc - pt + ry, bg.w, tm.asc + tm.desc + pt + pb),
+                rect: Rect::new(bg.x + shift_x + rx, baseline + central_shift(&tm) - tm.asc - pt + ry, bg.w, tm.asc + tm.desc + pt + pb),
                 baseline: baseline + ry,
                 node: item_elem(self.items, bg.item),
                 inert: style.pointer_events == rabbithole_style::PointerEvents::None,

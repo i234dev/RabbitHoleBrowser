@@ -666,6 +666,11 @@ impl LayoutBox {
 
     /// Baseline of the box's first line (absolute y), searching descendants.
     pub fn first_baseline(&self) -> Option<f32> {
+        if self.wm_wrapper {
+            // An orthogonal flow has no baseline in its parent's axis (its
+            // lines are in its own, logical, space): one is synthesized.
+            return None;
+        }
         if self.formatting == Formatting::Flex && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
             // An item without a baseline has one synthesized from its
             // border box's bottom edge.
@@ -695,6 +700,9 @@ impl LayoutBox {
 
     /// Baseline of the last line (absolute y).
     pub fn last_baseline(&self) -> Option<f32> {
+        if self.wm_wrapper {
+            return None;
+        }
         if self.formatting == Formatting::Flex && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
             return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(c.rect.bottom()));
         }

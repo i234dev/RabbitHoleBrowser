@@ -296,6 +296,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                     "sideways-lr" => WritingMode::SidewaysLr,
                     _ => return true,
                 };
+                style.writing_sideways = matches!(kw.as_str(), "sideways-rl" | "sideways-lr");
             }
         }
         "unicode-bidi" => {
@@ -718,9 +719,31 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 _ => return true,
             };
         }
+        "text-orientation" | "-webkit-text-orientation" => {
+            style.text_orientation = match values::ident(c0).as_deref() {
+                Some("mixed") => TextOrientation::Mixed,
+                Some("upright") => TextOrientation::Upright,
+                Some("sideways" | "sideways-right") => TextOrientation::Sideways,
+                _ => return true,
+            };
+        }
+        "text-combine-upright" | "-webkit-text-combine" => {
+            let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
+            style.text_combine_upright = match kws.first().map(String::as_str) {
+                Some("none") if comps.len() == 1 => 0,
+                Some("all" | "horizontal") if comps.len() == 1 => 1,
+                Some("digits") => match comps.get(1) {
+                    None => 3,
+                    Some(c) => match c {
+                        [Token::Number(n)] if comps.len() == 2 && n.fract() == 0.0 && (2.0..=4.0).contains(n) => *n as u8 + 1,
+                        _ => return true,
+                    },
+                },
+                _ => return true,
+            };
+        }
         "text-rendering" | "font-stretch"
-        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-orientation"
-        | "text-combine-upright" | "word-spacing-x"
+        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "word-spacing-x"
         | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"
         | "-webkit-text-stroke" | "-webkit-text-stroke-width" | "-webkit-text-stroke-color"
         | "-webkit-tap-highlight-color" | "-webkit-touch-callout" | "text-decoration-skip" => {}

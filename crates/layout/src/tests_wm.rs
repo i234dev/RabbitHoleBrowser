@@ -138,3 +138,25 @@ fn nested_vertical_box_paints_background_images_unturned() {
     let t = fx.layout();
     assert_rect!(fx.rect(&t, "b"), 200.0, 0.0, 100.0, 50.0, t);
 }
+
+#[test]
+fn vertical_lines_centre_atomic_inlines_on_the_central_baseline() {
+    // A 40px line (physical width): the strut is centred on the central
+    // baseline, and so is the 10px inline-block.
+    let fx = Fx::new("<div style='writing-mode:vertical-rl;font-size:20px;line-height:40px;height:200px'><span id=i style='display:inline-block;width:10px;height:10px'></span></div>", RESET);
+    let t = fx.layout();
+    assert_rect!(fx.rect(&t, "i"), 15.0, 0.0, 10.0, 10.0, t);
+    // Set sideways, the line keeps the alphabetic baseline: the box sits
+    // on it (above it, i.e. to its right), not centred.
+    let fx = Fx::new("<div style='writing-mode:vertical-rl;text-orientation:sideways;font-size:20px;line-height:40px;height:200px'><span id=i style='display:inline-block;width:10px;height:10px'></span></div>", RESET);
+    let t = fx.layout();
+    assert!(!close(fx.rect(&t, "i").x, 15.0), "{}", t.dump());
+}
+
+#[test]
+fn orthogonal_children_do_not_give_an_inline_block_its_baseline() {
+    let fx = Fx::new("<div style='font-size:20px;line-height:20px'>aaa<div id=ib style='display:inline-block'>bbb<div style='writing-mode:vertical-rl'>vvv</div></div></div>", RESET);
+    let t = fx.layout();
+    // Aligned by its "bbb" line: its top is the line's top.
+    assert!(close(fx.rect(&t, "ib").y, 0.0), "{}", t.dump());
+}

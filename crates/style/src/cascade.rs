@@ -1631,6 +1631,7 @@ fn is_inherited(name: &str) -> bool {
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
             | "font-synthesis" | "font-synthesis-style" | "font-synthesis-small-caps" | "text-justify" | "hyphenate-character" | "text-decoration-skip-ink"
+            | "writing-mode" | "-webkit-writing-mode" | "text-orientation" | "-webkit-text-orientation" | "text-combine-upright" | "-webkit-text-combine"
     )
 }
 
@@ -1988,7 +1989,12 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.text_decoration_thickness_from_font = from.text_decoration_thickness_from_font;
         }
         "direction" => to.direction = from.direction,
-        "writing-mode" | "-webkit-writing-mode" => to.writing_mode = from.writing_mode,
+        "writing-mode" | "-webkit-writing-mode" => {
+            to.writing_mode = from.writing_mode;
+            to.writing_sideways = from.writing_sideways;
+        }
+        "text-orientation" | "-webkit-text-orientation" => to.text_orientation = from.text_orientation,
+        "text-combine-upright" | "-webkit-text-combine" => to.text_combine_upright = from.text_combine_upright,
         "unicode-bidi" => to.unicode_bidi = from.unicode_bidi,
         "tab-size" => {
             to.tab_size = from.tab_size;
