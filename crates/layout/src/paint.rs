@@ -610,7 +610,9 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                     draw_text_basic(canvas, fonts, *font, *size, text, px + sh.x, py + sh.y, sh.color, *letter_spacing);
                 }
             }
-            if st.ext && (*small_caps || *oblique || letter_spacing.abs() >= 0.01) {
+            if color.a == 0 {
+                // Invisible glyphs (only their shadows show).
+            } else if st.ext && (*small_caps || *oblique || letter_spacing.abs() >= 0.01) {
                 canvas.draw_text_ext(fonts, *font, *size, text, px, py, *color, *letter_spacing, *small_caps, *oblique);
             } else {
                 draw_text_basic(canvas, fonts, *font, *size, text, px, py, *color, *letter_spacing);

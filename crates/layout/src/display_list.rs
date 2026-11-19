@@ -1487,8 +1487,32 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         }
                         // Underlines and overlines go under the text,
                         // line-throughs over it (CSS Text Decoration 3 §2.1).
+                        // Text shadows also shadow the decorations, all
+                        // below the text and its decorations (CSS Text
+                        // Decoration 3 §4): one layer per shadow, the
+                        // first on top.
+                        let decorated_shadows = decoration_info.any() && !shadows.is_empty();
+                        if decorated_shadows {
+                            for sh in shadows.iter().rev() {
+                                let off = Some((sh.x, sh.y, sh.color));
+                                self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, false, off);
+                                self.list.push(DisplayItem::Text {
+                                    x: f.rect.x,
+                                    y: f.baseline,
+                                    font: *font,
+                                    size: *size,
+                                    color: Color::TRANSPARENT,
+                                    text: text.to_string(),
+                                    letter_spacing: *letter_spacing,
+                                    shadows: vec![sh.clone()],
+                                    small_caps: *small_caps,
+                                    oblique: *oblique,
+                                });
+                                self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, true, off);
+                            }
+                        }
                         if decoration_info.any() {
-                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, false);
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, false, None);
                         }
                         self.list.push(DisplayItem::Text {
                             x: f.rect.x,
@@ -1498,12 +1522,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             color: *color,
                             text: text.to_string(),
                             letter_spacing: *letter_spacing,
-                            shadows: shadows.clone(),
+                            shadows: if decorated_shadows { Vec::new() } else { shadows.clone() },
                             small_caps: *small_caps,
                             oblique: *oblique,
                         });
                         if decoration_info.any() {
-                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, true);
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing), decoration_info, true, None);
                         }
                         if self.flipped {
                             self.list.push(DisplayItem::PopTransform);
@@ -1572,7 +1596,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// Paint the underlines and overlines (`through` false) or the
     /// line-throughs (`through` true) of a text fragment.
     #[allow(clippy::too_many_arguments)]
-    fn paint_decorations(&mut self, rect: Rect, baseline: f32, font: rabbithole_gfx::FontId, size: f32, text: (&str, f32), info: &DecorationInfo, through: bool) {
+    /// `shadow`: paint them as the shadow (offset, color) of a text-shadow.
+    fn paint_decorations(&mut self, rect: Rect, baseline: f32, font: rabbithole_gfx::FontId, size: f32, text: (&str, f32), info: &DecorationInfo, through: bool, shadow: Option<(f32, f32, Color)>) {
+        let (rect, baseline) = match shadow {
+            Some((dx, dy, _)) => (Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h), baseline + dy),
+            None => (rect, baseline),
+        };
         // Ink of the glyphs crossing underlines and overlines (skipped),
         // computed once per fragment.
         let mut ink: Option<Vec<(f32, f32, f32, f32)>> = None;
@@ -1615,9 +1644,10 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 let t = t.round().max(1.0);
                 let top = top.round();
                 let y = top + t / 2.0;
+                let color = shadow.map_or(d.color, |s| s.2);
                 let mut push = |a: f32, b: f32| {
                     if b > a {
-                        list.push(DisplayItem::Line { x0: a, y0: y, x1: b, y1: y, width: t, color: d.color, style: d.style });
+                        list.push(DisplayItem::Line { x0: a, y0: y, x1: b, y1: y, width: t, color, style: d.style });
                     }
                 };
                 match ink.as_deref().filter(|_| skip) {
@@ -1662,7 +1692,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 } else if let Some(o) = d.underline_offset {
                     baseline + o
                 } else {
-                    baseline + t
+                    // The gap below the baseline is the automatic
+                    // thickness: a thicker line grows downwards.
+                    baseline + if d.thickness.is_some() { auto_t.min(t) } else { t }
                 };
                 line(top, t);
             }
