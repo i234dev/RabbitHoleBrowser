@@ -1382,6 +1382,7 @@ fn transformed_boxes_contain_fixed_descendants() {
     let cb = divs[1];
     assert!((fixed.rect.y - (cb.rect.y + 10.0)).abs() < 0.5, "fixed at {:?}, containing block {:?}", fixed.rect, cb.rect);
     assert!(!fixed.fixed);
+}
 
 #[test]
 fn run_in_becomes_the_first_inline_box_of_the_next_block() {
