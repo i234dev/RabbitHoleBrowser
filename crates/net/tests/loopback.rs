@@ -922,3 +922,183 @@ fn referrer_follow_preflight_uses_remaining_source_and_preserves_request_origin(
     assert!(seen.iter().any(|r| r.method == "OPTIONS"));
     assert!(seen.iter().all(|r| r.header("origin") == Some(a.origin().as_str())), "original CORS identity must survive source filtering");
 }
+
+// ------------------------------------------------- SSO (Cloudflare Access-like)
+
+/// An identity-aware proxy flow over three sites served by one loopback
+/// server (`*.localhost` always resolves to loopback and is a secure
+/// context, as in Chrome): the app redirects to the access team domain,
+/// whose login *redirect* sets the CSRF cookie and sends the browser to the
+/// identity provider; the IdP returns to the callback with a cross-site
+/// `form_post` (or a 302 GET), and the callback needs the cookie.
+struct Sso {
+    srv: Server,
+}
+
+const CSRF_VALUE: &str = "\"v1|state-1234\"";
+
+impl Sso {
+    fn new() -> Sso {
+        let port: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+        let p = port.clone();
+        let srv = serve(Arc::new(move |req: &Req| {
+            let port = *p.lock().unwrap();
+            let host = req.header("host").unwrap_or("").split(':').next().unwrap_or("").to_string();
+            let path = req.path.split('?').next().unwrap_or("").to_string();
+            let cookie = req.header("cookie").unwrap_or("").to_string();
+            let has = |pair: &str| cookie.split("; ").any(|c| c == pair);
+            let html = |body: &str| (200, hv(&[("content-type", "text/html")]), body.as_bytes().to_vec());
+            let redirect = |to: String, cookies: &[String]| {
+                let mut h = vec![("location".to_string(), to)];
+                h.extend(cookies.iter().map(|c| ("set-cookie".to_string(), c.clone())));
+                (302, h, Vec::new())
+            };
+            let long = "x".repeat(3000);
+            match (host.as_str(), path.as_str()) {
+                ("app.localhost", "/") if has("CF_Authorization=app-token") => html("welcome"),
+                ("app.localhost", "/") => redirect(format!("http://team.access.localhost:{port}/cdn-cgi/access/login/app.localhost?redirect_url=%2F"), &[]),
+                ("app.localhost", "/cdn-cgi/access/authorized") => redirect("/".into(), &["CF_Authorization=app-token; Path=/; HttpOnly; Secure; SameSite=Lax".into()]),
+                ("team.access.localhost", "/cdn-cgi/access/login/app.localhost") => redirect(
+                    format!("http://accounts.idp.localhost:{port}/o/oauth2/auth?state=1234&redirect_uri=callback"),
+                    &[
+                        format!("CF_Session={CSRF_VALUE}; Path=/; Expires=Wed, 21 Oct 2099 07:28:00 GMT; HttpOnly; Secure; SameSite=None"),
+                        "CF_Big=".to_string() + &long + "; Path=/; Secure; SameSite=None; HttpOnly",
+                        "CF_Chips=1; Path=/; Secure; SameSite=None; Partitioned".into(),
+                        "__Host-cf_nonce=n1; Path=/; Secure; SameSite=Lax".into(),
+                        "cf_default=1; Path=/".into(),
+                        // Path defaults to the directory of the request
+                        // path: never sent to /cdn-cgi/access/callback.
+                        "cf_scoped=1".into(),
+                    ],
+                ),
+                ("team.access.localhost", "/cdn-cgi/access/callback") => {
+                    if !has(&format!("CF_Session={CSRF_VALUE}")) {
+                        return (403, hv(&[("content-type", "text/plain")]), b"Forbidden: no CSRF value available in the session cookie".to_vec());
+                    }
+                    redirect(
+                        format!("http://app.localhost:{port}/cdn-cgi/access/authorized?token=t"),
+                        &["CF_Authorization=team-token; Path=/; HttpOnly; Secure; SameSite=None".into(), "CF_Session=; Path=/; Max-Age=0; Secure; SameSite=None".into()],
+                    )
+                }
+                ("accounts.idp.localhost", "/o/oauth2/auth") => html("<form method=post action=callback>"),
+                _ => (404, vec![], b"not found".to_vec()),
+            }
+        }));
+        *port.lock().unwrap() = srv.port;
+        Sso { srv }
+    }
+    fn url(&self, host: &str, path: &str) -> Url {
+        Url::parse_absolute(&format!("http://{host}:{}{path}", self.srv.port)).unwrap()
+    }
+    fn last(&self, host: &str, path: &str) -> Req {
+        self.srv.requests().into_iter().rev().find(|r| r.path.split('?').next() == Some(path) && r.header("host").is_some_and(|h| h.starts_with(host))).unwrap_or_else(|| panic!("no request to {host}{path}"))
+    }
+}
+
+fn sso_login(callback_post: bool) {
+    let sso = Sso::new();
+    let f = fetcher();
+    // Typed URL: browser-initiated navigation through two redirects.
+    let r = f.request(&Request::get(sso.url("app.localhost", "/"))).unwrap();
+    assert_eq!(r.url.host, "accounts.idp.localhost", "redirect chain ends at the IdP");
+    {
+        let jar = f.cookies.as_ref().unwrap().lock().unwrap();
+        let names: Vec<&str> = jar.cookies().iter().map(|c| c.name.as_str()).collect();
+        for n in ["CF_Session", "CF_Big", "CF_Chips", "__Host-cf_nonce", "cf_default", "cf_scoped"] {
+            assert!(names.contains(&n), "Set-Cookie of the 302 stored before following it: {n} missing from {names:?}");
+        }
+    }
+    let idp_page = r.url.clone();
+    // The user signs in at the IdP (its own same-site POSTs), then the IdP
+    // sends the browser back to the callback.
+    let callback = sso.url("team.access.localhost", "/cdn-cgi/access/callback");
+    let req = if callback_post {
+        Request::post(callback, Body::form(&[("code".into(), "c0de".into()), ("state".into(), "1234".into())])).with_referer(idp_page.clone())
+    } else {
+        let mut u = callback;
+        u.query = Some("code=c0de&state=1234".into());
+        Request::get(u).with_referer(idp_page.clone())
+    };
+    let r = f.request(&req).unwrap();
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.body, b"welcome");
+    assert_eq!(r.url.host, "app.localhost");
+    let cb = sso.last("team.access.localhost", "/cdn-cgi/access/callback");
+    let cookie = cb.header("cookie").unwrap_or("");
+    assert!(cookie.contains(&format!("CF_Session={CSRF_VALUE}")), "quoted value sent verbatim: {cookie}");
+    assert!(cookie.contains(&format!("CF_Big={}", "x".repeat(3000))), "long values survive");
+    assert!(cookie.contains("CF_Chips=1"), "partitioned cookie of the same top-level site: {cookie}");
+    assert!(!cookie.contains("cf_scoped"), "default-path of the login URL: {cookie}");
+    // Lax cookies ride a cross-site top-level GET, not a cross-site POST;
+    // unspecified SameSite (Lax by default) also rides a POST for two
+    // minutes after creation, as in Chrome.
+    assert_eq!(cookie.contains("__Host-cf_nonce=n1"), !callback_post, "{cookie}");
+    assert!(cookie.contains("cf_default=1"), "{cookie}");
+    assert_eq!(cb.header("sec-fetch-site"), Some("cross-site"));
+    if callback_post {
+        assert_eq!(cb.method, "POST");
+        assert_eq!(cb.header("origin"), Some(idp_page.origin().as_str()));
+        assert_eq!(cb.body, b"code=c0de&state=1234");
+    }
+    // The 302 GET after the POST reaches the app with its Lax cookie set
+    // on the previous hop of the same (cross-site initiated) chain.
+    let app = sso.last("app.localhost", "/");
+    assert!(app.header("cookie").is_some_and(|c| c.contains("CF_Authorization=app-token")));
+    assert!(!app.header("cookie").unwrap().contains("team-token"), "host-only cookies stay on their host");
+    let jar = f.cookies.as_ref().unwrap().lock().unwrap();
+    assert!(!jar.cookies().iter().any(|c| c.name == "CF_Session"), "Max-Age=0 on a redirect deletes");
+}
+
+#[test]
+fn sso_cross_site_form_post_callback_gets_csrf_cookie() {
+    sso_login(true);
+}
+
+#[test]
+fn sso_redirect_get_callback_gets_csrf_cookie() {
+    sso_login(false);
+}
+
+#[test]
+fn localhost_subdomains_resolve_to_loopback_and_are_separate_sites() {
+    let srv = serve(Arc::new(|req: &Req| (200, hv(&[("set-cookie", "s=1; Secure; SameSite=None")]), req.header("host").unwrap_or("").as_bytes().to_vec())));
+    let f = fetcher();
+    let u = Url::parse_absolute(&format!("http://a.b.localhost:{}/", srv.port)).unwrap();
+    let r = f.request(&Request::get(u.clone())).unwrap();
+    assert_eq!(r.body, format!("a.b.localhost:{}", srv.port).as_bytes());
+    assert_eq!(f.cookies.as_ref().unwrap().lock().unwrap().len(), 1, "*.localhost is a secure context for Secure cookies");
+    assert_ne!(url::site_of("a.b.localhost"), url::site_of("c.localhost"));
+}
+
+#[test]
+fn set_cookie_on_a_304_revalidation_is_stored() {
+    let srv = serve(Arc::new(|req: &Req| {
+        if req.header("if-none-match") == Some("\"v1\"") {
+            return (304, hv(&[("etag", "\"v1\""), ("set-cookie", "fresh=2; Path=/")]), Vec::new());
+        }
+        (200, hv(&[("etag", "\"v1\""), ("cache-control", "no-cache"), ("content-type", "text/plain"), ("set-cookie", "first=1; Path=/")]), b"body".to_vec())
+    }));
+    let f = fetcher();
+    assert_eq!(f.request(&Request::get(srv.url("/r"))).unwrap().body, b"body");
+    let r = f.request(&Request::get(srv.url("/r"))).unwrap();
+    assert_eq!((r.status, r.body.as_slice()), (200, b"body".as_slice()), "served from the revalidated cache entry");
+    assert_eq!(srv.requests().len(), 2);
+    let jar = f.cookies.as_ref().unwrap().lock().unwrap();
+    assert_eq!(jar.header_for(&srv.url("/")).as_deref(), Some("first=1; fresh=2"));
+}
+
+#[test]
+fn post_navigation_redirected_across_origins_sends_origin_null() {
+    let target: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let t = target.clone();
+    let hop = serve(Arc::new(move |_req: &Req| (307, hv(&[("location", &format!("{}/final", t.lock().unwrap()))]), Vec::new())));
+    let end = serve(Arc::new(|_req: &Req| (200, hv(&[("content-type", "text/plain")]), b"ok".to_vec())));
+    *target.lock().unwrap() = end.origin().replace("127.0.0.1", "localhost");
+    let doc = Url::parse_absolute("http://idp.localhost:9/page").unwrap();
+    let f = fetcher();
+    f.request(&Request::post(hop.url("/cb"), Body::form(&[("a".into(), "b".into())])).with_referer(doc)).unwrap();
+    assert_eq!(hop.requests()[0].header("origin"), Some("http://idp.localhost:9"));
+    let last = end.requests().pop().unwrap();
+    assert_eq!((last.method.as_str(), last.body.as_slice()), ("POST", b"a=b".as_slice()), "307 keeps method and body");
+    assert_eq!(last.header("origin"), Some("null"), "redirected away from a cross-origin URL: tainted origin");
+}

@@ -1527,8 +1527,8 @@ impl Worker {
             self.dispatch_window("hashchange");
             return;
         }
-        let referer = page.url.clone();
-        self.send(FromContent::Navigate { request: Request::get(link).with_referer(referer), push_history: true });
+        let request = Request::get(link).with_referer(page.url.clone()).with_referrer_policy(page.referrer_policy);
+        self.send(FromContent::Navigate { request, push_history: true });
     }
 
     fn open_select_dropdown(&mut self, select: NodeId) {

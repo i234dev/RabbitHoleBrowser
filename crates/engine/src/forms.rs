@@ -241,7 +241,11 @@ pub fn submission_request(page: &Page, form: NodeId, submitter: Option<NodeId>, 
             Request::get(url)
         }
     };
-    Some(req.with_referer(page.url.clone()))
+    let mut req = req.with_referer(page.url.clone());
+    // The document's referrer policy; `rel=noreferrer` on the form wins.
+    let noreferrer = doc.attr(form, "rel").is_some_and(|r| r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("noreferrer")));
+    req.referrer_policy = if noreferrer { rabbithole_net::ReferrerPolicy::NoReferrer } else { page.referrer_policy };
+    Some(req)
 }
 
 /// Mutations of control state, stored in the DOM so layout, selectors

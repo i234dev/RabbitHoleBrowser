@@ -1183,7 +1183,12 @@ impl Fetcher {
             let mut b = resp.body;
             let _ = std::io::copy(&mut b, &mut std::io::sink());
             let fresh = c.freshen(entry, &resp.headers, t_req, t_resp);
-            return Ok(hop_from_entry(&fresh));
+            // The stored response never keeps Set-Cookie, but the 304
+            // itself may set cookies: they apply like any response's.
+            let mut hop = hop_from_entry(&fresh);
+            hop.headers.retain(|(k, _)| k != "set-cookie");
+            hop.headers.extend(resp.headers.iter().filter(|(k, _)| k == "set-cookie").cloned());
+            return Ok(hop);
         }
         // Unsafe methods invalidate stored responses for the URL.
         if !matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE") && resp.status < 400 {
@@ -1399,7 +1404,10 @@ impl Fetcher {
                             policy = p;
                         }
                         let next = next.without_fragment();
-                        if api && tainting == ResponseType::Cors && next.origin() != url.origin() && !same_origin {
+                        // Fetch §4.4 (HTTP-redirect fetch): any request
+                        // redirected away from a cross-origin URL has a
+                        // tainted origin (`Origin: null` from then on).
+                        if next.origin() != url.origin() && !same_origin {
                             tainted_origin = true;
                         }
                         site = worse_site(site, fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), &next));

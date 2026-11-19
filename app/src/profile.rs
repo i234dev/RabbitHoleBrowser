@@ -65,12 +65,11 @@ impl Profile {
         Arc::new(Mutex::new(jar))
     }
 
-    /// Persist the jar when it changed.
+    /// Persist the jar when it changed, merging what other windows (other
+    /// processes on this profile) wrote meanwhile instead of overwriting it.
     pub fn save_cookies(&self, jar: &Arc<Mutex<CookieJar>>) {
         if let Ok(mut jar) = jar.lock() {
-            if jar.dirty {
-                let _ = jar.save(&self.cookies_path());
-            }
+            let _ = jar.sync(&self.cookies_path());
         }
     }
 
