@@ -231,7 +231,15 @@ fn parse_transform(comps: &[&[Token]], ctx: &LengthContext) -> Option<Vec<Transf
             ("rotate" | "rotatez", 1) => TransformOp::Rotate(ang(0)?),
             ("rotatex", 1) => TransformOp::Rotate3d(1.0, 0.0, 0.0, ang(0)?),
             ("rotatey", 1) => TransformOp::Rotate3d(0.0, 1.0, 0.0, ang(0)?),
-            ("rotate3d", 4) => TransformOp::Rotate3d(num(0)?, num(1)?, num(2)?, ang(3)?),
+            ("rotate3d", 4) => {
+                let (x, y, z, a) = (num(0)?, num(1)?, num(2)?, ang(3)?);
+                // About the z axis: a 2D rotation.
+                if x == 0.0 && y == 0.0 && z != 0.0 {
+                    TransformOp::Rotate(if z < 0.0 { -a } else { a })
+                } else {
+                    TransformOp::Rotate3d(x, y, z, a)
+                }
+            }
             ("perspective", 1) => {
                 let a = arg(0)?;
                 if values::is_ident(a, "none") {

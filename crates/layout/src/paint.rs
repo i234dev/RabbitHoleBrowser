@@ -63,7 +63,8 @@ fn uniform_radius(r: &Radii) -> Option<f32> {
 
 /// Snap a box to device pixels like Blink does when painting boxes (edges
 /// rounded to the nearest pixel), so adjacent boxes at fractional offsets
-/// do not leave antialiased seams. Only without a canvas transform.
+/// do not leave antialiased seams. Under a transform only when it maps
+/// the pixel grid onto itself (mirrors, offsets).
 fn snap(r: Rect, canvas: &Canvas) -> Rect {
     let m = canvas.transform();
     if !rabbithole_gfx::path::is_identity(&m) {
