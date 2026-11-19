@@ -538,3 +538,16 @@ fn first_line_color_applies_to_first_line() {
     assert!(!first.is_empty() && first.iter().all(|c| *c == rabbithole_gfx::Color::rgb(0, 128, 0)));
     assert!(second.iter().all(|c| *c == rabbithole_gfx::Color::rgb(255, 0, 0)));
 }
+
+/// An auto width between two insets limited by max-width is recomputed
+/// as specified: auto margins then center the box (CSS 2.1 §10.4).
+#[test]
+fn absolute_max_width_between_insets_centers_with_auto_margins() {
+    let fx = Fx::new(
+        "<div style='position:relative;width:400px;height:100px'><div id=a style='position:absolute;left:0;right:0;max-width:100px;margin:0 auto;height:10px'></div></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    let a = fx.rect(&tree, "a");
+    assert!(close(a.x, 150.0) && close(a.w, 100.0), "{a:?}");
+}

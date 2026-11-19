@@ -1851,7 +1851,10 @@ impl<'a> Layouter<'a> {
         // With both insets and a definite size, auto margins share the
         // remaining space (CSS 2.1 §10.3.7 / §10.6.4: centering with
         // `inset: 0; margin: auto`).
-        let sized_w = !style.width.is_auto() || c.kind == BoxKind::Image || ratio.is_some();
+        // (An auto width that max-width / min-width changed counts as
+        // specified: CSS 2.1 §10.4 recomputes with it.)
+        let clamped_w = !table && style.width.is_auto() && matches!((l, r), (Some(l), Some(r)) if (c.rect.w + ml + mr - (cb.w - l - r)).abs() > 0.01);
+        let sized_w = !style.width.is_auto() || c.kind == BoxKind::Image || ratio.is_some() || clamped_w;
         let sized_h = !style.height.is_auto() || c.kind == BoxKind::Image || ratio.is_some();
         let x = if let (Some(l), Some(r), true) = (l, r, sized_w) {
             let free = cb.w - l - r - c.rect.w;
