@@ -322,7 +322,9 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
                 st.last = Some(ch);
             }
             '\u{a0}' => {
-                word.push(' ');
+                // Kept (not a collapsible, hanging or trimmed space): it
+                // measures and paints as a space.
+                word.push('\u{a0}');
                 st.prev_space = false;
                 st.last = Some(ch);
             }
@@ -396,7 +398,7 @@ impl<'a> Measurer<'a> {
         }
         // Soft hyphens are invisible (the hyphen shown at a line end is
         // measured on its own).
-        let w = if text.contains('\u{ad}') { self.fonts.measure(font, size, &text.replace('\u{ad}', "")) } else { self.fonts.measure(font, size, text) };
+        let w = if text.contains(['\u{ad}', '\u{a0}']) { self.fonts.measure(font, size, &text.replace('\u{ad}', "").replace('\u{a0}', " ")) } else { self.fonts.measure(font, size, text) };
         if text.len() <= 64 {
             per_font.insert(text.to_string(), w);
         }

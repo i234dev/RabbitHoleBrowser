@@ -184,3 +184,37 @@ fn orthogonal_flow_in_an_auto_sized_container_fills_the_icb_inline_size() {
     let h = fx.rect(&t, "h");
     assert!(close(h.w, 800.0), "{h:?}\n{}", t.dump());
 }
+
+fn line_texts(t: &LayoutTree) -> Vec<String> {
+    fn walk(b: &LayoutBox, out: &mut Vec<String>) {
+        for l in &b.lines {
+            let mut s = String::new();
+            for f in &l.fragments {
+                if let crate::tree::FragmentKind::Text { text, .. } = &f.kind {
+                    s.push_str(text);
+                }
+            }
+            out.push(s);
+        }
+        for c in &b.children {
+            walk(c, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&t.root, &mut out);
+    out
+}
+
+#[test]
+fn no_break_spaces_neither_hang_nor_trim() {
+    // A run of NBSPs after a space is a word: it moves to the next line
+    // rather than hanging at the end of this one.
+    let nb = "\u{a0}".repeat(20);
+    let fx = Fx::new(&format!("<div style='width:40px'>x {nb}</div>"), RESET);
+    let t = fx.layout();
+    assert_eq!(line_texts(&t).len(), 2, "{:?}", line_texts(&t));
+    // NBSPs ending a line are kept (they paint as spaces).
+    let fx = Fx::new("<div style='width:1000px'>a\u{a0}\u{a0} b</div>", RESET);
+    let t = fx.layout();
+    assert_eq!(line_texts(&t), vec!["a   b".to_string()]);
+}

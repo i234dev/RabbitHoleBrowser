@@ -348,7 +348,7 @@ fn hyphenate_items(items: &[InlineItem]) -> Vec<Option<String>> {
 /// Characters that glue to an adjacent atomic inline (CSS Text 3 §5.1):
 /// GL (but NBSP), WJ and ZWJ.
 fn glues_atomic(c: char) -> bool {
-    c != ' ' && matches!(lb::class(c), lb::Lb::GL | lb::Lb::WJ | lb::Lb::ZWJ)
+    c != '\u{a0}' && matches!(lb::class(c), lb::Lb::GL | lb::Lb::WJ | lb::Lb::ZWJ)
 }
 
 
@@ -2647,7 +2647,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                         kind: FragmentKind::Text {
-                            text: if text.bytes().any(|b| b == b'\t' || b == 0xAD) && text.contains(['\t', '\u{ad}']) { Rc::from(text.replace('\t', " ").replace('\u{ad}', "").as_str()) } else { Rc::from(text.as_str()) },
+                            text: if text.bytes().any(|b| b == b'\t' || b == 0xAD || b == 0xA0) && text.contains(['\t', '\u{ad}', '\u{a0}']) { Rc::from(text.replace('\t', " ").replace('\u{ad}', "").replace('\u{a0}', " ").as_str()) } else { Rc::from(text.as_str()) },
                             font: tm.font,
                             size: tm.size,
                             color: style.text_fill_color.unwrap_or(style.color),
@@ -2678,7 +2678,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                                             let m = self.lay.text_metrics(&s);
                                             (m.asc, m.desc)
                                         };
-                                        (fm.shift - d.baseline_shift, a, de)
+                                        // (Relative to the decorating box's alphabetic
+                                        // baseline, below the central one in vertical lines.)
+                                        (fm.shift - d.baseline_shift + if central { (a - de) / 2.0 } else { 0.0 }, a, de)
                                     })
                                     .collect(),
                                 variations: if style.applied_decorations.is_empty() { Vec::new() } else { style.font_variation_settings.clone() },
