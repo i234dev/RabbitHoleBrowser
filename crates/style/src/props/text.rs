@@ -3,6 +3,7 @@
 use super::ApplyCtx;
 use crate::computed::*;
 use crate::values::{self, ColorValue};
+use std::rc::Rc;
 use rabbithole_css::Token;
 
 /// Family names (as written, generic keywords excluded) from a
@@ -321,13 +322,73 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 style.tab_size = (px / (style.font_size * 0.5).max(1.0)).max(0.0);
             }
         }
-        "-webkit-line-clamp" | "line-clamp" => {
+        "-webkit-line-clamp" => {
             if values::is_ident(c0, "none") {
                 style.line_clamp = None;
-            } else if let Some(n) = values::number(c0) {
-                style.line_clamp = if n >= 1.0 { Some(n as u32) } else { None };
-                style.line_clamp_prefixed = name == "-webkit-line-clamp";
+                style.line_clamp_auto = false;
+            } else if let Some(n) = values::number(c0).filter(|n| comps.len() == 1 && n.fract() == 0.0 && *n >= 1.0) {
+                style.line_clamp = Some(n as u32);
+                style.line_clamp_prefixed = true;
+                style.line_clamp_auto = false;
+                style.block_ellipsis = Some(Rc::from("\u{2026}"));
             }
+        }
+        // `line-clamp: none | auto | [<integer [1,∞]> || <'block-ellipsis'>]`
+        // (CSS Overflow 4 §4.1; `auto` clamps by height).
+        "line-clamp" => {
+            if comps.len() == 1 && values::is_ident(c0, "none") {
+                style.line_clamp = None;
+                style.line_clamp_auto = false;
+                style.block_ellipsis = Some(Rc::from("\u{2026}"));
+                return true;
+            }
+            let mut count: Option<u32> = None;
+            let mut auto = false;
+            let mut ellipsis: Option<Option<Rc<str>>> = None;
+            for c in comps {
+                if let Some(n) = values::number(c).filter(|n| n.fract() == 0.0) {
+                    if count.is_some() || n < 1.0 {
+                        return true;
+                    }
+                    count = Some(n as u32);
+                } else if let [Token::String(s)] = c {
+                    if ellipsis.is_some() {
+                        return true;
+                    }
+                    ellipsis = Some(Some(Rc::from(s.as_str())));
+                } else if values::is_ident(c, "no-ellipsis") {
+                    if ellipsis.is_some() {
+                        return true;
+                    }
+                    ellipsis = Some(None);
+                } else if values::is_ident(c, "auto") {
+                    if !auto && count.is_none() && ellipsis.is_none() {
+                        auto = true;
+                    } else if ellipsis.is_none() {
+                        ellipsis = Some(Some(Rc::from("\u{2026}")));
+                    } else {
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
+            }
+            // `<integer> auto`: the `auto` read first was the ellipsis.
+            if auto && count.is_some() {
+                if ellipsis.is_some() {
+                    return true;
+                }
+                auto = false;
+                ellipsis = Some(Some(Rc::from("\u{2026}")));
+            }
+            if count.is_none() && !auto {
+                // A block ellipsis alone: `line-clamp: "…"` has no clamp.
+                return true;
+            }
+            style.line_clamp = Some(count.unwrap_or(u32::MAX));
+            style.line_clamp_auto = auto;
+            style.line_clamp_prefixed = false;
+            style.block_ellipsis = ellipsis.unwrap_or_else(|| Some(Rc::from("\u{2026}")));
         }
         "font-family" => {
             style.font_family_list = family_names(comps);

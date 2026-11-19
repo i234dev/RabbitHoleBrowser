@@ -1540,6 +1540,12 @@ pub struct ComputedStyle {
     /// `line_clamp` came from `-webkit-line-clamp` (applies only to
     /// `display: -webkit-box` with `-webkit-box-orient: vertical`).
     pub line_clamp_prefixed: bool,
+    /// `line-clamp: auto`: clamp after the last line that fits in the
+    /// box's (max-)height (`line_clamp` is then `Some(u32::MAX)`).
+    pub line_clamp_auto: bool,
+    /// The block ellipsis of `line-clamp` (`None` = `no-ellipsis`;
+    /// `Some("…")` for `auto`).
+    pub block_ellipsis: Option<std::rc::Rc<str>>,
     /// `display: -webkit-box` / `-webkit-inline-box` (legacy flexbox).
     pub webkit_box: bool,
     /// Actual family names in order (e.g. `["Roboto", "Helvetica Neue"]`),
@@ -1748,6 +1754,8 @@ impl ComputedStyle {
             contain_intrinsic_width: None,
             contain_intrinsic_height: None,
             line_clamp_prefixed: false,
+            line_clamp_auto: false,
+            block_ellipsis: Some(std::rc::Rc::from("\u{2026}")),
             webkit_box: false,
             font_family_list: Vec::new(),
             font_variant_small_caps: false,
@@ -1801,6 +1809,7 @@ impl ComputedStyle {
             applied_decorations: parent.applied_decorations.clone(),
             text_underline_offset: parent.text_underline_offset,
             text_emphasis_style: parent.text_emphasis_style.clone(),
+            block_ellipsis: parent.block_ellipsis.clone(),
             text_emphasis_color: parent.text_emphasis_color,
             text_emphasis_over: parent.text_emphasis_over,
             text_emphasis_right: parent.text_emphasis_right,
@@ -1853,6 +1862,7 @@ impl ComputedStyle {
             && self.font_style == o.font_style
             && self.line_height == o.line_height
             && self.line_height_number == o.line_height_number
+            && self.block_ellipsis == o.block_ellipsis
             && self.letter_spacing == o.letter_spacing
             && self.word_spacing == o.word_spacing
             && self.text_align == o.text_align

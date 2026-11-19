@@ -343,6 +343,7 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         listed: std::collections::HashSet::new(),
         flipped: false,
         wm_bg: None,
+        in_clamped: false,
     };
     p.paint_stacking_context(root, bounds);
     for (node, b) in top_layer {
@@ -384,6 +385,8 @@ struct Painter<'l, 't, 'a> {
     /// The box a vertical-mode wrapper turns, with the wrapper's physical
     /// rect, mapping and background layers: painted in physical space.
     wm_bg: Option<(usize, Rect, Matrix, std::rc::Rc<rabbithole_style::ComputedStyle>)>,
+    /// Collecting inside a box after a line-clamp point.
+    in_clamped: bool,
 }
 
 /// Painting phases of the in-flow content of a stacking context.
@@ -772,13 +775,20 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let flow_cb = if b.kind == BoxKind::AnonymousBlock { self.flow_cb } else { b.content_rect };
         let saved_flow_cb = std::mem::replace(&mut self.flow_cb, flow_cb);
         for c in &b.children {
-            if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
+            if self.hoisted.contains(&(c as *const LayoutBox as usize)) || c.clamped && c.is_positioned() {
                 continue;
             }
             let deferred = c.is_positioned() || c.is_stacking_context() || c.flow == Flow::Absolute;
+            // After a line-clamp point only absolutely positioned boxes
+            // whose containing block is outside the clamped boxes show.
+            if (self.in_clamped || c.clamped) && deferred && c.flow != Flow::Absolute {
+                continue;
+            }
             if deferred && !self.listed.insert(c as *const LayoutBox as usize) {
                 continue;
             }
+            let saved_clamped = self.in_clamped;
+            self.in_clamped |= c.clamped;
             if c.fixed && c.flow == Flow::Absolute {
                 *order += 1;
                 out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new() });
@@ -812,6 +822,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 self.collect_deferred(c, cb_for_children, out, order, flow_clips, abs_clips);
             }
+            self.in_clamped = saved_clamped;
             self.flow_cb = flow_cb;
         }
         self.flow_cb = saved_flow_cb;
@@ -833,7 +844,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     fn collect_hoisted(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
         for c in &b.children {
-            if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
+            if self.hoisted.contains(&(c as *const LayoutBox as usize)) || c.clamped {
                 // Already taken by an outer stacking context.
                 continue;
             }
@@ -925,7 +936,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // `border-shape` also shapes the overflow clip.
         let shape_clip = clip && b.style.border_shape.is_some() && self.push_border_shape(b, box_radii(b), false);
         if phase == Phase::Floats {
-            for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c)) {
+            for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c) && !c.clamped) {
                 self.paint_float_or_atomic(c);
             }
         }
@@ -949,7 +960,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
         } else if b.lines.is_empty() {
-            for c in b.children.iter().filter(|c| c.flow == Flow::InFlow && !Self::is_deferred(c)) {
+            for c in b.children.iter().filter(|c| c.flow == Flow::InFlow && !Self::is_deferred(c) && !c.clamped) {
                 if phase == Phase::Backgrounds && c.kind != BoxKind::Text {
                     self.paint_background_and_border(c, false);
                 }

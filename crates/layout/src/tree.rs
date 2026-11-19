@@ -290,6 +290,8 @@ pub struct LayoutBox {
     /// Generated content box (`::before` / `::after`); `node` is the
     /// originating element.
     pub pseudo: Option<PseudoElement>,
+    /// After the clamp point of a `line-clamp` container: not painted.
+    pub clamped: bool,
     pub(crate) pieces: Option<Vec<crate::inline::Piece>>,
     pub(crate) intrinsic_cache: Option<(f32, f32)>,
     /// A flex item's row-axis content sizes measured without its own
@@ -393,6 +395,7 @@ impl LayoutBox {
             scroll_offset: (0.0, 0.0),
             fixed: false,
             pseudo: None,
+            clamped: false,
             pieces: None,
             intrinsic_cache: None,
             flex_content_cache: None,

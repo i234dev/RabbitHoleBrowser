@@ -39,6 +39,37 @@ pub(crate) enum WidthMode {
     Fixed(f32),
 }
 
+
+/// Line clamping in progress (CSS Overflow 4 §4.4: `line-clamp`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ClampState {
+    /// Lines that may still be shown.
+    pub remaining: usize,
+    /// Bottom of the last line shown, once the clamp point is reached.
+    pub bottom: Option<f32>,
+    /// The clamp point ended a paragraph without an ellipsis.
+    pub final_hit: bool,
+    /// Something follows the clamp point (it needs the block ellipsis).
+    pub content_after: bool,
+    /// Second pass: put the ellipsis on the clamp line even when it ends
+    /// its paragraph.
+    pub ellipsize_last: bool,
+    /// Record line bottoms (first pass of `line-clamp: auto`).
+    pub record: bool,
+    pub bottoms: Vec<f32>,
+}
+
+impl ClampState {
+    pub fn lines(n: usize) -> Self {
+        ClampState { remaining: n, ..Default::default() }
+    }
+
+    /// The clamp point was reached: what follows is hidden.
+    pub fn hit(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
 pub(crate) struct Layouter<'a> {
     pub ctx: &'a LayoutContext<'a>,
     pub measurer: Measurer<'a>,
@@ -86,8 +117,8 @@ pub(crate) struct Layouter<'a> {
     cb_rtl: bool,
     /// Line clamping of a block container in progress (`line-clamp`
     /// counts the lines of its block descendants in the same formatting
-    /// context): lines left, and where the last allowed line ends.
-    pub(crate) clamp: Option<(usize, Option<f32>)>,
+    /// context).
+    pub(crate) clamp: Option<ClampState>,
     /// Bounds only the new recursive subgrid contribution/transport work.
     pub(crate) grid_work: crate::grid::subgrid::WorkBudget,
     pub(crate) grid_publication: crate::grid::resolved::Publication,
@@ -266,7 +297,7 @@ fn is_zero_len(l: Length) -> bool {
 /// Would this inline content produce no line boxes (CSS 2.1 §9.4.2: lines
 /// with no text, no preserved white space, no inline boxes with non-zero
 /// margins/padding/borders and no other in-flow content are zero-height)?
-fn inline_content_is_empty(b: &LayoutBox) -> bool {
+pub(crate) fn inline_content_is_empty(b: &LayoutBox) -> bool {
     use crate::tree::InlineItem;
     use rabbithole_style::WhiteSpace;
     for it in &b.items {
@@ -944,6 +975,60 @@ impl<'a> Layouter<'a> {
     }
 
     fn layout_contents(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
+        if matches!(b.formatting, Formatting::Inline | Formatting::Block) && !b.style.multicol && b.style.line_clamp.is_some_and(|n| n > 0) {
+            return self.layout_clamped(b, cb, bfc, top_collapsible, bottom_collapsible);
+        }
+        self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible)
+    }
+
+    /// Lay out a line-clamp container (CSS Overflow 4 §4.4): its lines and
+    /// those of its block descendants in the same formatting context are
+    /// counted; the box ends after the clamp line, with a block ellipsis
+    /// when content follows, and what follows is hidden.
+    fn layout_clamped(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
+        let saved = self.clamp.take();
+        let floats = bfc.snapshot();
+        let mut max_lines = b.style.line_clamp.unwrap_or(0) as usize;
+        if b.style.line_clamp_auto {
+            // Clamp after the last line that fits in the (max-)height.
+            let style = b.style.clone();
+            let pad = resolve_edges(&style.padding, cb.width);
+            let pb_v = pad.top + pad.bottom + style.border_width.top + style.border_width.bottom;
+            let max = self.clamp_height(&style, f32::INFINITY, cb.height, pb_v);
+            let limit = self.resolve_height(&style, cb.height, pb_v).map_or(max, |h| h.min(max));
+            self.clamp = Some(ClampState { remaining: usize::MAX, record: true, ..Default::default() });
+            let h = self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+            let state = self.clamp.take().unwrap_or_default();
+            let fit = state.bottoms.iter().take_while(|&&y| y <= b.content_rect.y + limit + 0.01).count();
+            if !limit.is_finite() || fit == state.bottoms.len() {
+                self.clamp = saved;
+                return h;
+            }
+            bfc.restore(floats.clone());
+            max_lines = fit;
+        }
+        self.clamp = Some(ClampState::lines(max_lines));
+        let mut h = self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+        let mut state = self.clamp.take().unwrap_or_default();
+        if state.final_hit && state.content_after && b.style.block_ellipsis.is_some() {
+            // The clamp line ended its paragraph but more content follows:
+            // lay out again with the ellipsis on that line.
+            bfc.restore(floats);
+            self.clamp = Some(ClampState { ellipsize_last: true, ..ClampState::lines(max_lines) });
+            h = self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+            state = self.clamp.take().unwrap_or_default();
+        }
+        if state.hit() {
+            // The box ends after the last line shown.
+            h = state.bottom.map_or(0.0, |bottom| (bottom - b.content_rect.y).max(0.0));
+            b.collapsed_bottom_margin = b.margin.bottom;
+            b.bottom_margins = Margins::of(b.margin.bottom).pair();
+        }
+        self.clamp = saved;
+        h
+    }
+
+    fn layout_contents_inner(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         match b.formatting {
             Formatting::Inline => self.layout_inline(b, cb, bfc),
             Formatting::Block => self.layout_block_children(b, cb, bfc, top_collapsible, bottom_collapsible),
@@ -969,19 +1054,7 @@ impl<'a> Layouter<'a> {
     fn layout_block_children(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         let saved = std::mem::replace(&mut self.center_blocks, b.style.text_align_webkit_center);
         let saved_rtl = std::mem::replace(&mut self.cb_rtl, b.style.direction == rabbithole_style::Direction::Rtl);
-        // A clamping block container: its block descendants' lines count.
-        let clamp_root = b.style.line_clamp.filter(|n| *n > 0 && !b.style.multicol).map(|n| n as usize);
-        let saved_clamp = if let Some(n) = clamp_root { std::mem::replace(&mut self.clamp, Some((n, None))) } else { None };
-        let mut h = self.layout_block_children_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
-        if clamp_root.is_some() {
-            if let Some((_, Some(bottom))) = self.clamp {
-                // The box ends after the last line shown.
-                h = (bottom - b.content_rect.y).max(0.0);
-                b.collapsed_bottom_margin = b.margin.bottom;
-                b.bottom_margins = Margins::of(b.margin.bottom).pair();
-            }
-            self.clamp = saved_clamp;
-        }
+        let h = self.layout_block_children_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
         self.center_blocks = saved;
         self.cb_rtl = saved_rtl;
         h
@@ -1005,9 +1078,32 @@ impl<'a> Layouter<'a> {
                 }
                 Flow::FloatLeft | Flow::FloatRight => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
-                    self.layout_float(&mut b.children[i], cb, cursor + off, bfc);
+                    let hidden = self.clamp.as_ref().is_some_and(|c| c.hit());
+                    b.children[i].clamped = hidden;
+                    if hidden {
+                        // Floats after the clamp point are not placed.
+                        if let Some(c) = self.clamp.as_mut() {
+                            c.content_after = true;
+                        }
+                        let mut scratch = Bfc::new();
+                        self.layout_float(&mut b.children[i], cb, cursor + off, &mut scratch);
+                    } else {
+                        self.layout_float(&mut b.children[i], cb, cursor + off, bfc);
+                    }
+                }
+                Flow::InFlow if self.clamp.as_ref().is_some_and(|c| c.hit()) => {
+                    // After the clamp point: laid out (for scripts) but
+                    // hidden, and not part of the box's height.
+                    if !self.collapses_through(&b.children[i], cb.height) {
+                        if let Some(c) = self.clamp.as_mut() {
+                            c.content_after = true;
+                        }
+                    }
+                    self.layout_block(&mut b.children[i], cb, cursor, bfc, WidthMode::Fill);
+                    b.children[i].clamped = true;
                 }
                 Flow::InFlow => {
+                    b.children[i].clamped = false;
                     let empty = self.collapses_through(&b.children[i], cb.height);
                     let child_top = self.top_margins(&b.children[i], cb.width, cb.height);
                     // Hypothetical position of the border edge (no clearance).

@@ -1836,6 +1836,8 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "-webkit-line-clamp" | "line-clamp" => {
             to.line_clamp = from.line_clamp;
             to.line_clamp_prefixed = from.line_clamp_prefixed;
+            to.line_clamp_auto = from.line_clamp_auto;
+            to.block_ellipsis = from.block_ellipsis.clone();
         }
         "font-variant" | "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
         "font-variation-settings" => to.font_variation_settings = from.font_variation_settings.clone(),
