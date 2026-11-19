@@ -2647,7 +2647,33 @@ fn physical_side(side: &str, wm: WritingMode, rtl: bool) -> &'static str {
 
 /// Map a flow-relative longhand to its physical property for the
 /// element's writing mode and direction (CSS Logical Properties §4).
-fn logical_to_physical(name: &str, wm: WritingMode, rtl: bool) -> Option<String> {
+fn logical_to_physical(name: &str, wm: WritingMode, rtl: bool) -> Option<std::borrow::Cow<'static, str>> {
+    use std::borrow::Cow;
+    // Flow-relative margins and paddings (the user-agent sheet's) map
+    // without allocating.
+    let (prefix, rest) = match name.strip_prefix("margin-") {
+        Some(r) => (true, r),
+        None => match name.strip_prefix("padding-") {
+            Some(r) => (false, r),
+            None => (false, ""),
+        },
+    };
+    if matches!(rest, "block-start" | "block-end" | "inline-start" | "inline-end") {
+        return Some(Cow::Borrowed(match (prefix, physical_side(rest, wm, rtl)) {
+            (true, "top") => "margin-top",
+            (true, "right") => "margin-right",
+            (true, "bottom") => "margin-bottom",
+            (true, _) => "margin-left",
+            (false, "top") => "padding-top",
+            (false, "right") => "padding-right",
+            (false, "bottom") => "padding-bottom",
+            (false, _) => "padding-left",
+        }));
+    }
+    logical_to_physical_slow(name, wm, rtl).map(Cow::Owned)
+}
+
+fn logical_to_physical_slow(name: &str, wm: WritingMode, rtl: bool) -> Option<String> {
     let vertical = wm.is_vertical();
     let size = |inline: bool| if inline != vertical { "width" } else { "height" };
     match name {

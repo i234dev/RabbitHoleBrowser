@@ -97,3 +97,44 @@ fn positioned_vertical_box_paints_its_background_image() {
     let list = fx.display_list(&bgs);
     assert!(list.items.iter().any(|i| matches!(i, DisplayItem::Image { .. } | DisplayItem::ImageTiled { .. })), "{:#?}", list.items);
 }
+
+#[test]
+fn user_agent_paragraph_margins_are_flow_relative() {
+    // HTML's `p { margin-block: 1em }`: in vertical-rl the block axis is
+    // horizontal, so the margins are on the right and left.
+    let fx = Fx::new("<div style='writing-mode:vertical-rl;font-size:10px;height:100px'><p id=p style='width:20px'></p></div>", RESET);
+    let p = fx.doc.element_by_id("p").unwrap();
+    let s = fx.styles.get(p).expect("style");
+    assert_eq!((s.margin.top, s.margin.bottom), (rabbithole_style::Length::ZERO, rabbithole_style::Length::ZERO));
+    assert_eq!((s.margin.right, s.margin.left), (rabbithole_style::Length::Px(10.0), rabbithole_style::Length::Px(10.0)));
+    // And in a right-to-left list the marker side gets the padding.
+    let fx = Fx::new("<ul id=u dir=rtl><li>x</ul>", RESET);
+    let s = fx.styles.get(fx.doc.element_by_id("u").unwrap()).expect("style");
+    assert_eq!((s.padding.left, s.padding.right), (rabbithole_style::Length::ZERO, rabbithole_style::Length::Px(40.0)));
+}
+
+#[test]
+fn nested_vertical_box_paints_background_images_unturned() {
+    // A box inside a vertical subtree: its image is painted under the
+    // inverse of the subtree's mapping, onto the box's physical rect.
+    let fx = Fx::new("<div style='writing-mode:vertical-rl;width:300px;height:200px'><div id=b style='width:100px;height:50px;background:url(x.png)'></div></div>", RESET);
+    let mut bgs: Bgs = HashMap::new();
+    bgs.insert("x.png".into(), fake_image(10, 10));
+    let list = fx.display_list(&bgs);
+    let img = list.items.iter().position(|i| matches!(i, DisplayItem::Image { .. } | DisplayItem::ImageTiled { .. })).expect("image");
+    // The innermost open transform is the inverse quarter turn.
+    let mut open = Vec::new();
+    for it in &list.items[..img] {
+        match it {
+            DisplayItem::PushTransform(m) => open.push(*m),
+            DisplayItem::PopTransform => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    let m = open.last().copied().expect("transform");
+    assert!(m[0] == 0.0 && m[1] == -1.0 && m[2] == 1.0, "{m:?}");
+    let t = fx.layout();
+    assert_rect!(fx.rect(&t, "b"), 200.0, 0.0, 100.0, 50.0, t);
+}
