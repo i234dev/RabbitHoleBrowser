@@ -1228,14 +1228,13 @@ impl<'a> Layouter<'a> {
         w.max(0.0)
     }
 
+    #[inline]
     fn resolve_height(&self, style: &ComputedStyle, cb_h: Option<f32>, pb_v: f32) -> Option<f32> {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
-        if rabbithole_style::is_stretch(style.height) {
-            return cb_h.map(|h| stretch_height(style, h, pb_v));
-        }
         match style.height {
             Length::Px(v) => Some(adj(v.max(0.0))),
             Length::Percent(p) => cb_h.map(|h| adj(h * p / 100.0)),
+            l @ Length::Math(_) if rabbithole_style::is_stretch(l) => cb_h.map(|h| stretch_height(style, h, pb_v)),
             l @ (Length::Calc(..) | Length::Math(_)) => cb_h.map(|h| adj(l.resolve_or_zero(h).max(0.0))),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         }
@@ -1250,12 +1249,34 @@ impl<'a> Layouter<'a> {
         (min, max.max(min))
     }
 
+    #[inline]
     pub(crate) fn clamp_height(&self, style: &ComputedStyle, h: f32, cb_h: Option<f32>, pb_v: f32) -> f32 {
-        if matches!(style.max_height, Length::Auto) && matches!(style.min_height, Length::Auto | Length::Px(0.0)) {
-            return h.max(0.0);
+        if matches!(style.max_height, Length::Math(_)) || matches!(style.min_height, Length::Math(_)) {
+            // (`stretch` limits are math lengths.)
+            let (min, max) = self.height_limits(style, cb_h, pb_v);
+            return h.min(max).max(min).max(0.0);
         }
-        let (min, max) = self.height_limits(style, cb_h, pb_v);
-        h.min(max).max(min).max(0.0)
+        let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
+        let mut h = h;
+        let max = match style.max_height {
+            Length::Px(v) => Some(v),
+            Length::Percent(p) => cb_h.map(|b| b * p / 100.0),
+            l @ Length::Calc(..) => cb_h.map(|b| l.resolve_or_zero(b)),
+            _ => None,
+        };
+        if let Some(m) = max {
+            h = h.min(adj(m));
+        }
+        let min = match style.min_height {
+            Length::Px(v) => Some(v),
+            Length::Percent(p) => cb_h.map(|b| b * p / 100.0),
+            l @ Length::Calc(..) => cb_h.map(|b| l.resolve_or_zero(b)),
+            _ => None,
+        };
+        if let Some(m) = min {
+            h = h.max(adj(m));
+        }
+        h.max(0.0)
     }
 
     /// Size of a replaced box's content area. `cbw == None` means

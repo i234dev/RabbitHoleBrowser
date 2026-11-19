@@ -125,6 +125,7 @@ impl<'a> Layouter<'a> {
     }
 
     /// (min, max) of a box's contents by formatting context.
+    #[inline]
     fn intrinsic_contents(&mut self, b: &mut LayoutBox) -> (f32, f32) {
         {
             match b.formatting {
