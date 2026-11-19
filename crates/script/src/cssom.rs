@@ -414,6 +414,11 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     Some(computed_from_style(&s, prop, r, cb))
 }
 
+/// A computed value read from a style alone (no layout box).
+pub(crate) fn computed_value_of_style(s: &ComputedStyle, prop: &str) -> String {
+    computed_from_style(s, prop, Default::default(), Default::default())
+}
+
 /// The containing block of `node` (after layout), the base of its
 /// percentage margins, padding, insets and min/max sizes: the padding box
 /// of the nearest positioned ancestor for absolute positioning, the

@@ -237,6 +237,22 @@ pub trait HostEnv {
     /// Take a blank iframe's initial load for synchronous delivery. False
     /// if it was already delivered (e.g. a state-preserving move).
     fn take_initial_frame_load(&mut self, _node: NodeId) -> bool { false }
+    /// The script animations' effects changed (Web Animations): the
+    /// embedder applies the registry's effects to rendering and computed
+    /// styles.
+    fn web_animations(&mut self, _registry: &crate::WebAnimations) {}
+    /// Style of `node` with the script effects of composite order up to
+    /// (and including) `order` applied (`Animation.commitStyles`).
+    fn web_animation_style(&mut self, _node: NodeId, _order: u64) -> Option<Rc<ComputedStyle>> { None }
+    /// The CSS animations and transitions of the document (after flushing
+    /// style), for `getAnimations()`.
+    fn css_animations(&mut self) -> Vec<crate::CssAnimationInfo> { Vec::new() }
+    /// One CSS animation or transition by id.
+    fn css_animation(&mut self, _id: u64) -> Option<crate::CssAnimationInfo> { None }
+    /// A script changed a CSS animation's playback: start time (embedder
+    /// clock ms), hold time (local ms), playback rate. Both times `None`
+    /// cancels it.
+    fn set_css_animation(&mut self, _id: u64, _start: Option<f64>, _hold: Option<f64>, _rate: f64) {}
 }
 
 type EnvPtr = *mut (dyn HostEnv + 'static);

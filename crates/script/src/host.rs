@@ -153,6 +153,8 @@ pub struct HostState {
     pub shadow: crate::shadow::ShadowState,
     /// "Update the rendering" hook state (observers).
     pub render: crate::natives::RenderState,
+    /// Web Animations (document timeline, effects shared with the embedder).
+    pub webanim: crate::webanim::WebAnimState,
     /// JS factories used by natives (see `__rhNative.setFactory`).
     pub factories: HashMap<String, Value>,
     /// `URL.createObjectURL` store: blob URL → (bytes, MIME type).
