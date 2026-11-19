@@ -990,12 +990,13 @@ fn apply_declarations(
     });
 
     // Substitute var() references up front (shared by both passes).
+    let attrs = attrs_active();
     let mut resolved: Vec<(&str, std::borrow::Cow<[Token]>, Option<&str>)> = Vec::with_capacity(local.len());
     for m in local {
         if m.decl.name.starts_with("--") {
             continue;
         }
-        if needs_substitution(&m.decl.value) && (m.decl.name != "content" || uses_attr(m.decl) || m.decl.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var")))) {
+        if needs_substitution(&m.decl.value, attrs) && (m.decl.name != "content" || uses_attr(m.decl) || m.decl.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var")))) {
             match substitute_vars(&m.decl.value, vars, 0) {
                 Some(v) => resolved.push((m.decl.name.as_str(), std::borrow::Cow::Owned(v), m.base)),
                 None => continue,
@@ -1509,9 +1510,9 @@ fn attrs_active() -> bool {
     ELEMENT_ATTRS.with(|a| a.borrow().is_some())
 }
 
-/// Does `value` hold a function substituted at computed-value time?
-fn needs_substitution(value: &[Token]) -> bool {
-    let attrs = attrs_active();
+/// Does `value` hold a function substituted at computed-value time
+/// (`attrs`: `attr()` too)?
+fn needs_substitution(value: &[Token], attrs: bool) -> bool {
     value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || (attrs && f.eq_ignore_ascii_case("attr"))))
 }
 
