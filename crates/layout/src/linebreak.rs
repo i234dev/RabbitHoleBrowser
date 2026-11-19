@@ -6,7 +6,10 @@
 //! with no space between them ([`split_points`], [`direct_break`]) and
 //! whether the spaces between two words are one ([`break_after_spaces`]).
 
+mod hyphenate;
 mod table;
+
+pub(crate) use hyphenate::hyphenate_en;
 
 /// Line_Break property values.
 #[allow(clippy::upper_case_acronyms)]

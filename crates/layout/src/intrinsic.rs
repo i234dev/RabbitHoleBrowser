@@ -216,6 +216,7 @@ impl<'a> Layouter<'a> {
         // Until the first word or atomic, break opportunities keep the
         // indent with the content that follows.
         let mut lead = true;
+        let mut after_shy = false;
         if let Some(mt) = &b.marker_text {
             if cstyle.list_style_position == rabbithole_style::ListStylePosition::Inside {
                 let font = self.font_for(&cstyle);
@@ -229,7 +230,11 @@ impl<'a> Layouter<'a> {
                 Piece::Word {
                     text, width, item, break_before,
                 } => {
-                    let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
+                    let st = item_style(&b.items, &cstyle, *item);
+                    // `auto-phrase` keeps its words whole in the intrinsic
+                    // sizes (soft hyphens are a fallback for overflow).
+                    let wraps = st.white_space.wraps() && !(after_shy && st.word_break == rabbithole_style::WordBreak::AutoPhrase);
+                    after_shy = text.ends_with('\u{ad}');
                     let tab;
                     let width = if &**text == "\t" {
                         let st = item_style(&b.items, &cstyle, *item).clone();

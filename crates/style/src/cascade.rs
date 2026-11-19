@@ -1234,6 +1234,7 @@ pub fn lang_code(tag: &str) -> u8 {
         "lt" => LANG_LT,
         "el" => LANG_EL,
         "nl" => LANG_NL,
+        "en" => LANG_EN,
         _ => 0,
     }
 }

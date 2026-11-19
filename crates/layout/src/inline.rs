@@ -230,6 +230,97 @@ fn autospace_between(a: char, b: char) -> bool {
     (ideo(a) && other(b)) || (other(a) && ideo(b))
 }
 
+/// Does `hyphens: auto` hyphenate this text (English, wrapping, no
+/// `line-break: anywhere` / `word-break: auto-phrase`)?
+fn auto_hyphens(style: &ComputedStyle) -> bool {
+    style.hyphens == 2
+        && style.lang == rabbithole_style::LANG_EN
+        && style.white_space.wraps()
+        && style.line_break != 3
+        && style.word_break != WordBreak::AutoPhrase
+}
+
+/// The transformed texts of the items, with soft hyphens inserted at the
+/// hyphenation points of the English words (runs of ASCII letters, across
+/// inline element boundaries) whose letters all hyphenate; `None` for the
+/// items left unchanged.
+fn hyphenate_items(items: &[InlineItem]) -> Vec<Option<String>> {
+    let texts: Vec<Option<String>> = items
+        .iter()
+        .map(|it| match it {
+            InlineItem::Text { text, style, .. } => Some(transform(text, style.text_transform)),
+            _ => None,
+        })
+        .collect();
+    // Insertion points: (item, byte offset).
+    let mut inserts: Vec<(usize, usize)> = Vec::new();
+    // The current word: (item, byte offset) of each letter.
+    let mut word: Vec<(usize, usize)> = Vec::new();
+    let mut letters = String::new();
+    let mut glued_before = false;
+    let mut pts = Vec::new();
+    let mut flush = |word: &mut Vec<(usize, usize)>, letters: &mut String, glued: bool, inserts: &mut Vec<(usize, usize)>| {
+        if !glued && word.len() >= 5 && word.iter().all(|(i, _)| matches!(&items[*i], InlineItem::Text { style, .. } if auto_hyphens(style))) {
+            lb::hyphenate_en(letters, &mut pts);
+            inserts.extend(pts.iter().map(|&p| word[p]));
+        }
+        word.clear();
+        letters.clear();
+    };
+    for (i, it) in items.iter().enumerate() {
+        match it {
+            InlineItem::Text { .. } => {
+                let t = texts[i].as_deref().unwrap_or("");
+                for (b, c) in t.char_indices() {
+                    if c.is_ascii_alphabetic() {
+                        word.push((i, b));
+                        letters.push(c);
+                    } else if c == '\u{ad}' {
+                        // Words with soft hyphens are not hyphenated
+                        // automatically.
+                        glued_before = true;
+                    } else {
+                        let glued = c.is_ascii_digit() || (c as u32 >= 0x80 && c.is_alphanumeric());
+                        if !word.is_empty() {
+                            flush(&mut word, &mut letters, glued_before || glued, &mut inserts);
+                        }
+                        glued_before = glued;
+                    }
+                }
+            }
+            InlineItem::Open { .. } | InlineItem::Close | InlineItem::Absolute(_) | InlineItem::Float(_) => {}
+            _ => {
+                if !word.is_empty() {
+                    flush(&mut word, &mut letters, glued_before, &mut inserts);
+                }
+                glued_before = false;
+            }
+        }
+    }
+    if !word.is_empty() {
+        flush(&mut word, &mut letters, glued_before, &mut inserts);
+    }
+    let mut out: Vec<Option<String>> = vec![None; items.len()];
+    inserts.sort_unstable();
+    let mut k = 0;
+    while k < inserts.len() {
+        let i = inserts[k].0;
+        let t = texts[i].as_deref().unwrap_or("");
+        let mut s = String::with_capacity(t.len() + 8);
+        let mut last = 0;
+        while k < inserts.len() && inserts[k].0 == i {
+            let b = inserts[k].1;
+            s.push_str(&t[last..b]);
+            s.push('\u{ad}');
+            last = b;
+            k += 1;
+        }
+        s.push_str(&t[last..]);
+        out[i] = Some(s);
+    }
+    out
+}
+
 /// Word-separator characters (CSS Text 3 §4.1.1): expanded by
 /// `inter-word` justification.
 fn is_word_separator(c: char) -> bool {
@@ -324,6 +415,13 @@ impl<'a> Layouter<'a> {
         let mut space_opp: Option<Option<char>> = None;
         let mut points = Vec::new();
         let mut segs = Vec::new();
+        // `hyphens: auto`: the texts with soft hyphens at the hyphenation
+        // points of their English words (which may span inline elements).
+        let mut hyphenated = if items.iter().any(|it| matches!(it, InlineItem::Text { style, .. } if auto_hyphens(style))) {
+            Some(hyphenate_items(items))
+        } else {
+            None
+        };
         for (i, item) in items.iter().enumerate() {
             match item {
                 InlineItem::Text { text, style, .. } => {
@@ -331,9 +429,13 @@ impl<'a> Layouter<'a> {
                     let size = style.font_size;
                     let ws = style.white_space;
                     let wraps = ws.wraps();
-                    let t = transform(text, style.text_transform);
+                    let t = match hyphenated.as_mut().and_then(|h| h[i].take()) {
+                        Some(t) => t,
+                        None => transform(text, style.text_transform),
+                    };
                     segs.clear();
-                    segment_tabs(&t, ws, &mut col, &mut segs, style.tab_size.max(1.0) as usize);
+                    let keep_shy = style.hyphens != 0;
+                    segment_tabs(&t, ws, &mut col, &mut segs, keep_shy);
                     let ls = style.letter_spacing;
                     let rules = lb::Rules {
                         line_break: if style.line_break == 3 && style.wrap_inside_avoid { 0 } else { style.line_break },
@@ -347,10 +449,12 @@ impl<'a> Layouter<'a> {
                         break_spaces: ws == rabbithole_style::WhiteSpace::BreakSpaces,
                     };
                     let anywhere = rules.line_break == 3;
+
                     for seg in segs.drain(..) {
                         match seg {
                             Seg::Word(w) => {
                                 let is_space_word = w.chars().all(|c| c == ' ' || c == '\t');
+
                                 // A break between the previous word and this
                                 // one when no space separates them
                                 // (ideographs, punctuation)...
@@ -371,6 +475,7 @@ impl<'a> Layouter<'a> {
                                         prev_break_opp = false;
                                     }
                                 }
+                                let w_cursive = w.chars().any(is_cursive);
                                 let prev_before = prev_char;
                                 prev_char = w.chars().rev().find(|&c| !attaches_to_previous(c)).or(w.chars().last());
                                 let mut parts: Vec<(String, bool)> = Vec::new();
@@ -419,6 +524,11 @@ impl<'a> Layouter<'a> {
                                         gapped.push((part, continuation, false));
                                     }
                                 }
+                                // The parts of a word in a joining script measure
+                                // as they are shaped together: by prefix widths.
+                                let joined = gapped.len() > 1 && w_cursive;
+                                let mut prefix = String::new();
+                                let mut prefix_w = 0.0;
                                 for (part, continuation, is_gap) in gapped {
                                     if is_gap {
                                         pieces.push(Piece::Gap(gap));
@@ -426,6 +536,12 @@ impl<'a> Layouter<'a> {
                                     }
                                     let width = if part == "\t" {
                                         self.tab_width(container, style, 0.0)
+                                    } else if joined {
+                                        prefix.push_str(&part);
+                                        let pw = self.measurer.width(font, size, &prefix);
+                                        let w = pw - prefix_w + ls * part.chars().count() as f32;
+                                        prefix_w = pw;
+                                        w
                                     } else {
                                         self.measurer.width(font, size, &part) + ls * part.chars().count() as f32
                                     };
@@ -1282,6 +1398,27 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.frags = out;
     }
 
+    /// A line broken at a soft hyphen ends with the hyphenation character
+    /// (`hyphenate-character`; U+2010, or `-` when the font lacks it).
+    fn show_hyphen(&mut self) {
+        let Some(PF { kind: PFKind::Text { text, item }, w, .. }) = self.cur.frags.last_mut() else { return };
+        if !text.ends_with('\u{ad}') {
+            return;
+        }
+        let style = item_style(self.items, self.cstyle, *item).clone();
+        let font = self.lay.font_for(&style);
+        let hyphen: Rc<str> = match &style.hyphenate_character {
+            Some(h) => h.clone(),
+            None if self.lay.ctx.fonts.has_glyph(font, '\u{2010}') => Rc::from("\u{2010}"),
+            None => Rc::from("-"),
+        };
+        text.pop();
+        text.push_str(&hyphen);
+        let hw = if hyphen.is_empty() { 0.0 } else { self.lay.measurer.width(font, style.font_size, &hyphen) + style.letter_spacing * hyphen.chars().count() as f32 };
+        *w += hw;
+        self.cur.x += hw;
+    }
+
     fn trim_trailing_space(&mut self) {
         if let Some(PF {
             kind: PFKind::Text { text, item },
@@ -1530,6 +1667,16 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         for (i, o) in origin.iter().enumerate() {
             if let Some((fi, k)) = o {
                 frag_levels[*fi][*k] = levels[i];
+            }
+        }
+        // An overflow marker isolated in the paragraph's own direction sits
+        // where its isolate initiator does (at the paragraph level): the
+        // dropped controls must not join it to a run of higher levels.
+        if container_bidi != UnicodeBidi::Plaintext {
+            for (fi, f) in self.cur.frags.iter().enumerate() {
+                if matches!(&f.kind, PFKind::Text { item, text } if *item == MARKER_ITEM && !text.chars().any(|c| matches!(class(c), BidiClass::L | BidiClass::R | BidiClass::AL))) {
+                    frag_levels[fi].iter_mut().for_each(|l| *l = base);
+                }
             }
         }
         // Split text fragments into units of one level (leading / trailing
@@ -1823,6 +1970,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
         self.cur.pending_space = None;
         self.trim_trailing_space();
+        if !forced && !self.final_flush {
+            self.show_hyphen();
+        }
         self.merge_frags();
 
         // Line clamp: this is the last allowed line and content follows.
@@ -2064,7 +2214,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                         kind: FragmentKind::Text {
-                            text: if text.contains('\t') { Rc::from(text.replace('\t', " ").as_str()) } else { Rc::from(text.as_str()) },
+                            text: if text.contains(['\t', '\u{ad}']) { Rc::from(text.replace('\t', " ").replace('\u{ad}', "").as_str()) } else { Rc::from(text.as_str()) },
                             font: tm.font,
                             size: tm.size,
                             color: style.color,

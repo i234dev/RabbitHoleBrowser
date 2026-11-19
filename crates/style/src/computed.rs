@@ -299,6 +299,7 @@ pub const LANG_TR: u8 = 4;
 pub const LANG_LT: u8 = 5;
 pub const LANG_EL: u8 = 6;
 pub const LANG_NL: u8 = 7;
+pub const LANG_EN: u8 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlign {

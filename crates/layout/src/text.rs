@@ -63,11 +63,14 @@ fn is_collapsible_ws(c: char) -> bool {
 /// Split `text` into segments according to `white-space`.
 #[cfg(test)]
 pub(crate) fn segment(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut Vec<Seg>) {
-    segment_tabs(text, ws, st, out, 8)
+    segment_tabs(text, ws, st, out, false)
 }
 
 /// Like [`segment`], with the `tab-size` (in spaces) for preserved tabs.
-pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut Vec<Seg>, _tab_size: usize) {
+/// Soft hyphens (U+00AD) stay in the words when `keep_shy` (`hyphens`
+/// other than `none`): they are break opportunities, shown as a hyphen
+/// only at the end of a line.
+pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut Vec<Seg>, keep_shy: bool) {
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut Vec<Seg>| {
         if !word.is_empty() {
@@ -78,7 +81,11 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
     let preserve_newlines = ws.preserves_newlines();
     for ch in text.chars() {
         match ch {
-            '\u{ad}' => {}
+            '\u{ad}' => {
+                if keep_shy {
+                    word.push('\u{ad}');
+                }
+            }
             '\u{200b}' => {
                 // Zero-width space: break opportunity without width.
                 flush(&mut word, out);
@@ -145,7 +152,9 @@ impl<'a> Measurer<'a> {
         if let Some(w) = per_font.get(text) {
             return *w;
         }
-        let w = self.fonts.measure(font, size, text);
+        // Soft hyphens are invisible (the hyphen shown at a line end is
+        // measured on its own).
+        let w = if text.contains('\u{ad}') { self.fonts.measure(font, size, &text.replace('\u{ad}', "")) } else { self.fonts.measure(font, size, text) };
         if text.len() <= 64 {
             per_font.insert(text.to_string(), w);
         }
