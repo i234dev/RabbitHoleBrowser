@@ -1030,7 +1030,13 @@ impl<'a> Layouter<'a> {
                 Flow::Absolute => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
                     let block = !b.children[i].style.display_before_blockification.is_inline_level();
-                    let x = content_x + if block && b.style.direction == rabbithole_style::Direction::Rtl { cb.width } else { 0.0 };
+                    let rtl = b.style.direction == rabbithole_style::Direction::Rtl;
+                    let mut x = content_x + if block && rtl { cb.width } else { 0.0 };
+                    if !block && !rtl && !bfc.is_empty() {
+                        // An inline-level box would start a line beside the
+                        // floats there.
+                        x = bfc.available(cursor + off, 1.0, content_x, cb.width).0;
+                    }
                     b.children[i].static_pos = (x, cursor + off);
                     b.children[i].static_align = None;
                 }
