@@ -155,6 +155,8 @@ struct InvalidationMap {
     classes: HashMap<String, u8>,
     ids: HashMap<String, u8>,
     attrs: HashMap<String, u8>,
+    /// Relation of `:dir()` to the content of `dir=auto` elements.
+    dir_auto: u8,
     /// Compounds using `:hover` / `:active` / `:focus`, so a state change
     /// only restyles elements that can match the rest of the compound.
     hover: StateDeps,
@@ -342,7 +344,16 @@ impl InvalidationMap {
                     *self.attrs.entry("selected".into()).or_default() |= rel;
                 }
                 // `:lang()` looks at the nearest ancestor with `lang`.
-                Pseudo::Lang(_) => *self.attrs.entry("lang".into()).or_default() |= rel | R_DESC,
+                Pseudo::Lang(_) => {
+                    *self.attrs.entry("lang".into()).or_default() |= rel | R_DESC;
+                    *self.attrs.entry("xml:lang".into()).or_default() |= rel | R_DESC;
+                }
+                // `:dir()` looks at the nearest ancestor with `dir`, and at
+                // the text of `dir=auto` elements.
+                Pseudo::Dir(_) => {
+                    *self.attrs.entry("dir".into()).or_default() |= rel | R_DESC;
+                    self.dir_auto |= rel | R_DESC;
+                }
                 Pseudo::Not(list) | Pseudo::Is(list) | Pseudo::Where(list) => {
                     for s in list {
                         self.add_selector(s, rel, in_has);
@@ -366,6 +377,22 @@ impl InvalidationMap {
                 _ => {}
             }
         }
+    }
+}
+
+/// The nearest inclusive ancestor whose direction comes from its content
+/// (`dir=auto`, `bdi`), stopping at an explicit `dir`.
+fn auto_dir_ancestor(doc: &Document, mut node: NodeId) -> Option<NodeId> {
+    loop {
+        if let Some(el) = doc.element(node) {
+            match el.attr("dir").map(|d| d.trim().to_ascii_lowercase()).as_deref() {
+                Some("auto") => return Some(node),
+                Some("ltr") | Some("rtl") => return None,
+                _ if el.tag == "bdi" => return Some(node),
+                _ => {}
+            }
+        }
+        node = doc.parent(node)?;
     }
 }
 
@@ -919,6 +946,12 @@ impl StyleEngine {
                     if inval.empty != 0 {
                         m.apply(parent, inval.empty);
                     }
+                    if inval.dir_auto != 0 {
+                        // Content of a `dir=auto` element: its direction.
+                        if let Some(a) = auto_dir_ancestor(doc, parent) {
+                            m.apply(a, inval.dir_auto);
+                        }
+                    }
                     if doc.element(child).is_none() && doc.element(parent).is_some() {
                         // Text inserted/removed: only `:empty` can notice.
                         continue;
@@ -928,6 +961,11 @@ impl StyleEngine {
                     if let Some(p) = doc.parent(*node) {
                         if inval.empty != 0 && doc.is_connected(p) {
                             m.apply(p, inval.empty);
+                        }
+                        if inval.dir_auto != 0 && doc.is_connected(p) {
+                            if let Some(a) = auto_dir_ancestor(doc, p) {
+                                m.apply(a, inval.dir_auto);
+                            }
                         }
                     }
                 }
