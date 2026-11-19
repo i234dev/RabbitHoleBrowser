@@ -357,10 +357,9 @@ impl Condition {
             Condition::Style(name, want) => {
                 let (src, n) = style?;
                 let have = src.custom_property(n, name)?;
-                let strip = |v: &[Token]| -> Vec<Token> { v.iter().filter(|t| !matches!(t, Token::Whitespace)).cloned().collect() };
                 Some(match (want, have) {
                     (None, have) => have.is_some(),
-                    (Some(w), Some(h)) => strip(w) == strip(&h),
+                    (Some(w), Some(h)) => src.same_value(w, &h),
                     (Some(_), None) => false,
                 })
             }
@@ -457,6 +456,12 @@ pub trait StyleSource {
     /// The computed value of custom property `name` on `n`: `Some(None)`
     /// when it is not set, `None` when `n` has no style yet.
     fn custom_property(&self, n: NodeId, name: &str) -> Option<Option<Vec<Token>>>;
+    /// Do two values compute to the same value (same tokens, or the same
+    /// color)?
+    fn same_value(&self, a: &[Token], b: &[Token]) -> bool {
+        let strip = |v: &[Token]| -> Vec<Token> { v.iter().filter(|t| !matches!(t, Token::Whitespace)).cloned().collect() };
+        strip(a) == strip(b)
+    }
 }
 
 /// Does every query hold for `node` (`pseudo`: the rule styles one of its

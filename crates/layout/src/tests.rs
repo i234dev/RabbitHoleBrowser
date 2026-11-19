@@ -1328,3 +1328,21 @@ fn border_image_draws_nine_slices_instead_of_the_border() {
     let gradients = dl.items.iter().filter(|i| matches!(i, DisplayItem::RectRadii { paint: Paint::Linear { .. }, .. })).count();
     assert_eq!(gradients, 8, "four corners and four edges, no middle without fill");
 }
+
+#[test]
+fn run_in_becomes_the_first_inline_box_of_the_next_block() {
+    let css = "body{margin:0;font:10px/10px monospace}div{display:block}.r{display:run-in}";
+    // Runs in past whitespace, display:none and floats.
+    let fx = Fixture::new("<div class=r>Head</div> <i style='display:none'></i><b style='float:left'></b><div id=t>Text</div>", css);
+    let tree = fx.layout();
+    let divs = fx.find(&tree, "div");
+    assert_eq!(divs.len(), 1, "the run-in has no block box of its own");
+    assert_eq!(divs[0].rect.h, 10.0, "one line: the header runs into the block");
+    // Text in between, a run-in holding a block, or no block after it:
+    // the run-in is a block.
+    for html in ["<div class=r>Head</div>text<div>Text</div>", "<div class=r><p>Head</p></div><div>Text</div>", "<div class=r>Head</div><span>x</span>"] {
+        let fx = Fixture::new(html, css);
+        let tree = fx.layout();
+        assert!(fx.find(&tree, "div").iter().any(|d| d.style.run_in), "{html}");
+    }
+}

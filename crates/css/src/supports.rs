@@ -215,7 +215,7 @@ fn declaration(toks: &[&Token]) -> bool {
         return false;
     }
     // Value functions we do not implement anywhere.
-    if values.iter().any(|v| matches!(v.as_str(), "anchor(" | "anchor-size(" | "sibling-index(" | "sibling-count(" | "if(" | "random(" | "progress(" | "contrast-color(")) {
+    if values.iter().any(|v| matches!(v.as_str(), "anchor(" | "anchor-size(" | "sibling-index(" | "sibling-count(" | "if(" | "random(" | "progress(")) {
         return false;
     }
     // Vendor-prefixed properties of other engines.

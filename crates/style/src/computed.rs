@@ -1651,6 +1651,12 @@ pub struct ComputedStyle {
     pub contain_size: bool,
     /// `contain: inline-size`.
     pub contain_inline_size: bool,
+    /// `contain: style` (also implied by `content`, `strict` and query
+    /// containers).
+    pub contain_style: bool,
+    /// `display: run-in` (computed as `block`): the box becomes the first
+    /// inline box of the block that follows it, when there is one.
+    pub run_in: bool,
     /// `container-type: size`: a size container, which is size-contained.
     pub container_size: bool,
     /// `container-type: inline-size` or `size`: a query container (and
@@ -1910,6 +1916,8 @@ impl ComputedStyle {
             contain_layout: false,
             contain_size: false,
             contain_inline_size: false,
+            contain_style: false,
+            run_in: false,
             container_size: false,
             container_inline: false,
             container_names: None,
@@ -1960,6 +1968,13 @@ impl ComputedStyle {
 
     /// A fresh style for a child: inherited properties copied from
     /// `parent`, everything else at its initial value.
+    /// Any containment (layout, paint, size, inline-size or style): stops
+    /// the propagation of the root's and body's background and overflow to
+    /// the viewport (CSS Contain 2 §3).
+    pub fn has_containment(&self) -> bool {
+        self.contain_layout || self.contain_paint || self.contain_size || self.contain_inline_size || self.contain_style || self.container_inline
+    }
+
     pub fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         ComputedStyle {
             color: parent.color,

@@ -300,7 +300,9 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
     let mut bg = root.style.background_color;
     let mut root_bg_painted = false;
     if bg.is_transparent() {
-        if let Some(body) = root.children.iter().find(|c| c.is_in_flow()) {
+        // (Not when the root or the body has containment.)
+        let body = root.children.iter().find(|c| c.is_in_flow() && c.node.is_some_and(|n| ctx.doc.is_element(n, "body")));
+        if let Some(body) = body.filter(|b| !root.style.has_containment() && !b.style.has_containment()) {
             bg = body.style.background_color;
         }
     } else {

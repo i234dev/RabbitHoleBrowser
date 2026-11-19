@@ -465,6 +465,19 @@ impl rabbithole_css::container::StyleSource for StyledSoFar<'_> {
         let vars = self.vars.get(n)?.as_ref()?;
         Some(vars.get(name).map(|v| substitute_vars(v, vars, 0).unwrap_or_else(|| v.clone())))
     }
+
+    fn same_value(&self, a: &[Token], b: &[Token]) -> bool {
+        let strip = |v: &[Token]| -> Vec<Token> { v.iter().filter(|t| !matches!(t, Token::Whitespace)).cloned().collect() };
+        let (a, b) = (strip(a), strip(b));
+        if a == b {
+            return true;
+        }
+        // Colors (of registered `<color>` properties) compare computed.
+        match (values::parse_color(&a), values::parse_color(&b)) {
+            (Some(ColorValue::Color(x)), Some(ColorValue::Color(y))) => x == y,
+            _ => false,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2008,6 +2021,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
     match prop {
         "display" => {
             to.display = from.display;
+            to.run_in = from.run_in;
             to.display_before_blockification = from.display;
             to.webkit_box = from.webkit_box;
             to.grid_lanes = from.grid_lanes;
@@ -2378,6 +2392,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.contain_layout = from.contain_layout;
             to.contain_size = from.contain_size;
             to.contain_inline_size = from.contain_inline_size;
+            to.contain_style = from.contain_style;
             to.creates_stacking_context = from.creates_stacking_context;
         }
         "-webkit-line-clamp" | "line-clamp" => {
@@ -2642,8 +2657,14 @@ fn display_of(comps: &[&[Token]]) -> Option<Display> {
             "table-column-group" => Display::TableColumnGroup,
             "contents" => Display::Contents,
             "ruby" | "ruby-base" | "ruby-text" => Display::Inline,
+            // A run-in is block-level unless it runs into the next block
+            // (see `ComputedStyle::run_in`).
+            "run-in" => Display::Block,
             _ => return None,
         });
+    }
+    if idents.len() == 2 && idents.iter().any(|i| i == "run-in") && idents.iter().any(|i| i == "flow") {
+        return Some(Display::Block);
     }
     // Two-value syntax: <outer> <inner>
     let outer_inline = idents.iter().any(|i| i == "inline");
@@ -3139,6 +3160,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.display_before_blockification = d;
                 style.webkit_box = comps.len() == 1 && values::ident(comps[0]).is_some_and(|k| k == "-webkit-box" || k == "-webkit-inline-box");
                 style.grid_lanes = comps.iter().any(|c| values::ident(c).is_some_and(|k| k == "grid-lanes" || k == "inline-grid-lanes"));
+                style.run_in = comps.iter().any(|c| values::is_ident(c, "run-in"));
             }
         }
         "position" => {

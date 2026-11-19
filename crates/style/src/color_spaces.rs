@@ -345,6 +345,25 @@ fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
             (predefined(&space, v)?, alpha(a)?)
         }
         "color-mix" => color_mix(c)?,
+        "contrast-color" => {
+            // White or black, whichever contrasts more (WCAG 2.1; white on
+            // ties), CSS Color 5 §7.
+            let parts = split_top_commas(strip(c));
+            let [arg] = parts.as_slice() else { return None };
+            let comps: Vec<&[Token]> = components(arg).into_iter().filter(|c| !matches!(c, [Token::Whitespace])).collect();
+            let [comp] = comps.as_slice() else { return None };
+            let lin = match parse_wide(comp) {
+                Some(w) => [w[0] as f64, w[1] as f64, w[2] as f64],
+                None => match crate::values::parse_color_component(comp)? {
+                    ColorValue::Color(col) => linear_of(col),
+                    ColorValue::CurrentColor => return None,
+                },
+            };
+            let lin = lin.map(|v| v.clamp(0.0, 1.0));
+            let y = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+            let (with_white, with_black) = (1.05 / (y + 0.05), (y + 0.05) / 0.05);
+            (if with_white >= with_black { [1.0; 3] } else { [0.0; 3] }, 1.0)
+        }
         _ => return None,
     })
 }
@@ -710,6 +729,8 @@ mod tests {
         assert_eq!(color("Canvas"), Some(Color::rgb(255, 255, 255)));
         assert_eq!(color("ButtonFace"), Some(Color::rgb(239, 239, 239)));
         assert!(color("oklch(50% 0.1)").is_none());
+        assert_eq!(color("contrast-color(#000)"), Some(Color::WHITE));
+        assert_eq!(color("contrast-color(yellow)"), Some(Color::BLACK));
     }
 
     #[test]
