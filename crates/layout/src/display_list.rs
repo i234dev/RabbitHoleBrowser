@@ -1329,6 +1329,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     /// Paint the backgrounds of `geom` (logical, in a vertical subtree)
     /// in the physical space of the subtree's horizontal ancestor.
+    #[cold]
+    #[inline(never)]
     fn paint_unturned_backgrounds(&mut self, geom: &BoxGeometry, style: &rabbithole_style::ComputedStyle, vp: Rect) {
         let Some(m) = self.wm_m else { return };
         let Some(inv) = crate::tree::invert_matrix(m) else { return };

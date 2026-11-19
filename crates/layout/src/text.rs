@@ -398,7 +398,9 @@ impl<'a> Measurer<'a> {
         }
         // Soft hyphens are invisible (the hyphen shown at a line end is
         // measured on its own).
-        let w = if text.contains(['\u{ad}', '\u{a0}']) { self.fonts.measure(font, size, &text.replace('\u{ad}', "").replace('\u{a0}', " ")) } else { self.fonts.measure(font, size, text) };
+        // (U+00AD and U+00A0 both start with the byte 0xC2: plain texts
+        // skip the character search.)
+        let w = if text.as_bytes().contains(&0xC2) && text.contains(['\u{ad}', '\u{a0}']) { self.fonts.measure(font, size, &text.replace('\u{ad}', "").replace('\u{a0}', " ")) } else { self.fonts.measure(font, size, text) };
         if text.len() <= 64 {
             per_font.insert(text.to_string(), w);
         }
