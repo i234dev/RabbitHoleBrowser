@@ -226,6 +226,9 @@ impl<'a> Layouter<'a> {
         let mut after_shy = false;
         // Hanging width at the end of the last word.
         let mut trail: f32 = 0.0;
+        // Preserved `pre-wrap` spaces ending the run: they hang at a soft
+        // wrap and do not count for min-content.
+        let mut space_trail: f32 = 0.0;
         if let Some(mt) = &b.marker_text {
             if cstyle.list_style_position == rabbithole_style::ListStylePosition::Inside {
                 let font = self.font_for(&cstyle);
@@ -253,10 +256,15 @@ impl<'a> Layouter<'a> {
                         width
                     };
                     if *break_before && wraps && !lead {
-                        min = min.max(run - trail);
+                        min = min.max(run - trail - space_trail);
                         run = soft_indent;
                     }
                     lead = false;
+                    if st.white_space == rabbithole_style::WhiteSpace::PreWrap && text.bytes().all(|b| b == b' ' || b == b'\t') {
+                        space_trail += width;
+                    } else {
+                        space_trail = 0.0;
+                    }
                     line += pending_space + width;
                     // `overflow-wrap: anywhere` / `word-break: break-word`:
                     // every grapheme cluster may end a line (min-content).
@@ -300,7 +308,7 @@ impl<'a> Layouter<'a> {
                 Piece::Space { width, item } => {
                     let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
                     if wraps && !lead {
-                        min = min.max(run - trail);
+                        min = min.max(run - trail - space_trail);
                         run = soft_indent;
                     }
                     if line > 0.0 && !lead {
@@ -322,7 +330,7 @@ impl<'a> Layouter<'a> {
                     let ex = extras_px(&b.children[*c].style);
                     let (cmin, cmax) = self.intrinsic(&mut b.children[*c]);
                     if container_wraps && before && !lead {
-                        min = min.max(run - trail);
+                        min = min.max(run - trail - space_trail);
                         run = soft_indent;
                     }
                     run += cmin + ex;
@@ -333,16 +341,18 @@ impl<'a> Layouter<'a> {
                     pending_space = 0.0;
                     lead = false;
                     trail = 0.0;
+                    space_trail = 0.0;
                 }
                 Piece::Abs(_) => {}
                 Piece::Gap(w) => {
                     run += w;
                     line += w;
                     trail = 0.0;
+                    space_trail = 0.0;
                 }
                 Piece::Break => {
                     lead = false;
-                    min = min.max(run - trail);
+                    min = min.max(run - trail - space_trail);
                     run = forced_indent;
                     max = max.max(line - trail);
                     line = forced_indent;
@@ -351,7 +361,7 @@ impl<'a> Layouter<'a> {
                 }
             }
         }
-        min = min.max(run - trail);
+        min = min.max(run - trail - space_trail);
         max = max.max(line - trail);
         b.pieces = Some(pieces);
         (min, max)
