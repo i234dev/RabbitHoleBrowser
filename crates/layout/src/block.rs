@@ -10,6 +10,13 @@ use rabbithole_gfx::{FontId, Rect};
 use rabbithole_style::{BoxSizing, Clear, ComputedStyle, Edges, ItemAlign, Length, Position};
 use std::collections::HashMap;
 
+// `LayoutBox::control` values.
+const CONTROL_NONE: u8 = 1;
+const CONTROL_TEXTAREA: u8 = 2;
+const CONTROL_INPUT: u8 = 3;
+const CONTROL_SELECT: u8 = 4;
+const CONTROL_BUTTON: u8 = 5;
+
 /// Containing block information passed down during layout.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Cb {
@@ -63,6 +70,8 @@ pub(crate) struct Layouter<'a> {
     /// Intrinsic sizing: the stretched definite height of the next box
     /// measured (a flex item in a container with a definite height).
     pub(crate) intrinsic_forced_h: Option<f32>,
+    /// Pooled working storage of flex layout.
+    pub(crate) flex_scratch: Vec<crate::flex::FlexScratch>,
     /// Whether `FontContext::select_family` & co. are implemented.
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
@@ -156,6 +165,42 @@ fn abs_align_fraction(align: ItemAlign, mods: rabbithole_style::AlignMods, rtl: 
         (_, ItemAlign::Baseline) if mods.last => 1.0 - start(inline && rtl),
         _ => return None,
     })
+}
+
+/// A block formatting context root next to floats: its (x, y, content
+/// width), narrowed or moved below them.
+#[cold]
+#[inline(never)]
+fn avoid_floats(style: &ComputedStyle, bfc: &Bfc, cb: &Cb, (mut x, mut y, mut content_w): (f32, f32, f32), pb_h: f32, ml: f32, mr: f32) -> (f32, f32, f32) {
+    let cbw = cb.width;
+    let mut guard = 0;
+    loop {
+        let (l, r) = bfc.available(y, 1.0, cb.x, cb.width);
+        if l <= cb.x && r >= cb.x + cb.width {
+            break;
+        }
+        // The used margins of a sized box absorb the rest of the
+        // containing block; next to floats only its own margins count.
+        let (sml, smr) = (style.margin.left.resolve(cbw).unwrap_or(0.0), style.margin.right.resolve(cbw).unwrap_or(0.0));
+        let outer = content_w + pb_h + sml + smr;
+        if style.width.is_auto() || rabbithole_style::is_stretch(style.width) {
+            content_w = (r - l - ml - mr - pb_h).max(0.0);
+            x = l + ml;
+            break;
+        } else if outer <= r - l + 0.01 {
+            x = l + sml;
+            break;
+        }
+        match bfc.next_y(y) {
+            Some(ny) => y = ny,
+            None => break,
+        }
+        guard += 1;
+        if guard > 100 {
+            break;
+        }
+    }
+    (x, y, content_w)
 }
 
 /// A set of adjoining vertical margins being collapsed (CSS 2.1 §8.3.1):
@@ -272,6 +317,7 @@ impl<'a> Layouter<'a> {
             width_intrinsic: None,
             intrinsic_cb_used: false,
             intrinsic_forced_h: None,
+            flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
             abs_cb: HashMap::new(),
@@ -285,13 +331,35 @@ impl<'a> Layouter<'a> {
 
     /// Form controls that show one line of text (and keep its height when
     /// empty).
-    fn is_line_control(&self, n: rabbithole_dom::NodeId) -> bool {
+    fn is_line_control(&self, b: &LayoutBox) -> bool {
         let doc = self.ctx.doc;
-        match doc.tag(n) {
-            Some("button") => true,
-            Some("select") => doc.attr(n, "multiple").is_none() && doc.attr(n, "size").and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0) <= 1,
-            Some("input") => !matches!(crate::build::input_type(doc, n).as_str(), "checkbox" | "radio" | "range" | "color" | "image" | "hidden"),
+        let Some(n) = b.node else { return false };
+        match self.control_kind(b) {
+            CONTROL_BUTTON => true,
+            CONTROL_SELECT => doc.attr(n, "multiple").is_none() && doc.attr(n, "size").and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0) <= 1,
+            CONTROL_INPUT => !matches!(crate::build::input_type(doc, n).as_str(), "checkbox" | "radio" | "range" | "color" | "image" | "hidden"),
             _ => false,
+        }
+    }
+
+    /// Which form control the box's element is (`CONTROL_*`), memoized on
+    /// the box: layout asks for every box, and the element's tag is
+    /// usually not in the cache.
+    #[inline]
+    fn control_kind(&self, b: &LayoutBox) -> u8 {
+        match b.control.get() {
+            0 => {
+                let k = match b.node.and_then(|n| self.ctx.doc.tag(n)) {
+                    Some("textarea") => CONTROL_TEXTAREA,
+                    Some("input") => CONTROL_INPUT,
+                    Some("select") => CONTROL_SELECT,
+                    Some("button") => CONTROL_BUTTON,
+                    _ => CONTROL_NONE,
+                };
+                b.control.set(k);
+                k
+            }
+            k => k,
         }
     }
 
@@ -548,33 +616,7 @@ impl<'a> Layouter<'a> {
         }
         // A BFC root placed next to floats narrows (or moves below them).
         if b.bfc_root && b.flow.is_in_flow() && matches!(mode, WidthMode::Fill) && !bfc.is_empty() {
-            let mut guard = 0;
-            loop {
-                let (l, r) = bfc.available(y, 1.0, cb.x, cb.width);
-                if l <= cb.x && r >= cb.x + cb.width {
-                    break;
-                }
-                // The used margins of a sized box absorb the rest of the
-                // containing block; next to floats only its own margins count.
-                let (sml, smr) = (style.margin.left.resolve(cbw).unwrap_or(0.0), style.margin.right.resolve(cbw).unwrap_or(0.0));
-                let outer = content_w + pb_h + sml + smr;
-                if style.width.is_auto() || rabbithole_style::is_stretch(style.width) {
-                    content_w = (r - l - ml - mr - pb_h).max(0.0);
-                    x = l + ml;
-                    break;
-                } else if outer <= r - l + 0.01 {
-                    x = l + sml;
-                    break;
-                }
-                match bfc.next_y(y) {
-                    Some(ny) => y = ny,
-                    None => break,
-                }
-                guard += 1;
-                if guard > 100 {
-                    break;
-                }
-            }
+            (x, y, content_w) = avoid_floats(&style, bfc, cb, (x, y, content_w), pb_h, ml, mr);
         }
 
         b.rect = Rect::new(x, y, content_w + pb_h, 0.0);
@@ -585,11 +627,8 @@ impl<'a> Layouter<'a> {
         let mut explicit_h = forced_h.or(replaced_h).or_else(|| self.resolve_height(&style, cb.height, pb_v).map(|h| self.clamp_height(&style, h, cb.height, pb_v))); // grid/flex hook
         // A `<textarea>` with an auto height is `rows` lines tall (2 by
         // default), whatever its value.
-        if explicit_h.is_none() && b.pseudo.is_none() {
-            if let Some(n) = b.node.filter(|&n| self.ctx.doc.is_element(n, "textarea")) {
-                let rows = self.ctx.doc.attr(n, "rows").and_then(|r| r.trim().parse::<f32>().ok()).filter(|r| *r >= 1.0).unwrap_or(2.0);
-                explicit_h = Some(rows.floor() * style.line_height_px());
-            }
+        if explicit_h.is_none() && b.pseudo.is_none() && self.control_kind(b) == CONTROL_TEXTAREA {
+            explicit_h = self.textarea_height(b, &style);
         }
         // `aspect-ratio` with an auto height derives it from the width.
         if explicit_h.is_none() && b.kind != BoxKind::Image {
@@ -602,7 +641,9 @@ impl<'a> Layouter<'a> {
         // boxes are transparent to it (CSS 2.1 §10.5).
         // (Only when a child uses it, so the box's layout cache stays keyed
         // on an indefinite height otherwise.)
+        // (Without a containing-block height there is nothing to pass.)
         let anonymous = b.kind == BoxKind::AnonymousBlock
+            && cb.height.is_some()
             && matches!(b.formatting, Formatting::Block | Formatting::Inline)
             && b.children.iter().any(|c| c.style.height.has_percent() || c.style.min_height.has_percent() || c.style.max_height.has_percent());
         let inner_cb = Cb {
@@ -743,7 +784,7 @@ impl<'a> Layouter<'a> {
                 h = h.max(fe);
             }
             // Empty text fields, buttons and menus are one line tall.
-            if b.pseudo.is_none() && h < 0.5 && b.node.is_some_and(|n| self.is_line_control(n)) {
+            if b.pseudo.is_none() && h < 0.5 && self.is_line_control(b) {
                 let font = self.font_for(&style);
                 h = style.line_height.unwrap_or_else(|| self.ctx.fonts.metrics(font, style.font_size).height());
             }
@@ -756,28 +797,7 @@ impl<'a> Layouter<'a> {
         // `height: 28px; padding: 13px 15px`, short boxes with a large
         // line-height, ...). Reused contents were centered already.
         if !b.reused_layout && b.pseudo.is_none() && (h - content_h).abs() > 0.01 {
-            // Buttons and drop-down menus center their contents too (when
-            // they fit).
-            let center = match b.node.and_then(|n| self.ctx.doc.tag(n)) {
-                Some("input") => !b.lines.is_empty(),
-                Some("select") => !b.lines.is_empty() && h > content_h,
-                Some("button") => h > content_h && style.display != rabbithole_style::Display::Flex && style.display != rabbithole_style::Display::Grid,
-                _ => false,
-            };
-            if center {
-                crate::table::translate_contents(b, 0.0, (h - content_h) / 2.0);
-            } else if h > content_h && matches!(b.formatting, Formatting::Block | Formatting::Inline) && b.kind != BoxKind::TableCell {
-                // `align-content` on a block container (CSS Align §5.4):
-                // the contents as one alignment subject.
-                let shift = match style.align_content {
-                    rabbithole_style::ContentDistribution::Center | rabbithole_style::ContentDistribution::SpaceAround | rabbithole_style::ContentDistribution::SpaceEvenly => (h - content_h) / 2.0,
-                    rabbithole_style::ContentDistribution::FlexEnd => h - content_h,
-                    _ => 0.0,
-                };
-                if shift > 0.0 {
-                    crate::table::translate_contents(b, 0.0, shift);
-                }
-            }
+            self.align_block_contents(b, &style, h, content_h);
         }
         if explicit_h.is_some() || (h - content_h).abs() > 0.01 {
             // A definite or clamped height separates the last child's
@@ -791,39 +811,7 @@ impl<'a> Layouter<'a> {
         // The baseline only serves inline-level (atomic) boxes; block-level
         // boxes export theirs through `first/last_baseline` when asked.
         if style.display.is_inline_level() || b.kind == BoxKind::InlineBlock {
-            // Single-line form controls clip their contents internally but keep
-            // the baseline of their text (Blink, Gecko).
-            let control_baseline = b.pseudo.is_none() && b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("input" | "select" | "button")));
-            // A scroll container's baseline is synthesized from its margin box,
-            // except for flex and grid containers (CSS Align §9.1).
-            let content_baseline = matches!(b.formatting, Formatting::Flex | Formatting::Grid) && !style.contain_size && !style.container_size;
-            b.baseline = if b.clips && !control_baseline && !content_baseline {
-                None
-            } else if b.ruby == 1 {
-                // A ruby pair aligns by its base.
-                b.children.iter().find(|c| c.ruby == 2).and_then(|c| c.last_baseline()).map(|bl| bl - b.rect.y)
-            } else {
-                // Inline-level flex containers and tables align by their first
-                // baseline (a table's is its first row's). A grid container
-                // exports its items' baselines; without one it falls back to
-                // its margin box here (the synthesized item baseline only
-                // serves enclosing block containers).
-                match b.formatting {
-                    Formatting::Flex | Formatting::Table | Formatting::TableWrapper => b.first_baseline(),
-                    Formatting::Grid => b.children.iter().rev().filter(|c| c.is_in_flow()).find_map(|c| c.last_baseline()),
-                    _ => b.last_baseline(),
-                }
-                .map(|bl| bl - b.rect.y)
-            };
-            // An empty one-line control has the baseline its text would have.
-            if control_baseline && b.lines.iter().all(|l| l.fragments.is_empty()) && b.node.is_some_and(|n| self.is_line_control(n)) {
-                let font = self.font_for(&style);
-                let m = self.ctx.fonts.metrics(font, style.font_size);
-                let lh = style.line_height.unwrap_or_else(|| m.height());
-                let half_leading = (lh - (m.ascent + m.descent)) / 2.0;
-                let top = b.content_rect.y + (b.content_rect.h - lh) / 2.0;
-                b.baseline = Some(top + half_leading + m.ascent - b.rect.y);
-            }
+            self.set_inline_level_baseline(b, &style);
         } else {
             b.baseline = None;
         }
@@ -834,6 +822,82 @@ impl<'a> Layouter<'a> {
         }
         b.fixed = style.position == Position::Fixed;
         self.finish_scroll_container(b);
+    }
+
+    /// Center a form control's contents in its content box, or apply
+    /// `align-content` to a block container's (h: used content height).
+    #[inline(never)]
+    fn align_block_contents(&mut self, b: &mut LayoutBox, style: &ComputedStyle, h: f32, content_h: f32) {
+        // Buttons and drop-down menus center their contents too (when
+        // they fit).
+        let center = match self.control_kind(b) {
+            CONTROL_INPUT => !b.lines.is_empty(),
+            CONTROL_SELECT => !b.lines.is_empty() && h > content_h,
+            CONTROL_BUTTON => h > content_h && style.display != rabbithole_style::Display::Flex && style.display != rabbithole_style::Display::Grid,
+            _ => false,
+        };
+        if center {
+            crate::table::translate_contents(b, 0.0, (h - content_h) / 2.0);
+        } else if h > content_h && matches!(b.formatting, Formatting::Block | Formatting::Inline) && b.kind != BoxKind::TableCell {
+            // `align-content` on a block container (CSS Align §5.4):
+            // the contents as one alignment subject.
+            let shift = match style.align_content {
+                rabbithole_style::ContentDistribution::Center | rabbithole_style::ContentDistribution::SpaceAround | rabbithole_style::ContentDistribution::SpaceEvenly => (h - content_h) / 2.0,
+                rabbithole_style::ContentDistribution::FlexEnd => h - content_h,
+                _ => 0.0,
+            };
+            if shift > 0.0 {
+                crate::table::translate_contents(b, 0.0, shift);
+            }
+        }
+    }
+
+    /// The baseline of an inline-level (atomic) box, for its line.
+    #[inline(never)]
+    fn set_inline_level_baseline(&mut self, b: &mut LayoutBox, style: &ComputedStyle) {
+        // Single-line form controls clip their contents internally but keep
+        // the baseline of their text (Blink, Gecko).
+        let control_baseline = b.pseudo.is_none() && matches!(self.control_kind(b), CONTROL_INPUT | CONTROL_SELECT | CONTROL_BUTTON);
+        // A scroll container's baseline is synthesized from its margin box,
+        // except for flex and grid containers (CSS Align §9.1).
+        let content_baseline = matches!(b.formatting, Formatting::Flex | Formatting::Grid) && !style.contain_size && !style.container_size;
+        b.baseline = if b.clips && !control_baseline && !content_baseline {
+            None
+        } else if b.ruby == 1 {
+            // A ruby pair aligns by its base.
+            b.children.iter().find(|c| c.ruby == 2).and_then(|c| c.last_baseline()).map(|bl| bl - b.rect.y)
+        } else {
+            // Inline-level flex containers and tables align by their first
+            // baseline (a table's is its first row's). A grid container
+            // exports its items' baselines; without one it falls back to
+            // its margin box here (the synthesized item baseline only
+            // serves enclosing block containers).
+            match b.formatting {
+                Formatting::Flex | Formatting::Table | Formatting::TableWrapper => b.first_baseline(),
+                Formatting::Grid => b.children.iter().rev().filter(|c| c.is_in_flow()).find_map(|c| c.last_baseline()),
+                _ => b.last_baseline(),
+            }
+            .map(|bl| bl - b.rect.y)
+        };
+        // An empty one-line control has the baseline its text would have.
+        if control_baseline && b.lines.iter().all(|l| l.fragments.is_empty()) && self.is_line_control(b) {
+            let font = self.font_for(style);
+            let m = self.ctx.fonts.metrics(font, style.font_size);
+            let lh = style.line_height.unwrap_or_else(|| m.height());
+            let half_leading = (lh - (m.ascent + m.descent)) / 2.0;
+            let top = b.content_rect.y + (b.content_rect.h - lh) / 2.0;
+            b.baseline = Some(top + half_leading + m.ascent - b.rect.y);
+        }
+    }
+
+    /// The content height of a `<textarea>` with an auto height: `rows`
+    /// lines (2 by default), whatever its value.
+    #[cold]
+    #[inline(never)]
+    fn textarea_height(&self, b: &LayoutBox, style: &ComputedStyle) -> Option<f32> {
+        let n = b.node?;
+        let rows = self.ctx.doc.attr(n, "rows").and_then(|r| r.trim().parse::<f32>().ok()).filter(|r| *r >= 1.0).unwrap_or(2.0);
+        Some(rows.floor() * style.line_height_px())
     }
 
     /// Record the scrollable content size of clipping boxes and apply the
@@ -1191,18 +1255,29 @@ impl<'a> Layouter<'a> {
         }
     }
 
+    #[inline]
     pub(crate) fn clamp_width(&self, style: &ComputedStyle, w: f32, cbw: f32, pb_h: f32) -> f32 {
+        if sizing_keyword(style.max_width) || sizing_keyword(style.min_width) {
+            return self.clamp_width_keywords(style, w, cbw, pb_h);
+        }
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
         let mut w = w;
-        if !sizing_keyword(style.max_width) && !sizing_keyword(style.min_width) {
-            if let Some(max) = style.max_width.resolve(cbw) {
-                w = w.min(adj(max));
-            }
-            if let Some(min) = style.min_width.resolve(cbw) {
-                w = w.max(adj(min));
-            }
-            return w.max(0.0);
+        if let Some(max) = style.max_width.resolve(cbw) {
+            w = w.min(adj(max));
         }
+        if let Some(min) = style.min_width.resolve(cbw) {
+            w = w.max(adj(min));
+        }
+        w.max(0.0)
+    }
+
+    /// [`Self::clamp_width`] with intrinsic, `stretch` or `fit-content()`
+    /// limits.
+    #[cold]
+    #[inline(never)]
+    fn clamp_width_keywords(&self, style: &ComputedStyle, w: f32, cbw: f32, pb_h: f32) -> f32 {
+        let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
+        let mut w = w;
         // Intrinsic keywords and fit-content() need the box's min/max-content
         // widths, which `compute_width` provides.
         let intrinsic = |l: Length| -> Option<f32> {
@@ -1241,7 +1316,16 @@ impl<'a> Layouter<'a> {
     }
 
     /// Content-box (min, max) heights (`max` is infinite for `none`).
+    #[inline]
     pub(crate) fn height_limits(&self, style: &ComputedStyle, cb_h: Option<f32>, pb_v: f32) -> (f32, f32) {
+        if style.min_height.is_auto() && style.max_height.is_auto() {
+            return (0.0, f32::INFINITY);
+        }
+        self.height_limits_general(style, cb_h, pb_v)
+    }
+
+    #[inline(never)]
+    fn height_limits_general(&self, style: &ComputedStyle, cb_h: Option<f32>, pb_v: f32) -> (f32, f32) {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v.max(0.0) };
         let limit = |l: Length| if rabbithole_style::is_stretch(l) { cb_h.map(|h| stretch_height(style, h, pb_v)) } else { l.resolve_definite(cb_h).map(adj) };
         let max = limit(style.max_height).unwrap_or(f32::INFINITY);

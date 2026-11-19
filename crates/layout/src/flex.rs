@@ -127,6 +127,17 @@ pub(crate) fn distribute(kind: ContentDistribution, free: f32, n: usize) -> (f32
     }
 }
 
+/// Per-container working storage of [`Layouter::layout_flex`], pooled on
+/// the layouter.
+#[derive(Default)]
+pub(crate) struct FlexScratch {
+    order: Vec<(i32, usize)>,
+    items: Vec<FlexItem>,
+    lines: Vec<std::ops::Range<usize>>,
+    ids: Vec<usize>,
+    metrics: Vec<[f32; 3]>,
+}
+
 struct FlexItem {
     idx: usize,
     edges: ItemEdges,
@@ -246,8 +257,15 @@ impl<'a> Layouter<'a> {
             Axis::Column => style.column_gap.resolve_or_zero(cbw),
         };
 
+        // Working storage, reused across containers (nested containers
+        // take their own).
+        let FlexScratch { mut order, mut items, mut lines, mut ids, metrics: mut line_metrics } = self.flex_scratch.pop().unwrap_or_default();
+        order.clear();
+        items.clear();
+        lines.clear();
+        ids.clear();
+        line_metrics.clear();
         // §9.1 collect items in order-modified document order.
-        let mut order: Vec<(i32, usize)> = Vec::new();
         for (i, c) in b.children.iter_mut().enumerate() {
             match c.flow {
                 Flow::Absolute => {
@@ -263,27 +281,28 @@ impl<'a> Layouter<'a> {
         // cross size, which stretched items take (§9.8).
         let stretch_line = if !is_multi_line(&style) { avail_cross } else { None };
         // §9.2 determine flex base size and hypothetical main size.
-        let mut items: Vec<FlexItem> = Vec::with_capacity(order.len());
+        items.reserve(order.len());
         for &(_, idx) in &order {
             let item = self.measure_flex_item(b, idx, axis, cbw, cb.height, avail_main, stretch_line, &style);
             items.push(item);
         }
 
-        // §9.3 collect into flex lines.
-        let mut lines: Vec<Vec<usize>> = Vec::new();
+        // §9.3 collect into flex lines: ranges of `ids` (the item indices
+        // in order).
+        ids.extend(0..items.len());
         let wraps = is_multi_line(&style);
         // A column container with an indefinite height breaks lines at its
         // maximum height (§9.2 step 2).
         let break_main = avail_main.or_else(|| limits.map(|(_, max)| max).filter(|m| m.is_finite()));
         if !wraps || break_main.is_none() {
-            lines.push((0..items.len()).collect());
+            lines.push(0..items.len());
         } else {
             let outers: Vec<f32> = items.iter().map(|it| it.hyp + it.edges.pb(axis) + it.edges.margin_sum(axis)).collect();
             let mut avail = break_main.unwrap_or(f32::INFINITY);
             if style.flex_wrap_balance && outers.len() > 1 {
                 avail = balanced_width(&outers, gap_main, avail, style.flex_line_count);
             }
-            lines = break_lines(&outers, gap_main, avail);
+            break_line_ranges(&outers, gap_main, avail, &mut lines);
         }
 
         // §9.2 step 3: an indefinite column container is as tall as its
@@ -293,6 +312,7 @@ impl<'a> Layouter<'a> {
             if let Some((min, max)) = limits {
                 let longest = lines
                     .iter()
+                    .map(|r| &ids[r.clone()])
                     .map(|line| line.iter().map(|&i| items[i].hyp + items[i].edges.pb(axis) + items[i].edges.margin_sum(axis)).sum::<f32>() + gap_main * line.len().saturating_sub(1) as f32)
                     .fold(0.0f32, f32::max);
                 let clamped = longest.clamp(min, max);
@@ -304,8 +324,8 @@ impl<'a> Layouter<'a> {
         }
 
         // §9.7 resolve flexible lengths per line.
-        for line in &lines {
-            self.resolve_flexible_lengths(&mut items, line, axis, avail_main, gap_main);
+        for r in &lines {
+            self.resolve_flexible_lengths(&mut items, &ids[r.clone()], axis, avail_main, gap_main);
         }
 
         // §9.4 cross size: lay out every item with its used main size.
@@ -317,7 +337,7 @@ impl<'a> Layouter<'a> {
         for it in items.iter_mut() {
             let child = &b.children[it.idx];
             if axis == Axis::Row && it.stretches && child.kind != BoxKind::Image && self.definite_relayouts == 0 && depends_on_definite_height(child) {
-                if let Some((main, w, h, cross, ascent)) = child.flex_measure {
+                if let Some(&(main, w, h, cross, ascent)) = child.flex_measure.as_deref() {
                     if main == it.main && w == cbw && h == cb.height {
                         it.cross_hyp = cross;
                         it.ascent = ascent;
@@ -326,7 +346,11 @@ impl<'a> Layouter<'a> {
                     }
                 }
                 self.layout_flex_item(b, it, axis, cbw, cb.height, None);
-                b.children[it.idx].flex_measure = Some((it.main, cbw, cb.height, it.cross_hyp, it.ascent));
+                let m = (it.main, cbw, cb.height, it.cross_hyp, it.ascent);
+                match &mut b.children[it.idx].flex_measure {
+                    Some(slot) => **slot = m,
+                    slot => *slot = Some(Box::new(m)),
+                }
             } else {
                 self.layout_flex_item(b, it, axis, cbw, cb.height, None);
             }
@@ -336,8 +360,9 @@ impl<'a> Layouter<'a> {
         let single_definite = lines.len() == 1 && avail_cross.is_some() && !wraps;
         // Per line: cross size, first-baseline ascent, last-baseline
         // distance to the bottom (one allocation).
-        let mut line_metrics: Vec<[f32; 3]> = Vec::with_capacity(lines.len());
-        for line in &lines {
+        line_metrics.reserve(lines.len());
+        for r in &lines {
+            let line = &ids[r.clone()];
             let mut max_asc: f32 = 0.0;
             let mut max_desc: f32 = 0.0;
             let mut max_outer: f32 = 0.0;
@@ -408,7 +433,8 @@ impl<'a> Layouter<'a> {
         // §9.4 step 11 / §9.5 / §9.6: per-line item alignment and main-axis
         // distribution.
         let mut max_main_extent: f32 = 0.0;
-        for (li, line) in lines.iter().enumerate() {
+        for (li, r) in lines.iter().enumerate() {
+            let line = &ids[r.clone()];
             let lc = line_metrics[li][0];
             // Main axis.
             let sum_outer: f32 = line.iter().map(|&i| items[i].outer_main(axis)).sum::<f32>() + gap_main * (line.len().saturating_sub(1)) as f32;
@@ -561,13 +587,16 @@ impl<'a> Layouter<'a> {
             let &i = shared.or(if last { line.last() } else { line.first() })?;
             Some(items[i].idx as u32)
         };
-        let baselines = (lines.first().and_then(|l| line_baseline(l, false)), lines.last().and_then(|l| line_baseline(l, true)));
-        b.flex_baselines = Some(baselines);
+        let baselines = (lines.first().and_then(|r| line_baseline(&ids[r.clone()], false)), lines.last().and_then(|r| line_baseline(&ids[r.clone()], true)));
+        let none = crate::tree::FLEX_BASELINE_NONE;
+        b.flex_baselines = [baselines.0.unwrap_or(none), baselines.1.unwrap_or(none)];
 
-        match axis {
+        let size = match axis {
             Axis::Row => line_metrics.iter().map(|m| m[0]).sum::<f32>() + gap_cross * (n_lines.saturating_sub(1)) as f32,
             Axis::Column => avail_main.unwrap_or(max_main_extent),
-        }
+        };
+        self.flex_scratch.push(FlexScratch { order, items, lines, ids, metrics: line_metrics });
+        size
     }
 
     /// §9.2: flex base size, hypothetical main size, min/max and the
@@ -765,6 +794,15 @@ impl<'a> Layouter<'a> {
         };
         let unconstrain = child.kind != BoxKind::Image && !child.wm_wrapper && child.style.aspect_ratio.is_none()
             && (size != Length::Auto || (min != Length::Auto && min != Length::Px(0.0)) || max != Length::Auto);
+        // Measured with its stretched height when that can matter.
+        let forced_h = if axis == Axis::Row && child.kind != BoxKind::Image { stretched_cross.filter(|_| may_use_definite_height(child)) } else { None };
+        // The unconstrained row measurement is remembered like the
+        // ordinary intrinsic sizes (when those could be cached).
+        if unconstrain && axis == Axis::Row && forced_h.is_none() {
+            if let Some(c) = child.flex_content_cache {
+                return c;
+            }
+        }
         let original = if unconstrain {
             let original = (child.style.clone(), child.intrinsic_cache.take());
             let mut style = (*child.style).clone();
@@ -783,8 +821,7 @@ impl<'a> Layouter<'a> {
                     let (w, _) = self.replaced_size_with(child, Some(cbw), cbh, pb, false);
                     (w, w)
                 } else {
-                    // Measured with its stretched height when that can matter.
-                    self.intrinsic_forced_h = stretched_cross.filter(|_| may_use_definite_height(child));
+                    self.intrinsic_forced_h = forced_h;
                     let r = self.intrinsic_in(child, cbh);
                     self.intrinsic_forced_h = None;
                     r
@@ -812,7 +849,11 @@ impl<'a> Layouter<'a> {
         };
         if let Some((style, cache)) = original {
             child.style = style;
-            child.intrinsic_cache = cache;
+            // (Set only when the measurement was cacheable.)
+            let measured = std::mem::replace(&mut child.intrinsic_cache, cache);
+            if axis == Axis::Row && forced_h.is_none() {
+                child.flex_content_cache = measured;
+            }
         }
         sizes
     }
@@ -1193,6 +1234,23 @@ impl<'a> Layouter<'a> {
 /// balance lines).
 fn is_multi_line(style: &ComputedStyle) -> bool {
     style.flex_wrap != FlexWrap::NoWrap && !(style.webkit_box && style.flex_wrap_balance)
+}
+
+/// [`break_lines`] as ranges of item indices, into `out`.
+fn break_line_ranges(outers: &[f32], gap: f32, avail: f32, out: &mut Vec<std::ops::Range<usize>>) {
+    let mut start = 0;
+    let mut used = 0.0f32;
+    for (i, &outer) in outers.iter().enumerate() {
+        let needed = if i == start { outer } else { used + gap + outer };
+        if i > start && needed > avail + 0.01 {
+            out.push(start..i);
+            start = i;
+            used = outer;
+        } else {
+            used = needed;
+        }
+    }
+    out.push(start..outers.len());
 }
 
 /// Greedy line breaking of outer main sizes in `avail` (§9.3).

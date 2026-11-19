@@ -203,6 +203,13 @@ pub struct ScrollInfo {
     pub offset: (f32, f32),
 }
 
+/// `LayoutBox::flex_baselines` before the box is laid out as a flex
+/// container.
+pub(crate) const FLEX_BASELINE_UNSET: u32 = u32::MAX;
+/// `LayoutBox::flex_baselines`: the container has no such baseline (no
+/// child is ever at this index).
+pub(crate) const FLEX_BASELINE_NONE: u32 = u32::MAX - 1;
+
 #[derive(Debug)]
 pub struct LayoutBox {
     pub kind: BoxKind,
@@ -235,15 +242,21 @@ pub struct LayoutBox {
     pub baseline: Option<f32>,
     /// The children whose baselines are a flex container's (first, last)
     /// baselines, set by its layout (CSS Flexbox §8.5).
-    pub(crate) flex_baselines: Option<(Option<u32>, Option<u32>)>,
+    /// ([`FLEX_BASELINE_UNSET`] until then, [`FLEX_BASELINE_NONE`] for
+    /// none.)
+    pub(crate) flex_baselines: [u32; 2],
     /// A stretched row flex item's measuring layout, kept while the box is
     /// reused: (main size, container width and height, cross size,
     /// ascent). The item is laid out again stretched anyway, so the
-    /// measure need not run.
-    pub(crate) flex_measure: Option<(f32, f32, Option<f32>, f32, f32)>,
+    /// measure need not run. (Boxed: few boxes have one.)
+    #[allow(clippy::type_complexity)]
+    pub(crate) flex_measure: Option<Box<(f32, f32, Option<f32>, f32, f32)>>,
     /// Memo of `flex::depends_on_definite_height` (0 unknown, 1 no,
     /// 2 yes), valid while the box is reused.
     pub(crate) pct_dependent: std::cell::Cell<u8>,
+    /// Memo of the element's form-control tag (see
+    /// `Layouter::control_kind`; 0 = not looked up yet).
+    pub(crate) control: std::cell::Cell<u8>,
     /// Resolved margins (px) after layout.
     pub margin: Edges<f32>,
     /// Effective bottom margin after collapsing with descendants.
@@ -279,6 +292,10 @@ pub struct LayoutBox {
     pub pseudo: Option<PseudoElement>,
     pub(crate) pieces: Option<Vec<crate::inline::Piece>>,
     pub(crate) intrinsic_cache: Option<(f32, f32)>,
+    /// A flex item's row-axis content sizes measured without its own
+    /// width and min/max-width (see `flex_content_sizes`), cached like
+    /// `intrinsic_cache`.
+    pub(crate) flex_content_cache: Option<(f32, f32)>,
     /// Inputs and results of the box's last content layout, so a box kept
     /// from the previous frame can be translated instead of laid out.
     pub(crate) layout_cache: Option<crate::incremental::LayoutCache>,
@@ -357,9 +374,10 @@ impl LayoutBox {
             marker: None,
             marker_text: None,
             baseline: None,
-            flex_baselines: None,
+            flex_baselines: [FLEX_BASELINE_UNSET; 2],
             flex_measure: None,
             pct_dependent: std::cell::Cell::new(0),
+            control: std::cell::Cell::new(0),
             margin: Edges::all(0.0),
             collapsed_bottom_margin: 0.0,
             bottom_margins: (0.0, 0.0),
@@ -377,6 +395,7 @@ impl LayoutBox {
             pseudo: None,
             pieces: None,
             intrinsic_cache: None,
+            flex_content_cache: None,
             layout_cache: None,
             contents_fp: std::cell::Cell::new(None),
             grid_columns: None,
@@ -588,10 +607,10 @@ impl LayoutBox {
 
     /// Baseline of the box's first line (absolute y), searching descendants.
     pub fn first_baseline(&self) -> Option<f32> {
-        if let Some((first, _)) = self.flex_baselines.filter(|_| self.formatting == Formatting::Flex) {
+        if self.formatting == Formatting::Flex && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
             // An item without a baseline has one synthesized from its
             // border box's bottom edge.
-            return first.and_then(|i| self.children.get(i as usize)).map(|c| c.first_baseline().unwrap_or(c.rect.bottom()));
+            return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(c.rect.bottom()));
         }
         if let Some(l) = self.lines.first() {
             return Some(l.baseline);
@@ -617,8 +636,8 @@ impl LayoutBox {
 
     /// Baseline of the last line (absolute y).
     pub fn last_baseline(&self) -> Option<f32> {
-        if let Some((_, last)) = self.flex_baselines.filter(|_| self.formatting == Formatting::Flex) {
-            return last.and_then(|i| self.children.get(i as usize)).map(|c| c.last_baseline().unwrap_or(c.rect.bottom()));
+        if self.formatting == Formatting::Flex && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
+            return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(c.rect.bottom()));
         }
         if let Some(l) = self.lines.last() {
             return Some(l.baseline);
