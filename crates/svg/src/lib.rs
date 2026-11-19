@@ -94,6 +94,19 @@ impl SvgTree {
         self.built.nodes.len()
     }
 
+    /// The outline of the `<clipPath>` with this `id` (for `clip-path:
+    /// url(#id)` on CSS boxes) and its clip rule.
+    ///
+    /// `bbox` is the referencing box: `objectBoundingBox` units map onto
+    /// it and user units start at its origin.
+    /// `transform` (CSS `transform` of the `<clipPath>`) replaces its
+    /// `transform` attribute.
+    pub fn clip_outline(&self, id: &str, bbox: Rect, transform: Option<rabbithole_gfx::Matrix>) -> Option<(Vec<rabbithole_gfx::PathSeg>, rabbithole_gfx::FillRule)> {
+        let (path, rule, units_bbox) = paint::clip_outline(&self.built, id, transform)?;
+        let m = if units_bbox { [bbox.w, 0.0, 0.0, bbox.h, bbox.x, bbox.y] } else { [1.0, 0.0, 0.0, 1.0, bbox.x, bbox.y] };
+        Some((paint::transform_path(&path, &m), rule))
+    }
+
     /// Draw into `canvas` filling `dest` (applies viewBox + preserveAspectRatio).
     pub fn render(&self, canvas: &mut Canvas, fonts: &FontContext, dest: Rect) {
         if dest.w <= 0.0 || dest.h <= 0.0 {

@@ -881,6 +881,12 @@ fn apply_declarations(
     if in_flex_or_grid && style.z_index.is_some() && !matches!(style.position, Position::Absolute | Position::Fixed) {
         style.creates_stacking_context = true;
     }
+    // Properties declared `!important` win over animations (CSS Cascade 4
+    // §6.1): remembered for the animation overlay of animated elements.
+    if !style.animations.is_empty() && local.iter().any(|m| m.rank >= Rank::AuthorImportant) {
+        let names: Vec<String> = local.iter().filter(|m| m.rank >= Rank::AuthorImportant).map(|m| m.decl.name.clone()).collect();
+        style.important = Some(Rc::new(names));
+    }
     style
 }
 
@@ -1712,6 +1718,11 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.opacity = from.opacity;
             to.creates_stacking_context = from.creates_stacking_context;
         }
+        "clip" => to.clip_rect = from.clip_rect,
+        "clip-path" | "-webkit-clip-path" => {
+            to.clip_path = from.clip_path.clone();
+            to.creates_stacking_context = from.creates_stacking_context;
+        }
         "backdrop-filter" | "-webkit-backdrop-filter" => {
             to.backdrop = from.backdrop;
             to.backdrop_filters = from.backdrop_filters.clone();
@@ -2394,13 +2405,16 @@ const SVG_PROPS: &[&str] = &[
 ];
 
 fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) {
-    if SVG_PROPS.contains(&name) {
+    if SVG_PROPS.contains(&name) || name == "clip-path" {
         let v = value.to_vec();
         match style.svg_props.iter_mut().find(|(n, _)| n == name) {
             Some(slot) => slot.1 = v,
             None => style.svg_props.push((name.to_string(), v)),
         }
-        return;
+        // `clip-path` also applies to CSS boxes.
+        if name != "clip-path" {
+            return;
+        }
     }
     if let Some((start, end, pair)) = logical_pair(name) {
         let comps = values::components(value);

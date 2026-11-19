@@ -95,6 +95,9 @@ impl Engine {
             let _ = self.tick(page);
         }
         let _ = self.tick(page);
+        // Animation overlays patched by the tick (CSS animations and
+        // transitions) must show in the snapshot.
+        self.flush_display_list(page);
     }
 
     /// Load `url`, let it settle, scroll to its fragment (if any) and

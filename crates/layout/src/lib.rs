@@ -9,6 +9,7 @@ pub mod tree;
 mod background;
 mod block;
 mod build;
+pub mod clip_path;
 mod counters;
 mod damage;
 mod flex;

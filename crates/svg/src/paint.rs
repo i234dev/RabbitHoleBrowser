@@ -1,7 +1,7 @@
 //! Rendering of the tree onto a gfx `Canvas`.
 
 use crate::parse::{Built, Gradient, Kind, Node, Spread};
-use crate::style::{PaintSpec, Props, TextAnchor};
+use crate::style::{ClipRef, PaintSpec, Props, TextAnchor};
 use crate::units::{is_identity, multiply, scale_factor, transform_point, translate, viewbox_transform, Length, ViewBox};
 use rabbithole_gfx::{Canvas, Color, ColorStop, FillRule, FontContext, Paint, PathSeg, Point, Rect, StrokeStyle};
 
@@ -57,7 +57,8 @@ impl<'a> Painter<'a> {
             self.canvas.begin_layer(bounds);
         }
         let clipped = match &node.spec.clip_path {
-            Some(id) => self.push_clip(id, node.bbox.unwrap_or(Rect::new(0.0, 0.0, self.viewport.0, self.viewport.1))),
+            Some(ClipRef::Id(id)) => self.push_clip(id, node.bbox.unwrap_or(Rect::new(0.0, 0.0, self.viewport.0, self.viewport.1))),
+            Some(ClipRef::Css(cp)) => self.push_css_clip(cp, node, &props),
             None => false,
         };
 
@@ -351,64 +352,39 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// Push a CSS `clip-path` shape (CSS Masking 1 §3.1: for SVG elements
+    /// `content-box` / `padding-box` act as `fill-box`, `border-box` /
+    /// `margin-box` as `stroke-box`).
+    fn push_css_clip(&mut self, cp: &rabbithole_style::ClipPath, node: &Node, props: &Props) -> bool {
+        use rabbithole_style::{ClipPath, ShapeBox};
+        let viewport = Rect::new(0.0, 0.0, self.viewport.0, self.viewport.1);
+        let fill = node.bbox.unwrap_or(viewport);
+        let reference = |b: ShapeBox| match b {
+            ShapeBox::Content | ShapeBox::Padding | ShapeBox::Fill => fill,
+            ShapeBox::View => viewport,
+            ShapeBox::Border | ShapeBox::Margin | ShapeBox::Stroke => {
+                let e = if props.stroke != PaintSpec::None { props.stroke_width.max(0.0) / 2.0 } else { 0.0 };
+                Rect::new(fill.x - e, fill.y - e, fill.w + 2.0 * e, fill.h + 2.0 * e)
+            }
+        };
+        let (path, rule) = match cp {
+            ClipPath::Url(id) => return self.push_clip(id, fill),
+            ClipPath::Box(b) => (rabbithole_gfx::path::rect_path(reference(*b)), FillRule::NonZero),
+            ClipPath::Shape(shape, b) => rabbithole_style::shapes::basic_shape_path(shape, reference(*b)),
+        };
+        self.canvas.push_clip_path(&path, rule);
+        true
+    }
+
     /// Push a clip from a `<clipPath>`; returns whether a clip was pushed.
     fn push_clip(&mut self, id: &str, bbox: Rect) -> bool {
-        let Some(&idx) = self.tree.ids.get(id) else { return false };
-        let Kind::ClipPath { units_bbox } = self.tree.nodes[idx].kind else { return false };
-        let clip_transform = self.tree.nodes[idx].transform;
-        let mut path: Vec<PathSeg> = Vec::new();
-        let mut rule = FillRule::NonZero;
-        let children = self.tree.nodes[idx].children.clone();
-        for c in children {
-            self.collect_clip_shapes(c, &clip_transform, &mut path, &mut rule, 0);
-        }
-        if path.is_empty() {
-            // An empty clip path clips everything.
-            path = vec![PathSeg::MoveTo(Point { x: 0.0, y: 0.0 }), PathSeg::Close];
-        }
+        let Some((mut path, rule, units_bbox)) = clip_outline(self.tree, id, None) else { return false };
         if units_bbox {
             let m = [bbox.w, 0.0, 0.0, bbox.h, bbox.x, bbox.y];
             path = transform_path(&path, &m);
         }
         self.canvas.push_clip_path(&path, rule);
         true
-    }
-
-    fn collect_clip_shapes(&self, idx: usize, m: &rabbithole_gfx::Matrix, out: &mut Vec<PathSeg>, rule: &mut FillRule, depth: usize) {
-        if depth > 8 {
-            return;
-        }
-        let node = &self.tree.nodes[idx];
-        if node.spec.display_none {
-            return;
-        }
-        let m = multiply(m, &node.transform);
-        match &node.kind {
-            Kind::Shape(p) => {
-                if let Some(r) = node.spec.fill_rule {
-                    *rule = r;
-                }
-                out.extend(transform_path(p, &m));
-            }
-            Kind::Use { href, x, y, .. } => {
-                if let Some(&t) = self.tree.ids.get(href) {
-                    let m2 = multiply(&m, &translate(*x, *y));
-                    self.collect_clip_shapes(t, &m2, out, rule, depth + 1);
-                }
-            }
-            Kind::Group => {
-                for &c in &node.children {
-                    self.collect_clip_shapes(c, &m, out, rule, depth + 1);
-                }
-            }
-            Kind::Text(t) => {
-                // Approximate text clips by their bounding box.
-                if let Some(b) = t.approx_bbox() {
-                    out.extend(transform_path(&crate::parse::rect_path(b, 0.0, 0.0), &m));
-                }
-            }
-            _ => {}
-        }
     }
 
     fn paint_text(&mut self, text: &crate::text::TextNode, base: &Props) {
@@ -533,5 +509,61 @@ pub fn fit_image(iw: f32, ih: f32, rect: Rect, par: crate::units::AspectRatio) -
             let h = ih * s;
             Rect::new(rect.x + (rect.w - w) * ax, rect.y + (rect.h - h) * ay, w, h)
         }
+    }
+}
+
+/// The outline of the `<clipPath>` `id`: its shapes (in its user space,
+/// its own `transform` applied), the clip rule and whether the units are
+/// `objectBoundingBox`. An empty clip path clips everything. `transform`
+/// replaces the clip path's own `transform` attribute (CSS `transform`).
+pub(crate) fn clip_outline(tree: &Built, id: &str, transform: Option<rabbithole_gfx::Matrix>) -> Option<(Vec<PathSeg>, FillRule, bool)> {
+    let &idx = tree.ids.get(id)?;
+    let Kind::ClipPath { units_bbox } = tree.nodes[idx].kind else { return None };
+    let clip_transform = transform.unwrap_or(tree.nodes[idx].transform);
+    let mut path: Vec<PathSeg> = Vec::new();
+    let mut rule = FillRule::NonZero;
+    for &c in &tree.nodes[idx].children {
+        collect_clip_shapes(tree, c, &clip_transform, &mut path, &mut rule, 0);
+    }
+    if path.is_empty() {
+        path = vec![PathSeg::MoveTo(Point { x: 0.0, y: 0.0 }), PathSeg::Close];
+    }
+    Some((path, rule, units_bbox))
+}
+
+fn collect_clip_shapes(tree: &Built, idx: usize, m: &rabbithole_gfx::Matrix, out: &mut Vec<PathSeg>, rule: &mut FillRule, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    let node = &tree.nodes[idx];
+    if node.spec.display_none {
+        return;
+    }
+    let m = multiply(m, &node.transform);
+    match &node.kind {
+        Kind::Shape(p) => {
+            if let Some(r) = node.spec.fill_rule {
+                *rule = r;
+            }
+            out.extend(transform_path(p, &m));
+        }
+        Kind::Use { href, x, y, .. } => {
+            if let Some(&t) = tree.ids.get(href) {
+                let m2 = multiply(&m, &translate(*x, *y));
+                collect_clip_shapes(tree, t, &m2, out, rule, depth + 1);
+            }
+        }
+        Kind::Group => {
+            for &c in &node.children {
+                collect_clip_shapes(tree, c, &m, out, rule, depth + 1);
+            }
+        }
+        Kind::Text(t) => {
+            // Approximate text clips by their bounding box.
+            if let Some(b) = t.approx_bbox() {
+                out.extend(transform_path(&crate::parse::rect_path(b, 0.0, 0.0), &m));
+            }
+        }
+        _ => {}
     }
 }

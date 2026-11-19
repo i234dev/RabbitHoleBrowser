@@ -694,3 +694,98 @@ fn incremental_active_and_focus_within_reparent_without_changing_state_ids() {
         }
     }
 }
+
+fn clip(css: &str) -> Option<ClipPath> {
+    one(&format!("clip-path: {css}")).clip_path.map(|c| (*c).clone())
+}
+
+#[test]
+fn clip_path_basic_shapes() {
+    let px = Length::Px;
+    let pc = Length::Percent;
+    assert_eq!(clip("none"), None);
+    assert!(one("clip-path: circle(10px)").creates_stacking_context);
+    assert_eq!(clip("circle()"), Some(ClipPath::Shape(BasicShape::Circle { r: ShapeRadius::ClosestSide, at: (pc(50.0), pc(50.0)) }, ShapeBox::Border)));
+    assert_eq!(
+        clip("circle(farthest-side at right 10px top) padding-box"),
+        Some(ClipPath::Shape(BasicShape::Circle { r: ShapeRadius::FarthestSide, at: (Length::Calc(-10.0, 100.0), pc(0.0)) }, ShapeBox::Padding))
+    );
+    assert_eq!(
+        clip("content-box ellipse(20px 50% at 0 0)"),
+        Some(ClipPath::Shape(BasicShape::Ellipse { rx: ShapeRadius::Len(px(20.0)), ry: ShapeRadius::Len(pc(50.0)), at: (px(0.0), px(0.0)) }, ShapeBox::Content))
+    );
+    let zero = (px(0.0), px(0.0));
+    assert_eq!(
+        clip("inset(10px 20% round 5px)"),
+        Some(ClipPath::Shape(BasicShape::Inset { insets: [px(10.0), pc(20.0), px(10.0), pc(20.0)], radii: [(px(5.0), px(5.0)); 4] }, ShapeBox::Border))
+    );
+    assert_eq!(
+        clip("rect(auto 10px 20px auto)"),
+        Some(ClipPath::Shape(BasicShape::Rect { edges: [Length::Auto, px(10.0), px(20.0), Length::Auto], radii: [zero; 4] }, ShapeBox::Border))
+    );
+    assert_eq!(
+        clip("polygon(evenodd, 0 0, 100% 0, 50% 100%)"),
+        Some(ClipPath::Shape(BasicShape::Polygon { evenodd: true, points: vec![(px(0.0), px(0.0)), (pc(100.0), px(0.0)), (pc(50.0), pc(100.0))], round: 0.0 }, ShapeBox::Border))
+    );
+    assert!(matches!(clip("path(evenodd, 'M0 0 L10 0 L10 10 Z')"), Some(ClipPath::Shape(BasicShape::Path { evenodd: true, .. }, _))));
+    assert!(matches!(
+        clip("shape(from 0 0, line to 100% 0, hline by -50%, curve to 0 100% with 10px 10px, arc by 5px 5px of 10px cw large, close)"),
+        Some(ClipPath::Shape(BasicShape::Shape { evenodd: false, .. }, ShapeBox::Border))
+    ));
+    assert_eq!(clip("margin-box"), Some(ClipPath::Box(ShapeBox::Margin)));
+    assert_eq!(clip("url(#c)"), Some(ClipPath::Url("c".into())));
+    assert_eq!(clip("url(other.svg#c)"), Some(ClipPath::Url(String::new())));
+    // Invalid values are ignored.
+    assert_eq!(clip("circle(-10px)"), None);
+    assert_eq!(clip("ellipse(10px)"), None);
+    assert_eq!(clip("circle(10px) border-box padding-box"), None);
+    assert_eq!(clip("xywh(0 0 -1px 10px)"), None);
+}
+
+#[test]
+fn basic_shape_geometry() {
+    use crate::shapes::{basic_shape_path, basic_shape_rounded};
+    use rabbithole_gfx::Rect;
+    let rb = Rect::new(10.0, 20.0, 200.0, 100.0);
+    let shape = |css: &str| match clip(css) {
+        Some(ClipPath::Shape(s, _)) => s,
+        other => panic!("{other:?}"),
+    };
+    // inset(): insets scale down when they exceed the box.
+    let (r, _) = basic_shape_rounded(&shape("inset(10px 150px 20px 150px)"), rb).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (110.0, 30.0, 0.0, 70.0));
+    // Radius percentages resolve against the reference box.
+    let (_, q) = basic_shape_rounded(&shape("inset(80% 0 0 round 8%)"), rb).unwrap();
+    assert!((q[0].0 - 16.0).abs() < 1e-3 && (q[0].1 - 8.0).abs() < 1e-3, "{q:?}");
+    // circle(): percentages of the normalized diagonal; side keywords.
+    let (r, _) = basic_shape_rounded(&shape("circle(closest-side at 50px 50%)"), rb).unwrap();
+    assert_eq!((r.x, r.y, r.w), (10.0, 20.0, 100.0));
+    let (r, _) = basic_shape_rounded(&shape("circle(farthest-corner at 0 0)"), rb).unwrap();
+    assert!((r.w / 2.0 - 200f32.hypot(100.0)).abs() < 1e-3);
+    // xywh() / rect() rectangles.
+    let (r, _) = basic_shape_rounded(&shape("xywh(10px 10% 50% 20px)"), rb).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (20.0, 30.0, 100.0, 20.0));
+    let (r, _) = basic_shape_rounded(&shape("rect(10px auto auto 20%)"), rb).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (50.0, 30.0, 160.0, 90.0));
+    // polygon() and path() are positioned in the box.
+    let (p, rule) = basic_shape_path(&shape("polygon(evenodd, 0 0, 100% 0, 0 100%)"), rb);
+    assert_eq!(rule, rabbithole_gfx::FillRule::EvenOdd);
+    assert_eq!(p[1], rabbithole_gfx::PathSeg::LineTo(rabbithole_gfx::Point::new(210.0, 20.0)));
+    let (p, _) = basic_shape_path(&shape("path('M5 5 L 10 5')"), rb);
+    assert_eq!(p[0], rabbithole_gfx::PathSeg::MoveTo(rabbithole_gfx::Point::new(15.0, 25.0)));
+    // shape(): relative commands accumulate from the current point.
+    let (p, _) = basic_shape_path(&shape("shape(from 10px 10px, hline by 50%, vline to 100%, close)"), rb);
+    assert_eq!(p[1], rabbithole_gfx::PathSeg::LineTo(rabbithole_gfx::Point::new(120.0, 30.0)));
+    assert_eq!(p[2], rabbithole_gfx::PathSeg::LineTo(rabbithole_gfx::Point::new(120.0, 120.0)));
+}
+
+#[test]
+fn legacy_clip_rect() {
+    let px = Length::Px;
+    assert_eq!(one("clip: rect(1px, auto, 3px, 4px)").clip_rect, Some([px(1.0), Length::Auto, px(3.0), px(4.0)]));
+    assert_eq!(one("clip: rect(1px auto 3px -4px)").clip_rect, Some([px(1.0), Length::Auto, px(3.0), px(-4.0)]));
+    assert_eq!(one("clip: auto").clip_rect, None);
+    // Mixed separators and percentages are invalid.
+    assert_eq!(one("clip: rect(1px 2px, 3px, 4px)").clip_rect, None);
+    assert_eq!(one("clip: rect(1px, 2px, 3px, 10%)").clip_rect, None);
+}

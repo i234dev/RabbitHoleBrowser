@@ -7,6 +7,7 @@ pub mod cascade;
 pub mod computed;
 pub mod props;
 pub mod restyle;
+pub mod shapes;
 #[cfg(test)]
 mod tests_props;
 #[cfg(test)]
