@@ -2288,6 +2288,12 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
             if c.fixed || c.clamped {
                 continue;
             }
+            // A transformed box counts with its transformed bounds.
+            if !c.style.transform.is_empty() {
+                let b = rabbithole_layout::block_content_bounds(c);
+                add(u, &b, dx, dy);
+                continue;
+            }
             add(u, &c.rect, dx, dy);
             let clamp_cut = c.style.line_clamp.is_some() && c.children.iter().any(|x| x.clamped);
             if !c.clips && !clamp_cut {

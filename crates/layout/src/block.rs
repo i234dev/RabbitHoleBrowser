@@ -2061,12 +2061,18 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
         return r;
     }
     for line in &b.lines {
-        for f in &line.fragments {
+        // Empty fragments (an empty inline, `content: ""`) add no overflow.
+        for f in line.fragments.iter().filter(|f| f.rect.w > 0.0) {
             r = r.union(&f.rect);
         }
     }
     for c in b.children.iter().filter(|c| !c.clamped) {
-        r = r.union(&content_bounds(c));
+        let cr = content_bounds(c);
+        // A transformed empty box (nothing to draw) adds no overflow.
+        if cr.w <= 0.0 && cr.h <= 0.0 || !c.style.transform.is_empty() && (cr.w <= 0.0 || cr.h <= 0.0) {
+            continue;
+        }
+        r = r.union(&cr);
     }
     let outer = b.margin_rect();
     // A clamped line-clamp container cuts its content's overflow at its
@@ -2082,7 +2088,7 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
         r.y = outer.y;
         r.h = outer.h;
     }
-    r
+    b.transformed_bounds(r)
 }
 
 /// Max right / bottom extents of the tree (border boxes and lines).
