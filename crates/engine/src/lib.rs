@@ -152,6 +152,31 @@ pub struct LoadedFont {
     pub data: Arc<Vec<u8>>,
 }
 
+/// The policy of the last valid `<meta name="referrer">` (HTML §4.2.5.3,
+/// with the legacy keywords).
+fn document_referrer_policy(doc: &Document) -> Option<rabbithole_net::ReferrerPolicy> {
+    use rabbithole_net::ReferrerPolicy as P;
+    let mut policy = None;
+    for n in doc.descendants(Document::ROOT) {
+        if !doc.is_element(n, "meta") || !doc.attr(n, "name").is_some_and(|v| v.trim().eq_ignore_ascii_case("referrer")) {
+            continue;
+        }
+        let Some(content) = doc.attr(n, "content") else { continue };
+        let found = match content.trim().to_ascii_lowercase().as_str() {
+            "never" => Some(P::NoReferrer),
+            "default" => Some(P::StrictOriginWhenCrossOrigin),
+            "always" => Some(P::UnsafeUrl),
+            "origin-when-crossorigin" => Some(P::OriginWhenCrossOrigin),
+            other if !other.contains(',') => P::parse(other),
+            _ => None,
+        };
+        if found.is_some() {
+            policy = found;
+        }
+    }
+    policy
+}
+
 /// Everything needed to build a [`Page`]; plain data, `Send`.
 pub struct LoadedPage {
     pub url: Url,
@@ -167,6 +192,8 @@ pub struct LoadedPage {
     pub scripts: Vec<ScriptSource>,
     /// Viewport used for media queries while discovering resources.
     pub viewport: Viewport,
+    /// The response's `Referrer-Policy` header, if any.
+    pub referrer_policy: Option<rabbithole_net::ReferrerPolicy>,
 }
 
 const MAX_IMPORT_DEPTH: usize = 4;
@@ -301,6 +328,7 @@ impl Loader {
             self.load_html(&html, url, viewport)
         };
         page.status = resp.status;
+        page.referrer_policy = resp.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("referrer-policy")).filter_map(|(_, v)| rabbithole_net::ReferrerPolicy::parse(v)).last();
         let essence = resp.content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
         if !essence.is_empty() && (essence.starts_with("text/html") || essence.contains("xml")) {
             page.doc.content_type = essence;
@@ -397,6 +425,7 @@ impl Loader {
             fonts,
             scripts,
             viewport,
+            referrer_policy: None,
         }
     }
 
@@ -1048,6 +1077,9 @@ pub struct Link {
 
 /// A loaded, styled and laid out document.
 pub struct Page {
+    /// The document's referrer policy (`Referrer-Policy` header, then
+    /// `<meta name=referrer>`), for the navigations it starts.
+    pub referrer_policy: rabbithole_net::ReferrerPolicy,
     /// Document-local web-font aliases/fallback over the Engine's shared store.
     pub fonts: Rc<FontContext>,
     pub url: Url,
@@ -1240,7 +1272,9 @@ impl Engine {
         }
         let has_dynamic_rules = loaded.sheets.iter().any(sheet_has_dynamic_rules);
         let frame = self.frame_context.borrow_mut().take();
+        let referrer_policy = document_referrer_policy(&loaded.doc).or(loaded.referrer_policy).unwrap_or_default();
         let mut page = Page {
+            referrer_policy,
             fonts,
             url: loaded.url,
             base_url: loaded.base_url,
@@ -1337,7 +1371,7 @@ impl Engine {
         if page.script.pending_navigation.is_none() {
             if let Some(target) = meta_refresh_target(page, self.scripting) {
                 page.script.pending_navigation = Some(PendingNavigation {
-                    request: Request::get(target).with_referer(page.url.clone()),
+                    request: Request::get(target).with_referer(page.url.clone()).with_referrer_policy(page.referrer_policy),
                     replace: true,
                 });
             }

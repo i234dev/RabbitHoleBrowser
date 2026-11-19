@@ -417,7 +417,7 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn navigate(&mut self, url: Url, replace: bool) {
         self.page.script.pending_navigation = Some(PendingNavigation {
-            request: Request::get(url).with_referer(self.page.url.clone()),
+            request: Request::get(url).with_referer(self.page.url.clone()).with_referrer_policy(self.page.referrer_policy),
             replace,
         });
     }
