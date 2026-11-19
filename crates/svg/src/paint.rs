@@ -362,7 +362,7 @@ impl<'a> Painter<'a> {
         let reference = |b: ShapeBox| match b {
             ShapeBox::Content | ShapeBox::Padding | ShapeBox::Fill => fill,
             ShapeBox::View => viewport,
-            ShapeBox::Border | ShapeBox::Margin | ShapeBox::Stroke => {
+            ShapeBox::Border | ShapeBox::HalfBorder | ShapeBox::Margin | ShapeBox::Stroke => {
                 let e = if props.stroke != PaintSpec::None { props.stroke_width.max(0.0) / 2.0 } else { 0.0 };
                 Rect::new(fill.x - e, fill.y - e, fill.w + 2.0 * e, fill.h + 2.0 * e)
             }

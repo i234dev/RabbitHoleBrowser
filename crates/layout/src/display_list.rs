@@ -338,6 +338,7 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         hits: HitList::default(),
         scope: None,
         hoisted: top_layer.iter().map(|(_, b)| *b as *const LayoutBox as usize).collect(),
+        listed: std::collections::HashSet::new(),
         flipped: false,
         wm_bg: None,
     };
@@ -371,6 +372,10 @@ struct Painter<'l, 't, 'a> {
     /// from inside a positioned `z-index: auto` ancestor (see
     /// [`Painter::collect_hoisted`]); that ancestor skips them.
     hoisted: std::collections::HashSet<usize>,
+    /// Boxes (by address) already listed as deferred by a stacking
+    /// context: floats and inline-blocks are painted like stacking
+    /// contexts inside it, and must not list (and paint) them again.
+    listed: std::collections::HashSet<usize>,
     /// Inside an odd number of reflections (`vertical-lr` subtrees): text
     /// is flipped back locally so glyphs read sideways, not mirrored.
     flipped: bool,
@@ -548,7 +553,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         if !root.style.backdrop_filters.is_empty() && root.style.visibility != Visibility::Hidden {
             let r = root.rect;
+            // Shaped corners / `border-shape` bound the backdrop too.
+            let shaped = self.push_border_shape(root, box_radii(root), true);
             self.list.push(DisplayItem::BackdropFilter { rect: r, radii: root.style.resolved_radii(r.w, r.h), filters: root.style.backdrop_filters.clone() });
+            if shaped {
+                self.list.push(DisplayItem::PopClip);
+            }
         }
         let mask = self.mask_items(root);
         let layer = layer || mask.is_some();
@@ -757,12 +767,15 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
                 continue;
             }
+            let deferred = c.is_positioned() || c.is_stacking_context() || c.flow == Flow::Absolute;
+            if deferred && !self.listed.insert(c as *const LayoutBox as usize) {
+                continue;
+            }
             if c.fixed && c.flow == Flow::Absolute {
                 *order += 1;
                 out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new() });
                 continue;
             }
-            let deferred = c.is_positioned() || c.is_stacking_context() || c.flow == Flow::Absolute;
             if deferred {
                 *order += 1;
                 let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { flow_cb };
@@ -890,11 +903,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
             if b.kind == BoxKind::Image {
+                // A replaced element's content is clipped to its
+                // `border-shape` (its overflow clip).
+                let shaped = b.style.border_shape.is_some() && self.push_border_shape(b, box_radii(b), false);
                 self.paint_image_box(b);
+                if shaped {
+                    self.list.push(DisplayItem::PopClip);
+                }
             }
         }
         let clip = b.clips && !b.rect.is_empty();
         let saved_scope = if clip { Some(self.push_clip(b)) } else { None };
+        // `border-shape` also shapes the overflow clip.
+        let shape_clip = clip && b.style.border_shape.is_some() && self.push_border_shape(b, box_radii(b), false);
         if phase == Phase::Floats {
             for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c)) {
                 self.paint_float_or_atomic(c);
@@ -912,6 +933,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         } else if phase == Phase::Content {
             self.paint_lines(b);
+        }
+        if shape_clip {
+            self.list.push(DisplayItem::PopClip);
         }
         if let Some(saved) = saved_scope {
             self.pop_clip(saved);
@@ -950,10 +974,16 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
         let widget = crate::widgets::widget(b, self.ctx);
         background::paint_box_shadows(self.list, &geom, &style.box_shadow, false);
+        // `border-shape` / `corner-shape`: the background and border are
+        // clipped to the shape (the border is not drawn along it).
+        let shaped = self.push_border_shape(b, geom.radii, true);
         if let Some(crate::widgets::Widget::Replace(items)) = widget {
             // Native checkbox / radio / slider / progress / meter.
             for it in items {
                 self.list.push(it);
+            }
+            if shaped {
+                self.list.push(DisplayItem::PopClip);
             }
             return;
         }
@@ -993,6 +1023,40 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 self.list.push(it);
             }
         }
+        if shaped {
+            self.list.push(DisplayItem::PopClip);
+        }
+    }
+
+    /// Clip the box's own painting to its `border-shape` or shaped corners
+    /// (paint only: hit testing keeps the box).
+    /// `corners`: also shaped corners (`corner-shape`), not only
+    /// `border-shape`.
+    fn push_border_shape(&mut self, b: &LayoutBox, radii: Radii, corners: bool) -> bool {
+        let style = &b.style;
+        let path = match style.border_shape.as_deref() {
+            Some(rabbithole_style::ClipPath::Shape(shape, which)) => {
+                let (r, _) = crate::clip_path::reference_box(b, *which);
+                rabbithole_style::shapes::basic_shape_path(shape, r)
+            }
+            _ if corners && style.corner_shape.iter().any(|c| *c != rabbithole_style::CornerShape::Round) && background::has_radii(&radii) => {
+                (rabbithole_style::shapes::corner_shaped_path(b.rect, radii, style.corner_shape), FillRule::NonZero)
+            }
+            _ => return false,
+        };
+        let poly = rabbithole_gfx::path::flatten(&path.0, &rabbithole_gfx::IDENTITY, 0.25);
+        let bounds = rabbithole_gfx::path::polylines_bounds(&poly).unwrap_or_default();
+        let anchor = Point::new(b.rect.x, b.rect.y);
+        // Circles and ellipses clip like `clip-path` ones (rounded-box
+        // coverage).
+        let rounded = match style.border_shape.as_deref() {
+            Some(rabbithole_style::ClipPath::Shape(shape @ (rabbithole_style::BasicShape::Circle { .. } | rabbithole_style::BasicShape::Ellipse { .. }), which)) => {
+                rabbithole_style::shapes::basic_shape_rounded(shape, crate::clip_path::reference_box(b, *which).0)
+            }
+            _ => None,
+        };
+        self.list.push(DisplayItem::PushClipPath { bounds, path: Arc::new(path.0), evenodd: path.1 == FillRule::EvenOdd, anchor, rounded });
+        true
     }
 
     fn paint_outline(&mut self, b: &LayoutBox) {

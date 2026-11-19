@@ -24,6 +24,12 @@ pub(crate) fn reference_box(b: &LayoutBox, which: ShapeBox) -> (Rect, Radii) {
     match which {
         ShapeBox::Border | ShapeBox::Stroke | ShapeBox::View => (border, radii),
         ShapeBox::Padding => (b.padding_rect(), inner_radii(radii, &b.style.border_width)),
+        ShapeBox::HalfBorder => {
+            let bw = &b.style.border_width;
+            let half = rabbithole_style::Edges { top: bw.top / 2.0, right: bw.right / 2.0, bottom: bw.bottom / 2.0, left: bw.left / 2.0 };
+            let r = Rect::new(border.x + half.left, border.y + half.top, (border.w - half.left - half.right).max(0.0), (border.h - half.top - half.bottom).max(0.0));
+            (r, inner_radii(radii, &half))
+        }
         ShapeBox::Content | ShapeBox::Fill => {
             let p = b.padding_rect();
             let pr = inner_radii(radii, &b.style.border_width);

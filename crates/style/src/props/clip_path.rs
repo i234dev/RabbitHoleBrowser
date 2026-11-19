@@ -21,6 +21,12 @@ pub fn apply(comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) {
 
 /// `Some(None)` = `none`; `None` = invalid.
 pub fn parse_clip_path(comps: &[&[Token]], ctx: &LengthContext) -> Option<Option<ClipPath>> {
+    parse_shape_value(comps, ctx, ShapeBox::Border)
+}
+
+/// `none | <url> | <basic-shape> || <geometry-box>` with `default` as the
+/// reference box of a shape given without one.
+pub fn parse_shape_value(comps: &[&[Token]], ctx: &LengthContext, default: ShapeBox) -> Option<Option<ClipPath>> {
     match comps {
         [] => None,
         [c] if values::is_ident(c, "none") => Some(None),
@@ -48,7 +54,7 @@ pub fn parse_clip_path(comps: &[&[Token]], ctx: &LengthContext) -> Option<Option
                 }
             }
             Some(Some(match shape {
-                Some(s) => ClipPath::Shape(s, reference.unwrap_or(ShapeBox::Border)),
+                Some(s) => ClipPath::Shape(s, reference.unwrap_or(default)),
                 None => ClipPath::Box(reference?),
             }))
         }
@@ -87,6 +93,7 @@ fn shape_box(k: &str) -> Option<ShapeBox> {
     Some(match k {
         "margin-box" => ShapeBox::Margin,
         "border-box" => ShapeBox::Border,
+        "half-border-box" => ShapeBox::HalfBorder,
         "padding-box" => ShapeBox::Padding,
         "content-box" => ShapeBox::Content,
         "fill-box" => ShapeBox::Fill,

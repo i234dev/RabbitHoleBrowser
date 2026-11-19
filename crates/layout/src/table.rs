@@ -222,6 +222,61 @@ fn cell_mut<'t>(table: &'t mut LayoutBox, c: &CellInfo) -> &'t mut LayoutBox {
     &mut row_mut(table, c.row_path).children[c.idx]
 }
 
+/// Tables with `border-shape` cells: row, row group and column backgrounds
+/// are painted by each cell (CSS Backgrounds 3 §2.11.2) so that the cell's
+/// shape clips them; the parts themselves then paint none.
+fn fold_part_backgrounds(table: &mut LayoutBox, g: &Grid) {
+    let has_bg = |s: &ComputedStyle| !s.background_color.is_transparent() || !s.background_layers.is_empty();
+    for c in &g.cells {
+        let mut parts: Vec<Rc<ComputedStyle>> = vec![row_ref(table, c.row_path).style.clone()];
+        if let Some(i) = g.row_group[c.row] {
+            parts.push(table.children[i].style.clone());
+        }
+        let mut cols: Vec<&ColBox> = g.col_boxes.iter().filter(|x| c.col >= x.first && c.col < x.first + x.span.max(1)).collect();
+        cols.sort_by_key(|x| x.path.1.is_none());
+        for x in cols {
+            let bx = match x.path.1 {
+                Some(j) => &table.children[x.path.0].children[j],
+                None => &table.children[x.path.0],
+            };
+            parts.push(bx.style.clone());
+        }
+        if !parts.iter().any(|p| has_bg(p)) {
+            continue;
+        }
+        let cell = cell_mut(table, c);
+        let mut s = (*cell.style).clone();
+        for p in &parts {
+            if s.background_color.is_transparent() {
+                s.background_color = p.background_color;
+            }
+            s.background_layers.extend(p.background_layers.iter().cloned());
+        }
+        cell.style = Rc::new(s);
+    }
+    let clear = |b: &mut LayoutBox| {
+        if !b.style.background_color.is_transparent() || !b.style.background_layers.is_empty() {
+            let mut s = (*b.style).clone();
+            s.background_color = Color::TRANSPARENT;
+            s.background_layers.clear();
+            s.background_image = None;
+            b.style = Rc::new(s);
+        }
+    };
+    for p in &g.rows {
+        clear(row_mut(table, *p));
+    }
+    for i in g.row_group.iter().flatten() {
+        clear(&mut table.children[*i]);
+    }
+    for x in &g.col_boxes {
+        match x.path.1 {
+            Some(j) => clear(&mut table.children[x.path.0].children[j]),
+            None => clear(&mut table.children[x.path.0]),
+        }
+    }
+}
+
 /// Horizontal padding + border of a cell in px (percent padding as 0).
 fn cell_extras(style: &ComputedStyle) -> f32 {
     horizontal_extras(style, 0.0)
@@ -628,6 +683,9 @@ impl<'a> Layouter<'a> {
             bx.rect = r;
             bx.content_rect = r;
             bx.rel_applied = (0.0, 0.0);
+        }
+        if g.cells.iter().any(|c| cell_ref(b, c).style.border_shape.is_some()) {
+            fold_part_backgrounds(b, &g);
         }
         // Anything else (stray out-of-flow boxes) sits at the table origin.
         for c in b.children.iter_mut() {

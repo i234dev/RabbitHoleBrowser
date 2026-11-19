@@ -773,3 +773,17 @@ fn legacy_clip_rect() {
     assert_eq!(one("clip: rect(1px 2px, 3px, 4px)").clip_rect, None);
     assert_eq!(one("clip: rect(1px, 2px, 3px, 10%)").clip_rect, None);
 }
+
+#[test]
+fn border_shape_and_corner_shape() {
+    assert!(matches!(one("border-shape: circle(50%) padding-box").border_shape.as_deref(), Some(ClipPath::Shape(BasicShape::Circle { .. }, ShapeBox::Padding))));
+    assert!(matches!(one("border-shape: circle(50%)").border_shape.as_deref(), Some(ClipPath::Shape(_, ShapeBox::HalfBorder))));
+    assert_eq!(one("border-shape: none").border_shape, None);
+    assert_eq!(one("corner-shape: bevel").corner_shape, [CornerShape::Bevel; 4]);
+    assert_eq!(
+        one("corner-shape: notch scoop").corner_shape,
+        [CornerShape::Notch, CornerShape::Scoop, CornerShape::Notch, CornerShape::Scoop]
+    );
+    assert_eq!(one("corner-shape: superellipse(0)").corner_shape, [CornerShape::Bevel; 4]);
+    assert_eq!(one("corner-shape: round; corner-top-left-shape: square").corner_shape[0], CornerShape::Square);
+}
