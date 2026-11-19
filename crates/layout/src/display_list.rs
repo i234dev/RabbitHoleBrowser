@@ -581,10 +581,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             Some(edges) if root.flow == Flow::Absolute => {
                 // (The clip is physical: a vertical-mode wrapper — whose
                 // contents are already turned here — maps it.)
-                let turned = root.wm_transform.and(self.wm_m);
-                let r = match (turned, saved_wm_m) {
-                    (Some(_), Some(outer)) => rabbithole_gfx::path::transform_rect_bounds(&outer, root.rect),
-                    _ => root.rect,
+                let turned = self.wm_m;
+                let outer = if root.wm_transform.is_some() { saved_wm_m } else { self.wm_m };
+                let r = match outer {
+                    Some(o) => rabbithole_gfx::path::transform_rect_bounds(&o, root.rect),
+                    None => root.rect,
                 };
                 let at = |l: rabbithole_style::Length, auto: f32| if l.is_auto() { auto } else { l.resolve_or_zero(0.0) };
                 let (top, right, bottom, left) = (at(edges[0], 0.0), at(edges[1], r.w), at(edges[2], r.h), at(edges[3], 0.0));

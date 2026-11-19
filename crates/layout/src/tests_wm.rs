@@ -337,10 +337,9 @@ fn top_aligned_inline_text_sits_at_the_line_top() {
 
 #[test]
 fn legacy_clip_of_a_turned_absolute_box_is_physical() {
-    // An absolutely positioned image in a vertical-rl page is wrapped (it
-    // stays upright); its `clip` keeps clipping its physical top-left
-    // quarter.
-    let fx = Fx::new("<html style='writing-mode:vertical-rl'><body><div><img style='position:absolute;clip:rect(0px,50px,50px,0px);width:100px;height:100px'></div></body></html>", "html, body { margin: 0; }");
+    // An absolutely positioned box in a vertical-rl page: its `clip`
+    // keeps clipping its physical top-left quarter.
+    let fx = Fx::new("<html style='writing-mode:vertical-rl'><body><div><div style='position:absolute;clip:rect(0px,50px,50px,0px);width:100px;height:100px;background:green'></div></div></body></html>", "html, body { margin: 0; }");
     let list = fx.display_list(&HashMap::new());
     let mut stack: Vec<Matrix> = vec![[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]];
     let mut clips = Vec::new();
