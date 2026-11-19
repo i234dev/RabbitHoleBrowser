@@ -1030,12 +1030,22 @@ impl<'a> Layouter<'a> {
                 Flow::Absolute => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
                     let block = !b.children[i].style.display_before_blockification.is_inline_level();
+                    // (In right-to-left containers the static position is
+                    // the box's right edge.)
                     let rtl = b.style.direction == rabbithole_style::Direction::Rtl;
-                    let mut x = content_x + if block && rtl { cb.width } else { 0.0 };
-                    if !block && !rtl && !bfc.is_empty() {
-                        // An inline-level box would start a line beside the
-                        // floats there.
-                        x = bfc.available(cursor + off, 1.0, content_x, cb.width).0;
+                    let mut x = content_x + if rtl { cb.width } else { 0.0 };
+                    if !block {
+                        // An inline-level box would start an (empty) line
+                        // beside the floats there, aligned by `text-align`.
+                        let (l, r) = if bfc.is_empty() { (content_x, content_x + cb.width) } else { bfc.available(cursor + off, 1.0, content_x, cb.width) };
+                        use rabbithole_style::TextAlign as T;
+                        x = match b.style.text_align {
+                            T::Left => l,
+                            T::Right => r,
+                            T::Center => (l + r) / 2.0,
+                            T::End => if rtl { l } else { r },
+                            T::Start | T::Justify => if rtl { r } else { l },
+                        };
                     }
                     b.children[i].static_pos = (x, cursor + off);
                     b.children[i].static_align = None;
@@ -1464,7 +1474,10 @@ impl<'a> Layouter<'a> {
         // The shape of an alternative label is not an image aspect ratio.
         // Only decoded dimensions, a pair of attributes or explicit CSS may
         // couple the axes; height:40px must not stretch the label's width.
-        let ratio_size = if b.image.as_ref().is_some_and(|i| i.no_ratio) { (0.0, 0.0) } else { natural.unwrap_or((b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0))) };
+        // Frames have no natural aspect ratio (their default 300×150 size
+        // is only a fallback size).
+        let frame = b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("iframe" | "frame")));
+        let ratio_size = if frame || b.image.as_ref().is_some_and(|i| i.no_ratio) { (0.0, 0.0) } else { natural.unwrap_or((b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0))) };
         let natural_ratio = if ratio_size.0 > 0.0 && ratio_size.1 > 0.0 { Some(ratio_size.0 / ratio_size.1) } else { None };
         let css_ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite());
         // `auto <ratio>` prefers the natural ratio.
@@ -1645,7 +1658,7 @@ impl<'a> Layouter<'a> {
                         .or_else(|| self.abs_cb.get(&n).copied())
                 });
                 let block_level = matches!(b.formatting, Formatting::Block | Formatting::Inline) && !b.children[i].style.display_before_blockification.is_inline_level();
-                let static_right = block_level && b.style.direction == rabbithole_style::Direction::Rtl;
+                let static_right = (block_level || b.formatting == Formatting::Block) && b.style.direction == rabbithole_style::Direction::Rtl;
                 // The static-position rectangle of a block-level box: the
                 // parent's content box in the inline axis, its static
                 // position in the block axis (CSS Position §4.1).
