@@ -47,6 +47,12 @@ pub enum Rule {
     },
     /// `@font-face { ... }` descriptors (font-family, src, font-weight, ...).
     FontFace(Vec<Declaration>),
+    /// `@font-feature-values <family>#` (CSS Fonts 4 §6.9.1): for each
+    /// family, (block kind such as `styleset`, value name, numbers).
+    FontFeatureValues {
+        families: Vec<String>,
+        values: Vec<(String, String, Vec<u32>)>,
+    },
     /// `@keyframes name { from {..} 50% {..} to {..} }`
     Keyframes {
         name: String,
@@ -218,7 +224,23 @@ impl Stylesheet {
                             walk(rules, env, out);
                         }
                     }
-                    Rule::Import { .. } | Rule::FontFace(_) | Rule::Keyframes { .. } => {}
+                    Rule::Import { .. } | Rule::FontFace(_) | Rule::Keyframes { .. } | Rule::FontFeatureValues { .. } => {}
+                }
+            }
+        }
+        walk(&self.rules, env, out);
+    }
+
+    /// All `@font-feature-values` rules (inside active media blocks too):
+    /// (families, values).
+    pub fn font_feature_values<'a>(&'a self, env: &MediaEnv, out: &mut Vec<(&'a [String], &'a [(String, String, Vec<u32>)])>) {
+        fn walk<'a>(rules: &'a [Rule], env: &MediaEnv, out: &mut Vec<(&'a [String], &'a [(String, String, Vec<u32>)])>) {
+            for r in rules {
+                match r {
+                    Rule::FontFeatureValues { families, values } => out.push((families, values)),
+                    Rule::Media { query, rules } if query.evaluate(env) => walk(rules, env, out),
+                    Rule::Supports { matches: true, rules } => walk(rules, env, out),
+                    _ => {}
                 }
             }
         }
@@ -471,6 +493,11 @@ impl<'a> Parser<'a> {
                                 "font-face" if parent.is_none() => {
                                     let mut dp = Parser { toks: inner, pos: 0 };
                                     rules.push(Rule::FontFace(dp.parse_declarations()));
+                                }
+                                "font-feature-values" if parent.is_none() => {
+                                    if let Some(rule) = parse_font_feature_values(&prelude[..], &inner[..]) {
+                                        rules.push(rule);
+                                    }
                                 }
                                 "keyframes" | "-webkit-keyframes" if parent.is_none() => {
                                     let kname = prelude
@@ -1007,4 +1034,69 @@ mod tests {
         let q = parse_media_query("(width >= 600px)");
         assert!(q.evaluate(&env));
     }
+}
+
+/// `@font-feature-values Family A, "Family B" { @styleset { name: 1 2; } ... }`.
+fn parse_font_feature_values(prelude: &[Token], body: &[Token]) -> Option<Rule> {
+    // Family names: identifier sequences or strings, comma separated.
+    let mut families = Vec::new();
+    let mut cur = String::new();
+    for t in prelude {
+        match t {
+            Token::Ident(s) => {
+                if !cur.is_empty() {
+                    cur.push(' ');
+                }
+                cur.push_str(s);
+            }
+            Token::String(s) if cur.is_empty() => cur.push_str(s),
+            Token::Whitespace => {}
+            Token::Comma => families.push(std::mem::take(&mut cur)),
+            _ => return None,
+        }
+    }
+    families.push(cur);
+    if families.iter().any(|f| f.is_empty()) {
+        return None;
+    }
+    let mut values = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        match &body[i] {
+            Token::AtKeyword(kind) => {
+                // `@kind { name: n [n]*; ... }`
+                let kind = kind.to_ascii_lowercase();
+                let mut j = i + 1;
+                while j < body.len() && body[j] != Token::OpenBrace {
+                    j += 1;
+                }
+                let start = j + 1;
+                let mut depth = 1;
+                let mut k = start;
+                while k < body.len() && depth > 0 {
+                    match body[k] {
+                        Token::OpenBrace => depth += 1,
+                        Token::CloseBrace => depth -= 1,
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                let block = &body[start.min(body.len())..k.saturating_sub(1).max(start).min(body.len())];
+                for decl in block.split(|t| *t == Token::Semicolon) {
+                    let toks: Vec<&Token> = decl.iter().filter(|t| **t != Token::Whitespace).collect();
+                    let (Some(Token::Ident(name)), Some(Token::Colon)) = (toks.first(), toks.get(1)) else { continue };
+                    let nums: Option<Vec<u32>> = toks[2..].iter().map(|t| match t {
+                        Token::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u32),
+                        _ => None,
+                    }).collect();
+                    if let Some(nums) = nums.filter(|n| !n.is_empty()) {
+                        values.push((kind.clone(), name.clone(), nums));
+                    }
+                }
+                i = k;
+            }
+            _ => i += 1,
+        }
+    }
+    Some(Rule::FontFeatureValues { families, values })
 }

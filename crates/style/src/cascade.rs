@@ -759,13 +759,14 @@ fn apply_declarations(
     // Pass 1: font-size (em resolves against the parent's font-size).
     let (pch, pex, pic) = crate::values::font_units(parent);
     let parent_ctx = LengthContext {
-        font_size: parent.font_size,
+        font_size: parent.computed_font_size(),
         root_font_size,
         viewport_w: env.width,
         viewport_h: env.height,
         ch: pch,
         ex: pex,
         ic: pic,
+        lh: parent.line_height.unwrap_or(parent.font_size * 1.2),
     };
     // (Whether a font size is declared, and the size of an absolute
     // keyword: both depend on the final family, see below.)
@@ -811,10 +812,25 @@ fn apply_declarations(
             font_probe.font_size = style.font_size;
         }
     } else if !size_declared && style.font_size_keyword && mono != parent.font_monospace_only {
-        style.font_size = if mono { parent.font_size * MONO_SCALE } else { parent.font_size / MONO_SCALE };
+        style.font_size = if mono { parent.computed_font_size() * MONO_SCALE } else { parent.computed_font_size() / MONO_SCALE };
         font_probe.font_size = style.font_size;
     }
     let (ch, ex, ic) = crate::values::font_units(&font_probe);
+    // The element's line height (for `lh`): its own `line-height`, whose
+    // `lh` units refer to the parent's.
+    let lh = {
+        let probe_ctx = LengthContext { font_size: style.font_size, ch, ex, ic, ..parent_ctx };
+        for (name, value, base) in &resolved {
+            if *name == "line-height" {
+                let ctx = ApplyCtx { len: probe_ctx, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
+                apply_property(name, value, &mut font_probe, parent, &ctx);
+            }
+        }
+        match font_probe.line_height_number {
+            Some(n) => n * style.font_size,
+            None => font_probe.line_height.unwrap_or(style.font_size * 1.2),
+        }
+    };
     drop(font_probe);
 
     // Pass 2: everything else.
@@ -826,6 +842,7 @@ fn apply_declarations(
         ch,
         ex,
         ic,
+        lh,
     };
     // `color` first: `currentcolor` in every other property (borders,
     // backgrounds, shadows...) is the element's final color, whatever the
@@ -882,6 +899,26 @@ fn apply_declarations(
             style.display = if style.display == Display::InlineFlex { Display::InlineBlock } else { Display::FlowRoot };
         } else if style.line_clamp_prefixed {
             style.line_clamp = None;
+        }
+    }
+    // Named font-variant-alternates follow the element's font families.
+    crate::props::text::resolve_alternates(&mut style);
+    // `font-size-adjust` (CSS Fonts 5 §2.4): the used size keeps the chosen
+    // metric at value × computed size (em lengths above used the computed
+    // size).
+    style.font_size_unadjusted = None;
+    if let Some((metric, Some(value))) = style.font_size_adjust {
+        let (ch, ex, ic) = crate::values::font_units(&style);
+        let aspect = match metric {
+            FontSizeAdjust::ExHeight => Some(ex),
+            FontSizeAdjust::ChWidth => Some(ch),
+            FontSizeAdjust::IcWidth | FontSizeAdjust::IcHeight => Some(ic),
+            FontSizeAdjust::CapHeight => crate::values::font_cap_height(&style),
+        };
+        if let Some(a) = aspect.filter(|a| *a > 0.0) {
+            let computed = style.font_size;
+            style.font_size_unadjusted = Some(computed);
+            style.font_size = (computed * value / a).max(0.0);
         }
     }
     style.resolve_spacing_pct();
@@ -976,7 +1013,7 @@ pub fn apply_decorations(style: &mut ComputedStyle, parent: &ComputedStyle) {
 pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declaration], root_font_size: f32, viewport: (f32, f32)) -> ComputedStyle {
     let mut style = base.clone();
     let (ch, ex, ic) = crate::values::font_units(base);
-    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch, ex, ic };
+    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch, ex, ic, lh: base.line_height.unwrap_or(base.font_size * 1.2) };
     let keep = |_: &str, raw: &str| Some(raw.to_string());
     let ctx = ApplyCtx { len, pseudo: false, base: None, document_base: "", resolve: &keep };
     for d in decls {
@@ -985,7 +1022,7 @@ pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declara
         }
         if d.name == "font-size" {
             let (pch, pex, pic) = crate::values::font_units(parent);
-            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch: pch, ex: pex, ic: pic };
+            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch: pch, ex: pex, ic: pic, lh: parent.line_height.unwrap_or(parent.font_size * 1.2) };
             apply_font_size(&d.value, &mut style, parent, &pctx);
             continue;
         }
@@ -1024,6 +1061,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
     let mut stretch = (100u16, 100u16);
     let mut display = "auto".to_string();
     let mut unicode_range = None;
+    let mut feature_settings = Vec::new();
     for d in decls {
         let comps = values::components(&d.value);
         match d.name.as_str() {
@@ -1127,10 +1165,16 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
                     unicode_range = Some(ranges);
                 }
             }
+            "font-feature-settings" => {
+                let comps = values::components(&d.value);
+                if let Some(f) = crate::props::text::parse_feature_settings(&comps) {
+                    feature_settings = f;
+                }
+            }
             _ => {}
         }
     }
-    Some(FontFace { family: family?, sources, weight, italic, stretch, display, unicode_range })
+    Some(FontFace { family: family?, sources, weight, italic, stretch, display, unicode_range, feature_settings })
 }
 
 /// `U+0025-00FF`, `U+4??`, `U+20AC` (also tolerates a missing `+`, which
@@ -1689,7 +1733,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.font_family_list = from.font_family_list.clone();
             to.font_size = from.font_size;
             to.font_size_keyword = from.font_size_keyword;
-            to.font_kerning_none = from.font_kerning_none;
+            set_font_kerning(to, from.font_features.as_ref().and_then(|f| f.kerning));
             to.font_weight = from.font_weight;
             to.font_stretch = from.font_stretch;
             to.font_style = from.font_style;
@@ -1789,6 +1833,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.overflow_y = from.overflow_y;
         }
         "overflow-x" => to.overflow_x = from.overflow_x,
+        "overflow-clip-margin" => to.overflow_clip_margin = from.overflow_clip_margin,
         "overflow-y" => to.overflow_y = from.overflow_y,
         "visibility" => to.visibility = from.visibility,
         "z-index" => to.z_index = from.z_index,
@@ -1908,6 +1953,22 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.border_radius = from.border_radius;
         }
         "box-shadow" => to.box_shadow = from.box_shadow.clone(),
+        "border-image" | "-webkit-border-image" => to.border_image = from.border_image.clone(),
+        "border-image-source" | "border-image-slice" | "border-image-width" | "border-image-outset" | "border-image-repeat" => {
+            let src = from.border_image.as_deref().cloned().unwrap_or_default();
+            let mut bi = to.border_image.as_deref().cloned().unwrap_or_default();
+            match prop {
+                "border-image-source" => bi.source = src.source,
+                "border-image-slice" => {
+                    bi.slice = src.slice;
+                    bi.fill = src.fill;
+                }
+                "border-image-width" => bi.width = src.width,
+                "border-image-outset" => bi.outset = src.outset,
+                _ => bi.repeat = src.repeat,
+            }
+            to.border_image = Some(Box::new(bi));
+        }
         "text-shadow" => to.text_shadow = from.text_shadow.clone(),
         "transform" => to.transform = from.transform.clone(),
         "transform-origin" => to.transform_origin = from.transform_origin,
@@ -1944,14 +2005,48 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "-webkit-line-clamp" | "line-clamp" => {
             to.line_clamp = from.line_clamp;
             to.line_clamp_prefixed = from.line_clamp_prefixed;
+            to.line_clamp_auto = from.line_clamp_auto;
+            to.block_ellipsis = from.block_ellipsis.clone();
         }
-        "font-variant" | "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
-        "font-kerning" => to.font_kerning_none = from.font_kerning_none,
+        "font-size-adjust" => to.font_size_adjust = from.font_size_adjust,
+        "-webkit-text-fill-color" => to.text_fill_color = from.text_fill_color,
+        "font-variant" => {
+            to.font_variant_small_caps = from.font_variant_small_caps;
+            to.font_features = from.font_features.clone();
+        }
+        "font-variant-caps" => {
+            to.font_variant_small_caps = from.font_variant_small_caps;
+            let mut f = to.font_features.as_deref().cloned().unwrap_or_default();
+            f.caps = from.font_features.as_ref().map(|g| g.caps.clone()).unwrap_or_default();
+            to.font_features = if f == FontFeatureProps::default() { None } else { Some(std::rc::Rc::new(f)) };
+        }
+        "font-feature-settings" | "font-kerning" | "font-variant-ligatures" | "font-variant-position" | "font-variant-numeric"
+        | "font-variant-east-asian" | "font-variant-alternates" | "font-language-override" => {
+            let src = from.font_features.as_deref().cloned().unwrap_or_default();
+            let mut f = to.font_features.as_deref().cloned().unwrap_or_default();
+            match prop {
+                "font-feature-settings" => f.settings = src.settings,
+                "font-kerning" => f.kerning = src.kerning,
+                "font-variant-ligatures" => f.ligatures = src.ligatures,
+                "font-variant-position" => f.position = src.position,
+                "font-variant-numeric" => f.numeric = src.numeric,
+                "font-variant-east-asian" => f.east_asian = src.east_asian,
+                "font-language-override" => f.language = src.language,
+                _ => {
+                    f.alternates = src.alternates;
+                    f.alternates_named = src.alternates_named;
+                    f.alternates_resolved = src.alternates_resolved;
+                }
+            }
+            to.font_features = if f == FontFeatureProps::default() { None } else { Some(std::rc::Rc::new(f)) };
+        }
         "font-variation-settings" => to.font_variation_settings = from.font_variation_settings.clone(),
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
+        "object-view-box" => to.object_view_box = from.object_view_box,
         "aspect-ratio" => { to.aspect_ratio = from.aspect_ratio; to.aspect_ratio_auto = from.aspect_ratio_auto; }
         "image-rendering" => to.image_rendering_pixelated = from.image_rendering_pixelated,
+        "image-orientation" => to.image_orientation_none = from.image_orientation_none,
         "accent-color" => to.accent_color = from.accent_color,
         "color-scheme" => to.color_scheme_dark = from.color_scheme_dark,
         "content" => to.content = from.content.clone(),
@@ -1984,6 +2079,16 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
 
 /// Apply a `font-size` value. Returns the size of an absolute keyword
 /// (`medium` = 16px), which depends on the final font family.
+/// Set `font-kerning` (None: `auto`) in the style's feature properties.
+fn set_font_kerning(style: &mut ComputedStyle, kerning: Option<bool>) {
+    if style.font_features.as_ref().map_or(kerning.is_none(), |f| f.kerning == kerning) {
+        return;
+    }
+    let mut f = style.font_features.as_deref().cloned().unwrap_or_default();
+    f.kerning = kerning;
+    style.font_features = if f == FontFeatureProps::default() { None } else { Some(std::rc::Rc::new(f)) };
+}
+
 fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &LengthContext) -> Option<f32> {
     if let Some(w) = wide_keyword(value) {
         match w {
@@ -1991,7 +2096,7 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
                 style.font_size = 16.0;
                 return Some(16.0);
             }
-            _ => style.font_size = parent.font_size,
+            _ => style.font_size = parent.computed_font_size(),
         }
         return None;
     }
@@ -2010,11 +2115,11 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
             "xx-large" => 32.0,
             "xxx-large" => 48.0,
             "smaller" => {
-                style.font_size = parent.font_size / 1.2;
+                style.font_size = parent.computed_font_size() / 1.2;
                 return None;
             }
             "larger" => {
-                style.font_size = parent.font_size * 1.2;
+                style.font_size = parent.computed_font_size() * 1.2;
                 return None;
             }
             _ => return None,
@@ -2025,7 +2130,7 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
     if let Some(lv) = values::parse_length(comps[0]) {
         match lv.resolve(ctx) {
             Length::Px(v) => style.font_size = v.max(0.0),
-            Length::Percent(p) => style.font_size = (parent.font_size * p / 100.0).max(0.0),
+            Length::Percent(p) => style.font_size = (parent.computed_font_size() * p / 100.0).max(0.0),
             _ => {}
         }
     }
@@ -3000,7 +3105,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 }
                 style.font_variant_small_caps = f.small_caps;
                 // The shorthand resets font-kerning to its initial value.
-                style.font_kerning_none = false;
+                set_font_kerning(style, None);
             }
         }
         "line-height" => {

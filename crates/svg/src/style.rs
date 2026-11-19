@@ -391,7 +391,7 @@ impl Specified {
                 } else {
                     let toks = rabbithole_css::Tokenizer::tokenize(v);
                     let comps = rabbithole_style::values::components(&toks);
-                    let ctx = rabbithole_style::values::LengthContext { font_size: 16.0, root_font_size: 16.0, viewport_w: 0.0, viewport_h: 0.0, ch: 0.5, ex: 0.5, ic: 1.0 };
+                    let ctx = rabbithole_style::values::LengthContext { font_size: 16.0, root_font_size: 16.0, viewport_w: 0.0, viewport_h: 0.0, ch: 0.5, ex: 0.5, ic: 1.0, lh: 19.2 };
                     if let Some(Some(cp)) = rabbithole_style::props::clip_path::parse_clip_path(&comps, &ctx) {
                         self.clip_path = Some(ClipRef::Css(std::sync::Arc::new(cp)));
                     }

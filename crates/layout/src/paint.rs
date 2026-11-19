@@ -76,6 +76,14 @@ fn snap(r: Rect, canvas: &Canvas) -> Rect {
     Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
 
+/// Pixels per CSS px for rendering a `w`×`h` vector image under `m`: the
+/// device scale, doubled for images up to 1024 device px (the draw then
+/// filters the rendering down: smoother, direction-independent edges).
+fn vector_scale(m: &Matrix, w: f32, h: f32) -> f32 {
+    let s = (m[0] * m[0] + m[1] * m[1]).sqrt().max((m[2] * m[2] + m[3] * m[3]).sqrt());
+    if w.max(h) * s < 1024.0 { s * 2.0 } else { s }
+}
+
 fn is_translation(m: &Matrix) -> bool {
     (m[0] - 1.0).abs() < 1e-6 && m[1].abs() < 1e-6 && m[2].abs() < 1e-6 && (m[3] - 1.0).abs() < 1e-6
 }
@@ -100,6 +108,20 @@ fn shift_paint(p: &Paint, dx: f32, dy: f32) -> Paint {
             stops: stops.clone(),
             repeat: *repeat,
         },
+        Paint::Conic { center, angle, stops, repeat } => Paint::Conic {
+            center: Point { x: center.x + dx, y: center.y + dy },
+            angle: *angle,
+            stops: stops.clone(),
+            repeat: *repeat,
+        },
+        Paint::Tiled { paint, origin, size, step, repeat_x, repeat_y } => Paint::Tiled {
+            paint: Box::new(shift_paint(paint, dx, dy)),
+            origin: Point { x: origin.x + dx, y: origin.y + dy },
+            size: *size,
+            step: *step,
+            repeat_x: *repeat_x,
+            repeat_y: *repeat_y,
+        },
     }
 }
 
@@ -107,7 +129,8 @@ fn shift_paint(p: &Paint, dx: f32, dy: f32) -> Paint {
 fn average_color(p: &Paint) -> Color {
     match p {
         Paint::Solid(c) => *c,
-        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => {
+        Paint::Tiled { paint, .. } => average_color(paint),
+        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } | Paint::Conic { stops, .. } => {
             if stops.is_empty() {
                 return Color::TRANSPARENT;
             }
@@ -659,7 +682,21 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                 && (src.w - image.width as f32).abs() < 0.5
                 && (src.h - image.height as f32).abs() < 0.5;
             canvas.image_smoothing = !*pixelated;
-            if full || !st.ext {
+            if image.vector.is_some() && src.w > 0.0 && src.h > 0.0 {
+                // Render vector images at the device size they cover.
+                let m = canvas.transform();
+                let whole = (rect.w / src.w * image.width as f32, rect.h / src.h * image.height as f32);
+                let sized = image.for_size(whole.0, whole.1, vector_scale(&m, whole.0, whole.1));
+                let (fx, fy) = (sized.width as f32 / image.width as f32, sized.height as f32 / image.height as f32);
+                let src2 = Rect::new(src.x * fx, src.y * fy, src.w * fx, src.h * fy);
+                if full && st.ext {
+                    canvas.draw_image(&sized, r, *opacity);
+                } else if st.ext {
+                    canvas.draw_image_region(&sized, src2, r, *opacity);
+                } else {
+                    canvas.draw_image(&sized, r, *opacity);
+                }
+            } else if full || !st.ext {
                 canvas.draw_image(image, r, *opacity);
             } else {
                 canvas.draw_image_region(image, *src, r, *opacity);
@@ -674,12 +711,21 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             repeat_x,
             repeat_y,
             opacity,
+            pixelated,
         } => {
             let a = snap(area.translate(dx, dy), canvas);
             if a.intersect(&view).is_empty() {
                 return;
             }
             let o = if rabbithole_gfx::path::is_identity(&canvas.transform()) { Point { x: (origin.x + dx).round(), y: (origin.y + dy).round() } } else { Point { x: origin.x + dx, y: origin.y + dy } };
+            canvas.image_smoothing = !*pixelated;
+            let image = if image.vector.is_some() {
+                let m = canvas.transform();
+                image.for_size(tile.0, tile.1, vector_scale(&m, tile.0, tile.1))
+            } else {
+                image.clone()
+            };
+            let image = &image;
             if st.ext {
                 canvas.draw_image_tiled(image, a, o, *tile, *repeat_x, *repeat_y, *opacity);
             } else {
@@ -709,6 +755,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                 }
                 canvas.pop_clip();
             }
+            canvas.image_smoothing = true;
         }
         DisplayItem::Line {
             x0,

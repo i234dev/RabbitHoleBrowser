@@ -571,6 +571,8 @@ pub struct StyleEngine {
     pending_roots: Vec<NodeId>,
     /// `@keyframes` / `@font-face` must be collected again.
     aux_dirty: bool,
+    /// `@font-feature-values` by lower-cased family.
+    feature_values: Rc<std::collections::HashMap<String, Vec<(String, String, Vec<u32>)>>>,
     inval: InvalidationMap,
     env: MediaEnv,
     /// Custom properties per element (inherited by children).
@@ -631,6 +633,7 @@ impl StyleEngine {
             shadow_seen: HashMap::new(),
             pending_roots: Vec::new(),
             aux_dirty: false,
+            feature_values: Rc::new(std::collections::HashMap::new()),
             inval,
             env: *env,
             vars: Vec::new(),
@@ -680,6 +683,7 @@ impl StyleEngine {
         self.state_chains = state_chains(doc, opts.state);
         self.ready = true;
         self.defined_seen = doc.defined_custom.clone();
+        crate::props::text::set_feature_values(self.feature_values.clone());
         self.walk(doc, &mut tree, opts, true, &mut Vec::new());
         tree
     }
@@ -687,6 +691,18 @@ impl StyleEngine {
     /// `@font-face` rules and `@keyframes` of `author`.
     fn collect_aux(&mut self, tree: &mut StyledTree, author: &[Stylesheet], opts: &StyleOptions) {
         tree.font_faces = collect_font_faces(author, &self.env, opts);
+        let mut fv: std::collections::HashMap<String, Vec<(String, String, Vec<u32>)>> = std::collections::HashMap::new();
+        for sheet in author {
+            let mut rules = Vec::new();
+            sheet.font_feature_values(&self.env, &mut rules);
+            for (families, values) in rules {
+                for fam in families {
+                    fv.entry(fam.to_ascii_lowercase()).or_default().extend(values.iter().cloned());
+                }
+            }
+        }
+        self.feature_values = Rc::new(fv);
+        crate::props::text::set_feature_values(self.feature_values.clone());
         tree.keyframes.clear();
         for sheet in author {
             let mut kf = Vec::new();
@@ -772,6 +788,7 @@ impl StyleEngine {
             return RestyleOutcome { full: true, ..Default::default() };
         }
         let mut changes = Vec::new();
+        crate::props::text::set_feature_values(self.feature_values.clone());
         let recomputed = self.walk(doc, tree, opts, false, &mut changes);
         RestyleOutcome { full: false, changes, recomputed, flat_changed }
     }

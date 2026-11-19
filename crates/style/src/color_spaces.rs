@@ -321,6 +321,238 @@ fn split_top_commas(toks: &[Token]) -> Vec<&[Token]> {
 }
 
 /// `color-mix(in <space> [<hue-method> hue]?, <color> [<p>]?, <color> [<p>]?)`.
+/// A `<color-interpolation-method>` (CSS Color 4 §12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InterpSpace {
+    #[default]
+    Srgb,
+    SrgbLinear,
+    Oklab,
+    Lab,
+    Xyz,
+    Hsl,
+    Hwb,
+    Lch,
+    Oklch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HueMethod {
+    #[default]
+    Shorter,
+    Longer,
+    Increasing,
+    Decreasing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColorInterp {
+    pub space: InterpSpace,
+    pub hue: HueMethod,
+}
+
+impl ColorInterp {
+    /// Parse `in <space> [<hue-method> hue]` from identifier words.
+    pub fn parse(words: &[String]) -> Option<ColorInterp> {
+        if words.first().map(String::as_str) != Some("in") || words.len() < 2 {
+            return None;
+        }
+        let space = match words[1].as_str() {
+            "srgb" | "display-p3" | "a98-rgb" | "prophoto-rgb" | "rec2020" => InterpSpace::Srgb,
+            "srgb-linear" => InterpSpace::SrgbLinear,
+            "oklab" => InterpSpace::Oklab,
+            "lab" => InterpSpace::Lab,
+            "xyz" | "xyz-d65" | "xyz-d50" => InterpSpace::Xyz,
+            "hsl" => InterpSpace::Hsl,
+            "hwb" => InterpSpace::Hwb,
+            "lch" => InterpSpace::Lch,
+            "oklch" => InterpSpace::Oklch,
+            _ => return None,
+        };
+        let polar = matches!(space, InterpSpace::Hsl | InterpSpace::Hwb | InterpSpace::Lch | InterpSpace::Oklch);
+        let hue = match words.len() {
+            2 => HueMethod::Shorter,
+            4 if polar && words[3] == "hue" => match words[2].as_str() {
+                "shorter" => HueMethod::Shorter,
+                "longer" => HueMethod::Longer,
+                "increasing" => HueMethod::Increasing,
+                "decreasing" => HueMethod::Decreasing,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(ColorInterp { space, hue })
+    }
+
+    pub fn is_srgb(&self) -> bool {
+        self.space == InterpSpace::Srgb
+    }
+}
+
+fn rgb_to_hsl(c: Rgb) -> (Option<f64>, f64, f64) {
+    let (r, g, b) = (c[0], c[1], c[2]);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d.abs() < 1e-9 {
+        return (None, 0.0, l);
+    }
+    let s = if l <= 0.0 || l >= 1.0 { 0.0 } else { (max - l) / l.min(1.0 - l) };
+    let h = if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    } * 60.0;
+    (if s.abs() < 1e-9 { None } else { Some(h) }, s, l)
+}
+
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> Rgb {
+    let f = |n: f64| {
+        let k = (n + h / 30.0).rem_euclid(12.0);
+        let a = s * l.min(1.0 - l);
+        l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    };
+    [f(0.0), f(8.0), f(4.0)]
+}
+
+/// Color components in an interpolation space: (hue, the others).
+/// A missing hue (achromatic colors) is None.
+fn to_interp(c: Color, space: InterpSpace) -> (Option<f64>, Rgb) {
+    let srgb = [c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0];
+    let lin = || linear_of(c);
+    match space {
+        InterpSpace::Srgb => (None, srgb),
+        InterpSpace::SrgbLinear => (None, lin()),
+        InterpSpace::Oklab => (None, linear_to_oklab(lin())),
+        InterpSpace::Lab => (None, linear_to_lab(lin())),
+        InterpSpace::Xyz => (None, mul(&LSRGB_TO_XYZ65, lin())),
+        InterpSpace::Hsl => {
+            let (h, s, l) = rgb_to_hsl(srgb);
+            (h, [0.0, s, l])
+        }
+        InterpSpace::Hwb => {
+            let (h, _, _) = rgb_to_hsl(srgb);
+            let w = srgb[0].min(srgb[1]).min(srgb[2]);
+            let b = 1.0 - srgb[0].max(srgb[1]).max(srgb[2]);
+            (if w + b >= 1.0 - 1e-9 { None } else { h }, [0.0, w, b])
+        }
+        InterpSpace::Lch | InterpSpace::Oklch => {
+            let lab = if space == InterpSpace::Lch { linear_to_lab(lin()) } else { linear_to_oklab(lin()) };
+            let chroma = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+            let eps = if space == InterpSpace::Lch { 1e-2 } else { 1e-4 };
+            let h = lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0);
+            (if chroma < eps { None } else { Some(h) }, [lab[0], chroma, 0.0])
+        }
+    }
+}
+
+fn from_interp(h: f64, v: Rgb, space: InterpSpace, a: f64) -> Color {
+    let lin = match space {
+        InterpSpace::Srgb => [gamma_decode(v[0]), gamma_decode(v[1]), gamma_decode(v[2])],
+        InterpSpace::SrgbLinear => v,
+        InterpSpace::Oklab => oklab_to_linear(v[0], v[1], v[2]),
+        InterpSpace::Lab => lab_to_linear(v[0], v[1], v[2]),
+        InterpSpace::Xyz => mul(&XYZ65_TO_LSRGB, v),
+        InterpSpace::Hsl => {
+            let rgb = hsl_to_rgb(h, v[1], v[2]);
+            [gamma_decode(rgb[0]), gamma_decode(rgb[1]), gamma_decode(rgb[2])]
+        }
+        InterpSpace::Hwb => {
+            let (w, b) = (v[1], v[2]);
+            let rgb = if w + b >= 1.0 {
+                let g = w / (w + b);
+                [g, g, g]
+            } else {
+                hsl_to_rgb(h, 1.0, 0.5).map(|c| c * (1.0 - w - b) + w)
+            };
+            [gamma_decode(rgb[0]), gamma_decode(rgb[1]), gamma_decode(rgb[2])]
+        }
+        InterpSpace::Lch | InterpSpace::Oklch => {
+            let (x, y) = polar(v[1], h);
+            if space == InterpSpace::Lch { lab_to_linear(v[0], x, y) } else { oklab_to_linear(v[0], x, y) }
+        }
+    };
+    to_color(lin, a.clamp(0.0, 1.0))
+}
+
+/// Interpolate `a`→`b` at `t` in the given space (premultiplied alpha,
+/// hue arcs per the hue method; CSS Color 4 §12.4).
+pub fn interpolate(a: Color, b: Color, t: f32, m: ColorInterp) -> Color {
+    let t = t as f64;
+    let (aa, ab) = (a.a as f64 / 255.0, b.a as f64 / 255.0);
+    let (ha, va) = to_interp(a, m.space);
+    let (hb, vb) = to_interp(b, m.space);
+    let alpha = aa + (ab - aa) * t;
+    let polar = matches!(m.space, InterpSpace::Hsl | InterpSpace::Hwb | InterpSpace::Lch | InterpSpace::Oklch);
+    // Transparent colors are "missing" in alpha-weighted terms only.
+    let mix = |x: f64, y: f64| -> f64 {
+        if alpha <= 0.0 {
+            x + (y - x) * t
+        } else {
+            (x * aa + (y * ab - x * aa) * t) / alpha
+        }
+    };
+    let mut v = [0.0; 3];
+    let first = if polar { 1 } else { 0 };
+    for i in 0..3 {
+        if polar && i == 0 && matches!(m.space, InterpSpace::Lch | InterpSpace::Oklch) {
+            v[0] = mix(va[0], vb[0]);
+            continue;
+        }
+        if i < first {
+            continue;
+        }
+        v[i] = mix(va[i], vb[i]);
+    }
+    if matches!(m.space, InterpSpace::Lch | InterpSpace::Oklch) {
+        // Components are (L, C, unused).
+        v[2] = 0.0;
+    }
+    let h = if polar {
+        match (ha, hb) {
+            (None, None) => 0.0,
+            (Some(h), None) | (None, Some(h)) => h,
+            (Some(h1), Some(h2)) => {
+                let (h1, mut h2) = (h1.rem_euclid(360.0), h2.rem_euclid(360.0));
+                let d = h2 - h1;
+                match m.hue {
+                    HueMethod::Shorter => {
+                        if d > 180.0 {
+                            h2 -= 360.0;
+                        } else if d < -180.0 {
+                            h2 += 360.0;
+                        }
+                    }
+                    HueMethod::Longer => {
+                        if d > 0.0 && d < 180.0 {
+                            h2 -= 360.0;
+                        } else if d > -180.0 && d <= 0.0 {
+                            h2 += 360.0;
+                        }
+                    }
+                    HueMethod::Increasing => {
+                        if d < 0.0 {
+                            h2 += 360.0;
+                        }
+                    }
+                    HueMethod::Decreasing => {
+                        if d > 0.0 {
+                            h2 -= 360.0;
+                        }
+                    }
+                }
+                (h1 + (h2 - h1) * t).rem_euclid(360.0)
+            }
+        }
+    } else {
+        0.0
+    };
+    from_interp(h, v, m.space, alpha)
+}
+
 fn color_mix(c: &[Token]) -> Option<ColorValue> {
     let parts = split_top_commas(strip(c));
     if parts.len() != 3 {
@@ -333,7 +565,7 @@ fn color_mix(c: &[Token]) -> Option<ColorValue> {
     if space.first().map(String::as_str) != Some("in") || space.len() < 2 {
         return None;
     }
-    let space = space[1].clone();
+    let interp = ColorInterp::parse(&space)?;
     let item = |toks: &[Token]| -> Option<(Color, Option<f64>)> {
         let comps: Vec<&[Token]> = components(toks).into_iter().filter(|c| !matches!(c, [Token::Whitespace])).collect();
         let mut color = None;
@@ -365,33 +597,10 @@ fn color_mix(c: &[Token]) -> Option<ColorValue> {
     let alpha_mult = sum.min(1.0);
     p1 /= sum;
     p2 /= sum;
-    let (a1, a2) = (c1.a as f64 / 255.0, c2.a as f64 / 255.0);
-    let a = a1 * p1 + a2 * p2;
-    // Interpolate premultiplied components in the mixing space.
-    let to_space = |c: Color| -> Rgb {
-        let lin = linear_of(c);
-        match space.as_str() {
-            "srgb-linear" => lin,
-            "oklab" | "oklch" => linear_to_oklab(lin),
-            "lab" | "lch" => linear_to_lab(lin),
-            "xyz" | "xyz-d65" | "xyz-d50" => mul(&LSRGB_TO_XYZ65, lin),
-            _ => [c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0],
-        }
-    };
-    let (v1, v2) = (to_space(c1), to_space(c2));
-    let mixed: Rgb = if a > 0.0 {
-        [0, 1, 2].map(|i| (v1[i] * a1 * p1 + v2[i] * a2 * p2) / a)
-    } else {
-        [0, 1, 2].map(|i| v1[i] * p1 + v2[i] * p2)
-    };
-    let lin = match space.as_str() {
-        "srgb-linear" => mixed,
-        "oklab" | "oklch" => oklab_to_linear(mixed[0], mixed[1], mixed[2]),
-        "lab" | "lch" => lab_to_linear(mixed[0], mixed[1], mixed[2]),
-        "xyz" | "xyz-d65" | "xyz-d50" => mul(&XYZ65_TO_LSRGB, mixed),
-        _ => [gamma_decode(mixed[0]), gamma_decode(mixed[1]), gamma_decode(mixed[2])],
-    };
-    Some(ColorValue::Color(to_color(lin, (a * alpha_mult).clamp(0.0, 1.0))))
+    let mut out = interpolate(c1, c2, p2 as f32, interp);
+    out.a = ((out.a as f64) * alpha_mult).round().clamp(0.0, 255.0) as u8;
+    let _ = p1;
+    Some(ColorValue::Color(out))
 }
 
 #[cfg(test)]

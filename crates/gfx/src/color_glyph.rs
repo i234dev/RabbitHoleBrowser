@@ -76,7 +76,7 @@ impl FontContext {
     /// The color rendering of `glyph` at `size`, if its face has one
     /// (cached).
     pub fn color_glyph(&self, font: FontId, glyph: u16, size: f32) -> Option<Rc<ColorGlyph>> {
-        let idx = self.resolve_index(font.face().0);
+        let idx = self.resolve_index(font.0);
         if !self.has_color_tables(idx) || glyph == crate::font::ZERO_WIDTH_GLYPH {
             return None;
         }

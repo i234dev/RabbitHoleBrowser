@@ -807,6 +807,9 @@ pub struct GradientStop {
     /// Position along the gradient line (percentage of its length or px);
     /// `None` = evenly distributed.
     pub position: Option<Length>,
+    /// A color interpolation hint (`position` only; `color` is unused):
+    /// the midpoint of the transition between its neighbouring stops.
+    pub hint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -842,6 +845,7 @@ pub enum BackgroundImage {
         direction: GradientDirection,
         stops: Vec<GradientStop>,
         repeating: bool,
+        interp: crate::ColorInterp,
     },
     RadialGradient {
         shape: RadialShape,
@@ -850,7 +854,111 @@ pub enum BackgroundImage {
         position: (Length, Length),
         stops: Vec<GradientStop>,
         repeating: bool,
+        interp: crate::ColorInterp,
     },
+    ConicGradient {
+        /// Start angle in radians (0 = up, clockwise).
+        angle: f32,
+        /// Center (x, y) as lengths/percentages.
+        position: (Length, Length),
+        /// Stop positions are percentages of a full turn.
+        stops: Vec<GradientStop>,
+        repeating: bool,
+        interp: crate::ColorInterp,
+    },
+}
+
+/// The inherited font feature properties (CSS Fonts 4 §6-7), each as the
+/// OpenType features it turns on or off.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FontFeatureProps {
+    /// `font-variant-caps` (`smcp`, `c2sc`...; synthesized when the font
+    /// lacks them).
+    pub caps: Vec<rabbithole_gfx::FontFeature>,
+    pub ligatures: Vec<rabbithole_gfx::FontFeature>,
+    pub position: Vec<rabbithole_gfx::FontFeature>,
+    pub numeric: Vec<rabbithole_gfx::FontFeature>,
+    pub east_asian: Vec<rabbithole_gfx::FontFeature>,
+    pub alternates: Vec<rabbithole_gfx::FontFeature>,
+    /// `font-kerning`: None = auto.
+    pub kerning: Option<bool>,
+    /// `font-feature-settings` (applied last).
+    pub settings: Vec<rabbithole_gfx::FontFeature>,
+    /// `font-language-override`: an OpenType language system tag.
+    pub language: Option<[u8; 4]>,
+    /// `font-variant-alternates` functions by name (`styleset(fancy)`):
+    /// (function, names), resolved per font family through
+    /// `@font-feature-values` into `alternates_resolved`.
+    pub alternates_named: Vec<(String, Vec<String>)>,
+    pub alternates_resolved: Vec<rabbithole_gfx::FontFeature>,
+}
+
+impl FontFeatureProps {
+    /// All features in application order; a later setting of a tag wins.
+    pub fn resolved(&self) -> Vec<rabbithole_gfx::FontFeature> {
+        let mut out: Vec<rabbithole_gfx::FontFeature> = Vec::new();
+        let kern = self.kerning.map(|k| (*b"kern", k as u32));
+        let lang = self.language.map(|t| (*rabbithole_gfx::LANGUAGE_TAG, u32::from_be_bytes(t)));
+        for f in lang.iter().chain(kern.iter()).chain(&self.caps).chain(&self.ligatures).chain(&self.position).chain(&self.numeric).chain(&self.east_asian).chain(&self.alternates).chain(&self.alternates_resolved).chain(&self.settings) {
+            out.retain(|g| g.0 != f.0);
+            out.push(*f);
+        }
+        out
+    }
+}
+
+/// The font metric `font-size-adjust` keeps constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontSizeAdjust {
+    ExHeight,
+    CapHeight,
+    ChWidth,
+    IcWidth,
+    IcHeight,
+}
+
+/// A `border-image-width` / `border-image-outset` value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BorderImageWidth {
+    /// A multiple of the border width.
+    Number(f32),
+    Length(Length),
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderImageRepeat {
+    Stretch,
+    Repeat,
+    Round,
+    Space,
+}
+
+/// The `border-image` longhands (CSS Backgrounds 3 §6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderImage {
+    pub source: BackgroundImage,
+    /// Top, right, bottom, left insets: `Px` = image pixels (a number),
+    /// or `Percent` of the image size.
+    pub slice: [Length; 4],
+    pub fill: bool,
+    pub width: [BorderImageWidth; 4],
+    pub outset: [BorderImageWidth; 4],
+    /// (horizontal, vertical).
+    pub repeat: (BorderImageRepeat, BorderImageRepeat),
+}
+
+impl Default for BorderImage {
+    fn default() -> Self {
+        BorderImage {
+            source: BackgroundImage::None,
+            slice: [Length::Percent(100.0); 4],
+            fill: false,
+            width: [BorderImageWidth::Number(1.0); 4],
+            outset: [BorderImageWidth::Number(0.0); 4],
+            repeat: (BorderImageRepeat::Stretch, BorderImageRepeat::Stretch),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -887,8 +995,14 @@ pub struct BackgroundLayer {
     pub repeat: (BackgroundRepeat, BackgroundRepeat),
     pub origin: BoxArea,
     pub clip: BoxArea,
+    /// `background-clip: text`: painted only inside the box's text.
+    pub clip_text: bool,
+    /// `background-clip: border-area`: painted only where the border is.
+    pub clip_border_area: bool,
     /// `background-attachment: fixed`
     pub fixed: bool,
+    /// `background-attachment: local`
+    pub local: bool,
 }
 
 impl Default for BackgroundLayer {
@@ -900,6 +1014,9 @@ impl Default for BackgroundLayer {
             repeat: (BackgroundRepeat::Repeat, BackgroundRepeat::Repeat),
             origin: BoxArea::PaddingBox,
             clip: BoxArea::BorderBox,
+            local: false,
+            clip_border_area: false,
+            clip_text: false,
             fixed: false,
         }
     }
@@ -1332,6 +1449,9 @@ pub struct ComputedStyle {
     pub list_style_position: ListStylePosition,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
+    /// `overflow-clip-margin`: the box the overflow clip edge starts from
+    /// and how far (px) it is outset (CSS Overflow 3 §3.2).
+    pub overflow_clip_margin: (BoxArea, f32),
     pub visibility: Visibility,
     pub z_index: Option<i32>,
     /// `cursor` keyword (one of [`CURSOR_KEYWORDS`]).
@@ -1402,6 +1522,8 @@ pub struct ComputedStyle {
     /// `mask-image` layers (with `mask-size`, `-position`, `-repeat`,
     /// `-origin`, `-clip`): the alpha of their images masks the box.
     pub mask_layers: Vec<BackgroundLayer>,
+    /// `border-image-*` (None: all initial).
+    pub border_image: Option<Box<BorderImage>>,
     /// Corner radii (top-left, top-right, bottom-right, bottom-left), each
     /// (horizontal, vertical). `border_radius` keeps the largest for
     /// compatibility with older code paths.
@@ -1523,6 +1645,12 @@ pub struct ComputedStyle {
     /// `line_clamp` came from `-webkit-line-clamp` (applies only to
     /// `display: -webkit-box` with `-webkit-box-orient: vertical`).
     pub line_clamp_prefixed: bool,
+    /// `line-clamp: auto`: clamp after the last line that fits in the
+    /// box's (max-)height (`line_clamp` is then `Some(u32::MAX)`).
+    pub line_clamp_auto: bool,
+    /// The block ellipsis of `line-clamp` (`None` = `no-ellipsis`;
+    /// `Some("…")` for `auto`).
+    pub block_ellipsis: Option<std::rc::Rc<str>>,
     /// `display: -webkit-box` / `-webkit-inline-box` (legacy flexbox).
     pub webkit_box: bool,
     /// Actual family names in order (e.g. `["Roboto", "Helvetica Neue"]`),
@@ -1536,15 +1664,26 @@ pub struct ComputedStyle {
     /// value, ...) through inheritance: it follows the family's own
     /// `medium` (inherited).
     pub font_size_keyword: bool,
-    /// `font-kerning: none` (inherited).
-    pub font_kerning_none: bool,
     pub font_variant_small_caps: bool,
+    /// `-webkit-text-fill-color` (None: the `color`).
+    pub text_fill_color: Option<Color>,
+    /// `font-size-adjust`: (metric, value); the value None is `from-font`.
+    pub font_size_adjust: Option<(FontSizeAdjust, Option<f32>)>,
+    /// The computed `font-size` when `font-size-adjust` changed the used
+    /// size in `font_size` (inherited values and `em` use this one).
+    pub font_size_unadjusted: Option<f32>,
+    /// OpenType features from `font-feature-settings`, `font-kerning` and
+    /// the `font-variant-*` longhands (None: all `normal`).
+    pub font_features: Option<std::rc::Rc<FontFeatureProps>>,
     /// `font-variation-settings` (inherited): axis tag and value.
     pub font_variation_settings: Vec<([u8; 4], f32)>,
 
     // ---- replaced elements / sizing
     pub object_fit: ObjectFit,
     pub object_position: (Length, Length),
+    /// `object-view-box` (CSS Images 5): the part of the image shown, as
+    /// insets (top, right, bottom, left) from its natural edges.
+    pub object_view_box: Option<[Length; 4]>,
     pub aspect_ratio: Option<f32>,
     /// `aspect-ratio: auto <ratio>`: a replaced element's natural ratio
     /// wins, and the ratio relates content boxes.
@@ -1552,6 +1691,8 @@ pub struct ComputedStyle {
     /// `image-rendering: pixelated | crisp-edges` (nearest-neighbour
     /// scaling). Inherited.
     pub image_rendering_pixelated: bool,
+    /// `image-orientation: none`: EXIF orientation is not applied.
+    pub image_orientation_none: bool,
     /// `accent-color` (`None` = auto). Inherited.
     pub accent_color: Option<Color>,
     /// `color-scheme` includes `dark` (and not `light` first): native
@@ -1648,6 +1789,7 @@ impl ComputedStyle {
             list_style_position: ListStylePosition::Outside,
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Visible,
+            overflow_clip_margin: (BoxArea::PaddingBox, 0.0),
             visibility: Visibility::Visible,
             z_index: None,
             cursor: "auto",
@@ -1691,6 +1833,7 @@ impl ComputedStyle {
             justify_self: ItemAlign::Auto,
             background_layers: Vec::new(),
             mask_layers: Vec::new(),
+            border_image: None,
             border_radii: [(Length::ZERO, Length::ZERO); 4],
             box_shadow: Vec::new(),
             text_shadow: Vec::new(),
@@ -1750,18 +1893,25 @@ impl ComputedStyle {
             contain_intrinsic_width: None,
             contain_intrinsic_height: None,
             line_clamp_prefixed: false,
+            line_clamp_auto: false,
+            block_ellipsis: Some(std::rc::Rc::from("\u{2026}")),
             webkit_box: false,
             font_family_list: Vec::new(),
             font_monospace_only: false,
             font_size_keyword: true,
-            font_kerning_none: false,
             font_variant_small_caps: false,
+            text_fill_color: None,
+            font_size_adjust: None,
+            font_size_unadjusted: None,
+            font_features: None,
             font_variation_settings: Vec::new(),
+            object_view_box: None,
             object_fit: ObjectFit::Fill,
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
             aspect_ratio: None,
             aspect_ratio_auto: false,
             image_rendering_pixelated: false,
+            image_orientation_none: false,
             accent_color: None,
             color_scheme_dark: false,
             content: Content::Normal,
@@ -1791,7 +1941,7 @@ impl ComputedStyle {
         ComputedStyle {
             color: parent.color,
             font_family: parent.font_family,
-            font_size: parent.font_size,
+            font_size: parent.computed_font_size(),
             font_weight: parent.font_weight,
             font_stretch: parent.font_stretch,
             font_style: parent.font_style,
@@ -1813,6 +1963,7 @@ impl ComputedStyle {
             applied_decorations: parent.applied_decorations.clone(),
             text_underline_offset: parent.text_underline_offset,
             text_emphasis_style: parent.text_emphasis_style.clone(),
+            block_ellipsis: parent.block_ellipsis.clone(),
             text_emphasis_color: parent.text_emphasis_color,
             text_emphasis_over: parent.text_emphasis_over,
             text_emphasis_right: parent.text_emphasis_right,
@@ -1843,10 +1994,13 @@ impl ComputedStyle {
             font_family_list: parent.font_family_list.clone(),
             font_monospace_only: parent.font_monospace_only,
             font_size_keyword: parent.font_size_keyword,
-            font_kerning_none: parent.font_kerning_none,
             font_variant_small_caps: parent.font_variant_small_caps,
+            text_fill_color: parent.text_fill_color,
+            font_size_adjust: parent.font_size_adjust,
+            font_features: parent.font_features.clone(),
             font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
+            image_orientation_none: parent.image_orientation_none,
             accent_color: parent.accent_color,
             color_scheme_dark: parent.color_scheme_dark,
             quotes: parent.quotes.clone(),
@@ -1881,13 +2035,13 @@ impl ComputedStyle {
             && self.font_family == o.font_family
             && self.font_monospace_only == o.font_monospace_only
             && self.font_size_keyword == o.font_size_keyword
-            && self.font_kerning_none == o.font_kerning_none
             && self.font_size == o.font_size
             && self.font_weight == o.font_weight
             && self.font_stretch == o.font_stretch
             && self.font_style == o.font_style
             && self.line_height == o.line_height
             && self.line_height_number == o.line_height_number
+            && self.block_ellipsis == o.block_ellipsis
             && self.letter_spacing == o.letter_spacing
             && self.word_spacing == o.word_spacing
             && self.spacing_pct == o.spacing_pct
@@ -1931,8 +2085,12 @@ impl ComputedStyle {
             && self.tab_size_length == o.tab_size_length
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
+            && self.text_fill_color == o.text_fill_color
+            && self.font_size_adjust == o.font_size_adjust
+            && self.font_features == o.font_features
             && self.font_variation_settings == o.font_variation_settings
             && self.image_rendering_pixelated == o.image_rendering_pixelated
+            && self.image_orientation_none == o.image_orientation_none
             && self.accent_color == o.accent_color
             && self.color_scheme_dark == o.color_scheme_dark
             && self.quotes == o.quotes
@@ -1986,6 +2144,11 @@ impl ComputedStyle {
 
     pub fn is_bold(&self) -> bool {
         self.font_weight >= 600
+    }
+
+    /// The computed `font-size` (before `font-size-adjust`).
+    pub fn computed_font_size(&self) -> f32 {
+        self.font_size_unadjusted.unwrap_or(self.font_size)
     }
 
     pub fn is_italic(&self) -> bool {

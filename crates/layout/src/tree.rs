@@ -312,6 +312,8 @@ pub struct LayoutBox {
     /// Generated content box (`::before` / `::after`); `node` is the
     /// originating element.
     pub pseudo: Option<PseudoElement>,
+    /// After the clamp point of a `line-clamp` container: not painted.
+    pub clamped: bool,
     pub(crate) pieces: Option<Vec<crate::inline::Piece>>,
     pub(crate) intrinsic_cache: Option<(f32, f32)>,
     /// A flex item's row-axis content sizes measured without its own
@@ -415,6 +417,7 @@ impl LayoutBox {
             scroll_offset: (0.0, 0.0),
             fixed: false,
             pseudo: None,
+            clamped: false,
             pieces: None,
             intrinsic_cache: None,
             flex_content_cache: None,
@@ -496,6 +499,29 @@ impl LayoutBox {
                 _ => (true, true),
             }
         }
+    }
+
+    /// `r` (document coordinates of this box's subtree) as seen through the
+    /// box's CSS transform: the bounding box of the transformed corners
+    /// (scrollable overflow follows transforms, CSS Overflow 3 §2.2).
+    pub fn transformed_bounds(&self, r: Rect) -> Rect {
+        if self.style.transform.is_empty() || self.wm_transform.is_some() {
+            return r;
+        }
+        let Some(m) = self.transform_matrix() else { return r };
+        let pts = [(r.x, r.y), (r.right(), r.y), (r.x, r.bottom()), (r.right(), r.bottom())].map(|(x, y)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]));
+        let (x0, x1) = pts.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.0), a.1.max(p.0)));
+        let (y0, y1) = pts.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.1), a.1.max(p.1)));
+        if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+            return r;
+        }
+        Rect::new(x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// A scroll container that users can scroll (not `overflow: hidden`).
+    pub fn user_scrollable(&self) -> bool {
+        use rabbithole_style::Overflow::{Auto, Scroll};
+        self.scroll_container && (matches!(self.style.overflow_x, Auto | Scroll) || matches!(self.style.overflow_y, Auto | Scroll))
     }
 
     fn overflow_contains(&self, x: f32, y: f32) -> bool {
@@ -834,7 +860,8 @@ impl LayoutTree {
             if b.fixed
                 || b.style.position == rabbithole_style::Position::Sticky
                 || b.style.background_layers.iter().any(|l| l.fixed)
-                || b.scroll_container
+                || b.user_scrollable()
+                || b.scroll_container && b.scroll_offset != (0.0, 0.0)
             {
                 return true;
             }
@@ -1090,7 +1117,7 @@ impl LayoutTree {
                     return Some(s);
                 }
             }
-            if b.scroll_container && b.rect.contains(x, y) {
+            if b.user_scrollable() && b.rect.contains(x, y) {
                 let pr = b.padding_rect();
                 if b.scroll_height > pr.h + 0.5 || b.scroll_width > pr.w + 0.5 {
                     return Some(ScrollInfo {

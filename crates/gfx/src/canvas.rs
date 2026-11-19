@@ -993,4 +993,37 @@ pub enum Paint {
         stops: Vec<ColorStop>,
         repeat: bool,
     },
+    /// Conic gradient around `center`, starting at `angle` (radians,
+    /// 0 = up, clockwise); offset 1 is a full turn.
+    Conic {
+        center: Point,
+        angle: f32,
+        stops: Vec<ColorStop>,
+        repeat: bool,
+    },
+    /// `paint` laid out for one tile at `origin` of `size`, repeated every
+    /// `step` along the repeating axes (CSS background tiling of
+    /// gradients; a step larger than the tile leaves gaps, as with
+    /// `background-repeat: space`).
+    Tiled {
+        paint: Box<Paint>,
+        origin: Point,
+        size: (f32, f32),
+        step: (f32, f32),
+        repeat_x: bool,
+        repeat_y: bool,
+    },
+}
+
+/// Gradient stop offsets span `[lo, hi]`: stops may lie outside 0..=1
+/// (CSS positions before/after the gradient line). A padded gradient
+/// covers at least 0..=1; a repeating one repeats its first..last stop.
+pub fn gradient_domain(stops: &[ColorStop], repeat: bool) -> (f32, f32) {
+    let first = stops.first().map(|s| s.offset).unwrap_or(0.0);
+    let last = stops.iter().fold(first, |m, s| m.max(s.offset));
+    if repeat {
+        (first, last)
+    } else {
+        (first.min(0.0), last.max(1.0))
+    }
 }

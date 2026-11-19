@@ -39,6 +39,37 @@ pub(crate) enum WidthMode {
     Fixed(f32),
 }
 
+
+/// Line clamping in progress (CSS Overflow 4 §4.4: `line-clamp`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ClampState {
+    /// Lines that may still be shown.
+    pub remaining: usize,
+    /// Bottom of the last line shown, once the clamp point is reached.
+    pub bottom: Option<f32>,
+    /// The clamp point ended a paragraph without an ellipsis.
+    pub final_hit: bool,
+    /// Something follows the clamp point (it needs the block ellipsis).
+    pub content_after: bool,
+    /// Second pass: put the ellipsis on the clamp line even when it ends
+    /// its paragraph.
+    pub ellipsize_last: bool,
+    /// Record line bottoms (first pass of `line-clamp: auto`).
+    pub record: bool,
+    pub bottoms: Vec<f32>,
+}
+
+impl ClampState {
+    pub fn lines(n: usize) -> Self {
+        ClampState { remaining: n, ..Default::default() }
+    }
+
+    /// The clamp point was reached: what follows is hidden.
+    pub fn hit(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
 pub(crate) struct Layouter<'a> {
     pub ctx: &'a LayoutContext<'a>,
     pub measurer: Measurer<'a>,
@@ -82,6 +113,9 @@ pub(crate) struct Layouter<'a> {
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
     font_cache: HashMap<(String, u16, bool, u16), FontId>,
+    /// (face, feature props by address, inter-character) → feature variant
+    /// (the computed styles outlive a layout pass).
+    feature_cache: HashMap<(usize, usize, bool), FontId>,
     /// Containing blocks of absolutely positioned grid children placed by
     /// grid lines (their grid area), set by the grid layout.
     pub(crate) abs_cb: HashMap<rabbithole_dom::NodeId, Rect>,
@@ -92,8 +126,8 @@ pub(crate) struct Layouter<'a> {
     cb_rtl: bool,
     /// Line clamping of a block container in progress (`line-clamp`
     /// counts the lines of its block descendants in the same formatting
-    /// context): lines left, and where the last allowed line ends.
-    pub(crate) clamp: Option<(usize, Option<f32>)>,
+    /// context).
+    pub(crate) clamp: Option<ClampState>,
     /// Bounds only the new recursive subgrid contribution/transport work.
     pub(crate) grid_work: crate::grid::subgrid::WorkBudget,
     pub(crate) grid_publication: crate::grid::resolved::Publication,
@@ -302,7 +336,7 @@ fn is_zero_len(l: Length) -> bool {
 /// Would this inline content produce no line boxes (CSS 2.1 §9.4.2: lines
 /// with no text, no preserved white space, no inline boxes with non-zero
 /// margins/padding/borders and no other in-flow content are zero-height)?
-fn inline_content_is_empty(b: &LayoutBox) -> bool {
+pub(crate) fn inline_content_is_empty(b: &LayoutBox) -> bool {
     use crate::tree::InlineItem;
     use rabbithole_style::WhiteSpace;
     for it in &b.items {
@@ -358,6 +392,7 @@ impl<'a> Layouter<'a> {
             flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
+            feature_cache: HashMap::new(),
             abs_cb: HashMap::new(),
             center_blocks: false,
             cb_rtl: false,
@@ -404,12 +439,32 @@ impl<'a> Layouter<'a> {
     /// Font for a style: the first available family of `font-family`
     /// (web fonts / system fonts) or the generic fallback.
     pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
-        let f = self.face_for(style);
-        // `font-kerning: none`: the face's runs are shaped without kerning.
-        if style.font_kerning_none { f.without_kerning() } else { f }
+        let font = self.font_for_family(style);
+        if !self.font_ext || style.font_features.is_none() && style.text_justify != 3 {
+            return font;
+        }
+        let key = (font.0, style.font_features.as_ref().map_or(0, |f| std::rc::Rc::as_ptr(f) as usize), style.text_justify == 3);
+        if let Some(&f) = self.feature_cache.get(&key) {
+            return f;
+        }
+        // OpenType features (font-feature-settings, font-variant-*); text
+        // justified between characters forms no ligatures (CSS Text 3 §7.3).
+        let mut feats = Vec::new();
+        if style.text_justify == 3 {
+            feats.extend([(*b"liga", 0), (*b"clig", 0), (*b"dlig", 0), (*b"hlig", 0), (*b"calt", 0)]);
+        }
+        if let Some(f) = &style.font_features {
+            for g in f.resolved() {
+                feats.retain(|h: &rabbithole_gfx::FontFeature| h.0 != g.0);
+                feats.push(g);
+            }
+        }
+        let f = self.ctx.fonts.with_features(font, &feats);
+        self.feature_cache.insert(key, f);
+        f
     }
 
-    fn face_for(&mut self, style: &ComputedStyle) -> FontId {
+    fn font_for_family(&mut self, style: &ComputedStyle) -> FontId {
         if self.font_ext && !style.font_family_list.is_empty() {
             let key = (style.font_family_list.join(","), style.font_weight, style.is_italic(), style.font_stretch);
             if let Some(f) = self.font_cache.get(&key) {
@@ -1008,12 +1063,15 @@ impl<'a> Layouter<'a> {
             return;
         }
         let style = b.style.clone();
-        b.scroll_container = matches!(style.overflow_x, rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Scroll)
-            || matches!(style.overflow_y, rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Scroll);
+        // `overflow: hidden` boxes are scroll containers too: scripts can
+        // scroll them (`scrollTop`), users cannot (see `user_scrollable`).
+        use rabbithole_style::Overflow::{Auto, Hidden, Scroll};
+        b.scroll_container = matches!(style.overflow_x, Auto | Scroll | Hidden) || matches!(style.overflow_y, Auto | Scroll | Hidden);
         let pr = b.padding_rect();
         let mut max_r = pr.right();
         let mut max_b = pr.bottom();
-        for c in &b.children {
+        // Boxes hidden after a line-clamp point add no scrollable overflow.
+        for c in b.children.iter().filter(|c| !c.clamped) {
             let r = content_bounds(c);
             max_r = max_r.max(r.right());
             max_b = max_b.max(r.bottom());
@@ -1045,6 +1103,63 @@ impl<'a> Layouter<'a> {
     }
 
     fn layout_contents(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
+        if matches!(b.formatting, Formatting::Inline | Formatting::Block) && !b.style.multicol && b.style.line_clamp.is_some_and(|n| n > 0) {
+            return self.layout_clamped(b, cb, bfc, top_collapsible, bottom_collapsible);
+        }
+        self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible)
+    }
+
+    /// Lay out a line-clamp container (CSS Overflow 4 §4.4): its lines and
+    /// those of its block descendants in the same formatting context are
+    /// counted; the box ends after the clamp line, with a block ellipsis
+    /// when content follows, and what follows is hidden.
+    fn layout_clamped(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
+        let saved = self.clamp.take();
+        let floats = bfc.snapshot();
+        let mut max_lines = b.style.line_clamp.unwrap_or(0) as usize;
+        if b.style.line_clamp_auto {
+            // Clamp after the last line that fits in the (max-)height.
+            let style = b.style.clone();
+            let pad = resolve_edges(&style.padding, cb.width);
+            let pb_v = pad.top + pad.bottom + style.border_width.top + style.border_width.bottom;
+            let max = self.clamp_height(&style, f32::INFINITY, cb.height, pb_v);
+            let limit = self.resolve_height(&style, cb.height, pb_v).map_or(max, |h| h.min(max));
+            self.clamp = Some(ClampState { remaining: usize::MAX, record: true, ..Default::default() });
+            let h = self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+            let state = self.clamp.take().unwrap_or_default();
+            let fit = state.bottoms.iter().take_while(|&&y| y <= b.content_rect.y + limit + 0.01).count();
+            if !limit.is_finite() || fit == state.bottoms.len() {
+                self.clamp = saved;
+                return h;
+            }
+            bfc.restore(floats.clone());
+            max_lines = fit;
+        }
+        self.clamp = Some(ClampState::lines(max_lines));
+        let mut h = self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+        let mut state = self.clamp.take().unwrap_or_default();
+        if state.final_hit && state.content_after && b.style.block_ellipsis.is_some() {
+            // The clamp line ended its paragraph but more content follows:
+            // lay out again with the ellipsis on that line.
+            bfc.restore(floats);
+            self.clamp = Some(ClampState { ellipsize_last: true, ..ClampState::lines(max_lines) });
+            h = self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+            state = self.clamp.take().unwrap_or_default();
+        }
+        if state.hit() && b.formatting == Formatting::Inline {
+            // The box ends after the last line shown. (Block children after
+            // the clamp point were left out of a block container's height,
+            // which keeps the end padding and borders of the boxes holding
+            // the clamp line.)
+            h = state.bottom.map_or(0.0, |bottom| (bottom - b.content_rect.y).max(0.0));
+            b.collapsed_bottom_margin = b.margin.bottom;
+            b.bottom_margins = Margins::of(b.margin.bottom).pair();
+        }
+        self.clamp = saved;
+        h
+    }
+
+    fn layout_contents_inner(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         match b.formatting {
             Formatting::Inline => self.layout_inline(b, cb, bfc),
             Formatting::Block => self.layout_block_children(b, cb, bfc, top_collapsible, bottom_collapsible),
@@ -1070,19 +1185,7 @@ impl<'a> Layouter<'a> {
     fn layout_block_children(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         let saved = std::mem::replace(&mut self.center_blocks, b.style.text_align_webkit_center);
         let saved_rtl = std::mem::replace(&mut self.cb_rtl, b.style.direction == rabbithole_style::Direction::Rtl);
-        // A clamping block container: its block descendants' lines count.
-        let clamp_root = b.style.line_clamp.filter(|n| *n > 0 && !b.style.multicol).map(|n| n as usize);
-        let saved_clamp = if let Some(n) = clamp_root { std::mem::replace(&mut self.clamp, Some((n, None))) } else { None };
-        let mut h = self.layout_block_children_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
-        if clamp_root.is_some() {
-            if let Some((_, Some(bottom))) = self.clamp {
-                // The box ends after the last line shown.
-                h = (bottom - b.content_rect.y).max(0.0);
-                b.collapsed_bottom_margin = b.margin.bottom;
-                b.bottom_margins = Margins::of(b.margin.bottom).pair();
-            }
-            self.clamp = saved_clamp;
-        }
+        let h = self.layout_block_children_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
         self.center_blocks = saved;
         self.cb_rtl = saved_rtl;
         h
@@ -1122,9 +1225,32 @@ impl<'a> Layouter<'a> {
                 }
                 Flow::FloatLeft | Flow::FloatRight => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
-                    self.layout_float(&mut b.children[i], cb, cursor + off, bfc);
+                    let hidden = self.clamp.as_ref().is_some_and(|c| c.hit());
+                    b.children[i].clamped = hidden;
+                    if hidden {
+                        // Floats after the clamp point are not placed.
+                        if let Some(c) = self.clamp.as_mut() {
+                            c.content_after = true;
+                        }
+                        let mut scratch = Bfc::new();
+                        self.layout_float(&mut b.children[i], cb, cursor + off, &mut scratch);
+                    } else {
+                        self.layout_float(&mut b.children[i], cb, cursor + off, bfc);
+                    }
+                }
+                Flow::InFlow if self.clamp.as_ref().is_some_and(|c| c.hit()) => {
+                    // After the clamp point: laid out (for scripts) but
+                    // hidden, and not part of the box's height.
+                    if !self.collapses_through(&b.children[i], cb.height) {
+                        if let Some(c) = self.clamp.as_mut() {
+                            c.content_after = true;
+                        }
+                    }
+                    self.layout_block(&mut b.children[i], cb, cursor, bfc, WidthMode::Fill);
+                    b.children[i].clamped = true;
                 }
                 Flow::InFlow => {
+                    b.children[i].clamped = false;
                     let empty = self.collapses_through(&b.children[i], cb.height);
                     let child_top = self.top_margins(&b.children[i], cb.width, cb.height);
                     // Hypothetical position of the border edge (no clearance).
@@ -1532,7 +1658,11 @@ impl<'a> Layouter<'a> {
         // Natural size: the decoded image (in CSS px), else the `width` /
         // `height` attributes (which also give the aspect ratio before the
         // image arrives, so loading causes no layout shift).
-        let natural = b.image.as_ref().filter(|i| !i.broken).map(|img| img.natural_size());
+        // `object-view-box` makes the shown region the natural size.
+        let natural = b.image.as_ref().filter(|i| !i.broken).map(|img| {
+            let n = img.natural_size();
+            crate::background::object_view_box(style, n).map_or(n, |v| (v.w, v.h))
+        });
         let fallback = if let Some(text) = b.text.as_deref().filter(|_| b.image.is_none()) {
             let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             let width = self.ctx.fonts.shape(font, style.font_size, text, style.letter_spacing).last().map(|g| g.x + g.advance).unwrap_or(0.0);
@@ -1577,8 +1707,14 @@ impl<'a> Layouter<'a> {
         // ratio: its auto width fills the containing block (300px when that
         // is unknown, e.g. for intrinsic sizing); the height follows the
         // ratio. (Its raster's pixel size is not its CSS size.)
+        // Likewise an `<object>` / `<embed>` showing an SVG document whose
+        // width is a percentage or omitted (100%): it fills the containing
+        // block like a nested document's viewport.
+        let fill_width = b.ratio_only
+            || b.image.as_ref().and_then(|i| i.vector.as_ref()).is_some_and(|v| v.width.is_none())
+                && b.node.and_then(|n| self.ctx.doc.tag(n)).is_some_and(|t| matches!(t, "object" | "embed"));
         let sw = match (sw, sh) {
-            (None, None) if b.ratio_only => Some(cbw.map(|c| (c - pb_h).max(0.0)).unwrap_or(300.0)),
+            (None, None) if fill_width => Some(cbw.map(|c| (c - pb_h).max(0.0)).unwrap_or(300.0)),
             _ => sw,
         };
         let (mut w, mut h) = match (sw, sh) {
@@ -2104,7 +2240,10 @@ fn inline_containing_blocks(b: &LayoutBox) -> HashMap<rabbithole_dom::NodeId, Re
 /// Union of a box's border box, its fragments and its descendants
 /// (respecting clips) — the area it occupies for scroll-size purposes.
 pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
-    let mut r = b.margin_rect();
+    // A transformed box contributes its transformed border box (its auto
+    // margins, turned, must not extend the overflow).
+    let transformed = !b.style.transform.is_empty();
+    let mut r = if transformed { b.rect } else { b.margin_rect() };
     if b.flow == Flow::Absolute && b.fixed {
         return r;
     }
@@ -2113,14 +2252,25 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
         return r;
     }
     for line in &b.lines {
-        for f in &line.fragments {
+        // Empty fragments (an empty inline, `content: ""`) add no overflow.
+        for f in line.fragments.iter().filter(|f| f.rect.w > 0.0) {
             r = r.union(&f.rect);
         }
     }
-    for c in &b.children {
-        r = r.union(&content_bounds(c));
+    for c in b.children.iter().filter(|c| !c.clamped) {
+        let cr = content_bounds(c);
+        // A transformed empty box (nothing to draw) adds no overflow.
+        if cr.w <= 0.0 && cr.h <= 0.0 || !c.style.transform.is_empty() && (cr.w <= 0.0 || cr.h <= 0.0) {
+            continue;
+        }
+        r = r.union(&cr);
     }
     let outer = b.margin_rect();
+    // A clamped line-clamp container cuts its content's overflow at its
+    // bottom edge (what is left after the clamp point is hidden).
+    if b.style.line_clamp.is_some() && b.children.iter().any(|c| c.clamped) && r.bottom() > outer.bottom() {
+        r.h = (outer.bottom() - r.y).max(0.0);
+    }
     if clip_x {
         r.x = outer.x;
         r.w = outer.w;
@@ -2129,7 +2279,7 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
         r.y = outer.y;
         r.h = outer.h;
     }
-    r
+    b.transformed_bounds(r)
 }
 
 /// Max right / bottom extents of the tree (border boxes and lines).

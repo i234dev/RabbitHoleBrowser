@@ -674,8 +674,9 @@ impl Loader {
         let mut keys: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
         let mut consider = |s: &rabbithole_style::ComputedStyle| {
-            for layer in s.background_layers.iter().chain(s.mask_layers.iter()) {
-                if let rabbithole_style::BackgroundImage::Url(u) = &layer.image {
+            let border = s.border_image.as_deref().map(|b| &b.source);
+            for image in s.background_layers.iter().chain(s.mask_layers.iter()).map(|l| &l.image).chain(border) {
+                if let rabbithole_style::BackgroundImage::Url(u) = image {
                     if seen.insert(u.clone()) {
                         keys.push(u.clone());
                     }
@@ -752,7 +753,7 @@ impl Loader {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some((u, resp)) = jobs.get(i) else { break };
                     let td = std::time::Instant::now();
-                    let img = resp.as_ref().and_then(|r| decode_image(&r.body, &r.content_type, &u.path)).map(Arc::new);
+                    let img = resp.as_ref().and_then(|r| decode_image(&r.body, &r.content_type, &u.path, u.fragment.as_deref())).map(Arc::new);
                     if debug {
                         eprintln!("[decode] {:?} {} -> {}", td.elapsed(), u, img.as_ref().map(|i| format!("{}x{}{}", i.width, i.height, if i.is_animated() { " animated" } else { "" })).unwrap_or_else(|| "none".into()));
                     }
@@ -1231,7 +1232,10 @@ impl Engine {
         for f in &loaded.fonts {
             let key = (f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic, f.face.stretch);
             if registered.insert(key) {
-                fonts.add_font_data_stretch(&f.face.family, f.face.weight.0, f.face.italic, f.face.stretch, &f.data);
+                let id = fonts.add_font_data_stretch(&f.face.family, f.face.weight.0, f.face.italic, f.face.stretch, &f.data);
+                if let (Some(id), false) = (id, f.face.feature_settings.is_empty()) {
+                    fonts.set_face_features(id, &f.face.feature_settings);
+                }
             }
         }
         let has_dynamic_rules = loaded.sheets.iter().any(sheet_has_dynamic_rules);
@@ -1362,7 +1366,10 @@ impl Engine {
         // (Re)select image sources for the new viewport / DOM and start
         // lazy or script-requested loads; cached results show right away.
         // Nothing changed: nothing to select (scrolling syncs lazy images).
-        if (page.incr.generation() != before || page.incr.take_dpr_change(self.device_pixel_ratio)) && self.sync_images(page) {
+        // Script-set sources (`img.src`, `new Image()`, possibly detached) are
+        // selected even when no restyle happened.
+        let script_images = !page.image_state.script_nodes.is_empty();
+        if (page.incr.generation() != before || page.incr.take_dpr_change(self.device_pixel_ratio) || script_images) && self.sync_images(page) {
             self.relayout_only(page);
         }
         self.sync_frames(page);
@@ -1562,13 +1569,14 @@ fn empty_layout() -> LayoutTree {
 
 /// Decode a raster image, or rasterize an SVG document at its intrinsic
 /// size (×2 for crispness when scaled, capped at 2048 px).
-fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
+fn decode_image(bytes: &[u8], content_type: &str, path: &str, fragment: Option<&str>) -> Option<Image> {
     let looks_svg = content_type.contains("svg")
         || path.to_ascii_lowercase().ends_with(".svg")
         || (bytes.len() > 5 && bytes.iter().take(512).any(|&b| b == b'<') && std::str::from_utf8(&bytes[..bytes.len().min(2048)]).map(|s| s.contains("<svg")).unwrap_or(false));
     if looks_svg {
         let text = decode_text(bytes, None);
-        let tree = rabbithole_svg::SvgTree::parse(&text)?;
+        let fragment = fragment.map(str::to_string);
+        let tree = rabbithole_svg::SvgTree::parse_view(&text, None, fragment.as_deref())?;
         let (w, h) = tree.resolve_size(None, None);
         let scale = if w.max(h) < 512.0 { 2.0 } else { 1.0 };
         let (pw, ph) = ((w * scale).round().clamp(1.0, 2048.0) as u32, (h * scale).round().clamp(1.0, 2048.0) as u32);
@@ -1578,9 +1586,36 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
         let mut img = SVG_FONTS.with(|fonts| tree.rasterize(fonts, pw, ph)).with_natural_size(w.round().max(1.0) as u32, h.round().max(1.0) as u32);
         let (iw, ih, viewbox) = tree.intrinsic_size();
         img.no_ratio = viewbox.is_none() && !(iw.is_some() && ih.is_some());
+        // Natural dimensions (CSS Images 3 §4.1 / SVG 2 §8.2): each of
+        // width and height when given in absolute units; the ratio from
+        // both of them, else from the viewBox.
+        let ratio = match (iw, ih) {
+            (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some(w / h),
+            (Some(_), Some(_)) => None,
+            _ => viewbox.filter(|v| v.w > 0.0 && v.h > 0.0).map(|v| v.w / v.h),
+        };
+        img.vector = Some(Arc::new(rabbithole_gfx::image::Vector::new(iw, ih, ratio, Box::new(SvgImageRender { text, fragment }))));
         return Some(img);
     }
     Image::decode(bytes)
+}
+
+/// Renders an SVG image document at concrete sizes (re-parsed per new
+/// size; renderings are cached by the image).
+struct SvgImageRender {
+    text: String,
+    /// The `<view>` shown (URL fragment).
+    fragment: Option<String>,
+}
+
+impl rabbithole_gfx::image::VectorRender for SvgImageRender {
+    fn render(&self, w: f32, h: f32, scale: f32) -> Option<Image> {
+        thread_local! {
+            static SVG_FONTS: FontContext = FontContext::new();
+        }
+        let tree = rabbithole_svg::SvgTree::parse_view(&self.text, Some((w, h)), self.fragment.as_deref())?;
+        Some(SVG_FONTS.with(|fonts| tree.rasterize_viewport(fonts, w, h, scale)))
+    }
 }
 
 /// Rasterize inline `<svg>` elements of a document into images keyed by
@@ -2248,11 +2283,20 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
             }
         }
         for c in &bx.children {
-            if c.fixed {
+            // Fixed boxes, and boxes hidden after a line-clamp point, add no
+            // scrollable overflow; a clamped container cuts its content.
+            if c.fixed || c.clamped {
+                continue;
+            }
+            // A transformed box counts with its transformed bounds.
+            if !c.style.transform.is_empty() {
+                let b = rabbithole_layout::block_content_bounds(c);
+                add(u, &b, dx, dy);
                 continue;
             }
             add(u, &c.rect, dx, dy);
-            if !c.clips {
+            let clamp_cut = c.style.line_clamp.is_some() && c.children.iter().any(|x| x.clamped);
+            if !c.clips && !clamp_cut {
                 walk(c, u, dx, dy);
             }
         }

@@ -74,6 +74,8 @@ pub enum DisplayItem {
         repeat_x: bool,
         repeat_y: bool,
         opacity: f32,
+        /// Nearest-neighbour scaling (`image-rendering: pixelated`).
+        pixelated: bool,
     },
     /// Horizontal/vertical line (text decorations, hr).
     Line {
@@ -345,6 +347,7 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         listed: std::collections::HashSet::new(),
         flipped: false,
         wm_bg: None,
+        in_clamped: false,
     };
     p.paint_stacking_context(root, bounds);
     for (node, b) in top_layer {
@@ -386,6 +389,8 @@ struct Painter<'l, 't, 'a> {
     /// The box a vertical-mode wrapper turns, with the wrapper's physical
     /// rect, mapping and background layers: painted in physical space.
     wm_bg: Option<(usize, Rect, Matrix, std::rc::Rc<rabbithole_style::ComputedStyle>)>,
+    /// Collecting inside a box after a line-clamp point.
+    in_clamped: bool,
 }
 
 /// Painting phases of the in-flow content of a stacking context.
@@ -432,7 +437,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     /// Overflow clipping in local coordinates, bounded by the painting area.
     fn overflow_clip_rect(&self, b: &LayoutBox) -> Rect {
-        let pr = b.padding_rect();
+        let pr = Self::overflow_clip_edge(b).0;
         let (clip_x, clip_y) = b.overflow_clip_axes();
         // The unconstrained axis needs only cover the current painting area.
         // Bounds are already mapped back through any ancestor transforms.
@@ -446,9 +451,42 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     /// Push an overflow clip (paint + hit scope); returns the scope to
     /// restore with `pop_clip`.
+    /// The overflow clip edge and its radii: the padding box, or for
+    /// `overflow: clip` / paint containment the `overflow-clip-margin`
+    /// visual box outset by its margin (CSS Overflow 3 §3.2).
+    fn overflow_clip_edge(b: &LayoutBox) -> (Rect, Radii) {
+        use rabbithole_style::{BoxArea, Overflow};
+        let s = &b.style;
+        let outer = box_radii(b);
+        let padding_radii = || background::inner_radii(outer, &s.border_width);
+        // The margin applies to `overflow: clip` (and paint containment
+        // without a scroll container); replaced elements never scroll, so
+        // any clipping overflow value clips at that edge.
+        let scrolls = |o: Overflow| matches!(o, Overflow::Hidden | Overflow::Scroll | Overflow::Auto);
+        let clip_kind = b.kind == BoxKind::Image && (s.overflow_x.clips() || s.overflow_y.clips())
+            || !scrolls(s.overflow_x) && !scrolls(s.overflow_y) && (s.contain_paint || s.overflow_x == Overflow::Clip || s.overflow_y == Overflow::Clip);
+        if !clip_kind || s.overflow_clip_margin == (BoxArea::PaddingBox, 0.0) {
+            return (b.padding_rect(), padding_radii());
+        }
+        let (area, margin) = s.overflow_clip_margin;
+        let (rect, radii) = match area {
+            BoxArea::BorderBox => (b.rect, outer),
+            BoxArea::PaddingBox => (b.padding_rect(), padding_radii()),
+            BoxArea::ContentBox => {
+                let p = b.padding_rect();
+                let c = b.content_rect;
+                let pad = rabbithole_style::Edges { top: c.y - p.y, right: p.right() - c.right(), bottom: p.bottom() - c.bottom(), left: c.x - p.x };
+                (c, background::inner_radii(padding_radii(), &pad))
+            }
+        };
+        let grow = |r: f32| if r > 0.0 { r + margin } else { 0.0 };
+        let rect = Rect::new(rect.x - margin, rect.y - margin, rect.w + 2.0 * margin, rect.h + 2.0 * margin);
+        (rect, radii.map(|(h, v)| (grow(h), grow(v))))
+    }
+
     fn push_clip(&mut self, b: &LayoutBox) -> Option<u32> {
         let pr = self.overflow_clip_rect(b);
-        let radii = background::inner_radii(box_radii(b), &b.style.border_width);
+        let radii = Self::overflow_clip_edge(b).1;
         // CSS Overflow 3: a clip/visible pair does not round the content clip.
         if b.overflow_clip_axes() == (true, true) && radii.iter().any(|(h, v)| *h > 0.0 && *v > 0.0) {
             self.list.push(DisplayItem::PushClipRounded(pr, radii));
@@ -639,7 +677,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         style.background_layers = b.style.mask_layers.clone();
         style.background_color = Color::TRANSPARENT;
         style.background_image = None;
-        let geom = BoxGeometry { border: b.rect, padding: b.padding_rect(), content: b.content_rect, radii: [(0.0, 0.0); 4], border_width: style.border_width };
+        let geom = BoxGeometry { border: b.rect, padding: b.padding_rect(), content: b.content_rect, radii: [(0.0, 0.0); 4], border_width: style.border_width, scrolled: None };
         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
         let mut tmp = DisplayList::default();
         background::paint_backgrounds(&mut tmp, &geom, &style, self.ctx.background_images, vp);
@@ -777,13 +815,20 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let flow_cb = if b.kind == BoxKind::AnonymousBlock || (b.formatting == Formatting::TableRow && !b.is_positioned()) { self.flow_cb } else { b.content_rect };
         let saved_flow_cb = std::mem::replace(&mut self.flow_cb, flow_cb);
         for c in &b.children {
-            if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
+            if self.hoisted.contains(&(c as *const LayoutBox as usize)) || c.clamped && c.is_positioned() {
                 continue;
             }
             let deferred = c.is_positioned() || c.is_stacking_context() || c.flow == Flow::Absolute;
+            // After a line-clamp point only absolutely positioned boxes
+            // whose containing block is outside the clamped boxes show.
+            if (self.in_clamped || c.clamped) && deferred && c.flow != Flow::Absolute {
+                continue;
+            }
             if deferred && !self.listed.insert(c as *const LayoutBox as usize) {
                 continue;
             }
+            let saved_clamped = self.in_clamped;
+            self.in_clamped |= c.clamped;
             if c.fixed && c.flow == Flow::Absolute {
                 *order += 1;
                 out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new() });
@@ -817,6 +862,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 self.collect_deferred(c, cb_for_children, out, order, flow_clips, abs_clips);
             }
+            self.in_clamped = saved_clamped;
             self.flow_cb = flow_cb;
         }
         self.flow_cb = saved_flow_cb;
@@ -838,7 +884,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     fn collect_hoisted(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
         for c in &b.children {
-            if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
+            if self.hoisted.contains(&(c as *const LayoutBox as usize)) || c.clamped {
                 // Already taken by an outer stacking context.
                 continue;
             }
@@ -931,7 +977,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // `border-shape` also shapes the overflow clip.
         let shape_clip = clip && b.style.border_shape.is_some() && self.push_border_shape(b, box_radii(b), false);
         if phase == Phase::Floats {
-            for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c)) {
+            for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c) && !c.clamped) {
                 self.paint_float_or_atomic(c);
             }
         }
@@ -955,7 +1001,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
         } else if b.lines.is_empty() {
-            for c in b.children.iter().filter(|c| c.flow == Flow::InFlow && !Self::is_deferred(c)) {
+            for c in b.children.iter().filter(|c| c.flow == Flow::InFlow && !Self::is_deferred(c) && !c.clamped) {
                 if phase == Phase::Backgrounds && c.kind != BoxKind::Text {
                     self.paint_background_and_border(c, false);
                 }
@@ -978,13 +1024,35 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// Floats and atomic inline-level boxes paint atomically (as if they
     /// were stacking contexts with z-index 0 that don't capture positioned
     /// descendants — approximated by a full stacking context).
+    /// The glyphs of a box's text (and its in-flow descendants'), opaque,
+    /// as a layer mask for `background-clip: text`.
+    fn text_mask_items(&mut self, b: &'t LayoutBox) -> Vec<DisplayItem> {
+        let start = self.list.items.len();
+        let (hits, scopes, scope) = (self.hits.entries.len(), self.hits.scopes.len(), self.scope);
+        self.paint_phase(b, Phase::Content);
+        self.hits.entries.truncate(hits);
+        self.hits.scopes.truncate(scopes);
+        self.scope = scope;
+        self.list
+            .items
+            .drain(start..)
+            .filter_map(|it| match it {
+                DisplayItem::Text { x, y, font, size, text, letter_spacing, word_spacing, small_caps, oblique, .. } => {
+                    Some(DisplayItem::Text { x, y, font, size, color: Color::BLACK, text, letter_spacing, word_spacing, shadows: Vec::new(), small_caps, oblique })
+                }
+                it @ (DisplayItem::PushClip(_) | DisplayItem::PushClipRounded(..) | DisplayItem::PopClip | DisplayItem::PushTransform(_) | DisplayItem::PopTransform) => Some(it),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn paint_float_or_atomic(&mut self, c: &'t LayoutBox) {
         self.paint_stacking_context(c, c.content_rect);
     }
 
     // -------------------------------------------------------- backgrounds
 
-    fn paint_background_and_border(&mut self, b: &LayoutBox, skip_bg: bool) {
+    fn paint_background_and_border(&mut self, b: &'t LayoutBox, skip_bg: bool) {
         if b.style.visibility != Visibility::Hidden && b.style.pointer_events != PointerEvents::None {
             self.record_hit(b.rect, b.node);
         }
@@ -1007,12 +1075,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
         }
+        // A scroll container's scrolled padding box (`background-attachment:
+        // local` positions against its scrollable overflow area).
+        let scrolled = b.scroll_container.then(|| {
+            let p = b.padding_rect();
+            Rect::new(p.x - b.scroll_offset.0, p.y - b.scroll_offset.1, b.scroll_width.max(p.w), b.scroll_height.max(p.h))
+        });
         let geom = BoxGeometry {
             border: rect,
             padding: b.padding_rect(),
             content: b.content_rect,
             radii,
             border_width: style.border_width,
+            scrolled,
         };
         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
         let widget = crate::widgets::widget(b, self.ctx);
@@ -1030,7 +1105,42 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
             return;
         }
-        if !skip_bg {
+        if !skip_bg && style.background_layers.iter().any(|l| l.clip_text || l.clip_border_area) {
+            // `background-clip: text` / `border-area`: those layers (and the
+            // color when the last layer is one) show only through the glyphs
+            // or the painted border. (Mixing both kinds masks by the first.)
+            let by_text = style.background_layers.iter().any(|l| l.clip_text);
+            let masked = |l: &rabbithole_style::BackgroundLayer| if by_text { l.clip_text } else { l.clip_border_area };
+            let mut boxed = (**style).clone();
+            let mut texty = (**style).clone();
+            let text_color = style.background_layers.last().is_some_and(|l| masked(l));
+            boxed.background_layers.retain(|l| !masked(l));
+            texty.background_layers.retain(|l| masked(l));
+            for l in &mut texty.background_layers {
+                l.clip = rabbithole_style::BoxArea::BorderBox;
+            }
+            if text_color {
+                boxed.background_color = Color::TRANSPARENT;
+            } else {
+                texty.background_color = Color::TRANSPARENT;
+            }
+            if let Some(last) = boxed.background_layers.last_mut().filter(|_| text_color) {
+                last.clip = rabbithole_style::BoxArea::BorderBox;
+            }
+            background::paint_backgrounds(self.list, &geom, &boxed, self.ctx.background_images, vp);
+            let mask = if by_text {
+                self.text_mask_items(b)
+            } else {
+                // The border's painted shape (styles, widths, radii), opaque.
+                let bw = style.border_width;
+                let bs = style.border_style;
+                vec![DisplayItem::Border { rect, widths: [bw.top, bw.right, bw.bottom, bw.left], colors: [Color::BLACK; 4], styles: [bs.top, bs.right, bs.bottom, bs.left], radii: geom.radii }]
+            };
+            self.list.push(DisplayItem::PushLayer(rect));
+            background::paint_backgrounds(self.list, &geom, &texty, self.ctx.background_images, vp);
+            self.list.push(DisplayItem::LayerMask(mask));
+            self.list.push(DisplayItem::PopLayer(1.0));
+        } else if !skip_bg {
             background::paint_backgrounds(self.list, &geom, style, self.ctx.background_images, vp);
             // A vertical box's background images, unturned.
             if let Some((ptr, prect, m, bg)) = self.wm_bg.clone() {
@@ -1041,7 +1151,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         let pad = crate::block::resolve_edges(&bg.padding, prect.w);
                         let padding = Rect::new(prect.x + bw.left, prect.y + bw.top, (prect.w - bw.left - bw.right).max(0.0), (prect.h - bw.top - bw.bottom).max(0.0));
                         let content = Rect::new(padding.x + pad.left, padding.y + pad.top, (padding.w - pad.left - pad.right).max(0.0), (padding.h - pad.top - pad.bottom).max(0.0));
-                        let pgeom = BoxGeometry { border: prect, padding, content, radii: bg.resolved_radii(prect.w, prect.h), border_width: bw };
+                        let pgeom = BoxGeometry { border: prect, padding, content, radii: bg.resolved_radii(prect.w, prect.h), border_width: bw, scrolled: None };
                         background::paint_backgrounds(self.list, &pgeom, &bg, self.ctx.background_images, vp);
                         self.list.push(DisplayItem::PopTransform);
                     }
@@ -1049,7 +1159,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
         background::paint_box_shadows(self.list, &geom, &style.box_shadow, true);
-        if style.has_visible_border() {
+        // A border image replaces the border styles (CSS Backgrounds 3 §6).
+        let border_image = style.border_image.as_deref().is_some_and(|bi| {
+            crate::border_image::paint_border_image(self.list, &geom, bi, self.ctx.background_images, style)
+        });
+        if style.has_visible_border() && !border_image {
             let bw = style.border_width;
             let bs = style.border_style;
             let bc = style.border_color;
@@ -1137,8 +1251,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         let tag = b.node.and_then(|n| self.ctx.doc.element(n)).map(|e| e.tag.as_str()).unwrap_or("");
         let is_media = matches!(tag, "video" | "audio");
-        if tag == "video" {
-            // Letterbox like a real player before the poster is drawn.
+        // A poster is drawn like an image: object-fit leaves the rest of the
+        // box transparent (HTML: the poster frame is the video's content).
+        let poster = tag == "video" && b.image.as_ref().is_some_and(|i| !i.broken);
+        if tag == "video" && !poster {
+            // Letterbox like a real player.
             self.list.push(DisplayItem::Rect { rect: b.content_rect, color: Color::rgb(0, 0, 0), radius: 0.0 });
         }
         match &b.image {
@@ -1154,8 +1271,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 // No native controls: a centred play affordance so the
                 // element does not look like an empty black box.
+                // A poster already shows what the element is.
                 let playing = b.node.and_then(|n| self.ctx.doc.media_ui.get(&n)).is_some_and(|u| !u.paused);
-                if !playing {
+                if !playing && !poster {
                     self.paint_big_play(b);
                 }
             }
@@ -1369,23 +1487,31 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let img = &img;
         let (iw, ih) = (img.width as f32, img.height as f32);
         let dest = b.content_rect;
+        // Concrete object size (CSS Images 3 §5.5) from the natural
+        // dimensions, with the content box as the default object size.
+        let mut natural = img.natural_dimensions();
+        let view = img.natural_dimensions().0.zip(img.natural_dimensions().1).and_then(|n| crate::background::object_view_box(&b.style, n).map(|v| (v, n)));
+        if let Some((v, _)) = view {
+            natural = (Some(v.w), Some(v.h), (v.h > 0.0).then(|| v.w / v.h));
+        }
+        let boxed = (dest.w, dest.h);
         let fit = b.style.object_fit;
+        let contain = || match natural.2 {
+            Some(r) => crate::background::fit_ratio(r, boxed, false),
+            None => boxed,
+        };
         let (dw, dh) = match fit {
-            ObjectFit::Fill => (dest.w, dest.h),
-            ObjectFit::Contain | ObjectFit::ScaleDown | ObjectFit::Cover | ObjectFit::None => {
-                if iw <= 0.0 || ih <= 0.0 {
-                    (dest.w, dest.h)
-                } else {
-                    let sx = dest.w / iw;
-                    let sy = dest.h / ih;
-                    let s = match fit {
-                        ObjectFit::Contain => sx.min(sy),
-                        ObjectFit::ScaleDown => sx.min(sy).min(1.0),
-                        ObjectFit::Cover => sx.max(sy),
-                        _ => 1.0,
-                    };
-                    (iw * s, ih * s)
-                }
+            ObjectFit::Fill => boxed,
+            ObjectFit::Contain => contain(),
+            ObjectFit::Cover => match natural.2 {
+                Some(r) => crate::background::fit_ratio(r, boxed, true),
+                None => boxed,
+            },
+            ObjectFit::None => crate::background::concrete_size((None, None), natural, boxed),
+            ObjectFit::ScaleDown => {
+                let none = crate::background::concrete_size((None, None), natural, boxed);
+                let c = contain();
+                if none.0 * none.1 <= c.0 * c.1 { none } else { c }
             }
         };
         let px = b.style.object_position.0;
@@ -1400,10 +1526,28 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             l @ (rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_)) => l.resolve_or_zero(dest.h - dh),
             other => other.resolve_or_zero(dest.h),
         };
-        let placed = Rect::new(dest.x + ox, dest.y + oy, dw, dh);
-        // Clip the placed image to the content box and compute the source
-        // sub-rectangle actually shown.
-        let shown = placed.intersect(&dest);
+        let mut placed = Rect::new(dest.x + ox, dest.y + oy, dw, dh);
+        // With a view box, the placed rect is the view box: the whole image
+        // extends around it (cut by the overflow clip, not the view box).
+        if let Some((v, n)) = view {
+            if v.w <= 0.0 || v.h <= 0.0 {
+                return;
+            }
+            let (sx, sy) = (dw / v.w, dh / v.h);
+            placed = Rect::new(placed.x - v.x * sx, placed.y - v.y * sy, n.0 * sx, n.1 * sy);
+        }
+        let (dw, dh) = (placed.w, placed.h);
+        // Clip the placed image to the overflow clip edge (the content box
+        // by default: `overflow: clip; overflow-clip-margin: content-box`)
+        // on clipped axes, and compute the source sub-rectangle shown.
+        let edge = if b.style.overflow_x.clips() || b.style.overflow_y.clips() { Self::overflow_clip_edge(b).0 } else { placed };
+        let clip = Rect::new(
+            if b.style.overflow_x.clips() { edge.x } else { placed.x },
+            if b.style.overflow_y.clips() { edge.y } else { placed.y },
+            if b.style.overflow_x.clips() { edge.w } else { placed.w },
+            if b.style.overflow_y.clips() { edge.h } else { placed.h },
+        );
+        let shown = placed.intersect(&clip);
         if shown.is_empty() || dw <= 0.0 || dh <= 0.0 {
             return;
         }
@@ -1453,6 +1597,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             content: f.rect,
                             radii,
                             border_width: rabbithole_style::Edges { top: widths[0], right: widths[1], bottom: widths[2], left: widths[3] },
+                            scrolled: None,
                         };
                         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
                         background::paint_box_shadows(self.list, &geom, &style.box_shadow, false);

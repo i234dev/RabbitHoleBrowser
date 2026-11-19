@@ -665,12 +665,18 @@ impl<'a> Layouter<'a> {
         let indent = cstyle.text_indent.resolve_or_zero(cb.width);
         let clips = cstyle.overflow_x.clips() || cstyle.overflow_y.clips();
         let ellipsis = cstyle.text_overflow != TextOverflow::Clip && clips;
-        let own_clamp = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
-        // Lines left by an ancestor's `line-clamp`.
-        let outer_clamp = if own_clamp.is_none() { self.clamp.map(|c| c.0) } else { None };
-        let max_lines = own_clamp.or(outer_clamp);
+        // Lines left by the `line-clamp` in progress (this box's own
+        // clamp is set up by the caller).
+        let outer_clamp = self.clamp.as_ref().map(|c| c.remaining);
+        let max_lines = outer_clamp.filter(|n| *n != usize::MAX);
+        let ellipsize_final = self.clamp.as_ref().is_some_and(|c| c.ellipsize_last) && cstyle.block_ellipsis.is_some();
         if outer_clamp == Some(0) {
             // Clamped away: no lines.
+            if !crate::block::inline_content_is_empty(b) {
+                if let Some(c) = self.clamp.as_mut() {
+                    c.content_after = true;
+                }
+            }
             b.items = items;
             b.lines = Vec::new();
             if inserted_marker {
@@ -719,6 +725,7 @@ impl<'a> Layouter<'a> {
                 indent,
                 ellipsis,
                 max_lines,
+                ellipsize_final,
                 final_flush: false,
                 done: false,
                 bidi_items,
@@ -775,9 +782,15 @@ impl<'a> Layouter<'a> {
         b.pieces = Some(pieces);
         b.items = items;
         if let (Some(n), Some(c)) = (outer_clamp, self.clamp.as_mut()) {
-            c.0 = n.saturating_sub(lines.len());
-            if c.0 == 0 {
-                c.1 = lines.last().map(|l| l.rect.bottom());
+            if c.record {
+                c.bottoms.extend(lines.iter().map(|l| l.rect.bottom()));
+            }
+            c.remaining = n.saturating_sub(lines.len());
+            if c.remaining == 0 {
+                c.bottom = lines.last().map(|l| l.rect.bottom());
+                // The clamp line ended this paragraph: an ellipsis is
+                // needed only if content follows elsewhere.
+                c.final_hit = !clamped;
             }
         }
         b.lines = lines;
@@ -863,8 +876,10 @@ struct InlineLayout<'l, 'a> {
     indent: f32,
     /// `text-overflow: ellipsis` applies (overflow clipped).
     ellipsis: bool,
-    /// `-webkit-line-clamp`.
+    /// `line-clamp`: lines that may be shown.
     max_lines: Option<usize>,
+    /// Ellipsize the clamp line even when it ends the paragraph.
+    ellipsize_final: bool,
     /// Set for the last `finish_line` call (no content follows).
     final_flush: bool,
     /// Line clamp reached: remaining content is dropped.
@@ -1015,7 +1030,22 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     fn run(&mut self, pieces: &[Piece]) -> f32 {
         self.start_line(self.content_y);
         for p in pieces {
+            if let Piece::Float(c) | Piece::Atomic(c, _) = p {
+                self.children[*c].clamped = false;
+            }
+        }
+        for (i, p) in pieces.iter().enumerate() {
             if self.done {
+                // After the clamp point: floats and atomic inlines that were
+                // not placed are hidden.
+                for q in &pieces[i..] {
+                    if let Piece::Float(c) | Piece::Atomic(c, _) = q {
+                        self.children[*c].clamped = true;
+                    }
+                }
+                for c in std::mem::take(&mut self.pending_floats) {
+                    self.children[c].clamped = true;
+                }
                 break;
             }
             match p {
@@ -1582,7 +1612,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
                 _ => "\u{2026}".to_string(),
             }
-        } else { "\u{2026}".to_string() };
+        } else {
+            cstyle.block_ellipsis.as_deref().unwrap_or("\u{2026}").to_string()
+        };
         let ell = marker.as_str();
         let ell_w = self.lay.measurer.width(font, size, ell) + cstyle.letter_spacing * ell.chars().count() as f32;
         let limit = self.cur.right - ell_w;
@@ -1599,6 +1631,43 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
             };
             let avail = limit - x;
+            if clamp {
+                // The block ellipsis goes after the last soft wrap
+                // opportunity that leaves room for it (CSS Overflow 4 §4.3).
+                let only = self.cur.frags.len() == 1;
+                let mut fitted: Option<(String, f32)> = None;
+                let t = text.trim_end();
+                for (i, ch) in t.char_indices().rev() {
+                    if ch != ' ' {
+                        continue;
+                    }
+                    let head = t[..i].trim_end();
+                    if head.is_empty() {
+                        continue;
+                    }
+                    let w = self.split_to_fit(head, item, f32::MAX, false).1;
+                    if w <= avail + 0.01 {
+                        fitted = Some((head.to_string(), w));
+                        break;
+                    }
+                }
+                match fitted {
+                    Some((head, w)) => {
+                        if let Some(f) = self.cur.frags.last_mut() {
+                            f.w = w;
+                            if let PFKind::Text { text, .. } = &mut f.kind {
+                                *text = head;
+                            }
+                        }
+                        break;
+                    }
+                    None if !only => {
+                        self.cur.frags.pop();
+                        continue;
+                    }
+                    None => {}
+                }
+            }
             // CSS Overflow keeps the first character on the line, clipping
             // the marker itself if there is not enough room for both.
             let keep_first = !clamp && self.cur.frags.len() == 1;
@@ -2168,11 +2237,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.merge_frags();
 
         // Line clamp: this is the last allowed line and content follows.
-        let more_follows = !self.final_flush;
+        let more_follows = !self.final_flush || self.ellipsize_final;
         let clamp_hit = matches!(self.max_lines, Some(n) if self.lines.len() + 1 >= n) && more_follows;
         let overflows = self.cur.x > self.cur.right + 0.5;
-        if (self.ellipsis && overflows) || clamp_hit {
-            self.ellipsize(clamp_hit);
+        if clamp_hit && self.cstyle.block_ellipsis.is_some() {
+            self.ellipsize(true);
+        } else if self.ellipsis && overflows {
+            self.ellipsize(false);
         }
         if clamp_hit {
             self.done = true;
@@ -2435,7 +2506,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             text: if text.contains(['\t', '\u{ad}']) { Rc::from(text.replace('\t', " ").replace('\u{ad}', "").as_str()) } else { Rc::from(text.as_str()) },
                             font: tm.font,
                             size: tm.size,
-                            color: style.color,
+                            color: style.text_fill_color.unwrap_or(style.color),
                             letter_spacing: style.letter_spacing,
                             word_spacing: self.cur.frag_ws.get(fi).copied().unwrap_or(0.0),
                             hidden: style.visibility == Visibility::Hidden,
@@ -2471,9 +2542,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                                 skip_spaces: skip_spaces.get(fi).copied().unwrap_or((0.0, 0.0)),
                             },
                             shadows: style.text_shadow.clone(),
-                            // (Drawn as synthesized small caps; without
-                            // synthesis only a face with real ones has them.)
-                            small_caps: style.font_variant_small_caps && (style.font_synthesis_small_caps || self.lay.ctx.fonts.has_small_caps(tm.font)),
+                            // Real small capitals when the face has them (the
+                            // smcp feature); otherwise synthesized, unless
+                            // font-synthesis-small-caps forbids it.
+                            small_caps: style.font_variant_small_caps && style.font_synthesis_small_caps && !self.lay.ctx.fonts.has_feature(tm.font, *b"smcp"),
                             oblique,
                             emphasis: if item == MARKER_ITEM { None } else { emphasis_of(&style) },
                         },

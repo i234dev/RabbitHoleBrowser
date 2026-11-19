@@ -13,31 +13,88 @@ fn color(c: &[Token], current: Color) -> Option<Color> {
     }
 }
 
-fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext) -> Vec<GradientStop> {
-    let mut stops = Vec::new();
+/// Color stops and hints. `conic`: positions are `<angle-percentage>`s
+/// (stored as percentages of a turn). Returns None when the list is
+/// invalid (a hint not between two color stops, a stray token, fewer than
+/// one color stop).
+fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext, conic: bool) -> Option<Vec<GradientStop>> {
+    let mut stops: Vec<GradientStop> = Vec::new();
+    let position = |c: &[Token]| -> Option<Length> {
+        if conic {
+            super::angle_percentage(c).map(|a| Length::Percent(a / std::f32::consts::TAU * 100.0))
+        } else {
+            super::len_no_auto(c, ctx)
+        }
+    };
     for arg in args {
         let mut col = None;
         let mut positions = Vec::new();
         for c in arg {
-            if let Some(cc) = color(c, current) {
+            if let (None, Some(cc)) = (col, color(c, current)) {
                 col = Some(cc);
-            } else if let Some(l) = super::len_no_auto(c, ctx) {
+            } else if let Some(l) = position(c) {
                 positions.push(l);
-            } else if let Some(a) = super::angle(c) {
-                // conic stops use angles; map to percent of a turn
-                positions.push(Length::Percent(a / std::f32::consts::TAU * 100.0));
+            } else {
+                return None;
             }
         }
-        let Some(col) = col else { continue }; // color hints are dropped
-        if positions.is_empty() {
-            stops.push(GradientStop { color: col, position: None });
-        } else {
-            for p in positions {
-                stops.push(GradientStop { color: col, position: Some(p) });
+        match col {
+            Some(col) => {
+                if positions.len() > 2 {
+                    return None;
+                }
+                if positions.is_empty() {
+                    stops.push(GradientStop { color: col, position: None, hint: false });
+                }
+                for p in positions {
+                    stops.push(GradientStop { color: col, position: Some(p), hint: false });
+                }
+            }
+            None => {
+                // A color interpolation hint: one position between stops.
+                if positions.len() != 1 || stops.last().is_none_or(|s| s.hint) {
+                    return None;
+                }
+                stops.push(GradientStop { color: Color::TRANSPARENT, position: Some(positions[0]), hint: true });
             }
         }
     }
-    stops
+    if stops.is_empty() || stops.last().is_some_and(|s| s.hint) {
+        return None;
+    }
+    Some(stops)
+}
+
+/// Parse a `<color-interpolation-method>` (`in <space> [<hue> hue]`) at
+/// `toks[*i]`, advancing past it.
+fn parse_interpolation(toks: &[&[Token]], i: &mut usize) -> Option<crate::ColorInterp> {
+    if !toks.get(*i).is_some_and(|t| values::is_ident(t, "in")) {
+        return None;
+    }
+    let mut words = vec!["in".to_string()];
+    let mut j = *i + 1;
+    while j < toks.len() && words.len() < 4 {
+        match values::ident(toks[j]) {
+            Some(w) if w != "to" && w != "at" && w != "from" => words.push(w.to_ascii_lowercase()),
+            _ => break,
+        }
+        j += 1;
+    }
+    // Take the longest word run that parses (`in hsl longer hue`).
+    while words.len() >= 2 {
+        if let Some(m) = crate::ColorInterp::parse(&words) {
+            *i += words.len();
+            return Some(m);
+        }
+        words.pop();
+    }
+    None
+}
+
+/// Is the first argument a prelude (no color in it)?
+fn is_prelude(first: &[&[Token]], current: Color) -> bool {
+    !first.is_empty() && first.iter().all(|t| color(t, current).is_none())
+        && first.first().is_some_and(|t| values::ident(t).is_some() || super::angle(t).is_some())
 }
 
 /// Parse a gradient function component.
@@ -60,50 +117,77 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
     match kind {
         "linear" => {
             let mut direction = GradientDirection::Corner(0, 1);
+            let mut interp = crate::ColorInterp::default();
             let mut stop_start = 0;
             let first = &args[0];
-            if let Some(a) = first.first().and_then(|t| super::angle(t)) {
-                direction = GradientDirection::Angle(a);
+            if is_prelude(first, current) {
                 stop_start = 1;
-            } else if first.first().map(|t| values::is_ident(t, "to")).unwrap_or(false) {
-                let (mut h, mut v) = (0i8, 0i8);
-                for t in &first[1..] {
-                    match values::ident(t).as_deref() {
-                        Some("left") => h = -1,
-                        Some("right") => h = 1,
-                        Some("top") => v = -1,
-                        Some("bottom") => v = 1,
-                        _ => return None,
+                let mut i = 0;
+                let mut seen_dir = false;
+                let mut seen_interp = false;
+                while i < first.len() {
+                    if !seen_interp {
+                        if let Some(m) = parse_interpolation(first, &mut i) {
+                            interp = m;
+                            seen_interp = true;
+                            continue;
+                        }
                     }
-                }
-                direction = GradientDirection::Corner(h, v);
-                stop_start = 1;
-            } else if name.starts_with("-webkit-") || name.starts_with("-moz-") {
-                // Legacy prefixed syntax: a bare side keyword means "from".
-                if let Some(kw) = first.first().and_then(|t| values::ident(t)) {
-                    let d = match kw.as_str() {
-                        "left" => Some((1, 0)),
-                        "right" => Some((-1, 0)),
-                        "top" => Some((0, 1)),
-                        "bottom" => Some((0, -1)),
-                        _ => None,
-                    };
-                    if let Some((h, v)) = d {
+                    if seen_dir {
+                        return None;
+                    }
+                    seen_dir = true;
+                    if let Some(a) = super::angle(first[i]) {
+                        direction = GradientDirection::Angle(a);
+                        i += 1;
+                    } else if values::is_ident(first[i], "to") {
+                        let (mut h, mut v) = (0i8, 0i8);
+                        i += 1;
+                        let mut n = 0;
+                        while i < first.len() && n < 2 {
+                            match values::ident(first[i]).as_deref() {
+                                Some("left") if h == 0 => h = -1,
+                                Some("right") if h == 0 => h = 1,
+                                Some("top") if v == 0 => v = -1,
+                                Some("bottom") if v == 0 => v = 1,
+                                Some("in") => break,
+                                _ => return None,
+                            }
+                            i += 1;
+                            n += 1;
+                        }
+                        if n == 0 {
+                            return None;
+                        }
                         direction = GradientDirection::Corner(h, v);
-                        stop_start = 1;
+                    } else if name.starts_with("-webkit-") || name.starts_with("-moz-") {
+                        // Legacy prefixed syntax: a bare side keyword means "from".
+                        let d = match values::ident(first[i]).as_deref() {
+                            Some("left") => (1, 0),
+                            Some("right") => (-1, 0),
+                            Some("top") => (0, 1),
+                            Some("bottom") => (0, -1),
+                            _ => return None,
+                        };
+                        direction = GradientDirection::Corner(d.0, d.1);
+                        i += 1;
+                        // A second legacy keyword is accepted and ignored.
+                        if i < first.len() && values::ident(first[i]).is_some_and(|k| matches!(k.as_str(), "left" | "right" | "top" | "bottom")) {
+                            i += 1;
+                        }
+                    } else {
+                        return None;
                     }
                 }
             }
-            let stops = gradient_stops(&args[stop_start..], current, ctx);
-            if stops.is_empty() {
-                return None;
-            }
-            Some(BackgroundImage::LinearGradient { direction, stops, repeating })
+            let stops = gradient_stops(&args[stop_start..], current, ctx, false)?;
+            Some(BackgroundImage::LinearGradient { direction, stops, repeating, interp })
         }
         "radial" => {
             let mut shape = RadialShape::Ellipse;
             let mut size = RadialSize::FarthestCorner;
             let mut position = (Length::Percent(50.0), Length::Percent(50.0));
+            let mut interp = crate::ColorInterp::default();
             let mut stop_start = 0;
             let first = &args[0];
             // A first argument without a color is the shape/size/position prelude.
@@ -111,31 +195,43 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                 let mut lens: Vec<Length> = Vec::new();
                 let mut i = 0;
                 let mut explicit_shape = false;
+                let mut keyword_size = false;
                 while i < first.len() {
+                    if let Some(m) = parse_interpolation(first, &mut i) {
+                        interp = m;
+                        continue;
+                    }
                     let t = first[i];
                     if let Some(kw) = values::ident(t) {
                         match kw.as_str() {
-                            "circle" => {
-                                shape = RadialShape::Circle;
+                            "circle" | "ellipse" if !explicit_shape => {
+                                shape = if kw == "circle" { RadialShape::Circle } else { RadialShape::Ellipse };
                                 explicit_shape = true;
                             }
-                            "ellipse" => {
-                                shape = RadialShape::Ellipse;
-                                explicit_shape = true;
+                            "closest-side" | "farthest-side" | "closest-corner" | "farthest-corner" if !keyword_size && lens.is_empty() => {
+                                keyword_size = true;
+                                size = match kw.as_str() {
+                                    "closest-side" => RadialSize::ClosestSide,
+                                    "farthest-side" => RadialSize::FarthestSide,
+                                    "closest-corner" => RadialSize::ClosestCorner,
+                                    _ => RadialSize::FarthestCorner,
+                                };
                             }
-                            "closest-side" => size = RadialSize::ClosestSide,
-                            "farthest-side" => size = RadialSize::FarthestSide,
-                            "closest-corner" => size = RadialSize::ClosestCorner,
-                            "farthest-corner" => size = RadialSize::FarthestCorner,
                             "at" => {
-                                if let Some(p) = super::parse_position(&first[i + 1..], ctx) {
-                                    position = p;
+                                let mut j = i + 1;
+                                while j < first.len() && !values::is_ident(first[j], "in") {
+                                    j += 1;
                                 }
-                                break;
+                                position = super::parse_position(&first[i + 1..j], ctx)?;
+                                i = j;
+                                continue;
                             }
                             _ => return None,
                         }
                     } else if let Some(l) = super::len_no_auto(t, ctx) {
+                        if keyword_size {
+                            return None;
+                        }
                         lens.push(l);
                     } else {
                         return None;
@@ -143,32 +239,61 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                     i += 1;
                 }
                 match lens.len() {
+                    0 => {}
                     1 => {
-                        size = RadialSize::Explicit(lens[0], lens[0]);
-                        if !explicit_shape {
-                            shape = RadialShape::Circle;
+                        if matches!(lens[0], Length::Percent(_)) || matches!(shape, RadialShape::Ellipse) && explicit_shape {
+                            return None;
                         }
+                        size = RadialSize::Explicit(lens[0], lens[0]);
+                        shape = RadialShape::Circle;
                     }
-                    2 => size = RadialSize::Explicit(lens[0], lens[1]),
-                    _ => {}
+                    2 => {
+                        if matches!(shape, RadialShape::Circle) {
+                            return None;
+                        }
+                        size = RadialSize::Explicit(lens[0], lens[1]);
+                    }
+                    _ => return None,
                 }
                 stop_start = 1;
             }
-            let stops = gradient_stops(&args[stop_start..], current, ctx);
-            if stops.is_empty() {
-                return None;
-            }
-            Some(BackgroundImage::RadialGradient { shape, size, position, stops, repeating })
+            let stops = gradient_stops(&args[stop_start..], current, ctx, false)?;
+            Some(BackgroundImage::RadialGradient { shape, size, position, stops, repeating, interp })
         }
         _ => {
-            // conic: approximate as a linear gradient from the top.
             let first = &args[0];
-            let stop_start = if first.iter().all(|t| color(t, current).is_none()) { 1 } else { 0 };
-            let stops = gradient_stops(&args[stop_start.min(args.len())..], current, ctx);
-            if stops.is_empty() {
-                return None;
+            let mut angle = 0.0;
+            let mut position = (Length::Percent(50.0), Length::Percent(50.0));
+            let mut interp = crate::ColorInterp::default();
+            let mut stop_start = 0;
+            if first.iter().all(|t| color(t, current).is_none()) && first.first().is_some_and(|t| values::ident(t).is_some()) {
+                stop_start = 1;
+                let mut i = 0;
+                let (mut seen_from, mut seen_at) = (false, false);
+                while i < first.len() {
+                    if let Some(m) = parse_interpolation(first, &mut i) {
+                        interp = m;
+                        continue;
+                    }
+                    if values::is_ident(first[i], "from") && !seen_from {
+                        seen_from = true;
+                        angle = super::angle(first.get(i + 1)?)?;
+                        i += 2;
+                    } else if values::is_ident(first[i], "at") && !seen_at {
+                        seen_at = true;
+                        let mut j = i + 1;
+                        while j < first.len() && !values::is_ident(first[j], "in") && !values::is_ident(first[j], "from") {
+                            j += 1;
+                        }
+                        position = super::parse_position(&first[i + 1..j], ctx)?;
+                        i = j;
+                    } else {
+                        return None;
+                    }
+                }
             }
-            Some(BackgroundImage::LinearGradient { direction: GradientDirection::Angle(0.0), stops, repeating })
+            let stops = gradient_stops(&args[stop_start..], current, ctx, true)?;
+            Some(BackgroundImage::ConicGradient { angle, position, stops, repeating, interp })
         }
     }
 }
@@ -187,9 +312,29 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
     }
     if let Some(f) = super::fn_name(c) {
         if f.ends_with("image-set") {
-            return Some(parse_image_set(c, ctx).map(BackgroundImage::Url).unwrap_or(BackgroundImage::None));
+            return parse_image_set_value(c, current, ctx);
         }
-        if f == "image" || f == "cross-fade" {
+        if f == "image" {
+            // image([<url> | <string>]? , <color>?): the first image, else a
+            // solid color image (no natural size).
+            let args = super::fn_args(c);
+            for arg in &args {
+                if let [t] = arg.as_slice() {
+                    if let Some(u) = crate::cascade::url_of(t) {
+                        return Some(BackgroundImage::Url(ctx.url(&u)));
+                    }
+                    if let [Token::String(s)] = t {
+                        return Some(BackgroundImage::Url(ctx.url(s)));
+                    }
+                }
+            }
+            if let Some(col) = args.last().filter(|a| a.len() == 1).and_then(|a| color(a[0], current)) {
+                let stop = GradientStop { color: col, position: None, hint: false };
+                return Some(BackgroundImage::LinearGradient { direction: GradientDirection::Corner(0, 1), stops: vec![stop.clone(), stop], repeating: false, interp: crate::ColorInterp::default() });
+            }
+            return None;
+        }
+        if f == "cross-fade" {
             for arg in super::fn_args(c) {
                 for t in arg {
                     if let Some(u) = crate::cascade::url_of(t) {
@@ -204,6 +349,79 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
         }
     }
     None
+}
+
+/// `image-set()` as an image: candidates are URLs, strings or gradients
+/// with an optional resolution (`<number>x`, `dppx`, `dpi`, `dpcm`) and
+/// `type()`. A negative or zero resolution invalidates the whole value.
+/// The 1x (smallest resolution ≥ 1, else densest) supported candidate wins.
+fn parse_image_set_value(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<BackgroundImage> {
+    let mut best: Option<(f32, BackgroundImage)> = None;
+    let mut fallback: Option<(f32, BackgroundImage)> = None;
+    for arg in super::fn_args(c) {
+        let mut image = None;
+        let mut res = None;
+        let mut supported = true;
+        for t in arg {
+            if image.is_none() {
+                if let Some(u) = crate::cascade::url_of(t) {
+                    image = Some(BackgroundImage::Url(ctx.url(&u)));
+                    continue;
+                }
+                if let [Token::String(s)] = t {
+                    image = Some(BackgroundImage::Url(ctx.url(s)));
+                    continue;
+                }
+                if let Some(g) = parse_gradient(t, current, ctx) {
+                    image = Some(g);
+                    continue;
+                }
+            }
+            let resolution = |tok: &Token| match tok {
+                Token::Dimension(v, unit) => match unit.to_ascii_lowercase().as_str() {
+                    "x" | "dppx" => Some(*v),
+                    "dpi" => Some(*v / 96.0),
+                    "dpcm" => Some(*v * 2.54 / 96.0),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let r = match t {
+                [tok @ Token::Dimension(..)] => Some(resolution(tok)),
+                [Token::Function(f), ..] if f.eq_ignore_ascii_case("calc") || f.eq_ignore_ascii_case("min") || f.eq_ignore_ascii_case("max") || f.eq_ignore_ascii_case("clamp") => {
+                    Some(super::math_value(t, &resolution))
+                }
+                _ => None,
+            };
+            if let Some(r) = r {
+                let Some(r) = r.filter(|r| *r > 0.0) else { return None };
+                if res.is_some() {
+                    return None;
+                }
+                res = Some(r);
+            } else if super::fn_name(t).as_deref() == Some("type") {
+                match t.get(1) {
+                    Some(Token::String(m)) => supported = rabbithole_gfx::image::supports_mime(m),
+                    _ => return None,
+                }
+            } else {
+                return None;
+            }
+        }
+        let image = image?;
+        if !supported {
+            continue;
+        }
+        let res = res.unwrap_or(1.0);
+        if res + 1e-3 >= 1.0 {
+            if best.as_ref().map(|(r, _)| res < *r).unwrap_or(true) {
+                best = Some((res, image));
+            }
+        } else if fallback.as_ref().map(|(r, _)| res > *r).unwrap_or(true) {
+            fallback = Some((res, image));
+        }
+    }
+    Some(best.or(fallback).map(|(_, i)| i).unwrap_or(BackgroundImage::None))
 }
 
 /// `image-set()`: drop candidates whose `type()` we cannot decode, then
@@ -375,6 +593,7 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
         if is_attachment_kw(c) {
             seen_attach = true;
             out.fixed = values::is_ident(c, "fixed");
+            out.local = values::is_ident(c, "local");
             i += 1;
             continue;
         }
@@ -384,6 +603,12 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
             continue;
         }
         if values::is_ident(c, "text") {
+            out.clip_text = true;
+            i += 1;
+            continue;
+        }
+        if values::is_ident(c, "border-area") {
+            out.clip_border_area = true;
             i += 1;
             continue;
         }
@@ -526,9 +751,278 @@ fn apply_mask(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &A
     true
 }
 
+/// 1–4 values expanded to (top, right, bottom, left).
+fn four<T: Copy>(v: &[T]) -> Option<[T; 4]> {
+    Some(match v.len() {
+        1 => [v[0]; 4],
+        2 => [v[0], v[1], v[0], v[1]],
+        3 => [v[0], v[1], v[2], v[1]],
+        4 => [v[0], v[1], v[2], v[3]],
+        _ => return None,
+    })
+}
+
+/// `border-image-slice`: [<number> | <percentage>]{1,4} && fill?
+fn parse_bi_slice(comps: &[&[Token]]) -> Option<([Length; 4], bool)> {
+    let mut fill = false;
+    let mut vals = Vec::new();
+    for (i, c) in comps.iter().enumerate() {
+        if values::is_ident(c, "fill") {
+            // `fill` comes first or last.
+            if fill || (i != 0 && i != comps.len() - 1) {
+                return None;
+            }
+            fill = true;
+            continue;
+        }
+        match c {
+            [Token::Number(n)] if *n >= 0.0 => vals.push(Length::Px(*n)),
+            [Token::Percentage(p)] if *p >= 0.0 => vals.push(Length::Percent(*p)),
+            _ => return None,
+        }
+    }
+    Some((four(&vals)?, fill))
+}
+
+/// `border-image-width` (`auto` allowed) / `border-image-outset`.
+fn parse_bi_widths(comps: &[&[Token]], ctx: &LengthContext, outset: bool) -> Option<[BorderImageWidth; 4]> {
+    let mut vals = Vec::new();
+    for c in comps {
+        let v = if !outset && values::is_ident(c, "auto") {
+            BorderImageWidth::Auto
+        } else if let [Token::Number(n)] = c {
+            if *n < 0.0 {
+                return None;
+            }
+            BorderImageWidth::Number(*n)
+        } else {
+            let l = super::len_no_auto(c, ctx)?;
+            if outset && matches!(l, Length::Percent(_)) {
+                return None;
+            }
+            if matches!(l, Length::Px(v) if v < 0.0) || matches!(l, Length::Percent(v) if v < 0.0) {
+                return None;
+            }
+            BorderImageWidth::Length(l)
+        };
+        vals.push(v);
+    }
+    four(&vals)
+}
+
+fn parse_bi_repeat(comps: &[&[Token]]) -> Option<(BorderImageRepeat, BorderImageRepeat)> {
+    let one = |c: &[Token]| -> Option<BorderImageRepeat> {
+        Some(match values::ident(c)?.as_str() {
+            "stretch" => BorderImageRepeat::Stretch,
+            "repeat" => BorderImageRepeat::Repeat,
+            "round" => BorderImageRepeat::Round,
+            "space" => BorderImageRepeat::Space,
+            _ => return None,
+        })
+    };
+    match comps {
+        [a] => {
+            let r = one(a)?;
+            Some((r, r))
+        }
+        [a, b] => Some((one(a)?, one(b)?)),
+        _ => None,
+    }
+}
+
+/// The `border-image` shorthand: <source> || <slice> [/ <width>? [/ <outset>]?]? || <repeat>.
+fn parse_border_image(comps: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<BorderImage> {
+    let mut out = BorderImage::default();
+    let (mut seen_src, mut seen_slice, mut seen_repeat) = (false, false, false);
+    let is_slice_tok = |c: &[Token]| matches!(c, [Token::Number(_)] | [Token::Percentage(_)]) || values::is_ident(c, "fill");
+    let is_repeat_tok = |c: &[Token]| matches!(values::ident(c).as_deref(), Some("stretch" | "repeat" | "round" | "space"));
+    let mut i = 0;
+    while i < comps.len() {
+        let c = comps[i];
+        if !seen_src {
+            if let Some(img) = parse_image(c, current, ctx) {
+                out.source = img;
+                seen_src = true;
+                i += 1;
+                continue;
+            }
+        }
+        if !seen_slice && is_slice_tok(c) {
+            let mut j = i;
+            while j < comps.len() && is_slice_tok(comps[j]) {
+                j += 1;
+            }
+            let (slice, fill) = parse_bi_slice(&comps[i..j])?;
+            out.slice = slice;
+            out.fill = fill;
+            seen_slice = true;
+            i = j;
+            // `/ width` and `/ outset`.
+            let slash = |k: usize| k < comps.len() && matches!(comps[k], [Token::Delim('/')]);
+            if slash(i) {
+                i += 1;
+                let mut j = i;
+                while j < comps.len() && !slash(j) && !is_repeat_tok(comps[j]) && parse_image(comps[j], current, ctx).is_none() {
+                    j += 1;
+                }
+                if j > i {
+                    out.width = parse_bi_widths(&comps[i..j], ctx, false)?;
+                }
+                i = j;
+                if slash(i) {
+                    i += 1;
+                    let mut j = i;
+                    while j < comps.len() && !is_repeat_tok(comps[j]) && parse_image(comps[j], current, ctx).is_none() {
+                        j += 1;
+                    }
+                    if j == i {
+                        return None;
+                    }
+                    out.outset = parse_bi_widths(&comps[i..j], ctx, true)?;
+                    i = j;
+                } else if comps.get(i - 1).is_some_and(|c| matches!(c, [Token::Delim('/')])) {
+                    // A slash with neither width nor outset.
+                    return None;
+                }
+            }
+            continue;
+        }
+        if !seen_repeat && is_repeat_tok(c) {
+            let mut j = i + 1;
+            if j < comps.len() && is_repeat_tok(comps[j]) {
+                j += 1;
+            }
+            out.repeat = parse_bi_repeat(&comps[i..j])?;
+            seen_repeat = true;
+            i = j;
+            continue;
+        }
+        return None;
+    }
+    Some(out)
+}
+
+fn apply_border_image(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) {
+    let current = style.color;
+    let mut bi = style.border_image.as_deref().cloned().unwrap_or_default();
+    match name {
+        "border-image" | "-webkit-border-image" => {
+            if comps.len() == 1 && values::is_ident(comps[0], "none") {
+                style.border_image = None;
+                return;
+            }
+            let Some(mut parsed) = parse_border_image(comps, current, ctx) else { return };
+            if name == "-webkit-border-image" {
+                // The legacy property always fills the middle and its
+                // widths, when given, are the border widths.
+                parsed.fill = true;
+            }
+            bi = parsed;
+        }
+        "border-image-source" => {
+            if comps.len() != 1 {
+                return;
+            }
+            match parse_image(comps[0], current, ctx) {
+                Some(img) => bi.source = img,
+                None => return,
+            }
+        }
+        "border-image-slice" => match parse_bi_slice(comps) {
+            Some((slice, fill)) => {
+                bi.slice = slice;
+                bi.fill = fill;
+            }
+            None => return,
+        },
+        "border-image-width" => match parse_bi_widths(comps, ctx, false) {
+            Some(w) => bi.width = w,
+            None => return,
+        },
+        "border-image-outset" => match parse_bi_widths(comps, ctx, true) {
+            Some(w) => bi.outset = w,
+            None => return,
+        },
+        "border-image-repeat" => match parse_bi_repeat(comps) {
+            Some(r) => bi.repeat = r,
+            None => return,
+        },
+        _ => return,
+    }
+    style.border_image = if bi == BorderImage::default() { None } else { Some(Box::new(bi)) };
+}
+
 pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) -> bool {
     if name.contains("mask") {
         return apply_mask(name, comps, style, ctx);
+    }
+    if name == "object-view-box" {
+        // none | inset() | rect() | xywh(): stored as insets.
+        if comps.len() != 1 {
+            return true;
+        }
+        if values::is_ident(comps[0], "none") {
+            style.object_view_box = None;
+            return true;
+        }
+        let Some(f) = super::fn_name(comps[0]) else { return true };
+        let args: Vec<&[Token]> = super::fn_args(comps[0]).into_iter().flatten().collect();
+        // Lengths up to an optional `round` part.
+        let end = args.iter().position(|c| values::is_ident(c, "round")).unwrap_or(args.len());
+        let lens: Option<Vec<Length>> = args[..end].iter().map(|c| {
+            if values::is_ident(c, "auto") { Some(Length::Auto) } else { super::len_no_auto(c, ctx) }
+        }).collect();
+        let Some(lens) = lens else { return true };
+        let neg = |l: &Length| matches!(l, Length::Px(v) | Length::Percent(v) if *v < 0.0);
+        let inset = match (f.as_str(), lens.len()) {
+            ("inset", 1..=4) if !lens.iter().any(|l| l.is_auto()) => four(&lens),
+            // rect(top right bottom left): edges from the top-left corner.
+            ("rect", 4) => Some([lens[0], complement(lens[1]), complement(lens[2]), lens[3]]),
+            // xywh(x y w h): w and h must not be negative.
+            ("xywh", 4) if !neg(&lens[2]) && !neg(&lens[3]) && !lens.iter().any(|l| l.is_auto()) => {
+                Some([lens[1], complement(add(lens[0], lens[2])), complement(add(lens[1], lens[3])), lens[0]])
+            }
+            _ => None,
+        };
+        if let Some(i) = inset {
+            style.object_view_box = Some(i);
+        }
+        return true;
+    }
+    if name == "image-orientation" {
+        // from-image | none | [<angle> || flip] (angles are legacy: treated
+        // as from-image).
+        if comps.len() == 1 && values::is_ident(comps[0], "none") {
+            style.image_orientation_none = true;
+        } else if comps.len() == 1 && values::is_ident(comps[0], "from-image") {
+            style.image_orientation_none = false;
+        }
+        return true;
+    }
+    if name == "overflow-clip-margin" {
+        // <visual-box> || <length [0,∞]>
+        let mut area = None;
+        let mut len = None;
+        for c in comps {
+            if let (None, Some(b)) = (area, parse_box(c)) {
+                area = Some(b);
+            } else if let (None, Some(px)) = (len, super::len_no_auto(c, ctx).and_then(|l| match l {
+                Length::Px(v) if v >= 0.0 => Some(v),
+                _ => None,
+            })) {
+                len = Some(px);
+            } else {
+                return true;
+            }
+        }
+        if area.is_some() || len.is_some() {
+            style.overflow_clip_margin = (area.unwrap_or(BoxArea::PaddingBox), len.unwrap_or(0.0));
+        }
+        return true;
+    }
+    if name.starts_with("border-image") || name == "-webkit-border-image" {
+        apply_border_image(name, comps, style, ctx);
+        return true;
     }
     let name = match name {
         "-webkit-background-size" => "background-size",
@@ -635,12 +1129,15 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
         }
         "background-attachment" => {
-            let vals: Option<Vec<bool>> = values::split_commas(comps)
+            let vals: Option<Vec<(bool, bool)>> = values::split_commas(comps)
                 .iter()
-                .map(|l| if l.len() == 1 && is_attachment_kw(l[0]) { Some(values::is_ident(l[0], "fixed")) } else { None })
+                .map(|l| if l.len() == 1 && is_attachment_kw(l[0]) { Some((values::is_ident(l[0], "fixed"), values::is_ident(l[0], "local"))) } else { None })
                 .collect();
             if let Some(v) = vals {
-                set_each(style, v, |l, f| l.fixed = f);
+                set_each(style, v, |l, (f, local)| {
+                    l.fixed = f;
+                    l.local = local;
+                });
             }
         }
         "background-origin" => {
@@ -650,24 +1147,26 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
         }
         "background-clip" => {
-            let vals: Option<Vec<Option<BoxArea>>> = values::split_commas(comps)
+            let vals: Option<Vec<(Option<BoxArea>, bool)>> = values::split_commas(comps)
                 .iter()
                 .map(|l| {
                     if l.len() != 1 {
                         return None;
                     }
                     if values::is_ident(l[0], "text") {
-                        Some(None)
+                        Some((None, false))
+                    } else if values::is_ident(l[0], "border-area") {
+                        Some((None, true))
                     } else {
-                        parse_box(l[0]).map(Some)
+                        parse_box(l[0]).map(|b| (Some(b), false))
                     }
                 })
                 .collect();
             if let Some(v) = vals {
-                set_each(style, v, |l, b| {
-                    if let Some(b) = b {
-                        l.clip = b;
-                    }
+                set_each(style, v, |l, (b, border_area)| {
+                    l.clip_text = b.is_none() && !border_area;
+                    l.clip_border_area = border_area;
+                    l.clip = b.unwrap_or(BoxArea::BorderBox);
                 });
             }
         }
@@ -675,4 +1174,32 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         _ => return false,
     }
     true
+}
+
+/// `100% - l` (an edge position turned into an inset from the far edge).
+fn complement(l: Length) -> Length {
+    match l {
+        Length::Auto => Length::Percent(0.0),
+        Length::Px(v) => Length::Calc(-v, 100.0),
+        Length::Percent(p) => Length::Percent(100.0 - p),
+        Length::Calc(px, pct) => Length::Calc(-px, 100.0 - pct),
+        other => other,
+    }
+}
+
+/// `a + b` for lengths/percentages.
+fn add(a: Length, b: Length) -> Length {
+    let parts = |l: Length| match l {
+        Length::Px(v) => (v, 0.0),
+        Length::Percent(p) => (0.0, p),
+        Length::Calc(px, pct) => (px, pct),
+        _ => (0.0, 0.0),
+    };
+    let (ap, aq) = parts(a);
+    let (bp, bq) = parts(b);
+    match (ap + bp, aq + bq) {
+        (px, pct) if pct == 0.0 => Length::Px(px),
+        (px, pct) if px == 0.0 => Length::Percent(pct),
+        (px, pct) => Length::Calc(px, pct),
+    }
 }

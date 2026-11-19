@@ -7,6 +7,7 @@ pub mod paint;
 pub mod tree;
 
 mod background;
+mod border_image;
 mod block;
 mod build;
 pub mod clip_path;
@@ -98,4 +99,10 @@ pub fn paint_region(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext
 /// (canvas coordinates of the viewport's top-left corner).
 pub fn paint_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, fixed_origin: (f32, f32)) {
     paint::paint_with_fixed_origin(list, canvas, fonts, scroll_x, scroll_y, fixed_origin)
+}
+
+/// The bounds of a box's subtree for scrollable overflow (margin boxes,
+/// lines, transforms; clipped axes cut).
+pub fn block_content_bounds(b: &tree::LayoutBox) -> rabbithole_gfx::Rect {
+    block::content_bounds(b)
 }

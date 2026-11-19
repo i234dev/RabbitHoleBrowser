@@ -4,7 +4,7 @@ use rabbithole_gfx::Rect;
 use rabbithole_style::Clear;
 
 #[derive(Debug, Clone, Copy)]
-struct FloatInfo {
+pub(crate) struct FloatInfo {
     /// Margin box.
     rect: Rect,
     left: bool,
@@ -39,6 +39,15 @@ pub(crate) fn same_floats(a: &[RelFloat], b: &[RelFloat]) -> bool {
 impl Bfc {
     pub fn new() -> Self {
         Bfc::default()
+    }
+
+    /// The floats placed so far (to undo a trial layout).
+    pub fn snapshot(&self) -> Vec<FloatInfo> {
+        self.floats.clone()
+    }
+
+    pub fn restore(&mut self, floats: Vec<FloatInfo>) {
+        self.floats = floats;
     }
 
     /// Floats not entirely above `y`, relative to `origin`.

@@ -478,6 +478,7 @@ pub fn select_image(doc: &Document, n: NodeId, vp: Viewport, dpr: f32, scripting
             src_eff.map(|u| ImageChoice { url: u.to_string(), density: 1.0 })
         }
         "object" => object_image_url(doc, n).map(|u| ImageChoice { url: u.to_string(), density: 1.0 }),
+        "embed" => embed_image_url(doc, n).map(|u| ImageChoice { url: u.to_string(), density: 1.0 }),
         _ => None,
     }
 }
@@ -494,6 +495,18 @@ fn object_image_url<'d>(doc: &'d Document, n: NodeId) -> Option<&'d str> {
         }
     }
     Some(data)
+}
+
+/// The resource of an `<embed>` shown as an image: its `src` unless
+/// `type` names something that is not an image.
+fn embed_image_url<'d>(doc: &'d Document, n: NodeId) -> Option<&'d str> {
+    let src = non_empty(doc, n, "src")?;
+    if let Some(t) = non_empty(doc, n, "type") {
+        if !t.to_ascii_lowercase().starts_with("image/") {
+            return None;
+        }
+    }
+    Some(src)
 }
 
 /// Give an image the natural size implied by its `srcset` density.
@@ -513,6 +526,7 @@ pub(crate) fn is_image_element(doc: &Document, n: NodeId) -> bool {
         Some("video") => doc.attr(n, "poster").is_some(),
         Some("input") => doc.attr(n, "type").map(|t| t.eq_ignore_ascii_case("image")).unwrap_or(false),
         Some("object") => object_image_url(doc, n).is_some(),
+        Some("embed") => embed_image_url(doc, n).is_some(),
         _ => false,
     }
 }
@@ -548,9 +562,9 @@ pub struct ImageState {
     rx: Receiver<Vec<String>>,
     /// Elements whose source scripts changed (including detached
     /// `new Image()` elements, which are not in the tree).
-    script_nodes: Vec<NodeId>,
+    pub(crate) script_nodes: Vec<NodeId>,
     /// `load` / `error` events waiting to be fired.
-    events: Vec<(NodeId, &'static str)>,
+    pub(crate) events: Vec<(NodeId, &'static str)>,
     next_frame: Option<Instant>,
     /// The engine's clock origin (for `next_script_due` in engine ms).
     pub(crate) clock: Option<Instant>,
@@ -621,9 +635,10 @@ fn collect_backgrounds(b: &LayoutBox, view: &Rect, have: &HashMap<String, Arc<Im
     if out.len() >= 64 {
         return;
     }
-    if !(b.style.background_layers.is_empty() && b.style.mask_layers.is_empty()) && (!b.rect.intersect(view).is_empty()) {
-        for l in b.style.background_layers.iter().chain(b.style.mask_layers.iter()) {
-            if let rabbithole_style::BackgroundImage::Url(u) = &l.image {
+    if !(b.style.background_layers.is_empty() && b.style.mask_layers.is_empty() && b.style.border_image.is_none()) && (!b.rect.intersect(view).is_empty()) {
+        let border = b.style.border_image.as_deref().map(|bi| &bi.source);
+        for image in b.style.background_layers.iter().chain(b.style.mask_layers.iter()).map(|l| &l.image).chain(border) {
+            if let rabbithole_style::BackgroundImage::Url(u) = image {
                 if !have.contains_key(u) && !out.contains(u) {
                     out.push(u.clone());
                 }
@@ -1037,7 +1052,7 @@ fn favicon_url(doc: &Document, base: &Url, page: &Url) -> Option<Url> {
 fn install(page: &mut Page, n: NodeId, result: Option<Option<Arc<Image>>>, density: f32, key: &str, document: bool) -> bool {
     let decoded = result.flatten();
     let decoded = match decoded {
-        None if document && page.doc.is_element(n, "object") => Some(Arc::new(Image::new(1, 1, vec![0; 4]).with_natural_size(300, 150))),
+        None if document && (page.doc.is_element(n, "object") || page.doc.is_element(n, "embed")) => Some(Arc::new(Image::new(1, 1, vec![0; 4]).with_natural_size(300, 150))),
         d => d,
     };
     let is_img = page.doc.is_element(n, "img") || page.doc.is_element(n, "input");

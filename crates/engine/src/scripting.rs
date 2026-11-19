@@ -892,6 +892,10 @@ impl Engine {
         if images_changed {
             self.relayout_only(page);
             self.shrink_oversized_images(page);
+        }
+        // Events queued by fetches finished now, or by sources installed
+        // straight from the cache during an earlier restyle.
+        if images_changed || !page.image_state.events.is_empty() {
             img_out = self.fire_image_events(page);
         }
         if self.advance_animations(page) {

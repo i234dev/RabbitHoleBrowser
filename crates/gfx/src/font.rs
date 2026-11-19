@@ -19,26 +19,6 @@ pub enum Family {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontId(pub usize);
 
-/// Flag bit of a [`FontId`] shaped without kerning (`font-kerning: none`).
-const NO_KERNING: usize = 1 << (usize::BITS - 1);
-
-impl FontId {
-    /// The same face, shaped without kerning.
-    pub fn without_kerning(self) -> FontId {
-        FontId(self.0 | NO_KERNING)
-    }
-
-    /// Whether this id turns kerning off.
-    pub fn kerning_disabled(self) -> bool {
-        self.0 & NO_KERNING != 0
-    }
-
-    /// The face itself (kerning flag removed).
-    pub fn face(self) -> FontId {
-        FontId(self.0 & !NO_KERNING)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineMetrics {
     /// Distance from baseline to top of the line box (positive).
@@ -487,7 +467,6 @@ impl FontContext {
     }
 
     pub fn metrics(&self, font: FontId, size: f32) -> LineMetrics {
-        let font = font.face();
         match self.face(font.0).horizontal_line_metrics(size) {
             Some(m) => LineMetrics {
                 ascent: m.ascent.max(0.0),
@@ -531,7 +510,6 @@ impl FontContext {
     /// same generic family, then script-specific well-known system fonts,
     /// then any registered face. Results are cached per (face, char).
     pub fn fallback_for_char(&self, ch: char, prefer: FontId) -> Option<FontId> {
-        let prefer = prefer.face();
         let primary = self.resolve_index(prefer.0);
         let generation = self.base_generation.get();
         if self.seen_base_generation.replace(generation) != generation {
@@ -644,8 +622,6 @@ impl FontContext {
 
     /// [`FontContext::shape`] with explicit font features.
     pub fn shape_with(&self, font: FontId, size: f32, text: &str, letter_spacing: f32, features: crate::ShapeFeatures) -> Vec<ShapedGlyph> {
-        let features = crate::ShapeFeatures { no_kerning: features.no_kerning || font.kerning_disabled(), ..features };
-        let font = font.face();
         // A leading RLO / LRO (put there by bidi layout) gives the whole run
         // its direction: right-to-left runs come out in visual order.
         let (forced, skip) = match text.chars().next() {
@@ -767,14 +743,12 @@ impl FontContext {
 
     /// Rasterize (cached) a glyph at a given size.
     pub fn rasterize(&self, font: FontId, glyph: u16, size: f32) -> Rc<GlyphBitmap> {
-        let font = font.face();
         self.rasterize_subpixel(font, glyph, size, 0)
     }
 
     /// Rasterize a glyph shifted right by `quarter`/4 px (subpixel
     /// positioning; the coverage is resampled horizontally).
     pub fn rasterize_subpixel(&self, font: FontId, glyph: u16, size: f32, quarter: u8) -> Rc<GlyphBitmap> {
-        let font = font.face();
         let face_idx = self.resolve_index(font.0);
         let quarter = quarter % 4;
         let key = (face_idx, glyph, (size * 4.0).round().max(0.0) as u32, quarter);
@@ -811,7 +785,6 @@ impl FontContext {
 
     /// Advance width of a single char (used for tab stops / list markers).
     pub fn char_advance(&self, font: FontId, size: f32, ch: char) -> f32 {
-        let font = font.face();
         if is_zero_width(ch) {
             return 0.0;
         }
@@ -826,7 +799,6 @@ impl FontContext {
     }
 
     pub fn face_name(&self, font: FontId) -> String {
-        let font = font.face();
         let faces = self.faces.borrow();
         faces.get(font.0).or(faces.first()).map(|s| s.name.clone()).unwrap_or_default()
     }
@@ -838,7 +810,6 @@ impl FontContext {
 
     /// Whether `font` has a real glyph for `ch` (no fallback considered).
     pub fn has_glyph(&self, font: FontId, ch: char) -> bool {
-        let font = font.face();
         self.face(font.0).lookup_glyph_index(ch) != 0
     }
 
@@ -921,14 +892,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kerning_can_be_turned_off_per_font_id() {
+    fn kerning_can_be_turned_off_with_a_feature_variant() {
         let fc = FontContext::new();
         let f = fc.select(Family::Sans, 400, false);
-        let nk = f.without_kerning();
-        assert!(nk.kerning_disabled() && !f.kerning_disabled());
-        assert_eq!(nk.face(), f);
-        // DejaVu Sans kerns "AV" (and "To"): without kerning the pair is
-        // the sum of its advances.
+        let nk = fc.with_features(f, &[(*b"kern", 0)]);
+        assert_ne!(nk, f);
+        assert_eq!(fc.with_features(f, &[(*b"kern", 0)]), nk, "variants are reused");
+        // DejaVu Sans kerns "AV": without kerning the pair is the sum of
+        // its advances.
         let sum = fc.measure(f, 32.0, "A") + fc.measure(f, 32.0, "V");
         let kerned = fc.measure(f, 32.0, "AV");
         let plain = fc.measure(nk, 32.0, "AV");

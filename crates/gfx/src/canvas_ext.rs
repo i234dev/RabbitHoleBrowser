@@ -433,7 +433,26 @@ impl Canvas {
             if srect.is_empty() {
                 return;
             }
-            let sradii = radii.map(|(h, v)| ((h + spread).max(0.0), (v + spread).max(0.0)));
+            // Spreading a corner radius smaller than the spread grows it
+            // less (CSS Backgrounds 3 §7.1.1): spread × (1 + (r/s − 1)³).
+            let grow = |r: f32| {
+                if r <= 0.0 {
+                    0.0
+                } else if spread > 0.0 && r < spread {
+                    r + spread * (1.0 + (r / spread - 1.0).powi(3))
+                } else {
+                    (r + spread).max(0.0)
+                }
+            };
+            // A fully rounded box (a circle or a pill) stays fully rounded.
+            let full = |r: f32, len: f32| len > 0.0 && r >= len / 2.0 - 0.01;
+            let sradii = radii.map(|(h, v)| {
+                if full(h, dr.w) && full(v, dr.h) {
+                    (srect.w / 2.0, srect.h / 2.0)
+                } else {
+                    (grow(h), grow(v))
+                }
+            });
             let shadow_shape = RoundedBox::new(srect, sradii);
             // Region: shadow rect padded by the blur, limited to clip ± pad.
             let region = Rect::new(srect.x - pad, srect.y - pad, srect.w + 2.0 * pad, srect.h + 2.0 * pad);
@@ -747,7 +766,8 @@ impl Canvas {
                     } else if downscale {
                         crate::canvas::sample_box(image, u0.max(src.x), v0.max(src.y), u1.min(src.right()), v1.min(src.bottom()))
                     } else {
-                        crate::canvas::sample_bilinear(image, (u0 + u1) * 0.5 - 0.5, (v0 + v1) * 0.5 - 0.5)
+                        // Filtering never reads outside the source rect.
+                        crate::canvas::sample_bilinear(image, clamp_center((u0 + u1) * 0.5, src.x, src.right()) - 0.5, clamp_center((v0 + v1) * 0.5, src.y, src.bottom()) - 0.5)
                     };
                     let cx = span_coverage(px as f32, d.x, d.right());
                     let mut alpha = (a * op * cx * cy + 0.5) as u32;
@@ -772,20 +792,32 @@ impl Canvas {
         let inv = invert(&m);
         let sx = src.w / dest.w;
         let sy = src.h / dest.h;
+        // A flip or quarter turn at unit scale maps device pixel centres
+        // onto source pixel centres: one sample per pixel copies exactly.
+        let unit = |v: f32| (v.abs() - 1.0).abs() < 1e-4;
+        let quarter_turn = ((m[1].abs() < 1e-6 && m[2].abs() < 1e-6 && unit(m[0]) && unit(m[3])) || (m[0].abs() < 1e-6 && m[3].abs() < 1e-6 && unit(m[1]) && unit(m[2])))
+            && (sx - 1.0).abs() < 1e-4 && (sy - 1.0).abs() < 1e-4;
+        const CENTRE: [(f32, f32); 1] = [(0.5, 0.5)];
+        const GRID: [(f32, f32); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
+        let samples: &[(f32, f32)] = if quarter_turn { &CENTRE } else { &GRID };
         for py in b.y0..b.y1 {
             let drow = py as usize * w;
             for px in b.x0..b.x1 {
                 // 2×2 supersampling for edge anti-aliasing.
                 let mut acc = [0.0f32; 4];
                 let mut hits = 0;
-                for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                for &(ox, oy) in samples {
                     let p = transform_point(&inv, Point::new(px as f32 + ox, py as f32 + oy));
                     if !dest.contains(p.x, p.y) {
                         continue;
                     }
                     let u = src.x + (p.x - dest.x) * sx;
                     let v = src.y + (p.y - dest.y) * sy;
-                    let s = if self.image_smoothing { crate::canvas::sample_bilinear(image, u - 0.5, v - 0.5) } else { crate::canvas::sample_nearest(image, u, v) };
+                    let s = if self.image_smoothing {
+                        crate::canvas::sample_bilinear(image, clamp_center(u, src.x, src.right()) - 0.5, clamp_center(v, src.y, src.bottom()) - 0.5)
+                    } else {
+                        crate::canvas::sample_nearest(image, u, v)
+                    };
                     for i in 0..3 {
                         acc[i] += s[i] * s[3];
                     }
@@ -798,7 +830,7 @@ impl Canvas {
                 let r = acc[0] / acc[3];
                 let g = acc[1] / acc[3];
                 let bl = acc[2] / acc[3];
-                let a = acc[3] / 4.0;
+                let a = acc[3] / samples.len() as f32;
                 let mut alpha = (a * op + 0.5) as u32;
                 if let Some(mk) = &mask {
                     alpha = (alpha * mk.get(px, py) as u32 + 127) / 255;
@@ -1207,4 +1239,15 @@ pub fn blend_pixel(mode: u8, backdrop: u32, source: u32) -> u32 {
     };
     let q = |v: f32| ((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32) & 0xff;
     (q(out[0]) << 16) | (q(out[1]) << 8) | q(out[2])
+}
+
+/// A bilinear sample centre kept half a pixel inside `lo..hi`, so the
+/// filter only reads source pixels of that span.
+#[inline]
+fn clamp_center(c: f32, lo: f32, hi: f32) -> f32 {
+    if hi - lo <= 1.0 {
+        (lo + hi) * 0.5
+    } else {
+        c.clamp(lo + 0.5, hi - 0.5)
+    }
 }

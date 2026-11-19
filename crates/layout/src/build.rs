@@ -132,7 +132,7 @@ impl<'a> Builder<'a> {
                             Rc::new(s)
                         };
                         let mut b = LayoutBox::new(BoxKind::Image, Some(node), image_style);
-                        b.image = Some(img.clone());
+                        b.image = Some(crate::background::oriented(img, &style));
                         b.bfc_root = true;
                         children.push(b);
                     }
@@ -626,7 +626,7 @@ impl<'a> Builder<'a> {
     fn build_replaced(&self, node: NodeId, tag: &str, style: &Rc<ComputedStyle>) -> Option<LayoutBox> {
         let doc = self.doc();
         // `<video>` shows its poster image (stored under the node too).
-        let image = if matches!(tag, "img" | "svg" | "input" | "video" | "canvas" | "object" | "iframe" | "frame") { self.ctx.images.get(&node).cloned() } else { None };
+        let image = if matches!(tag, "img" | "svg" | "input" | "video" | "canvas" | "object" | "embed" | "iframe" | "frame") { self.ctx.images.get(&node).map(|i| crate::background::oriented(i, style)) } else { None };
         let attr_w = doc.attr(node, "width").and_then(parse_dimension_attr);
         let attr_h = doc.attr(node, "height").and_then(parse_dimension_attr);
         let broken = image.as_ref().map(|i| i.broken).unwrap_or(false);
