@@ -1092,3 +1092,16 @@ fn typed_attr_substitution() {
     assert_eq!(d.height, Length::Px(3.0));
     assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(0, 0, 255));
 }
+
+#[test]
+fn stepped_and_trigonometric_math_functions() {
+    assert_eq!(one("width: round(12.4px, 5px)").width, Length::Px(10.0));
+    assert_eq!(one("width: round(up, 12.4px, 5px)").width, Length::Px(15.0));
+    assert_eq!(one("width: calc(mod(17px, 5px) * 2)").width, Length::Px(4.0));
+    assert_eq!(one("margin-left: rem(-7px, 3px)").margin.left, Length::Px(-1.0));
+    assert_eq!(one("margin-left: calc(100px * sign(-3px) + abs(-20px))").margin.left, Length::Px(-80.0));
+    assert_eq!(one("width: calc(sin(30deg) * 100px)").width, Length::Px(50.0));
+    assert_eq!(one("width: calc(pow(2, 3) * 1px + sqrt(16) * 1px)").width, Length::Px(12.0));
+    assert_eq!(one("width: hypot(3px, 4px)").width, Length::Px(5.0));
+    assert!(matches!(one("opacity: round(0.26, 0.1)").opacity, o if (o - 0.3).abs() < 1e-6));
+}

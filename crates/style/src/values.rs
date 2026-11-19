@@ -564,6 +564,7 @@ pub fn number(c: &[Token]) -> Option<f32> {
                 _ => eval_sum(&comps).filter(|l| l.is_number).map(|l| l.num),
             }
         }
+        [Token::Function(f), ..] if is_math_fn(f) => eval_math_fn(c).filter(|l| l.is_number).map(|l| l.num),
         _ => None,
     }
 }
@@ -667,6 +668,13 @@ pub fn parse_length_opts(c: &[Token], allow_unitless: bool) -> Option<LengthValu
                     Some(LengthValue::Math(f, lins))
                 }
                 "var" | "env" => None,
+                _ if is_math_fn(&lf) => {
+                    let lin = eval_math_fn(c)?;
+                    if lin.is_number && !(lin.num == 0.0 || allow_unitless) {
+                        return None;
+                    }
+                    Some(if lin.is_number { LengthValue::Px(lin.num) } else { LengthValue::Calc(lin) })
+                }
                 _ => None,
             }
         }
@@ -799,11 +807,170 @@ fn eval_product(comps: &[&[Token]], i: &mut usize) -> Option<Lin> {
     Some(acc)
 }
 
+/// Names of the CSS Values 4 math functions evaluated here (besides
+/// `calc()`, `min()`, `max()`, `clamp()`).
+fn is_math_fn(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "round" | "mod" | "rem" | "abs" | "sign" | "sin" | "cos" | "tan" | "pow" | "sqrt" | "hypot" | "log" | "exp"
+    )
+}
+
+fn number_lin(n: f32) -> Lin {
+    Lin { num: n, is_number: true, ..Lin::default() }
+}
+
+/// The unit terms of a length combination.
+fn lin_terms(l: &Lin) -> [f32; 12] {
+    [l.px, l.em, l.rem, l.percent, l.vw, l.vh, l.vmin, l.vmax, l.ch, l.ex, l.ic, l.lh]
+}
+
+/// Apply `f` to the values of `a` and `b` when they are numbers or
+/// lengths of one same unit (a zero length matches any unit); `None` for
+/// mixed units, which only layout could combine.
+fn same_kind(a: Lin, b: Lin, f: impl Fn(f32, f32) -> f32) -> Option<Lin> {
+    if a.is_number && b.is_number {
+        return Some(number_lin(f(a.num, b.num)));
+    }
+    if a.is_number || b.is_number {
+        return None;
+    }
+    let (ta, tb) = (lin_terms(&a), lin_terms(&b));
+    let nz = |t: &[f32; 12]| t.iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(i, _)| i).collect::<Vec<_>>();
+    let (na, nb) = (nz(&ta), nz(&tb));
+    let unit = match (na.as_slice(), nb.as_slice()) {
+        ([], []) => 0,
+        ([i], []) | ([], [i]) => *i,
+        ([i], [j]) if i == j => *i,
+        _ => return None,
+    };
+    let v = f(ta[unit], tb[unit]);
+    let mut out = Lin::default();
+    let slot = match unit {
+        0 => &mut out.px,
+        1 => &mut out.em,
+        2 => &mut out.rem,
+        3 => &mut out.percent,
+        4 => &mut out.vw,
+        5 => &mut out.vh,
+        6 => &mut out.vmin,
+        7 => &mut out.vmax,
+        8 => &mut out.ch,
+        9 => &mut out.ex,
+        10 => &mut out.ic,
+        _ => &mut out.lh,
+    };
+    *slot = v;
+    Some(out)
+}
+
+/// A trigonometric argument in radians: an angle or a number.
+fn angle_arg(arg: &[&[Token]]) -> Option<f32> {
+    if let [[Token::Dimension(v, u)]] = arg {
+        return Some(match u.to_ascii_lowercase().as_str() {
+            "deg" => v.to_radians(),
+            "rad" => *v,
+            "grad" => (v * 0.9).to_radians(),
+            "turn" => v * std::f32::consts::TAU,
+            _ => return None,
+        });
+    }
+    let l = eval_sum(arg)?;
+    l.is_number.then_some(l.num)
+}
+
+/// `round()`, `mod()`, `rem()`, `abs()`, `sign()`, `sin()`, `cos()`,
+/// `tan()`, `pow()`, `sqrt()`, `hypot()`, `log()`, `exp()` (CSS Values 4
+/// §10) on numbers and single-unit lengths.
+fn eval_math_fn(c: &[Token]) -> Option<Lin> {
+    let [Token::Function(name), ..] = c else { return None };
+    let name = name.to_ascii_lowercase();
+    let args = function_args(c);
+    let num = |a: &Vec<&[Token]>| -> Option<f32> {
+        let l = eval_sum(a)?;
+        l.is_number.then_some(l.num)
+    };
+    match (name.as_str(), args.as_slice()) {
+        ("round", _) => {
+            let (strategy, rest) = match args.first().map(|a| a.as_slice()) {
+                Some([[Token::Ident(k)]]) => (k.to_ascii_lowercase(), &args[1..]),
+                _ => ("nearest".to_string(), &args[..]),
+            };
+            let a = eval_sum(rest.first()?)?;
+            let b = match rest.get(1) {
+                Some(b) => eval_sum(b)?,
+                None if a.is_number => number_lin(1.0),
+                None => return None,
+            };
+            if rest.len() > 2 {
+                return None;
+            }
+            let round = |x: f32, step: f32| -> f32 {
+                if step == 0.0 {
+                    return f32::NAN;
+                }
+                let q = x / step;
+                let r = match strategy.as_str() {
+                    "nearest" => (q + 0.5).floor(),
+                    "up" => q.ceil(),
+                    "down" => q.floor(),
+                    "to-zero" => q.trunc(),
+                    _ => return f32::NAN,
+                };
+                r * step
+            };
+            same_kind(a, b, round).filter(|l| !l.num.is_nan() && lin_terms(l).iter().all(|v| !v.is_nan()))
+        }
+        ("mod" | "rem", [a, b]) => {
+            let (a, b) = (eval_sum(a)?, eval_sum(b)?);
+            let floor = name == "mod";
+            same_kind(a, b, |x, y| if floor { x - y * (x / y).floor() } else { x - y * (x / y).trunc() })
+        }
+        ("abs", [a]) => {
+            let a = eval_sum(a)?;
+            same_kind(a, if a.is_number { number_lin(0.0) } else { Lin::default() }, |x, _| x.abs())
+        }
+        ("sign", [a]) => {
+            let a = eval_sum(a)?;
+            let v = if a.is_number { a.num } else { lin_terms(&a).iter().copied().find(|v| *v != 0.0).unwrap_or(0.0) };
+            Some(number_lin(if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 }))
+        }
+        ("sin", [a]) => Some(number_lin(angle_arg(a)?.sin())),
+        ("cos", [a]) => Some(number_lin(angle_arg(a)?.cos())),
+        ("tan", [a]) => Some(number_lin(angle_arg(a)?.tan())),
+        ("pow", [a, b]) => Some(number_lin(num(a)?.powf(num(b)?))),
+        ("sqrt", [a]) => Some(number_lin(num(a)?.sqrt())),
+        ("exp", [a]) => Some(number_lin(num(a)?.exp())),
+        ("log", [a]) => Some(number_lin(num(a)?.ln())),
+        ("log", [a, b]) => Some(number_lin(num(a)?.ln() / num(b)?.ln())),
+        ("hypot", list) if !list.is_empty() => {
+            let mut acc = eval_sum(&list[0])?;
+            acc = same_kind(acc, acc, |x, _| x * x)?;
+            for a in &list[1..] {
+                let l = eval_sum(a)?;
+                let sq = same_kind(l, l, |x, _| x * x)?;
+                acc = same_kind(acc, sq, |x, y| x + y)?;
+            }
+            same_kind(acc, acc, |x, _| x.sqrt())
+        }
+        _ => None,
+    }
+}
+
 fn eval_unit(comps: &[&[Token]], i: &mut usize) -> Option<Lin> {
     let c = *comps.get(*i)?;
     *i += 1;
     match c {
         [Token::Number(n)] => Some(Lin { num: *n, is_number: true, ..Lin::default() }),
+        [Token::Function(f), ..] if is_math_fn(f) => eval_math_fn(c),
+        // Numeric constants (CSS Values 4 §10.7.1).
+        [Token::Ident(k)] => match k.to_ascii_lowercase().as_str() {
+            "e" => Some(number_lin(std::f32::consts::E)),
+            "pi" => Some(number_lin(std::f32::consts::PI)),
+            "infinity" => Some(number_lin(f32::INFINITY)),
+            "-infinity" => Some(number_lin(f32::NEG_INFINITY)),
+            _ => None,
+        },
         [Token::OpenParen, ..] => eval_sum(&components(strip_function(c))),
         [Token::Delim('-')] => {
             // unary minus

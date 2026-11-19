@@ -332,7 +332,14 @@ impl<'a> Builder<'a> {
             if let Some(r) = self.reuse {
                 r.open(node);
             }
-            out.extend(self.build_children(node, &style, in_table_row));
+            // The element has no box, but its `::before` / `::after` do
+            // (CSS Display 3 §2.5).
+            let before = self.build_pseudo(node, PseudoElement::Before, in_table_row);
+            let children = self.build_children(node, &style, in_table_row);
+            let after = self.build_pseudo(node, PseudoElement::After, in_table_row);
+            out.extend(before);
+            out.extend(children);
+            out.extend(after);
             return;
         }
         if matches!(style.display, Display::TableColumn | Display::TableColumnGroup) {
