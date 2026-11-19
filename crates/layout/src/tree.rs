@@ -233,9 +233,9 @@ pub struct LayoutBox {
     pub marker_text: Option<Rc<str>>,
     /// Baseline offset from `rect.y` (for inline-block alignment), if known.
     pub baseline: Option<f32>,
-    /// A flex container's (first, last) baselines as offsets from
-    /// `rect.y`, set by its layout (CSS Flexbox §8.5).
-    pub(crate) flex_baselines: Option<(Option<f32>, Option<f32>)>,
+    /// The children whose baselines are a flex container's (first, last)
+    /// baselines, set by its layout (CSS Flexbox §8.5).
+    pub(crate) flex_baselines: Option<(Option<u32>, Option<u32>)>,
     /// A stretched row flex item's measuring layout, kept while the box is
     /// reused: (main size, container width and height, cross size,
     /// ascent). The item is laid out again stretched anyway, so the
@@ -589,7 +589,9 @@ impl LayoutBox {
     /// Baseline of the box's first line (absolute y), searching descendants.
     pub fn first_baseline(&self) -> Option<f32> {
         if let Some((first, _)) = self.flex_baselines.filter(|_| self.formatting == Formatting::Flex) {
-            return first.map(|v| self.rect.y + v);
+            // An item without a baseline has one synthesized from its
+            // border box's bottom edge.
+            return first.and_then(|i| self.children.get(i as usize)).map(|c| c.first_baseline().unwrap_or(c.rect.bottom()));
         }
         if let Some(l) = self.lines.first() {
             return Some(l.baseline);
@@ -616,7 +618,7 @@ impl LayoutBox {
     /// Baseline of the last line (absolute y).
     pub fn last_baseline(&self) -> Option<f32> {
         if let Some((_, last)) = self.flex_baselines.filter(|_| self.formatting == Formatting::Flex) {
-            return last.map(|v| self.rect.y + v);
+            return last.and_then(|i| self.children.get(i as usize)).map(|c| c.last_baseline().unwrap_or(c.rect.bottom()));
         }
         if let Some(l) = self.lines.last() {
             return Some(l.baseline);

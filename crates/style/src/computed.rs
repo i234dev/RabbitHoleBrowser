@@ -155,6 +155,16 @@ static MATH_TABLE: std::sync::LazyLock<std::sync::RwLock<MathTable>> = std::sync
 /// Intern a math expression, returning its [`Length::Math`] id (equal
 /// expressions share one).
 pub fn intern_math(n: MathNode) -> u32 {
+    // Sizing keywords carry a tag bit so layout can tell them from plain
+    // math lengths without a table lookup.
+    let tag = if matches!(n, MathNode::FitContent(_) | MathNode::Stretch) { SIZING_TAG } else { 0 };
+    intern_math_untagged(n) | tag
+}
+
+/// Tag bit of [`Length::Math`] ids of `fit-content()` / `stretch`.
+const SIZING_TAG: u32 = 1 << 31;
+
+fn intern_math_untagged(n: MathNode) -> u32 {
     let key = format!("{n:?}");
     if let Some(&id) = MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).ids.get(&key) {
         return id;
@@ -171,7 +181,7 @@ pub fn intern_math(n: MathNode) -> u32 {
 
 /// The interned expression `id`.
 pub fn math_node(id: u32) -> Option<std::sync::Arc<MathNode>> {
-    MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get(id as usize).cloned()
+    MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get((id & !SIZING_TAG) as usize).cloned()
 }
 
 /// The `stretch` sizing keyword as a length.
@@ -181,13 +191,23 @@ pub fn stretch_length() -> Length {
 }
 
 /// Whether `l` is the `stretch` sizing keyword.
+#[inline]
 pub fn is_stretch(l: Length) -> bool {
-    matches!(l, Length::Math(_)) && l == stretch_length()
+    matches!(l, Length::Math(id) if id & SIZING_TAG != 0) && l == stretch_length()
+}
+
+/// Whether `l` is `fit-content(<length-percentage>)` (cheap check).
+#[inline]
+pub fn is_fit_content_fn(l: Length) -> bool {
+    matches!(l, Length::Math(id) if id & SIZING_TAG != 0) && !is_stretch(l)
 }
 
 /// The argument of a `fit-content(<length-percentage>)` length.
 pub fn fit_content_arg(l: Length) -> Option<std::sync::Arc<MathNode>> {
     let Length::Math(id) = l else { return None };
+    if id & SIZING_TAG == 0 {
+        return None;
+    }
     match &*math_node(id)? {
         MathNode::FitContent(a) => Some(std::sync::Arc::new((**a).clone())),
         _ => None,

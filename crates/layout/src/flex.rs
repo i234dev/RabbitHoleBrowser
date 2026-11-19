@@ -334,9 +334,9 @@ impl<'a> Layouter<'a> {
 
         // Line cross sizes.
         let single_definite = lines.len() == 1 && avail_cross.is_some() && !wraps;
-        let mut line_cross: Vec<f32> = Vec::with_capacity(lines.len());
-        let mut line_ascent: Vec<f32> = Vec::with_capacity(lines.len());
-        let mut line_below: Vec<f32> = Vec::with_capacity(lines.len());
+        // Per line: cross size, first-baseline ascent, last-baseline
+        // distance to the bottom (one allocation).
+        let mut line_metrics: Vec<[f32; 3]> = Vec::with_capacity(lines.len());
         for line in &lines {
             let mut max_asc: f32 = 0.0;
             let mut max_desc: f32 = 0.0;
@@ -359,8 +359,7 @@ impl<'a> Layouter<'a> {
                 }
             }
             let cross = max_outer.max(max_asc + max_desc).max(last_above + last_below);
-            line_below.push(last_below);
-            line_cross.push(if single_definite {
+            let lc = if single_definite {
                 avail_cross.unwrap_or(cross)
             } else if !wraps && lines.len() == 1 {
                 // §9.4 step 15: a single line is clamped by the
@@ -371,13 +370,13 @@ impl<'a> Layouter<'a> {
                 }
             } else {
                 cross
-            });
-            line_ascent.push(max_asc);
+            };
+            line_metrics.push([lc, max_asc, last_below]);
         }
 
         // §9.6 align-content: distribute free cross space between lines.
         let n_lines = lines.len();
-        let total_cross: f32 = line_cross.iter().sum::<f32>() + gap_cross * (n_lines.saturating_sub(1)) as f32;
+        let total_cross: f32 = line_metrics.iter().map(|m| m[0]).sum::<f32>() + gap_cross * (n_lines.saturating_sub(1)) as f32;
         // An indefinite row container's height is its lines' total clamped
         // by min/max-height; align-content distributes the difference.
         let avail_cross = avail_cross.or_else(|| match (axis, limits) {
@@ -390,8 +389,8 @@ impl<'a> Layouter<'a> {
                 let dist = overflow_fallback(align_content, rabbithole_style::AlignMods::of_content(style.align_content, style.align_content_flags), free, wrap_reverse);
                 if dist == ContentDistribution::Stretch && free > 0.0 {
                     let add = free / n_lines as f32;
-                    for lc in line_cross.iter_mut() {
-                        *lc += add;
+                    for m in line_metrics.iter_mut() {
+                        m[0] += add;
                     }
                     (0.0, 0.0)
                 } else {
@@ -400,7 +399,7 @@ impl<'a> Layouter<'a> {
             }
             _ => (0.0, 0.0),
         };
-        let container_cross = avail_cross.unwrap_or(line_cross.iter().sum::<f32>() + gap_cross * (n_lines.saturating_sub(1)) as f32);
+        let container_cross = avail_cross.unwrap_or(line_metrics.iter().map(|m| m[0]).sum::<f32>() + gap_cross * (n_lines.saturating_sub(1)) as f32);
         if style.flex_wrap == FlexWrap::WrapReverse {
             // Lines run from the cross end.
             cross_offset = container_cross - cross_offset;
@@ -410,7 +409,7 @@ impl<'a> Layouter<'a> {
         // distribution.
         let mut max_main_extent: f32 = 0.0;
         for (li, line) in lines.iter().enumerate() {
-            let lc = line_cross[li];
+            let lc = line_metrics[li][0];
             // Main axis.
             let sum_outer: f32 = line.iter().map(|&i| items[i].outer_main(axis)).sum::<f32>() + gap_main * (line.len().saturating_sub(1)) as f32;
             let container_main = avail_main.unwrap_or(sum_outer);
@@ -494,9 +493,9 @@ impl<'a> Layouter<'a> {
                         ItemAlign::Baseline => {
                             if participates_in_baseline(it, axis) {
                                 if it.last_baseline {
-                                    lc - line_below[li] - (outer - it.below)
+                                    lc - line_metrics[li][2] - (outer - it.below)
                                 } else {
-                                    line_ascent[li] - it.ascent
+                                    line_metrics[li][1] - it.ascent
                                 }
                             } else if it.last_baseline && axis == Axis::Row {
                                 // Fallback alignment of `last baseline`: end.
@@ -555,18 +554,18 @@ impl<'a> Layouter<'a> {
         // §8.5 the container's first / last baselines: those of the items
         // baseline-aligned in its first / last line, else of the line's
         // first / last item.
-        let line_baseline = |line: &[usize], last: bool| -> Option<f32> {
+        // (Only the items are recorded: their baselines are looked up when
+        // asked for, which most containers never are.)
+        let line_baseline = |line: &[usize], last: bool| -> Option<u32> {
             let shared = line.iter().find(|&&i| participates_in_baseline(&items[i], axis) && items[i].last_baseline == last);
             let &i = shared.or(if last { line.last() } else { line.first() })?;
-            let child = &b.children[items[i].idx];
-            let bl = if last { child.last_baseline() } else { child.first_baseline() };
-            Some(bl.unwrap_or(child.rect.bottom()) - b.rect.y)
+            Some(items[i].idx as u32)
         };
         let baselines = (lines.first().and_then(|l| line_baseline(l, false)), lines.last().and_then(|l| line_baseline(l, true)));
         b.flex_baselines = Some(baselines);
 
         match axis {
-            Axis::Row => line_cross.iter().sum::<f32>() + gap_cross * (n_lines.saturating_sub(1)) as f32,
+            Axis::Row => line_metrics.iter().map(|m| m[0]).sum::<f32>() + gap_cross * (n_lines.saturating_sub(1)) as f32,
             Axis::Column => avail_main.unwrap_or(max_main_extent),
         }
     }
@@ -585,9 +584,15 @@ impl<'a> Layouter<'a> {
         };
         let specified = resolve_size(size_prop, avail_main, bb, pb_main);
 
-        let (align, mods) = match child_style.align_self {
-            ItemAlign::Auto => (container.align_items, rabbithole_style::AlignMods::of_item(container.align_items, container.align_items_flags)),
-            a => (a, rabbithole_style::AlignMods::of_item(child_style.align_self, child_style.align_self_flags)),
+        let (align, flags) = match child_style.align_self {
+            ItemAlign::Auto => (container.align_items, container.align_items_flags),
+            a => (a, child_style.align_self_flags),
+        };
+        // (Most values carry no keyword details worth decoding.)
+        let mods = if flags.0 & !rabbithole_style::AlignFlags::NORMAL == 0 && !matches!(align, ItemAlign::FlexStart | ItemAlign::FlexEnd) {
+            rabbithole_style::AlignMods::default()
+        } else {
+            rabbithole_style::AlignMods::of_item(align, flags)
         };
         let wrap_reverse = container.flex_wrap == FlexWrap::WrapReverse;
         // `start`/`end` follow the writing mode, so flip with wrap-reverse;
@@ -618,7 +623,7 @@ impl<'a> Layouter<'a> {
             Axis::Row => (cbh, child_style.min_height, child_style.max_height),
             Axis::Column => (Some(cbw), child_style.min_width, child_style.max_width),
         };
-        let ratio = item_ratio(&b.children[idx]);
+        let ratio = if child_style.aspect_ratio.is_none() && b.children[idx].kind != BoxKind::Image { None } else { item_ratio(&b.children[idx]) };
         let is_replaced = b.children[idx].kind == BoxKind::Image;
         // The ratio relates content boxes for natural ratios and the
         // box-sizing boxes for `aspect-ratio`.
@@ -631,8 +636,13 @@ impl<'a> Layouter<'a> {
             };
             Some(if ratio_border_box { ((cross + pb_cross) * main_per_cross - pb_main).max(0.0) } else { (cross * main_per_cross).max(0.0) })
         };
-        let cross_min = resolve_size(cross_min_prop, avail_cross, bb, pb_cross).unwrap_or(0.0);
-        let cross_max = resolve_size(cross_max_prop, avail_cross, bb, pb_cross).unwrap_or(f32::INFINITY).max(cross_min);
+        // (Cross limits only matter for ratios and stretched sizes.)
+        let (cross_min, cross_max) = if ratio.is_some() || stretch_line.is_some() {
+            let lo = resolve_size(cross_min_prop, avail_cross, bb, pb_cross).unwrap_or(0.0);
+            (lo, resolve_size(cross_max_prop, avail_cross, bb, pb_cross).unwrap_or(f32::INFINITY).max(lo))
+        } else {
+            (0.0, f32::INFINITY)
+        };
         let (ma, mb) = edges.autos(cross_axis);
         let stretch_like = cross_prop.is_auto() && matches!(align, ItemAlign::Stretch | ItemAlign::Normal) && !ma && !mb;
         let stretched_cross = {
@@ -1239,11 +1249,19 @@ fn balanced_width(outers: &[f32], gap: f32, avail: f32, line_count: Option<u32>)
 /// with percentage heights.
 fn may_use_definite_height(c: &LayoutBox) -> bool {
     use crate::tree::Formatting;
-    c.kind == BoxKind::Image
+    // Memoized in bits 2-3 of `pct_dependent` while the box is reused.
+    match c.pct_dependent.get() >> 2 {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
+    let r = c.kind == BoxKind::Image
         || c.style.aspect_ratio.is_some()
         // (A column-wrap container's width follows its height.)
         || (c.formatting == Formatting::Flex && is_multi_line(&c.style) && matches!(c.style.flex_direction, FlexDirection::Column | FlexDirection::ColumnReverse))
-        || c.children.iter().any(|g| g.style.height.has_percent() || g.style.max_height.has_percent() || g.style.min_height.has_percent())
+        || c.children.iter().any(|g| g.style.height.has_percent() || g.style.max_height.has_percent() || g.style.min_height.has_percent());
+    c.pct_dependent.set((c.pct_dependent.get() & 3) | if r { 8 } else { 4 });
+    r
 }
 
 /// Whether a flex item is stretched in the cross axis of `container`:
@@ -1324,7 +1342,7 @@ fn overflow_fallback(dist: ContentDistribution, mods: AlignMods, free: f32, reve
 /// containers (whose stretched or flexed items become definite).
 fn depends_on_definite_height(b: &LayoutBox) -> bool {
     use crate::tree::Formatting;
-    match b.pct_dependent.get() {
+    match b.pct_dependent.get() & 3 {
         1 => return false,
         2 => return true,
         _ => {}
@@ -1345,7 +1363,7 @@ fn depends_on_definite_height(b: &LayoutBox) -> bool {
     } else {
         b.children.iter().any(|c| c.is_in_flow() && (pct(c) || (matches!(c.formatting, Formatting::Flex | Formatting::Grid) && depends_on_definite_height(c))))
     };
-    b.pct_dependent.set(if dep { 2 } else { 1 });
+    b.pct_dependent.set((b.pct_dependent.get() & !3) | if dep { 2 } else { 1 });
     dep
 }
 

@@ -106,6 +106,17 @@ pub(crate) fn vertical_extras(style: &ComputedStyle) -> f32 {
     p.top + p.bottom + style.border_width.top + style.border_width.bottom
 }
 
+/// Whether a min/max size is an intrinsic keyword, `fit-content()` or
+/// `stretch` (sizes that need more than a percentage base).
+#[inline]
+fn sizing_keyword(l: Length) -> bool {
+    match l {
+        Length::MinContent | Length::MaxContent | Length::FitContent => true,
+        Length::Math(_) => rabbithole_style::is_stretch(l) || rabbithole_style::is_fit_content_fn(l),
+        _ => false,
+    }
+}
+
 /// The content height of a `stretch` box in a containing block of
 /// content height `cb_h`: its margin box fills it.
 fn stretch_height(style: &ComputedStyle, cb_h: f32, pb_v: f32) -> f32 {
@@ -777,38 +788,44 @@ impl<'a> Layouter<'a> {
 
         self.place_marker(b);
 
-        // Single-line form controls clip their contents internally but keep
-        // the baseline of their text (Blink, Gecko).
-        let control_baseline = b.pseudo.is_none() && b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("input" | "select" | "button")));
-        // A scroll container's baseline is synthesized from its margin box,
-        // except for flex and grid containers (CSS Align §9.1).
-        let content_baseline = matches!(b.formatting, Formatting::Flex | Formatting::Grid) && !style.contain_size && !style.container_size;
-        b.baseline = if b.clips && !control_baseline && !content_baseline {
-            None
-        } else if b.ruby == 1 {
-            // A ruby pair aligns by its base.
-            b.children.iter().find(|c| c.ruby == 2).and_then(|c| c.last_baseline()).map(|bl| bl - b.rect.y)
-        } else {
-            // Inline-level flex containers and tables align by their first
-            // baseline (a table's is its first row's). A grid container
-            // exports its items' baselines; without one it falls back to
-            // its margin box here (the synthesized item baseline only
-            // serves enclosing block containers).
-            match b.formatting {
-                Formatting::Flex | Formatting::Table | Formatting::TableWrapper => b.first_baseline(),
-                Formatting::Grid => b.children.iter().rev().filter(|c| c.is_in_flow()).find_map(|c| c.last_baseline()),
-                _ => b.last_baseline(),
+        // The baseline only serves inline-level (atomic) boxes; block-level
+        // boxes export theirs through `first/last_baseline` when asked.
+        if style.display.is_inline_level() || b.kind == BoxKind::InlineBlock {
+            // Single-line form controls clip their contents internally but keep
+            // the baseline of their text (Blink, Gecko).
+            let control_baseline = b.pseudo.is_none() && b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("input" | "select" | "button")));
+            // A scroll container's baseline is synthesized from its margin box,
+            // except for flex and grid containers (CSS Align §9.1).
+            let content_baseline = matches!(b.formatting, Formatting::Flex | Formatting::Grid) && !style.contain_size && !style.container_size;
+            b.baseline = if b.clips && !control_baseline && !content_baseline {
+                None
+            } else if b.ruby == 1 {
+                // A ruby pair aligns by its base.
+                b.children.iter().find(|c| c.ruby == 2).and_then(|c| c.last_baseline()).map(|bl| bl - b.rect.y)
+            } else {
+                // Inline-level flex containers and tables align by their first
+                // baseline (a table's is its first row's). A grid container
+                // exports its items' baselines; without one it falls back to
+                // its margin box here (the synthesized item baseline only
+                // serves enclosing block containers).
+                match b.formatting {
+                    Formatting::Flex | Formatting::Table | Formatting::TableWrapper => b.first_baseline(),
+                    Formatting::Grid => b.children.iter().rev().filter(|c| c.is_in_flow()).find_map(|c| c.last_baseline()),
+                    _ => b.last_baseline(),
+                }
+                .map(|bl| bl - b.rect.y)
+            };
+            // An empty one-line control has the baseline its text would have.
+            if control_baseline && b.lines.iter().all(|l| l.fragments.is_empty()) && b.node.is_some_and(|n| self.is_line_control(n)) {
+                let font = self.font_for(&style);
+                let m = self.ctx.fonts.metrics(font, style.font_size);
+                let lh = style.line_height.unwrap_or_else(|| m.height());
+                let half_leading = (lh - (m.ascent + m.descent)) / 2.0;
+                let top = b.content_rect.y + (b.content_rect.h - lh) / 2.0;
+                b.baseline = Some(top + half_leading + m.ascent - b.rect.y);
             }
-            .map(|bl| bl - b.rect.y)
-        };
-        // An empty one-line control has the baseline its text would have.
-        if control_baseline && b.lines.iter().all(|l| l.fragments.is_empty()) && b.node.is_some_and(|n| self.is_line_control(n)) {
-            let font = self.font_for(&style);
-            let m = self.ctx.fonts.metrics(font, style.font_size);
-            let lh = style.line_height.unwrap_or_else(|| m.height());
-            let half_leading = (lh - (m.ascent + m.descent)) / 2.0;
-            let top = b.content_rect.y + (b.content_rect.h - lh) / 2.0;
-            b.baseline = Some(top + half_leading + m.ascent - b.rect.y);
+        } else {
+            b.baseline = None;
         }
 
         if style.position != Position::Static {
@@ -979,12 +996,22 @@ impl<'a> Layouter<'a> {
     /// CSS 2.1 §10.3 width resolution for non-replaced boxes. Returns
     /// (content width, margin-left, margin-right).
     #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     fn compute_width(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
-        let intrinsic_limit = |l: Length| l.is_intrinsic() || (matches!(l, Length::Math(_)) && rabbithole_style::fit_content_arg(l).is_some());
+        let intrinsic_limit = |l: Length| l.is_intrinsic() || rabbithole_style::is_fit_content_fn(l);
         // (Multi-column containers have no column-aware intrinsic sizes yet.)
-        if b.style.multicol || (!intrinsic_limit(b.style.min_width) && !intrinsic_limit(b.style.max_width) && rabbithole_style::fit_content_arg(b.style.width).is_none()) {
+        if b.style.multicol || (!intrinsic_limit(b.style.min_width) && !intrinsic_limit(b.style.max_width) && !rabbithole_style::is_fit_content_fn(b.style.width)) {
             return self.compute_width_inner(b, cbw, cb_h, pb_h, ml, mr, mode);
         }
+        self.compute_width_with_limits(b, cbw, cb_h, pb_h, ml, mr, mode)
+    }
+
+    /// [`Self::compute_width`] when min/max-width or `fit-content()` need
+    /// the box's intrinsic widths.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn compute_width_with_limits(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
         let sizes = self.intrinsic_in(b, cb_h);
         let saved = self.width_intrinsic.replace(sizes);
         let r = self.compute_width_inner(b, cbw, cb_h, pb_h, ml, mr, mode);
@@ -993,32 +1020,54 @@ impl<'a> Layouter<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     fn compute_width_inner(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
         let style = b.style.clone();
+        // A width imposed by the parent (flex items, cells): nothing else
+        // about the width matters.
+        if let WidthMode::Fixed(w) = mode {
+            return (self.clamp_width(&style, w.max(0.0), cbw, pb_h), ml.unwrap_or(0.0), mr.unwrap_or(0.0));
+        }
+        if matches!(style.width, Length::Math(_)) {
+            if let Some(r) = self.compute_sizing_keyword_width(&style, cbw, pb_h, ml, mr, mode) {
+                return r;
+            }
+        }
+        self.compute_width_general(b, &style, cbw, cb_h, pb_h, ml, mr, mode)
+    }
+
+    /// `width: stretch` and `width: fit-content(<length-percentage>)`.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn compute_sizing_keyword_width(&mut self, style: &ComputedStyle, cbw: f32, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> Option<(f32, f32, f32)> {
         // `width: stretch`: the margin box fills the containing block
         // (auto margins count as zero).
-        if rabbithole_style::is_stretch(style.width) && !matches!(mode, WidthMode::Fixed(_)) {
+        if rabbithole_style::is_stretch(style.width) {
             let (l, r) = (ml.unwrap_or(0.0), mr.unwrap_or(0.0));
-            let w = self.clamp_width(&style, (cbw - l - r - pb_h).max(0.0), cbw, pb_h);
-            return (w, l, r);
+            let w = self.clamp_width(style, (cbw - l - r - pb_h).max(0.0), cbw, pb_h);
+            return Some((w, l, r));
         }
         // `width: fit-content(<length-percentage>)`.
         if let (Some(arg), Some((mn, mx))) = (rabbithole_style::fit_content_arg(style.width), self.width_intrinsic) {
             let a = arg.eval(cbw);
             let a = if style.box_sizing == BoxSizing::BorderBox { (a - pb_h).max(0.0) } else { a.max(0.0) };
-            let w = self.clamp_width(&style, mx.min(a.max(mn)), cbw, pb_h);
-            return match mode {
-                WidthMode::Fixed(f) => (self.clamp_width(&style, f.max(0.0), cbw, pb_h), ml.unwrap_or(0.0), mr.unwrap_or(0.0)),
-                _ => {
-                    let rem = cbw - w - pb_h;
-                    match (ml, mr) {
-                        (None, None) if matches!(mode, WidthMode::Fill) && rem > 0.0 => (w, rem / 2.0, rem / 2.0),
-                        (None, Some(r)) if matches!(mode, WidthMode::Fill) => (w, (rem - r).max(0.0), r),
-                        (l, r) => (w, l.unwrap_or(0.0), r.unwrap_or(0.0)),
-                    }
-                }
-            };
+            let w = self.clamp_width(style, mx.min(a.max(mn)), cbw, pb_h);
+            let rem = cbw - w - pb_h;
+            return Some(match (ml, mr) {
+                (None, None) if matches!(mode, WidthMode::Fill) && rem > 0.0 => (w, rem / 2.0, rem / 2.0),
+                (None, Some(r)) if matches!(mode, WidthMode::Fill) => (w, (rem - r).max(0.0), r),
+                (l, r) => (w, l.unwrap_or(0.0), r.unwrap_or(0.0)),
+            });
         }
+        None
+    }
+
+    /// Width of a box that is not given one by its parent.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn compute_width_general(&mut self, b: &mut LayoutBox, style: &std::rc::Rc<ComputedStyle>, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
+        let style = style.clone();
         let mut specified = style.width.resolve(cbw).map(|w| {
             let w = if style.box_sizing == BoxSizing::BorderBox { w - pb_h } else { w };
             self.clamp_width(&style, w.max(0.0), cbw, pb_h)
@@ -1145,6 +1194,15 @@ impl<'a> Layouter<'a> {
     pub(crate) fn clamp_width(&self, style: &ComputedStyle, w: f32, cbw: f32, pb_h: f32) -> f32 {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
         let mut w = w;
+        if !sizing_keyword(style.max_width) && !sizing_keyword(style.min_width) {
+            if let Some(max) = style.max_width.resolve(cbw) {
+                w = w.min(adj(max));
+            }
+            if let Some(min) = style.min_width.resolve(cbw) {
+                w = w.max(adj(min));
+            }
+            return w.max(0.0);
+        }
         // Intrinsic keywords and fit-content() need the box's min/max-content
         // widths, which `compute_width` provides.
         let intrinsic = |l: Length| -> Option<f32> {
@@ -1193,6 +1251,9 @@ impl<'a> Layouter<'a> {
     }
 
     pub(crate) fn clamp_height(&self, style: &ComputedStyle, h: f32, cb_h: Option<f32>, pb_v: f32) -> f32 {
+        if matches!(style.max_height, Length::Auto) && matches!(style.min_height, Length::Auto | Length::Px(0.0)) {
+            return h.max(0.0);
+        }
         let (min, max) = self.height_limits(style, cb_h, pb_v);
         h.min(max).max(min).max(0.0)
     }
