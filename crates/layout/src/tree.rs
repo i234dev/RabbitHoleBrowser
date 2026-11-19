@@ -114,6 +114,8 @@ pub struct DecorationInfo {
     /// `font-variation-settings` of the text (variable fonts vary their
     /// decoration metrics).
     pub variations: Vec<([u8; 4], f32)>,
+    /// `text-decoration-skip-ink` of the text: 0 auto, 1 none, 2 all.
+    pub skip_ink: u8,
 }
 
 impl DecorationInfo {

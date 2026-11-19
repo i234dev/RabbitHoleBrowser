@@ -2288,6 +2288,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                                     })
                                     .collect(),
                                 variations: if style.applied_decorations.is_empty() { Vec::new() } else { style.font_variation_settings.clone() },
+                                skip_ink: style.text_decoration_skip_ink,
                             },
                             shadows: style.text_shadow.clone(),
                             small_caps: style.font_variant_small_caps,

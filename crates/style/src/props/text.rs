@@ -491,6 +491,14 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             _ if values::is_ident(c0, "auto") => style.hyphenate_character = None,
             _ => return true,
         },
+        "text-decoration-skip-ink" => {
+            style.text_decoration_skip_ink = match values::ident(c0).as_deref() {
+                Some("auto") => 0,
+                Some("none") => 1,
+                Some("all") => 2,
+                _ => return true,
+            };
+        }
         "-rh-lang" => {
             if let Some(n) = values::number(c0) {
                 style.lang = n as u8;
@@ -511,7 +519,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"
         | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"
         | "-webkit-text-fill-color" | "-webkit-text-stroke" | "-webkit-text-stroke-width" | "-webkit-text-stroke-color"
-        | "-webkit-tap-highlight-color" | "-webkit-touch-callout" | "text-decoration-skip-ink" | "text-decoration-skip" => {}
+        | "-webkit-tap-highlight-color" | "-webkit-touch-callout" | "text-decoration-skip" => {}
         _ => return false,
     }
     let _ = (value, parent);

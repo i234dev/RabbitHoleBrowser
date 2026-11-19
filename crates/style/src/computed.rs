@@ -1309,6 +1309,8 @@ pub struct ComputedStyle {
     pub hyphens: u8,
     /// `hyphenate-character` (inherited); `None` = `auto` (U+2010).
     pub hyphenate_character: Option<std::rc::Rc<str>>,
+    /// `text-decoration-skip-ink` (inherited): 0 auto, 1 none, 2 all.
+    pub text_decoration_skip_ink: u8,
     /// The content language (inherited, from `lang` attributes): one of
     /// the `LANG_*` codes, 0 when none of them.
     pub lang: u8,
@@ -1612,6 +1614,7 @@ impl ComputedStyle {
             text_justify: 0,
             hyphens: 1,
             hyphenate_character: None,
+            text_decoration_skip_ink: 0,
             lang: 0,
             text_align_webkit_center: false,
             text_decoration: TextDecoration::default(),
@@ -1777,6 +1780,7 @@ impl ComputedStyle {
             text_justify: parent.text_justify,
             hyphens: parent.hyphens,
             hyphenate_character: parent.hyphenate_character.clone(),
+            text_decoration_skip_ink: parent.text_decoration_skip_ink,
             lang: parent.lang,
             // `text-decoration-line` is not inherited; the decorations it
             // draws propagate through `applied_decorations`.
@@ -1858,6 +1862,7 @@ impl ComputedStyle {
             && self.text_justify == o.text_justify
             && self.hyphens == o.hyphens
             && self.hyphenate_character == o.hyphenate_character
+            && self.text_decoration_skip_ink == o.text_decoration_skip_ink
             && self.lang == o.lang
             && self.applied_decorations == o.applied_decorations
             && self.text_underline_offset == o.text_underline_offset

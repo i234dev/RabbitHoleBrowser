@@ -1543,7 +1543,7 @@ fn is_inherited(name: &str) -> bool {
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
-            | "font-synthesis" | "font-synthesis-style" | "text-justify" | "hyphenate-character"
+            | "font-synthesis" | "font-synthesis-style" | "text-justify" | "hyphenate-character" | "text-decoration-skip-ink"
     )
 }
 
@@ -1640,6 +1640,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "text-align-last" => to.text_align_last = from.text_align_last,
         "text-justify" => to.text_justify = from.text_justify,
+        "text-decoration-skip-ink" => to.text_decoration_skip_ink = from.text_decoration_skip_ink,
         "hyphens" => to.hyphens = from.hyphens,
         "hyphenate-character" => to.hyphenate_character = from.hyphenate_character.clone(),
         "text-decoration" => {
