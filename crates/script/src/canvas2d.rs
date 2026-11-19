@@ -764,7 +764,7 @@ fn parse_font(font: &str) -> Option<rabbithole_style::cascade::ResolvedFontShort
     let parent = rabbithole_style::ComputedStyle::initial();
     let context = rabbithole_style::values::LengthContext {
         font_size: 16.0, root_font_size: 16.0, viewport_w: 0.0, viewport_h: 0.0,
-        ch: 0.5, ex: 0.5, ic: 1.0,
+        ch: 0.5, ex: 0.5, ic: 1.0, lh: 19.2,
     };
     let tokens = rabbithole_css::Tokenizer::tokenize(font);
     rabbithole_style::cascade::resolve_font_shorthand(&tokens, &parent, &context)

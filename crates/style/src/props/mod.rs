@@ -80,18 +80,144 @@ pub fn px_signed(c: &[Token], ctx: &LengthContext) -> Option<f32> {
 
 /// Angle in radians from `deg`/`rad`/`grad`/`turn` dimensions (or `0`).
 pub fn angle(c: &[Token]) -> Option<f32> {
-    match c {
-        [Token::Dimension(v, u)] => Some(match u.as_str() {
+    if let Some(Token::Function(_)) = c.first() {
+        return math_value(c, &|t| angle_unit(t, None));
+    }
+    angle_unit(c.first()?, None).filter(|_| c.len() == 1)
+}
+
+/// An `<angle-percentage>` (conic gradient stops): percentages are
+/// fractions of a full turn. Returns radians.
+pub fn angle_percentage(c: &[Token]) -> Option<f32> {
+    if let Some(Token::Function(_)) = c.first() {
+        return math_value(c, &|t| angle_unit(t, Some(std::f32::consts::TAU)));
+    }
+    angle_unit(c.first()?, Some(std::f32::consts::TAU)).filter(|_| c.len() == 1)
+}
+
+fn angle_unit(t: &Token, percent_of: Option<f32>) -> Option<f32> {
+    match t {
+        Token::Dimension(v, u) => Some(match u.to_ascii_lowercase().as_str() {
             "deg" => v.to_radians(),
             "rad" => *v,
             "grad" => v * std::f32::consts::PI / 200.0,
             "turn" => v * std::f32::consts::TAU,
             _ => return None,
         }),
-        [Token::Number(n)] if *n == 0.0 => Some(0.0),
+        Token::Percentage(p) => percent_of.map(|b| p / 100.0 * b),
+        Token::Number(n) if *n == 0.0 => Some(0.0),
         _ => None,
     }
 }
+
+/// Evaluate a math function (`calc()`, `min()`, `max()`, `clamp()`) whose
+/// leaves all convert to one unit through `leaf` (angles, times...).
+pub fn math_value(c: &[Token], leaf: &dyn Fn(&Token) -> Option<f32>) -> Option<f32> {
+    #[derive(Clone, Copy)]
+    enum V {
+        Num(f32),
+        Dim(f32),
+    }
+    fn unit(comps: &[&[Token]], i: &mut usize, leaf: &dyn Fn(&Token) -> Option<f32>) -> Option<V> {
+        let c = *comps.get(*i)?;
+        *i += 1;
+        match c {
+            [Token::Number(n)] => Some(V::Num(*n)),
+            [Token::Ident(k)] => match k.to_ascii_lowercase().as_str() {
+                "infinity" => Some(V::Num(f32::INFINITY)),
+                "-infinity" => Some(V::Num(f32::NEG_INFINITY)),
+                "nan" => Some(V::Num(f32::NAN)),
+                "pi" => Some(V::Num(std::f32::consts::PI)),
+                "e" => Some(V::Num(std::f32::consts::E)),
+                _ => None,
+            },
+            [Token::Delim('-')] => match unit(comps, i, leaf)? {
+                V::Num(n) => Some(V::Num(-n)),
+                V::Dim(d) => Some(V::Dim(-d)),
+            },
+            [Token::OpenParen, ..] => sum(&values::components(&c[1..c.len().saturating_sub(1).max(1)]), leaf),
+            [Token::Function(f), ..] => {
+                let inner = if matches!(c.last(), Some(Token::CloseParen)) { &c[1..c.len() - 1] } else { &c[1..] };
+                let comps = values::components(inner);
+                match f.to_ascii_lowercase().as_str() {
+                    "calc" | "-webkit-calc" => sum(&comps, leaf),
+                    name @ ("min" | "max" | "clamp") => {
+                        let args: Option<Vec<V>> = values::split_commas(&comps).iter().map(|a| sum(a, leaf)).collect();
+                        let args = args?;
+                        let vals: Vec<f32> = args.iter().map(|v| match v { V::Num(n) => *n, V::Dim(d) => *d }).collect();
+                        let all_num = args.iter().all(|v| matches!(v, V::Num(_)));
+                        let r = match name {
+                            "min" => vals.iter().copied().fold(f32::INFINITY, f32::min),
+                            "max" => vals.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+                            _ if vals.len() == 3 => vals[1].min(vals[2]).max(vals[0]),
+                            _ => return None,
+                        };
+                        Some(if all_num { V::Num(r) } else { V::Dim(r) })
+                    }
+                    _ => None,
+                }
+            }
+            [t] => leaf(t).map(V::Dim),
+            _ => None,
+        }
+    }
+    fn product(comps: &[&[Token]], i: &mut usize, leaf: &dyn Fn(&Token) -> Option<f32>) -> Option<V> {
+        let mut acc = unit(comps, i, leaf)?;
+        while *i < comps.len() {
+            match comps[*i] {
+                [Token::Delim('*')] => {
+                    *i += 1;
+                    let r = unit(comps, i, leaf)?;
+                    acc = match (acc, r) {
+                        (V::Num(a), V::Num(b)) => V::Num(a * b),
+                        (V::Dim(a), V::Num(b)) | (V::Num(b), V::Dim(a)) => V::Dim(a * b),
+                        _ => return None,
+                    };
+                }
+                [Token::Delim('/')] => {
+                    *i += 1;
+                    let V::Num(d) = unit(comps, i, leaf)? else { return None };
+                    acc = match acc {
+                        V::Num(a) => V::Num(a / d),
+                        V::Dim(a) => V::Dim(a / d),
+                    };
+                }
+                _ => break,
+            }
+        }
+        Some(acc)
+    }
+    fn sum(comps: &[&[Token]], leaf: &dyn Fn(&Token) -> Option<f32>) -> Option<V> {
+        let mut i = 0;
+        let mut acc = product(comps, &mut i, leaf)?;
+        while i < comps.len() {
+            let sign = match comps[i] {
+                [Token::Delim('+')] => 1.0,
+                [Token::Delim('-')] => -1.0,
+                _ => return None,
+            };
+            i += 1;
+            let r = product(comps, &mut i, leaf)?;
+            acc = match (acc, r) {
+                (V::Num(a), V::Num(b)) => V::Num(a + sign * b),
+                (V::Dim(a), V::Dim(b)) => V::Dim(a + sign * b),
+                // A bare 0 mixes with dimensions.
+                (V::Num(a), V::Dim(b)) if a == 0.0 => V::Dim(sign * b),
+                (V::Dim(a), V::Num(b)) if b == 0.0 => V::Dim(a),
+                _ => return None,
+            };
+        }
+        Some(acc)
+    }
+    let comps = [c];
+    let mut i = 0;
+    match unit(&comps, &mut i, leaf)? {
+        V::Dim(d) => Some(if d.is_nan() { 0.0 } else { d }),
+        V::Num(n) if n == 0.0 => Some(0.0),
+        V::Num(_) => None,
+    }
+}
+
 
 /// Time in seconds from `s`/`ms` dimensions.
 pub fn seconds(c: &[Token]) -> Option<f32> {
@@ -124,8 +250,7 @@ pub fn fn_name(c: &[Token]) -> Option<String> {
 }
 
 /// Parse a CSS `<position>` (1–4 values) into (x, y) lengths/percentages.
-/// Edge offsets such as `right 10px` are approximated by the edge
-/// percentage (the offset is dropped unless it is a percentage).
+/// Edge offsets such as `right 10px` become `calc(100% - 10px)`.
 pub fn parse_position(comps: &[&[Token]], ctx: &LengthContext) -> Option<(Length, Length)> {
     #[derive(Clone, Copy, PartialEq)]
     enum Kw {
@@ -189,14 +314,19 @@ pub fn parse_position(comps: &[&[Token]], ctx: &LengthContext) -> Option<(Length
                 let V::Kw(k) = vals[i] else { return None };
                 let mut edge = kw_len(k);
                 if let Some(V::Len(off)) = vals.get(i + 1) {
-                    // `right 10%` → 90%; px offsets are dropped (approximation).
-                    if let (Length::Percent(p), Length::Percent(o)) = (edge, *off) {
-                        edge = Length::Percent(if p >= 100.0 { 100.0 - o } else { o });
-                    } else if let (Length::Percent(p), Length::Px(_)) = (edge, *off) {
-                        if p == 0.0 {
-                            edge = *off;
-                        }
+                    if k == Kw::Center {
+                        return None;
                     }
+                    // `left 10px` is the offset itself; `right 10px` is
+                    // `calc(100% - 10px)`.
+                    let far = matches!(k, Kw::Right | Kw::Bottom);
+                    edge = match (*off, far) {
+                        (o, false) => o,
+                        (Length::Percent(o), true) => Length::Percent(100.0 - o),
+                        (Length::Px(o), true) => Length::Calc(-o, 100.0),
+                        (Length::Calc(px, pct), true) => Length::Calc(-px, 100.0 - pct),
+                        (_, true) => edge,
+                    };
                     i += 1;
                 }
                 if is_y(k) {

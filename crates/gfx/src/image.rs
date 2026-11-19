@@ -26,6 +26,62 @@ pub struct Image {
     /// The natural size is only the default object size: the image has
     /// no natural aspect ratio (an SVG without width/height or viewBox).
     pub no_ratio: bool,
+    /// A vector image (SVG): optional natural dimensions and a renderer
+    /// for any concrete size. `rgba` holds a rendering at the default size.
+    pub vector: Option<Arc<Vector>>,
+}
+
+/// Renders a vector image at a concrete size of `w`×`h` CSS px into
+/// `w·scale`×`h·scale` pixels.
+pub trait VectorRender: Send + Sync {
+    fn render(&self, w: f32, h: f32, scale: f32) -> Option<Image>;
+}
+
+/// A vector image: natural dimensions are each optional (CSS Images 3
+/// §4.1), and renderings at concrete sizes are cached.
+pub struct Vector {
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    /// Natural aspect ratio (width / height).
+    pub ratio: Option<f32>,
+    renderer: Box<dyn VectorRender>,
+    cache: Mutex<Vec<((u32, u32, u32), Arc<Image>)>>,
+}
+
+impl std::fmt::Debug for Vector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Vector").field("width", &self.width).field("height", &self.height).field("ratio", &self.ratio).finish()
+    }
+}
+
+impl Vector {
+    pub fn new(width: Option<f32>, height: Option<f32>, ratio: Option<f32>, renderer: Box<dyn VectorRender>) -> Vector {
+        let ratio = ratio.filter(|r| r.is_finite() && *r > 0.0);
+        Vector { width, height, ratio, renderer, cache: Mutex::new(Vec::new()) }
+    }
+
+    /// A rendering at concrete size `w`×`h` CSS px with `scale` pixels per
+    /// px (cached; at most 4096 pixels per side).
+    pub fn at_size(&self, w: f32, h: f32, scale: f32) -> Option<Arc<Image>> {
+        if !(w.is_finite() && h.is_finite() && scale.is_finite()) || w * scale < 0.5 || h * scale < 0.5 {
+            return None;
+        }
+        let scale = scale.min(4096.0 / w.max(h)).max(1e-3);
+        let key = ((w * 64.0).round() as u32, (h * 64.0).round() as u32, (scale * 64.0).round() as u32);
+        let mut cache = self.cache.lock().ok()?;
+        if let Some(i) = cache.iter().position(|(k, _)| *k == key) {
+            let hit = cache.remove(i);
+            let img = hit.1.clone();
+            cache.push(hit);
+            return Some(img);
+        }
+        let img = Arc::new(self.renderer.render(w, h, scale)?);
+        if cache.len() >= 8 {
+            cache.remove(0);
+        }
+        cache.push((key, img.clone()));
+        Some(img)
+    }
 }
 
 /// Frames of an animated image plus its playback position. The current
@@ -153,7 +209,7 @@ impl Image {
 
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         debug_assert_eq!(rgba.len(), (width * height * 4) as usize);
-        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None, broken: false, no_ratio: false }
+        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None, broken: false, no_ratio: false, vector: None }
     }
 
     /// Marker image for a failed load (1×1 transparent, natural size 0).
@@ -176,6 +232,26 @@ impl Image {
     /// Intrinsic size in CSS pixels.
     pub fn natural_size(&self) -> (f32, f32) {
         (self.natural_width as f32, self.natural_height as f32)
+    }
+
+    /// Natural width, height and aspect ratio, each optional (a vector
+    /// image may lack any of them; a raster image has all three).
+    pub fn natural_dimensions(&self) -> (Option<f32>, Option<f32>, Option<f32>) {
+        if let Some(v) = &self.vector {
+            return (v.width, v.height, v.ratio);
+        }
+        let (w, h) = self.natural_size();
+        let ratio = if self.no_ratio || w <= 0.0 || h <= 0.0 { None } else { Some(w / h) };
+        (Some(w), Some(h), ratio)
+    }
+
+    /// The pixels to draw at a concrete size `w`×`h` CSS px with `scale`
+    /// pixels per px: a fresh rendering for vector images, else the image.
+    pub fn for_size(self: &Arc<Self>, w: f32, h: f32, scale: f32) -> Arc<Image> {
+        match &self.vector {
+            Some(v) => v.at_size(w, h, scale).unwrap_or_else(|| self.clone()),
+            None => self.clone(),
+        }
     }
 
     /// Pixels of the frame currently shown.
@@ -277,7 +353,7 @@ impl Image {
                 a.loop_count,
             ))
         });
-        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken, no_ratio: self.no_ratio }
+        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken, no_ratio: self.no_ratio, vector: self.vector.clone() }
     }
 
     /// Encode the current frame as PNG.

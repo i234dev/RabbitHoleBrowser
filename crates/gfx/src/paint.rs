@@ -5,6 +5,31 @@ use crate::path::{invert, transform_point};
 
 const LUT_SIZE: usize = 1024;
 
+/// A gradient's color table over its offset domain.
+pub struct Lut {
+    colors: Vec<Color>,
+    lo: f32,
+    /// 1 / (hi - lo); 0 for a degenerate domain.
+    inv_span: f32,
+}
+
+impl Lut {
+    fn new(stops: &[ColorStop], repeat: bool) -> Lut {
+        let (lo, hi) = crate::canvas::gradient_domain(stops, repeat);
+        let span = hi - lo;
+        let inv_span = if span > 1e-9 && span.is_finite() { 1.0 / span } else { 0.0 };
+        Lut { colors: build_lut_range(stops, lo, hi), lo, inv_span }
+    }
+
+    #[inline]
+    fn lookup(&self, t: f32, repeat: bool) -> Color {
+        let u = if t.is_nan() { 0.0 } else { (t - self.lo) * self.inv_span };
+        let u = if repeat { u.rem_euclid(1.0) } else { u.clamp(0.0, 1.0) };
+        let i = ((u * (LUT_SIZE - 1) as f32) + 0.5) as usize;
+        self.colors[i.min(LUT_SIZE - 1)]
+    }
+}
+
 /// A paint prepared for a specific drawing call: evaluates the color at a
 /// device pixel.
 pub enum Shader {
@@ -14,7 +39,7 @@ pub enum Shader {
         start: Point,
         /// Direction vector divided by its squared length.
         dir: Point,
-        lut: Vec<Color>,
+        lut: Lut,
         repeat: bool,
     },
     Radial {
@@ -22,8 +47,26 @@ pub enum Shader {
         center: Point,
         rx: f32,
         ry: f32,
-        lut: Vec<Color>,
+        lut: Lut,
         repeat: bool,
+    },
+    Conic {
+        inv: Matrix,
+        center: Point,
+        angle: f32,
+        lut: Lut,
+        repeat: bool,
+    },
+    /// A paint repeated over tiles (user space); pixels in the gaps
+    /// between spaced tiles are transparent.
+    Tiled {
+        inv: Matrix,
+        inner: Box<Shader>,
+        origin: Point,
+        size: (f32, f32),
+        step: (f32, f32),
+        repeat_x: bool,
+        repeat_y: bool,
     },
 }
 
@@ -37,15 +80,31 @@ impl Shader {
                 let dy = end.y - start.y;
                 let len2 = dx * dx + dy * dy;
                 let dir = if len2 > 1e-9 { Point::new(dx / len2, dy / len2) } else { Point::new(0.0, 0.0) };
-                Shader::Linear { inv: invert(m), start: *start, dir, lut: build_lut(stops), repeat: *repeat }
+                Shader::Linear { inv: invert(m), start: *start, dir, lut: Lut::new(stops, *repeat), repeat: *repeat }
             }
             Paint::Radial { center, rx, ry, stops, repeat } => Shader::Radial {
                 inv: invert(m),
                 center: *center,
                 rx: rx.max(1e-6),
                 ry: ry.max(1e-6),
-                lut: build_lut(stops),
+                lut: Lut::new(stops, *repeat),
                 repeat: *repeat,
+            },
+            Paint::Conic { center, angle, stops, repeat } => Shader::Conic {
+                inv: invert(m),
+                center: *center,
+                angle: *angle,
+                lut: Lut::new(stops, *repeat),
+                repeat: *repeat,
+            },
+            Paint::Tiled { paint, origin, size, step, repeat_x, repeat_y } => Shader::Tiled {
+                inv: invert(m),
+                inner: Box::new(Shader::new(paint, &crate::canvas::IDENTITY)),
+                origin: *origin,
+                size: *size,
+                step: (step.0.max(1e-3), step.1.max(1e-3)),
+                repeat_x: *repeat_x,
+                repeat_y: *repeat_y,
             },
         }
     }
@@ -66,12 +125,13 @@ impl Shader {
         }
     }
 
-    /// Color for a gradient parameter (linear/radial shaders only).
+    /// Color for a gradient parameter (linear/radial/conic shaders only).
     #[inline]
     pub fn lut_color(&self, t: f32, repeat: bool) -> Color {
         match self {
             Shader::Solid(c) => *c,
-            Shader::Linear { lut, .. } | Shader::Radial { lut, .. } => lut_lookup(lut, t, repeat),
+            Shader::Linear { lut, .. } | Shader::Radial { lut, .. } | Shader::Conic { lut, .. } => lut.lookup(t, repeat),
+            Shader::Tiled { .. } => Color::TRANSPARENT,
         }
     }
 
@@ -85,58 +145,88 @@ impl Shader {
     /// Color at device pixel centre (x + 0.5, y + 0.5).
     #[inline]
     pub fn color_at(&self, x: i32, y: i32) -> Color {
+        let d = Point::new(x as f32 + 0.5, y as f32 + 0.5);
         match self {
             Shader::Solid(c) => *c,
-            Shader::Linear { inv, start, dir, lut, repeat } => {
-                let p = transform_point(inv, Point::new(x as f32 + 0.5, y as f32 + 0.5));
-                let t = (p.x - start.x) * dir.x + (p.y - start.y) * dir.y;
-                lut_lookup(lut, t, *repeat)
+            Shader::Linear { inv, .. } | Shader::Radial { inv, .. } | Shader::Conic { inv, .. } | Shader::Tiled { inv, .. } => {
+                self.color_at_user(transform_point(inv, d))
             }
-            Shader::Radial { inv, center, rx, ry, lut, repeat } => {
-                let p = transform_point(inv, Point::new(x as f32 + 0.5, y as f32 + 0.5));
+        }
+    }
+
+    /// Color at a point in user space.
+    fn color_at_user(&self, p: Point) -> Color {
+        match self {
+            Shader::Solid(c) => *c,
+            Shader::Linear { start, dir, lut, repeat, .. } => {
+                let t = (p.x - start.x) * dir.x + (p.y - start.y) * dir.y;
+                lut.lookup(t, *repeat)
+            }
+            Shader::Radial { center, rx, ry, lut, repeat, .. } => {
                 let dx = (p.x - center.x) / rx;
                 let dy = (p.y - center.y) / ry;
-                let t = (dx * dx + dy * dy).sqrt();
-                lut_lookup(lut, t, *repeat)
+                lut.lookup((dx * dx + dy * dy).sqrt(), *repeat)
+            }
+            Shader::Conic { center, angle, lut, repeat, .. } => {
+                let dx = p.x - center.x;
+                let dy = p.y - center.y;
+                // 0 = up, clockwise (y grows downwards).
+                let a = dx.atan2(-dy) - angle;
+                let t = (a / std::f32::consts::TAU).rem_euclid(1.0);
+                lut.lookup(t, *repeat)
+            }
+            Shader::Tiled { inner, origin, size, step, repeat_x, repeat_y, .. } => {
+                let mut x = p.x - origin.x;
+                let mut y = p.y - origin.y;
+                if *repeat_x {
+                    x = x.rem_euclid(step.0);
+                }
+                if *repeat_y {
+                    y = y.rem_euclid(step.1);
+                }
+                if x < 0.0 || y < 0.0 || x >= size.0 || y >= size.1 {
+                    return Color::TRANSPARENT;
+                }
+                inner.color_at_user(Point::new(origin.x + x, origin.y + y))
             }
         }
     }
 }
 
-#[inline]
-fn lut_lookup(lut: &[Color], t: f32, repeat: bool) -> Color {
-    let t = if t.is_nan() {
-        0.0
-    } else if repeat {
-        t.rem_euclid(1.0)
-    } else {
-        t.clamp(0.0, 1.0)
-    };
-    let i = ((t * (LUT_SIZE - 1) as f32) + 0.5) as usize;
-    lut[i.min(LUT_SIZE - 1)]
-}
-
 /// Build a lookup table of colors over t ∈ [0, 1], interpolating stops in
 /// premultiplied sRGB (so transparent stops do not darken).
 pub fn build_lut(stops: &[ColorStop]) -> Vec<Color> {
+    let clamped: Vec<ColorStop> = stops.iter().map(|s| ColorStop { offset: s.offset.clamp(0.0, 1.0), color: s.color }).collect();
+    build_lut_range(&clamped, 0.0, 1.0)
+}
+
+/// Lookup table over offsets `lo..=hi`.
+fn build_lut_range(stops: &[ColorStop], lo: f32, hi: f32) -> Vec<Color> {
     let mut stops: Vec<ColorStop> = stops.to_vec();
     if stops.is_empty() {
         return vec![Color::TRANSPARENT; LUT_SIZE];
     }
     // Enforce monotonic offsets (CSS: a stop earlier than the previous is
-    // clamped to it) and sort stably.
+    // clamped to it).
     let mut maxo = f32::MIN;
     for s in &mut stops {
-        s.offset = s.offset.clamp(0.0, 1.0);
+        if !s.offset.is_finite() {
+            s.offset = if s.offset > 0.0 { hi } else { lo };
+        }
         if s.offset < maxo {
             s.offset = maxo;
         }
         maxo = maxo.max(s.offset);
     }
     let mut lut = Vec::with_capacity(LUT_SIZE);
+    // Offsets increase with i: walk the stop segments once.
+    let mut seg = 0usize;
     for i in 0..LUT_SIZE {
-        let t = i as f32 / (LUT_SIZE - 1) as f32;
-        lut.push(sample_stops(&stops, t));
+        let t = lo + (hi - lo) * i as f32 / (LUT_SIZE - 1) as f32;
+        while seg + 1 < stops.len() && stops[seg + 1].offset < t {
+            seg += 1;
+        }
+        lut.push(sample_stops(&stops[seg.saturating_sub(1)..], t));
     }
     lut
 }

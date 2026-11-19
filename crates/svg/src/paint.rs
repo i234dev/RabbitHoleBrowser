@@ -273,6 +273,17 @@ impl<'a> Painter<'a> {
         if stops.len() == 1 {
             return Some(Paint::Solid(stops[0].color));
         }
+        // SVG offsets lie in 0..=1 and the gradient vector is the whole
+        // period: pad the ends so the painted domain is exactly 0..=1.
+        for s in &mut stops {
+            s.offset = s.offset.clamp(0.0, 1.0);
+        }
+        if stops[0].offset > 0.0 {
+            stops.insert(0, ColorStop { offset: 0.0, color: stops[0].color });
+        }
+        if let Some(&last) = stops.last().filter(|s| s.offset < 1.0) {
+            stops.push(ColorStop { offset: 1.0, color: last.color });
+        }
         let units_bbox = g.units_bbox.unwrap_or(true);
         let gt = g.transform.unwrap_or(rabbithole_gfx::IDENTITY);
         // Coordinates: in bbox units a bare number is a fraction, a percent is a percent.

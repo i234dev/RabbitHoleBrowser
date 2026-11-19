@@ -1362,7 +1362,10 @@ impl Engine {
         // (Re)select image sources for the new viewport / DOM and start
         // lazy or script-requested loads; cached results show right away.
         // Nothing changed: nothing to select (scrolling syncs lazy images).
-        if (page.incr.generation() != before || page.incr.take_dpr_change(self.device_pixel_ratio)) && self.sync_images(page) {
+        // Script-set sources (`img.src`, `new Image()`, possibly detached) are
+        // selected even when no restyle happened.
+        let script_images = !page.image_state.script_nodes.is_empty();
+        if (page.incr.generation() != before || page.incr.take_dpr_change(self.device_pixel_ratio) || script_images) && self.sync_images(page) {
             self.relayout_only(page);
         }
         self.sync_frames(page);
@@ -1578,9 +1581,34 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
         let mut img = SVG_FONTS.with(|fonts| tree.rasterize(fonts, pw, ph)).with_natural_size(w.round().max(1.0) as u32, h.round().max(1.0) as u32);
         let (iw, ih, viewbox) = tree.intrinsic_size();
         img.no_ratio = viewbox.is_none() && !(iw.is_some() && ih.is_some());
+        // Natural dimensions (CSS Images 3 §4.1 / SVG 2 §8.2): each of
+        // width and height when given in absolute units; the ratio from
+        // both of them, else from the viewBox.
+        let ratio = match (iw, ih) {
+            (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some(w / h),
+            (Some(_), Some(_)) => None,
+            _ => viewbox.filter(|v| v.w > 0.0 && v.h > 0.0).map(|v| v.w / v.h),
+        };
+        img.vector = Some(Arc::new(rabbithole_gfx::image::Vector::new(iw, ih, ratio, Box::new(SvgImageRender { text }))));
         return Some(img);
     }
     Image::decode(bytes)
+}
+
+/// Renders an SVG image document at concrete sizes (re-parsed per new
+/// size; renderings are cached by the image).
+struct SvgImageRender {
+    text: String,
+}
+
+impl rabbithole_gfx::image::VectorRender for SvgImageRender {
+    fn render(&self, w: f32, h: f32, scale: f32) -> Option<Image> {
+        thread_local! {
+            static SVG_FONTS: FontContext = FontContext::new();
+        }
+        let tree = rabbithole_svg::SvgTree::parse_in(&self.text, Some((w, h)))?;
+        Some(SVG_FONTS.with(|fonts| tree.rasterize_viewport(fonts, w, h, scale)))
+    }
 }
 
 /// Rasterize inline `<svg>` elements of a document into images keyed by

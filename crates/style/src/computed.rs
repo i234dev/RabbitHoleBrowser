@@ -793,6 +793,9 @@ pub struct GradientStop {
     /// Position along the gradient line (percentage of its length or px);
     /// `None` = evenly distributed.
     pub position: Option<Length>,
+    /// A color interpolation hint (`position` only; `color` is unused):
+    /// the midpoint of the transition between its neighbouring stops.
+    pub hint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -828,6 +831,7 @@ pub enum BackgroundImage {
         direction: GradientDirection,
         stops: Vec<GradientStop>,
         repeating: bool,
+        interp: crate::ColorInterp,
     },
     RadialGradient {
         shape: RadialShape,
@@ -836,6 +840,17 @@ pub enum BackgroundImage {
         position: (Length, Length),
         stops: Vec<GradientStop>,
         repeating: bool,
+        interp: crate::ColorInterp,
+    },
+    ConicGradient {
+        /// Start angle in radians (0 = up, clockwise).
+        angle: f32,
+        /// Center (x, y) as lengths/percentages.
+        position: (Length, Length),
+        /// Stop positions are percentages of a full turn.
+        stops: Vec<GradientStop>,
+        repeating: bool,
+        interp: crate::ColorInterp,
     },
 }
 

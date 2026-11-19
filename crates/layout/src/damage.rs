@@ -32,9 +32,9 @@ fn item_eq(a: &DisplayItem, b: &DisplayItem) -> bool {
             r1 == r2 && s1 == s2 && Arc::ptr_eq(i1, i2) && o1 == o2 && p1 == p2
         }
         (
-            D::ImageTiled { image: i1, area: a1, origin: g1, tile: t1, repeat_x: x1, repeat_y: y1, opacity: o1 },
-            D::ImageTiled { image: i2, area: a2, origin: g2, tile: t2, repeat_x: x2, repeat_y: y2, opacity: o2 },
-        ) => Arc::ptr_eq(i1, i2) && a1 == a2 && g1 == g2 && t1 == t2 && x1 == x2 && y1 == y2 && o1 == o2,
+            D::ImageTiled { image: i1, area: a1, origin: g1, tile: t1, repeat_x: x1, repeat_y: y1, opacity: o1, pixelated: p1 },
+            D::ImageTiled { image: i2, area: a2, origin: g2, tile: t2, repeat_x: x2, repeat_y: y2, opacity: o2, pixelated: p2 },
+        ) => Arc::ptr_eq(i1, i2) && a1 == a2 && g1 == g2 && t1 == t2 && x1 == x2 && y1 == y2 && o1 == o2 && p1 == p2,
         (D::Line { x0: a0, y0: b0, x1: a1, y1: b1, width: w1, color: c1, style: s1 }, D::Line { x0: a2, y0: b2, x1: a3, y1: b3, width: w2, color: c2, style: s2 }) => {
             a0 == a2 && b0 == b2 && a1 == a3 && b1 == b3 && w1 == w2 && c1 == c2 && s1 == s2
         }

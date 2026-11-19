@@ -17,6 +17,7 @@ pub mod values;
 mod color_spaces;
 
 pub use computed::*;
+pub use color_spaces::{interpolate as interpolate_color, ColorInterp, HueMethod, InterpSpace};
 pub use restyle::{RestyleOutcome, StyleChange, StyleEngine};
 pub use rabbithole_css::{Declaration, MatchState, MediaEnv, PseudoElement, Stylesheet};
 

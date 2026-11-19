@@ -144,6 +144,12 @@ struct Builder<'a> {
 
 /// Build the tree for the `<svg>` element `root`.
 pub fn build(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) -> Option<String>) -> Option<Built> {
+    build_in(doc, root, style_of, None)
+}
+
+/// `viewport`: the size the root viewport takes (an image's concrete
+/// size), resolving percentages when there is no `viewBox`.
+pub fn build_in(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) -> Option<String>, viewport: Option<(f32, f32)>) -> Option<Built> {
     if !doc.is_element(root, "svg") {
         return None;
     }
@@ -171,8 +177,8 @@ pub fn build(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) -> Op
     });
     let viewbox = attr_ci(doc, root, "viewbox").and_then(parse_viewbox);
     let par = parse_aspect_ratio(attr_ci(doc, root, "preserveaspectratio"));
-    let vw = width.or(viewbox.map(|v| v.w)).unwrap_or(300.0);
-    let vh = height.or(viewbox.map(|v| v.h)).unwrap_or(150.0);
+    let vw = viewbox.map(|v| v.w).or(viewport.map(|v| v.0)).or(width).unwrap_or(300.0);
+    let vh = viewbox.map(|v| v.h).or(viewport.map(|v| v.1)).or(height).unwrap_or(150.0);
 
     let mut b = Builder { doc, style_of, rules, nodes: Vec::new(), ids: HashMap::new(), built: HashMap::new(), viewport: (vw, vh) };
     let root_idx = b.build_node(root, 0, true)?;

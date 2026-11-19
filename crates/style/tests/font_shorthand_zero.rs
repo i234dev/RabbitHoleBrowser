@@ -17,7 +17,7 @@ fn computed(declarations: &str) -> ComputedStyle {
 fn resolved(value: &str) -> Option<ResolvedFontShorthand> {
     resolve_font_shorthand(&Tokenizer::tokenize(value), &ComputedStyle::initial(), &LengthContext {
         font_size: 16.0, root_font_size: 16.0, viewport_w: 800.0, viewport_h: 600.0,
-        ch: 0.5, ex: 0.5, ic: 1.0,
+        ch: 0.5, ex: 0.5, ic: 1.0, lh: 19.2,
     })
 }
 

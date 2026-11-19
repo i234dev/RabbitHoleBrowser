@@ -72,6 +72,8 @@ pub enum DisplayItem {
         repeat_x: bool,
         repeat_y: bool,
         opacity: f32,
+        /// Nearest-neighbour scaling (`image-rendering: pixelated`).
+        pixelated: bool,
     },
     /// Horizontal/vertical line (text decorations, hr).
     Line {
@@ -1129,8 +1131,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         let tag = b.node.and_then(|n| self.ctx.doc.element(n)).map(|e| e.tag.as_str()).unwrap_or("");
         let is_media = matches!(tag, "video" | "audio");
-        if tag == "video" {
-            // Letterbox like a real player before the poster is drawn.
+        // A poster is drawn like an image: object-fit leaves the rest of the
+        // box transparent (HTML: the poster frame is the video's content).
+        let poster = tag == "video" && b.image.as_ref().is_some_and(|i| !i.broken);
+        if tag == "video" && !poster {
+            // Letterbox like a real player.
             self.list.push(DisplayItem::Rect { rect: b.content_rect, color: Color::rgb(0, 0, 0), radius: 0.0 });
         }
         match &b.image {
@@ -1146,8 +1151,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 // No native controls: a centred play affordance so the
                 // element does not look like an empty black box.
+                // A poster already shows what the element is.
                 let playing = b.node.and_then(|n| self.ctx.doc.media_ui.get(&n)).is_some_and(|u| !u.paused);
-                if !playing {
+                if !playing && !poster {
                     self.paint_big_play(b);
                 }
             }
@@ -1358,23 +1364,27 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let img = &img;
         let (iw, ih) = (img.width as f32, img.height as f32);
         let dest = b.content_rect;
+        // Concrete object size (CSS Images 3 §5.5) from the natural
+        // dimensions, with the content box as the default object size.
+        let natural = img.natural_dimensions();
+        let boxed = (dest.w, dest.h);
         let fit = b.style.object_fit;
+        let contain = || match natural.2 {
+            Some(r) => crate::background::fit_ratio(r, boxed, false),
+            None => boxed,
+        };
         let (dw, dh) = match fit {
-            ObjectFit::Fill => (dest.w, dest.h),
-            ObjectFit::Contain | ObjectFit::ScaleDown | ObjectFit::Cover | ObjectFit::None => {
-                if iw <= 0.0 || ih <= 0.0 {
-                    (dest.w, dest.h)
-                } else {
-                    let sx = dest.w / iw;
-                    let sy = dest.h / ih;
-                    let s = match fit {
-                        ObjectFit::Contain => sx.min(sy),
-                        ObjectFit::ScaleDown => sx.min(sy).min(1.0),
-                        ObjectFit::Cover => sx.max(sy),
-                        _ => 1.0,
-                    };
-                    (iw * s, ih * s)
-                }
+            ObjectFit::Fill => boxed,
+            ObjectFit::Contain => contain(),
+            ObjectFit::Cover => match natural.2 {
+                Some(r) => crate::background::fit_ratio(r, boxed, true),
+                None => boxed,
+            },
+            ObjectFit::None => crate::background::concrete_size((None, None), natural, boxed),
+            ObjectFit::ScaleDown => {
+                let none = crate::background::concrete_size((None, None), natural, boxed);
+                let c = contain();
+                if none.0 * none.1 <= c.0 * c.1 { none } else { c }
             }
         };
         let px = b.style.object_position.0;

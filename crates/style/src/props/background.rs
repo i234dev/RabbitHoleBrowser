@@ -13,31 +13,88 @@ fn color(c: &[Token], current: Color) -> Option<Color> {
     }
 }
 
-fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext) -> Vec<GradientStop> {
-    let mut stops = Vec::new();
+/// Color stops and hints. `conic`: positions are `<angle-percentage>`s
+/// (stored as percentages of a turn). Returns None when the list is
+/// invalid (a hint not between two color stops, a stray token, fewer than
+/// one color stop).
+fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext, conic: bool) -> Option<Vec<GradientStop>> {
+    let mut stops: Vec<GradientStop> = Vec::new();
+    let position = |c: &[Token]| -> Option<Length> {
+        if conic {
+            super::angle_percentage(c).map(|a| Length::Percent(a / std::f32::consts::TAU * 100.0))
+        } else {
+            super::len_no_auto(c, ctx)
+        }
+    };
     for arg in args {
         let mut col = None;
         let mut positions = Vec::new();
         for c in arg {
-            if let Some(cc) = color(c, current) {
+            if let (None, Some(cc)) = (col, color(c, current)) {
                 col = Some(cc);
-            } else if let Some(l) = super::len_no_auto(c, ctx) {
+            } else if let Some(l) = position(c) {
                 positions.push(l);
-            } else if let Some(a) = super::angle(c) {
-                // conic stops use angles; map to percent of a turn
-                positions.push(Length::Percent(a / std::f32::consts::TAU * 100.0));
+            } else {
+                return None;
             }
         }
-        let Some(col) = col else { continue }; // color hints are dropped
-        if positions.is_empty() {
-            stops.push(GradientStop { color: col, position: None });
-        } else {
-            for p in positions {
-                stops.push(GradientStop { color: col, position: Some(p) });
+        match col {
+            Some(col) => {
+                if positions.len() > 2 {
+                    return None;
+                }
+                if positions.is_empty() {
+                    stops.push(GradientStop { color: col, position: None, hint: false });
+                }
+                for p in positions {
+                    stops.push(GradientStop { color: col, position: Some(p), hint: false });
+                }
+            }
+            None => {
+                // A color interpolation hint: one position between stops.
+                if positions.len() != 1 || stops.last().is_none_or(|s| s.hint) {
+                    return None;
+                }
+                stops.push(GradientStop { color: Color::TRANSPARENT, position: Some(positions[0]), hint: true });
             }
         }
     }
-    stops
+    if stops.is_empty() || stops.last().is_some_and(|s| s.hint) {
+        return None;
+    }
+    Some(stops)
+}
+
+/// Parse a `<color-interpolation-method>` (`in <space> [<hue> hue]`) at
+/// `toks[*i]`, advancing past it.
+fn parse_interpolation(toks: &[&[Token]], i: &mut usize) -> Option<crate::ColorInterp> {
+    if !toks.get(*i).is_some_and(|t| values::is_ident(t, "in")) {
+        return None;
+    }
+    let mut words = vec!["in".to_string()];
+    let mut j = *i + 1;
+    while j < toks.len() && words.len() < 4 {
+        match values::ident(toks[j]) {
+            Some(w) if w != "to" && w != "at" && w != "from" => words.push(w.to_ascii_lowercase()),
+            _ => break,
+        }
+        j += 1;
+    }
+    // Take the longest word run that parses (`in hsl longer hue`).
+    while words.len() >= 2 {
+        if let Some(m) = crate::ColorInterp::parse(&words) {
+            *i += words.len();
+            return Some(m);
+        }
+        words.pop();
+    }
+    None
+}
+
+/// Is the first argument a prelude (no color in it)?
+fn is_prelude(first: &[&[Token]], current: Color) -> bool {
+    !first.is_empty() && first.iter().all(|t| color(t, current).is_none())
+        && first.first().is_some_and(|t| values::ident(t).is_some() || super::angle(t).is_some())
 }
 
 /// Parse a gradient function component.
@@ -60,50 +117,77 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
     match kind {
         "linear" => {
             let mut direction = GradientDirection::Corner(0, 1);
+            let mut interp = crate::ColorInterp::default();
             let mut stop_start = 0;
             let first = &args[0];
-            if let Some(a) = first.first().and_then(|t| super::angle(t)) {
-                direction = GradientDirection::Angle(a);
+            if is_prelude(first, current) {
                 stop_start = 1;
-            } else if first.first().map(|t| values::is_ident(t, "to")).unwrap_or(false) {
-                let (mut h, mut v) = (0i8, 0i8);
-                for t in &first[1..] {
-                    match values::ident(t).as_deref() {
-                        Some("left") => h = -1,
-                        Some("right") => h = 1,
-                        Some("top") => v = -1,
-                        Some("bottom") => v = 1,
-                        _ => return None,
+                let mut i = 0;
+                let mut seen_dir = false;
+                let mut seen_interp = false;
+                while i < first.len() {
+                    if !seen_interp {
+                        if let Some(m) = parse_interpolation(first, &mut i) {
+                            interp = m;
+                            seen_interp = true;
+                            continue;
+                        }
                     }
-                }
-                direction = GradientDirection::Corner(h, v);
-                stop_start = 1;
-            } else if name.starts_with("-webkit-") || name.starts_with("-moz-") {
-                // Legacy prefixed syntax: a bare side keyword means "from".
-                if let Some(kw) = first.first().and_then(|t| values::ident(t)) {
-                    let d = match kw.as_str() {
-                        "left" => Some((1, 0)),
-                        "right" => Some((-1, 0)),
-                        "top" => Some((0, 1)),
-                        "bottom" => Some((0, -1)),
-                        _ => None,
-                    };
-                    if let Some((h, v)) = d {
+                    if seen_dir {
+                        return None;
+                    }
+                    seen_dir = true;
+                    if let Some(a) = super::angle(first[i]) {
+                        direction = GradientDirection::Angle(a);
+                        i += 1;
+                    } else if values::is_ident(first[i], "to") {
+                        let (mut h, mut v) = (0i8, 0i8);
+                        i += 1;
+                        let mut n = 0;
+                        while i < first.len() && n < 2 {
+                            match values::ident(first[i]).as_deref() {
+                                Some("left") if h == 0 => h = -1,
+                                Some("right") if h == 0 => h = 1,
+                                Some("top") if v == 0 => v = -1,
+                                Some("bottom") if v == 0 => v = 1,
+                                Some("in") => break,
+                                _ => return None,
+                            }
+                            i += 1;
+                            n += 1;
+                        }
+                        if n == 0 {
+                            return None;
+                        }
                         direction = GradientDirection::Corner(h, v);
-                        stop_start = 1;
+                    } else if name.starts_with("-webkit-") || name.starts_with("-moz-") {
+                        // Legacy prefixed syntax: a bare side keyword means "from".
+                        let d = match values::ident(first[i]).as_deref() {
+                            Some("left") => (1, 0),
+                            Some("right") => (-1, 0),
+                            Some("top") => (0, 1),
+                            Some("bottom") => (0, -1),
+                            _ => return None,
+                        };
+                        direction = GradientDirection::Corner(d.0, d.1);
+                        i += 1;
+                        // A second legacy keyword is accepted and ignored.
+                        if i < first.len() && values::ident(first[i]).is_some_and(|k| matches!(k.as_str(), "left" | "right" | "top" | "bottom")) {
+                            i += 1;
+                        }
+                    } else {
+                        return None;
                     }
                 }
             }
-            let stops = gradient_stops(&args[stop_start..], current, ctx);
-            if stops.is_empty() {
-                return None;
-            }
-            Some(BackgroundImage::LinearGradient { direction, stops, repeating })
+            let stops = gradient_stops(&args[stop_start..], current, ctx, false)?;
+            Some(BackgroundImage::LinearGradient { direction, stops, repeating, interp })
         }
         "radial" => {
             let mut shape = RadialShape::Ellipse;
             let mut size = RadialSize::FarthestCorner;
             let mut position = (Length::Percent(50.0), Length::Percent(50.0));
+            let mut interp = crate::ColorInterp::default();
             let mut stop_start = 0;
             let first = &args[0];
             // A first argument without a color is the shape/size/position prelude.
@@ -111,31 +195,43 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                 let mut lens: Vec<Length> = Vec::new();
                 let mut i = 0;
                 let mut explicit_shape = false;
+                let mut keyword_size = false;
                 while i < first.len() {
+                    if let Some(m) = parse_interpolation(first, &mut i) {
+                        interp = m;
+                        continue;
+                    }
                     let t = first[i];
                     if let Some(kw) = values::ident(t) {
                         match kw.as_str() {
-                            "circle" => {
-                                shape = RadialShape::Circle;
+                            "circle" | "ellipse" if !explicit_shape => {
+                                shape = if kw == "circle" { RadialShape::Circle } else { RadialShape::Ellipse };
                                 explicit_shape = true;
                             }
-                            "ellipse" => {
-                                shape = RadialShape::Ellipse;
-                                explicit_shape = true;
+                            "closest-side" | "farthest-side" | "closest-corner" | "farthest-corner" if !keyword_size && lens.is_empty() => {
+                                keyword_size = true;
+                                size = match kw.as_str() {
+                                    "closest-side" => RadialSize::ClosestSide,
+                                    "farthest-side" => RadialSize::FarthestSide,
+                                    "closest-corner" => RadialSize::ClosestCorner,
+                                    _ => RadialSize::FarthestCorner,
+                                };
                             }
-                            "closest-side" => size = RadialSize::ClosestSide,
-                            "farthest-side" => size = RadialSize::FarthestSide,
-                            "closest-corner" => size = RadialSize::ClosestCorner,
-                            "farthest-corner" => size = RadialSize::FarthestCorner,
                             "at" => {
-                                if let Some(p) = super::parse_position(&first[i + 1..], ctx) {
-                                    position = p;
+                                let mut j = i + 1;
+                                while j < first.len() && !values::is_ident(first[j], "in") {
+                                    j += 1;
                                 }
-                                break;
+                                position = super::parse_position(&first[i + 1..j], ctx)?;
+                                i = j;
+                                continue;
                             }
                             _ => return None,
                         }
                     } else if let Some(l) = super::len_no_auto(t, ctx) {
+                        if keyword_size {
+                            return None;
+                        }
                         lens.push(l);
                     } else {
                         return None;
@@ -143,32 +239,61 @@ pub fn parse_gradient(c: &[Token], current: Color, ctx: &LengthContext) -> Optio
                     i += 1;
                 }
                 match lens.len() {
+                    0 => {}
                     1 => {
-                        size = RadialSize::Explicit(lens[0], lens[0]);
-                        if !explicit_shape {
-                            shape = RadialShape::Circle;
+                        if matches!(lens[0], Length::Percent(_)) || matches!(shape, RadialShape::Ellipse) && explicit_shape {
+                            return None;
                         }
+                        size = RadialSize::Explicit(lens[0], lens[0]);
+                        shape = RadialShape::Circle;
                     }
-                    2 => size = RadialSize::Explicit(lens[0], lens[1]),
-                    _ => {}
+                    2 => {
+                        if matches!(shape, RadialShape::Circle) {
+                            return None;
+                        }
+                        size = RadialSize::Explicit(lens[0], lens[1]);
+                    }
+                    _ => return None,
                 }
                 stop_start = 1;
             }
-            let stops = gradient_stops(&args[stop_start..], current, ctx);
-            if stops.is_empty() {
-                return None;
-            }
-            Some(BackgroundImage::RadialGradient { shape, size, position, stops, repeating })
+            let stops = gradient_stops(&args[stop_start..], current, ctx, false)?;
+            Some(BackgroundImage::RadialGradient { shape, size, position, stops, repeating, interp })
         }
         _ => {
-            // conic: approximate as a linear gradient from the top.
             let first = &args[0];
-            let stop_start = if first.iter().all(|t| color(t, current).is_none()) { 1 } else { 0 };
-            let stops = gradient_stops(&args[stop_start.min(args.len())..], current, ctx);
-            if stops.is_empty() {
-                return None;
+            let mut angle = 0.0;
+            let mut position = (Length::Percent(50.0), Length::Percent(50.0));
+            let mut interp = crate::ColorInterp::default();
+            let mut stop_start = 0;
+            if first.iter().all(|t| color(t, current).is_none()) && first.first().is_some_and(|t| values::ident(t).is_some()) {
+                stop_start = 1;
+                let mut i = 0;
+                let (mut seen_from, mut seen_at) = (false, false);
+                while i < first.len() {
+                    if let Some(m) = parse_interpolation(first, &mut i) {
+                        interp = m;
+                        continue;
+                    }
+                    if values::is_ident(first[i], "from") && !seen_from {
+                        seen_from = true;
+                        angle = super::angle(first.get(i + 1)?)?;
+                        i += 2;
+                    } else if values::is_ident(first[i], "at") && !seen_at {
+                        seen_at = true;
+                        let mut j = i + 1;
+                        while j < first.len() && !values::is_ident(first[j], "in") && !values::is_ident(first[j], "from") {
+                            j += 1;
+                        }
+                        position = super::parse_position(&first[i + 1..j], ctx)?;
+                        i = j;
+                    } else {
+                        return None;
+                    }
+                }
             }
-            Some(BackgroundImage::LinearGradient { direction: GradientDirection::Angle(0.0), stops, repeating })
+            let stops = gradient_stops(&args[stop_start..], current, ctx, true)?;
+            Some(BackgroundImage::ConicGradient { angle, position, stops, repeating, interp })
         }
     }
 }

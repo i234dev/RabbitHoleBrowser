@@ -116,7 +116,7 @@ fn background_layers_and_gradients() {
     assert_eq!(l0.size, BackgroundSize::Cover);
     let l1 = &s.background_layers[1];
     match &l1.image {
-        BackgroundImage::LinearGradient { direction, stops, repeating } => {
+        BackgroundImage::LinearGradient { direction, stops, repeating, .. } => {
             assert_eq!(*direction, GradientDirection::Corner(1, 0));
             assert!(!repeating);
             assert_eq!(stops.len(), 2);

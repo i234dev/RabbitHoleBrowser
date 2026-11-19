@@ -40,13 +40,19 @@ impl std::fmt::Debug for SvgTree {
 impl SvgTree {
     /// Parse a standalone SVG document (XML text).
     pub fn parse(xml: &str) -> Option<SvgTree> {
+        Self::parse_in(xml, None)
+    }
+
+    /// Parse a standalone SVG document shown as an image of concrete size
+    /// `viewport` (percentages resolve against it when there is no viewBox).
+    pub fn parse_in(xml: &str, viewport: Option<(f32, f32)>) -> Option<SvgTree> {
         // Drop the XML prolog / DOCTYPE; the HTML parser treats the rest as
         // foreign content once the <svg> element starts.
         let start = xml.find("<svg").or_else(|| xml.find("<SVG"))?;
         let body = &xml[start..];
         let doc = rabbithole_html::parse(&format!("<!doctype html><html><body>{body}</body></html>"));
         let root = doc.find_element("svg")?;
-        Self::from_dom(&doc, root, &|_, _| None)
+        parse::build_in(&doc, root, &|_, _| None, viewport).map(|built| SvgTree { built })
     }
 
     /// Build from an `<svg>` element already in a DOM (inline SVG).
@@ -109,16 +115,29 @@ impl SvgTree {
 
     /// Draw into `canvas` filling `dest` (applies viewBox + preserveAspectRatio).
     pub fn render(&self, canvas: &mut Canvas, fonts: &FontContext, dest: Rect) {
+        self.render_mode(canvas, fonts, dest, false);
+    }
+
+    /// Draw as an image whose concrete size is `dest` (SVG as a CSS image:
+    /// the size replaces `width`/`height`, so `dest` is the viewport and
+    /// content without a `viewBox` is not scaled).
+    pub fn render_viewport(&self, canvas: &mut Canvas, fonts: &FontContext, dest: Rect) {
+        self.render_mode(canvas, fonts, dest, true);
+    }
+
+    fn render_mode(&self, canvas: &mut Canvas, fonts: &FontContext, dest: Rect, viewport: bool) {
         if dest.w <= 0.0 || dest.h <= 0.0 {
             return;
         }
         let b = &self.built;
         let (vw, vh) = match b.viewbox {
             Some(v) => (v.w, v.h),
+            None if viewport => (dest.w, dest.h),
             None => (b.width.unwrap_or(dest.w), b.height.unwrap_or(dest.h)),
         };
         let m = match b.viewbox {
             Some(vb) => units::viewbox_transform(vb, dest, b.par),
+            None if viewport => [1.0, 0.0, 0.0, 1.0, dest.x, dest.y],
             None => {
                 // No viewBox: user units are px; scale the intrinsic size to dest.
                 let sx = if let Some(w) = b.width { dest.w / w } else { 1.0 };
@@ -142,15 +161,43 @@ impl SvgTree {
 
     /// Rasterize to an RGBA image with a transparent background.
     pub fn rasterize(&self, fonts: &FontContext, width: u32, height: u32) -> Image {
+        self.rasterize_mode(fonts, width, height, None)
+    }
+
+    /// Rasterize as an image of concrete size `width`×`height` (see
+    /// [`SvgTree::render_viewport`]).
+    /// `scale` maps the CSS size to the pixel size.
+    pub fn rasterize_viewport(&self, fonts: &FontContext, width: f32, height: f32, scale: f32) -> Image {
+        let pw = (width * scale).round().max(1.0) as u32;
+        let ph = (height * scale).round().max(1.0) as u32;
+        self.rasterize_mode(fonts, pw, ph, Some((width, height)))
+    }
+
+    /// `viewport`: render as an image of that CSS size scaled to the pixels.
+    fn rasterize_mode(&self, fonts: &FontContext, width: u32, height: u32, viewport: Option<(f32, f32)>) -> Image {
         let width = width.max(1);
         let height = height.max(1);
         let dest = Rect::new(0.0, 0.0, width as f32, height as f32);
         let mut on_black = Canvas::new(width, height);
         on_black.clear(Color::BLACK);
-        self.render(&mut on_black, fonts, dest);
+        match viewport {
+            Some((vw, vh)) => {
+                on_black.push_transform([width as f32 / vw.max(1e-3), 0.0, 0.0, height as f32 / vh.max(1e-3), 0.0, 0.0]);
+                self.render_mode(&mut on_black, fonts, Rect::new(0.0, 0.0, vw, vh), true);
+                on_black.pop_transform();
+            }
+            None => self.render_mode(&mut on_black, fonts, dest, false),
+        }
         let mut on_white = Canvas::new(width, height);
         on_white.clear(Color::WHITE);
-        self.render(&mut on_white, fonts, dest);
+        match viewport {
+            Some((vw, vh)) => {
+                on_white.push_transform([width as f32 / vw.max(1e-3), 0.0, 0.0, height as f32 / vh.max(1e-3), 0.0, 0.0]);
+                self.render_mode(&mut on_white, fonts, Rect::new(0.0, 0.0, vw, vh), true);
+                on_white.pop_transform();
+            }
+            None => self.render_mode(&mut on_white, fonts, dest, false),
+        }
         let mut rgba = Vec::with_capacity((width * height * 4) as usize);
         for (pb, pw) in on_black.data.iter().zip(on_white.data.iter()) {
             let (rb, gb, bb) = ((pb >> 16) & 0xff, (pb >> 8) & 0xff, pb & 0xff);

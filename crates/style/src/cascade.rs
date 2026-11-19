@@ -760,6 +760,7 @@ fn apply_declarations(
         ch: pch,
         ex: pex,
         ic: pic,
+        lh: parent.line_height.unwrap_or(parent.font_size * 1.2),
     };
     for (name, value, _) in &resolved {
         match *name {
@@ -784,6 +785,21 @@ fn apply_declarations(
         }
     }
     let (ch, ex, ic) = crate::values::font_units(&font_probe);
+    // The element's line height (for `lh`): its own `line-height`, whose
+    // `lh` units refer to the parent's.
+    let lh = {
+        let probe_ctx = LengthContext { font_size: style.font_size, ch, ex, ic, ..parent_ctx };
+        for (name, value, base) in &resolved {
+            if *name == "line-height" {
+                let ctx = ApplyCtx { len: probe_ctx, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
+                apply_property(name, value, &mut font_probe, parent, &ctx);
+            }
+        }
+        match font_probe.line_height_number {
+            Some(n) => n * style.font_size,
+            None => font_probe.line_height.unwrap_or(style.font_size * 1.2),
+        }
+    };
     drop(font_probe);
 
     // Pass 2: everything else.
@@ -795,6 +811,7 @@ fn apply_declarations(
         ch,
         ex,
         ic,
+        lh,
     };
     // `color` first: `currentcolor` in every other property (borders,
     // backgrounds, shadows...) is the element's final color, whatever the
@@ -940,7 +957,7 @@ pub fn apply_decorations(style: &mut ComputedStyle, parent: &ComputedStyle) {
 pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declaration], root_font_size: f32, viewport: (f32, f32)) -> ComputedStyle {
     let mut style = base.clone();
     let (ch, ex, ic) = crate::values::font_units(base);
-    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch, ex, ic };
+    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch, ex, ic, lh: base.line_height.unwrap_or(base.font_size * 1.2) };
     let keep = |_: &str, raw: &str| Some(raw.to_string());
     let ctx = ApplyCtx { len, pseudo: false, base: None, document_base: "", resolve: &keep };
     for d in decls {
@@ -949,7 +966,7 @@ pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declara
         }
         if d.name == "font-size" {
             let (pch, pex, pic) = crate::values::font_units(parent);
-            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch: pch, ex: pex, ic: pic };
+            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch: pch, ex: pex, ic: pic, lh: parent.line_height.unwrap_or(parent.font_size * 1.2) };
             apply_font_size(&d.value, &mut style, parent, &pctx);
             continue;
         }
