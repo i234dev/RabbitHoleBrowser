@@ -196,15 +196,17 @@ fn paint_text(text: &str) -> Rc<str> {
     }
 }
 
+/// An inline box whose `vertical-align` moves it (and its text) as a whole.
+fn aligns_as_a_whole(s: &ComputedStyle) -> bool {
+    matches!(s.vertical_align, VerticalAlign::Top | VerticalAlign::Bottom | VerticalAlign::TextTop | VerticalAlign::TextBottom | VerticalAlign::Middle)
+}
+
 /// Per item, the inline box (its Open item index) whose `top` /
 /// `bottom` / `text-*` / `middle` alignment moves it: the outermost such
 /// box enclosing it (`usize::MAX` for none). Empty when no inline box
 /// has such an alignment.
 fn inline_nesting(items: &[InlineItem]) -> Vec<usize> {
-    let keyword = |s: &ComputedStyle| matches!(s.vertical_align, VerticalAlign::Top | VerticalAlign::Bottom | VerticalAlign::TextTop | VerticalAlign::TextBottom | VerticalAlign::Middle);
-    if !items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if keyword(style))) {
-        return Vec::new();
-    }
+    let keyword = aligns_as_a_whole;
     let mut out = vec![usize::MAX; items.len()];
     let mut parents: Vec<usize> = Vec::new();
     for (i, it) in items.iter().enumerate() {
@@ -482,6 +484,7 @@ impl<'a> Layouter<'a> {
                 .collect()
         };
         let pieces = self.build_pieces(&b.items, &b.style, &tcy);
+        b.aligned_inline = b.items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if aligns_as_a_whole(style)));
         b.pieces = Some(pieces);
     }
 
@@ -781,7 +784,7 @@ impl<'a> Layouter<'a> {
         }
         let (rel, rel_kids) = relative_offsets(&items, b.children.len(), cb.width, cb.height);
         let parent_open = open_parents(&items, &cstyle);
-        let in_inline = inline_nesting(&items);
+        let in_inline = if b.aligned_inline { inline_nesting(&items) } else { Vec::new() };
         let bidi_items = items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal));
         // `text-wrap: balance` (CSS Text 4 §6.1.2): per group of lines
         // between forced breaks, the narrowest wrap width that keeps its

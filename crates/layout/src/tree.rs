@@ -359,6 +359,9 @@ pub struct LayoutBox {
     /// A wrapper holding a horizontal-in-vertical composition
     /// (`text-combine-upright`): squeezed into 1em.
     pub(crate) wm_tcy: bool,
+    /// Its inline content has an inline box aligned by `top` / `bottom` /
+    /// `text-*` / `middle` (set with the pieces).
+    pub(crate) aligned_inline: bool,
     /// Logical → physical mapping of a wrapper's contents.
     pub(crate) wm_transform: Option<Matrix>,
     /// How a wrapper's contents are turned (see `wm.rs`).
@@ -441,6 +444,7 @@ impl LayoutBox {
             counter_io: None,
             wm_wrapper: false,
             wm_tcy: false,
+            aligned_inline: false,
             ruby: 0,
             wm_transform: None,
             wm_kind: WmKind::Cw,
