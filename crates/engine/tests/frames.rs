@@ -494,3 +494,18 @@ fn damage_repainted_frames_match_full_paints() {
         assert!(full.to_rgba8() == shown.pixels(), "step {n}: damage repaint differs from a full paint");
     }
 }
+
+#[test]
+fn a_fragment_navigation_during_load_does_not_reload_the_frame() {
+    // A hash router setting `location` to `#/` while its document loads
+    // stays in that document: the iframe fires `load` once and the page
+    // is not fetched again (a second `load` restarted Speedometer steps).
+    let mut e = engine();
+    let child = "<p id=p>app</p><script>location.href = location.href.split('#')[0] + '#/'; document.getElementById('p').textContent = 'routed';</script>";
+    let mut page = load(&mut e, &format!(
+        r#"<script>var loads = 0;</script><iframe id="f" onload="loads++" src="data:text/html,{}"></iframe>"#,
+        escape_attr(&child.replace('#', "%23").replace(' ', "%20"))
+    ));
+    settle(&e, &mut page);
+    assert_eq!(eval(&e, &mut page, "String(loads)"), "1");
+}

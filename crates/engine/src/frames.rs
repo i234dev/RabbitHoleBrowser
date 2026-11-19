@@ -982,10 +982,26 @@ impl Engine {
 
     /// Load `url` in the frame hosted by `node`.
     pub(crate) fn navigate_frame_node(&self, page: &mut Page, node: NodeId, url: Url) {
-        let Some(c) = page.frame_mut(node) else { return };
         if url.scheme == "javascript" {
             return;
         }
+        // A navigation to a fragment of the frame's current document (a
+        // hash router setting `location = '#/'` while it loads) stays in
+        // that document: no new fetch, no second `load` on the iframe.
+        if let Some(i) = Self::child_index(page, node) {
+            let same_document = url.fragment.is_some()
+                && page.frames.children[i].pending.is_none()
+                && page.frames.children[i].page.as_ref().is_some_and(|p| p.url.without_fragment() == url.without_fragment());
+            if same_document {
+                if let Some(Some(o)) = self.with_child(page, i, |child| self.navigate_fragment(child, url.clone(), true, false)) {
+                    if let Some(c) = page.frames.children.get_mut(i) {
+                        c.dirty |= o.relayout;
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(c) = page.frame_mut(node) else { return };
         // Keep the iframe's `src` as the author set it; the frame shows
         // the new document.
         let vp = Viewport { width: c.size.0.max(1.0), height: c.size.1.max(1.0) };
