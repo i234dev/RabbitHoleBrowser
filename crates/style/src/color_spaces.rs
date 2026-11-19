@@ -1,7 +1,9 @@
 //! CSS Color 4/5 beyond sRGB notations: `hwb()`, `lab()`, `lch()`,
 //! `oklab()`, `oklch()`, `color()` (sRGB, linear sRGB, Display P3, A98,
 //! ProPhoto, Rec.2020, XYZ), `color-mix()`, `light-dark()` and the system
-//! colors. Everything is converted (and gamut-clipped) to 8-bit sRGB.
+//! colors. Computed values are gamut-clipped 8-bit sRGB; gradients keep
+//! the unclipped linear-light sRGB of the newer notations ([`Wide`]) so
+//! interpolation sees the real color and clipping happens per sample.
 
 use crate::values::{components, ColorValue};
 use rabbithole_css::Token;
@@ -175,6 +177,10 @@ fn predefined(space: &str, v: Rgb) -> Option<Rgb> {
             &[0.4865709486482162, 0.26566769316909306, 0.1982172852343625, 0.2289745640697488, 0.6917385218365064, 0.079286914093745, 0.0, 0.04511338185890264, 1.043944368900976],
             &gamma_decode,
         ),
+        "display-p3-linear" => rgb_space(
+            &[0.4865709486482162, 0.26566769316909306, 0.1982172852343625, 0.2289745640697488, 0.6917385218365064, 0.079286914093745, 0.0, 0.04511338185890264, 1.043944368900976],
+            &|x: f64| x,
+        ),
         "a98-rgb" => rgb_space(
             &[0.5766690429101305, 0.1855582379065463, 0.1882286462349947, 0.29734497525053605, 0.6273635662554661, 0.0752914584939978, 0.02703136138641234, 0.07068885253582723, 0.9913375368376388],
             &|x: f64| x.signum() * x.abs().powf(563.0 / 256.0),
@@ -206,32 +212,84 @@ fn predefined(space: &str, v: Rgb) -> Option<Rgb> {
     })
 }
 
-/// System colors (CSS Color 4 §6.2) as rendered by Blink in light mode.
+/// System colors (CSS Color 4 §6.2) as rendered by Blink in light mode;
+/// the deprecated ones (§6.3) are the same as their replacements.
 pub fn system_color(name: &str) -> Option<Color> {
+    let name = match name {
+        "activeborder" | "inactiveborder" | "threeddarkshadow" | "threedshadow" | "threedlightshadow" | "windowframe" => "buttonborder",
+        "activecaption" | "appworkspace" | "background" | "inactivecaption" | "infobackground" | "menu" | "scrollbar" | "window" => "canvas",
+        "buttonhighlight" | "buttonshadow" | "threedface" | "threedhighlight" => "buttonface",
+        "captiontext" | "infotext" | "menutext" | "windowtext" => "canvastext",
+        "inactivecaptiontext" => "graytext",
+        n => n,
+    };
     Some(match name {
-        "canvas" | "field" | "window" | "background" | "buttonhighlight" | "threedhighlight" | "infobackground" | "menu" => Color::rgb(255, 255, 255),
-        "canvastext" | "fieldtext" | "buttontext" | "windowtext" | "highlighttext" | "selecteditemtext" | "marktext" | "menutext" | "infotext" | "captiontext" => {
-            Color::rgb(0, 0, 0)
-        }
+        "canvas" | "field" => Color::rgb(255, 255, 255),
+        "canvastext" | "fieldtext" | "buttontext" | "highlighttext" | "selecteditemtext" | "marktext" => Color::rgb(0, 0, 0),
         "linktext" => Color::rgb(0, 0, 238),
         "visitedtext" => Color::rgb(85, 26, 139),
         "activetext" => Color::rgb(255, 0, 0),
-        "buttonface" | "threedface" | "activeborder" | "inactiveborder" | "scrollbar" | "appworkspace" | "inactivecaption" => Color::rgb(239, 239, 239),
-        "buttonborder" | "buttonshadow" | "threedshadow" | "threeddarkshadow" | "windowframe" | "threedlightshadow" => Color::rgb(118, 118, 118),
-        "graytext" | "inactivecaptiontext" => Color::rgb(109, 109, 109),
+        "buttonface" => Color::rgb(239, 239, 239),
+        "buttonborder" => Color::rgb(118, 118, 118),
+        "graytext" => Color::rgb(109, 109, 109),
         "highlight" | "selecteditem" => Color::rgb(181, 213, 255),
         "mark" => Color::rgb(255, 255, 0),
-        "accentcolor" | "activecaption" => Color::rgb(0, 117, 255),
+        "accentcolor" => Color::rgb(0, 117, 255),
         "accentcolortext" => Color::rgb(255, 255, 255),
         _ => return None,
     })
 }
 
+/// A color kept at full precision: linear-light sRGB components (not
+/// clipped to the sRGB gamut) and alpha.
+pub type Wide = [f32; 4];
+
 /// A color of one of the newer notations, or `None` when `c` is not one
 /// (or is invalid).
 pub fn parse_function(f: &str, c: &[Token]) -> Option<ColorValue> {
+    if f == "light-dark" {
+        // The light scheme is the one we render.
+        let parts = split_top_commas(strip(c));
+        if parts.len() != 2 {
+            return None;
+        }
+        return crate::values::parse_color(parts[0]);
+    }
+    let (lin, a) = parse_linear(f, c)?;
+    Some(ColorValue::Color(to_color(lin, a)))
+}
+
+/// The unclipped color of a component in one of the CSS Color 4/5
+/// notations (`lab()`, `oklch()`, `color()`, `color-mix()`, ...); `None`
+/// for the legacy sRGB notations, `currentcolor` and invalid values.
+pub fn parse_wide(c: &[Token]) -> Option<Wide> {
+    let [Token::Function(f), ..] = c else { return None };
+    let f = f.to_ascii_lowercase();
+    if matches!(f.as_str(), "rgb" | "rgba" | "hsl" | "hsla" | "hwb" | "light-dark") {
+        return None;
+    }
+    let (lin, a) = parse_linear(&f, c)?;
+    Some([lin[0] as f32, lin[1] as f32, lin[2] as f32, a as f32])
+}
+
+/// Colors outside the sRGB gamut are clipped per channel, as engines do,
+/// except at the ends of the lightness range, where gamut mapping (CSS
+/// Color 4 §13.2) gives white and black whatever the chroma. Lightness
+/// within rounding of an end counts as that end.
+fn lightness_ends(lin: Rgb, l: f64, max: f64) -> Rgb {
+    let out = lin.iter().any(|v| !(-1e-4..=1.0001).contains(v));
+    if out && l >= max * (1.0 - 1e-5) {
+        [1.0; 3]
+    } else if out && l <= max * 1e-5 {
+        [0.0; 3]
+    } else {
+        lin
+    }
+}
+
+fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
     let (vals, a) = args(c)?;
-    let color = match f {
+    Some(match f {
         "hwb" => {
             if vals.len() != 3 {
                 return None;
@@ -247,31 +305,33 @@ pub fn parse_function(f: &str, c: &[Token]) -> Option<ColorValue> {
                 let f = |x: f32| x as f64 * (1.0 - w - bl) + w;
                 (f(r), f(g), f(b))
             };
-            to_color([gamma_decode(r), gamma_decode(g), gamma_decode(b)], alpha(a)?)
+            ([gamma_decode(r), gamma_decode(g), gamma_decode(b)], alpha(a)?)
         }
         "lab" | "oklab" => {
             if vals.len() != 3 {
                 return None;
             }
             let ok = f == "oklab";
-            let l = num(vals[0], if ok { 1.0 } else { 100.0 })?;
+            let max = if ok { 1.0 } else { 100.0 };
+            let l = num(vals[0], max)?;
             let ab_ref = if ok { 0.4 } else { 125.0 };
             let (x, y) = (num(vals[1], ab_ref)?, num(vals[2], ab_ref)?);
-            let l = l.clamp(0.0, if ok { 1.0 } else { 100.0 });
+            let l = l.clamp(0.0, max);
             let lin = if ok { oklab_to_linear(l, x, y) } else { lab_to_linear(l, x, y) };
-            to_color(lin, alpha(a)?)
+            (lightness_ends(lin, l, max), alpha(a)?)
         }
         "lch" | "oklch" => {
             if vals.len() != 3 {
                 return None;
             }
             let ok = f == "oklch";
-            let l = num(vals[0], if ok { 1.0 } else { 100.0 })?;
+            let max = if ok { 1.0 } else { 100.0 };
+            let l = num(vals[0], max)?;
             let ch = num(vals[1], if ok { 0.4 } else { 150.0 })?.max(0.0);
             let (x, y) = polar(ch, hue(vals[2])?);
-            let l = l.clamp(0.0, if ok { 1.0 } else { 100.0 });
+            let l = l.clamp(0.0, max);
             let lin = if ok { oklab_to_linear(l, x, y) } else { lab_to_linear(l, x, y) };
-            to_color(lin, alpha(a)?)
+            (lightness_ends(lin, l, max), alpha(a)?)
         }
         "color" => {
             let space = match vals.first()? {
@@ -281,23 +341,12 @@ pub fn parse_function(f: &str, c: &[Token]) -> Option<ColorValue> {
             if vals.len() != 4 {
                 return None;
             }
-            let xyz = space.starts_with("xyz");
-            let r = if xyz { 1.0 } else { 1.0 };
-            let v = [num(vals[1], r)?, num(vals[2], r)?, num(vals[3], r)?];
-            to_color(predefined(&space, v)?, alpha(a)?)
+            let v = [num(vals[1], 1.0)?, num(vals[2], 1.0)?, num(vals[3], 1.0)?];
+            (predefined(&space, v)?, alpha(a)?)
         }
-        "light-dark" => {
-            // The light scheme is the one we render.
-            let parts = split_top_commas(strip(c));
-            if parts.len() != 2 {
-                return None;
-            }
-            return crate::values::parse_color(parts[0]);
-        }
-        "color-mix" => return color_mix(c),
+        "color-mix" => color_mix(c)?,
         _ => return None,
-    };
-    Some(ColorValue::Color(color))
+    })
 }
 
 /// Split function arguments at top-level commas.
@@ -420,9 +469,9 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> Rgb {
 
 /// Color components in an interpolation space: (hue, the others).
 /// A missing hue (achromatic colors) is None.
-fn to_interp(c: Color, space: InterpSpace) -> (Option<f64>, Rgb) {
-    let srgb = [c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0];
-    let lin = || linear_of(c);
+fn to_interp(linear: Rgb, space: InterpSpace) -> (Option<f64>, Rgb) {
+    let srgb = linear.map(gamma_encode);
+    let lin = || linear;
     match space {
         InterpSpace::Srgb => (None, srgb),
         InterpSpace::SrgbLinear => (None, lin()),
@@ -449,7 +498,7 @@ fn to_interp(c: Color, space: InterpSpace) -> (Option<f64>, Rgb) {
     }
 }
 
-fn from_interp(h: f64, v: Rgb, space: InterpSpace, a: f64) -> Color {
+fn from_interp(h: f64, v: Rgb, space: InterpSpace) -> Rgb {
     let lin = match space {
         InterpSpace::Srgb => [gamma_decode(v[0]), gamma_decode(v[1]), gamma_decode(v[2])],
         InterpSpace::SrgbLinear => v,
@@ -475,16 +524,39 @@ fn from_interp(h: f64, v: Rgb, space: InterpSpace, a: f64) -> Color {
             if space == InterpSpace::Lch { lab_to_linear(v[0], x, y) } else { oklab_to_linear(v[0], x, y) }
         }
     };
-    to_color(lin, a.clamp(0.0, 1.0))
+    lin
 }
 
 /// Interpolate `a`→`b` at `t` in the given space (premultiplied alpha,
 /// hue arcs per the hue method; CSS Color 4 §12.4).
 pub fn interpolate(a: Color, b: Color, t: f32, m: ColorInterp) -> Color {
-    let t = t as f64;
-    let (aa, ab) = (a.a as f64 / 255.0, b.a as f64 / 255.0);
-    let (ha, va) = to_interp(a, m.space);
-    let (hb, vb) = to_interp(b, m.space);
+    let (lin, alpha) = interpolate_linear((linear_of(a), a.a as f64 / 255.0), (linear_of(b), b.a as f64 / 255.0), t as f64, m);
+    to_color(lin, alpha)
+}
+
+/// [`interpolate`] between full-precision colors; the result is not
+/// clipped to the sRGB gamut.
+pub fn interpolate_wide(a: Wide, b: Wide, t: f32, m: ColorInterp) -> Wide {
+    let w = |c: Wide| ([c[0] as f64, c[1] as f64, c[2] as f64], c[3] as f64);
+    let (lin, alpha) = interpolate_linear(w(a), w(b), t as f64, m);
+    [lin[0] as f32, lin[1] as f32, lin[2] as f32, alpha as f32]
+}
+
+/// The 8-bit sRGB color of a full-precision one (clipped per channel).
+pub fn wide_to_color(c: Wide) -> Color {
+    to_color([c[0] as f64, c[1] as f64, c[2] as f64], c[3] as f64)
+}
+
+/// The full-precision form of an 8-bit sRGB color.
+pub fn color_to_wide(c: Color) -> Wide {
+    let l = linear_of(c);
+    [l[0] as f32, l[1] as f32, l[2] as f32, c.a as f32 / 255.0]
+}
+
+fn interpolate_linear(a: (Rgb, f64), b: (Rgb, f64), t: f64, m: ColorInterp) -> (Rgb, f64) {
+    let (aa, ab) = (a.1, b.1);
+    let (ha, va) = to_interp(a.0, m.space);
+    let (hb, vb) = to_interp(b.0, m.space);
     let alpha = aa + (ab - aa) * t;
     let polar = matches!(m.space, InterpSpace::Hsl | InterpSpace::Hwb | InterpSpace::Lch | InterpSpace::Oklch);
     // Transparent colors are "missing" in alpha-weighted terms only.
@@ -550,10 +622,10 @@ pub fn interpolate(a: Color, b: Color, t: f32, m: ColorInterp) -> Color {
     } else {
         0.0
     };
-    from_interp(h, v, m.space, alpha)
+    (from_interp(h, v, m.space), alpha.clamp(0.0, 1.0))
 }
 
-fn color_mix(c: &[Token]) -> Option<ColorValue> {
+fn color_mix(c: &[Token]) -> Option<(Rgb, f64)> {
     let parts = split_top_commas(strip(c));
     if parts.len() != 3 {
         return None;
@@ -566,16 +638,18 @@ fn color_mix(c: &[Token]) -> Option<ColorValue> {
         return None;
     }
     let interp = ColorInterp::parse(&space)?;
-    let item = |toks: &[Token]| -> Option<(Color, Option<f64>)> {
+    let item = |toks: &[Token]| -> Option<((Rgb, f64), Option<f64>)> {
         let comps: Vec<&[Token]> = components(toks).into_iter().filter(|c| !matches!(c, [Token::Whitespace])).collect();
         let mut color = None;
         let mut pct = None;
         for comp in comps {
             if let [Token::Percentage(p)] = comp {
                 pct = Some(*p as f64 / 100.0);
+            } else if let Some(w) = parse_wide(comp) {
+                color = Some(([w[0] as f64, w[1] as f64, w[2] as f64], w[3] as f64));
             } else {
                 match crate::values::parse_color_component(comp)? {
-                    ColorValue::Color(c) => color = Some(c),
+                    ColorValue::Color(c) => color = Some((linear_of(c), c.a as f64 / 255.0)),
                     ColorValue::CurrentColor => return None,
                 }
             }
@@ -584,7 +658,7 @@ fn color_mix(c: &[Token]) -> Option<ColorValue> {
     };
     let (c1, p1) = item(parts[1])?;
     let (c2, p2) = item(parts[2])?;
-    let (mut p1, mut p2) = match (p1, p2) {
+    let (p1, p2) = match (p1, p2) {
         (None, None) => (0.5, 0.5),
         (Some(a), None) => (a, 1.0 - a),
         (None, Some(b)) => (1.0 - b, b),
@@ -595,12 +669,8 @@ fn color_mix(c: &[Token]) -> Option<ColorValue> {
         return None;
     }
     let alpha_mult = sum.min(1.0);
-    p1 /= sum;
-    p2 /= sum;
-    let mut out = interpolate(c1, c2, p2 as f32, interp);
-    out.a = ((out.a as f64) * alpha_mult).round().clamp(0.0, 255.0) as u8;
-    let _ = p1;
-    Some(ColorValue::Color(out))
+    let (lin, alpha) = interpolate_linear(c1, c2, p2 / sum, interp);
+    Some((lin, alpha * alpha_mult))
 }
 
 #[cfg(test)]
@@ -640,5 +710,30 @@ mod tests {
         assert_eq!(color("Canvas"), Some(Color::rgb(255, 255, 255)));
         assert_eq!(color("ButtonFace"), Some(Color::rgb(239, 239, 239)));
         assert!(color("oklch(50% 0.1)").is_none());
+    }
+
+    #[test]
+    fn wide_gamut_and_system_colors() {
+        assert!(close(color("color(display-p3-linear 0.0383 0.2087 0.0156)").unwrap(), Color::rgb(0, 128, 0)));
+        // Deprecated system colors are their replacements.
+        assert_eq!(color("ActiveBorder"), color("ButtonBorder"));
+        assert_eq!(color("ThreeDFace"), color("ButtonFace"));
+        assert_eq!(color("InfoText"), color("CanvasText"));
+        // The lightness ends are white and black whatever the chroma.
+        assert_eq!(color("lch(100% 110 60)"), Some(Color::WHITE));
+        assert_eq!(color("oklch(0% 110 60)"), Some(Color::BLACK));
+        assert_eq!(color("oklab(99.9999% 0.15 0.15)"), color("oklab(1 0.15 0.15)"));
+        // Out-of-gamut colors keep their unclipped value for interpolation.
+        let toks = Tokenizer::tokenize("lch(50% 100% 0deg)");
+        let w = super::parse_wide(&toks).unwrap();
+        assert!(w[..3].iter().any(|v| *v < 0.0 || *v > 1.0));
+        assert!(super::parse_wide(&Tokenizer::tokenize("rgb(1 2 3)")).is_none());
+        // A mix in LCh of out-of-gamut colors stays out of gamut.
+        let mix = super::parse_wide(&Tokenizer::tokenize("color-mix(in lch longer hue, red, blue)")).unwrap();
+        let m = crate::ColorInterp { space: crate::InterpSpace::Lch, hue: crate::HueMethod::Longer };
+        let red = super::parse_wide(&Tokenizer::tokenize("color(srgb 1 0 0)")).unwrap();
+        let blue = super::parse_wide(&Tokenizer::tokenize("color(srgb 0 0 1)")).unwrap();
+        let mid = super::interpolate_wide(red, blue, 0.5, m);
+        assert!(mid.iter().zip(mix.iter()).all(|(a, b)| (a - b).abs() < 1e-4), "{mid:?} {mix:?}");
     }
 }

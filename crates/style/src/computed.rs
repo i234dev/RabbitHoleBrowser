@@ -810,6 +810,9 @@ pub struct GradientStop {
     /// A color interpolation hint (`position` only; `color` is unused):
     /// the midpoint of the transition between its neighbouring stops.
     pub hint: bool,
+    /// The unclipped color of a stop written in a CSS Color 4 notation
+    /// (`color` is its sRGB clip); `None` for legacy sRGB colors.
+    pub wide: Option<crate::Wide>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
