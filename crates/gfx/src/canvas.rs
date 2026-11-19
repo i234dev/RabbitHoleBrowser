@@ -329,6 +329,12 @@ impl Canvas {
             rect
         } else if is_axis_aligned(&m) {
             transform_rect_aligned(&m, rect)
+        } else if m[1].abs() < 1e-6 && m[2].abs() < 1e-6 && m[0] != 0.0 && m[3] != 0.0 {
+            // Mirrored (`scaleX(-1)`, `rotateY(180deg)`): still a rect.
+            let r = transform_rect_aligned(&m, rect);
+            let (x0, x1) = (r.x.min(r.x + r.w), r.x.max(r.x + r.w));
+            let (y0, y1) = (r.y.min(r.y + r.h), r.y.max(r.y + r.h));
+            Rect::new(x0, y0, x1 - x0, y1 - y0)
         } else {
             let path = rect_path(rect);
             return self.fill_path(&path, FillRule::NonZero, &Paint::Solid(color));

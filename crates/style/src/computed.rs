@@ -1058,6 +1058,84 @@ pub enum TransformOp {
     SkewY(f32),
     /// `matrix(a, b, c, d, e, f)`
     Matrix([f32; 6]),
+    /// `translate3d(x, y, z)` / `translateZ(z)` (z in px).
+    Translate3d(Length, Length, f32),
+    /// `scale3d(x, y, z)` / `scaleZ(z)`.
+    Scale3d(f32, f32, f32),
+    /// `rotate3d(x, y, z, angle)` / `rotateX()` / `rotateY()` (radians).
+    Rotate3d(f32, f32, f32, f32),
+    /// `perspective(d)` in px; `None` = `none` (identity).
+    Perspective(Option<f32>),
+    /// `matrix3d()` arguments (column-major, as written).
+    Matrix3d(Box<[f32; 16]>),
+}
+
+impl TransformOp {
+    /// A 2D transform function (no z / perspective component).
+    pub fn is_2d(&self) -> bool {
+        match self {
+            TransformOp::Translate3d(_, _, z) => *z == 0.0,
+            TransformOp::Scale3d(_, _, z) => *z == 1.0,
+            TransformOp::Rotate3d(x, y, _, a) => *a == 0.0 || (*x == 0.0 && *y == 0.0),
+            TransformOp::Perspective(_) => false,
+            TransformOp::Matrix3d(m) => rabbithole_gfx::mat4::is_2d(&rabbithole_gfx::mat4::from_css(m)),
+            _ => true,
+        }
+    }
+}
+
+/// The 3D-related properties beyond `transform` (boxed: most elements
+/// have none): the individual transform properties, `perspective`,
+/// `perspective-origin`, `transform-style`, `backface-visibility` and the
+/// z component of `transform-origin`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transform3dProps {
+    /// `translate` (a `Translate3d`), `None` = `none`.
+    pub translate: Option<TransformOp>,
+    /// `rotate` (a `Rotate3d`).
+    pub rotate: Option<TransformOp>,
+    /// `scale` (a `Scale3d`).
+    pub scale: Option<TransformOp>,
+    /// `perspective` in px (`None` = `none`).
+    pub perspective: Option<f32>,
+    pub perspective_origin: (Length, Length),
+    /// `transform-style: preserve-3d`.
+    pub preserve_3d: bool,
+    /// `backface-visibility: hidden`.
+    pub backface_hidden: bool,
+    /// z component of `transform-origin` (px).
+    pub origin_z: f32,
+    pub transform_box: TransformBox,
+    /// `transform-origin` was declared (SVG elements default to `0 0`).
+    pub origin_specified: bool,
+}
+
+/// `transform-box`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransformBox {
+    ContentBox,
+    BorderBox,
+    FillBox,
+    StrokeBox,
+    #[default]
+    ViewBox,
+}
+
+impl Default for Transform3dProps {
+    fn default() -> Self {
+        Transform3dProps {
+            translate: None,
+            rotate: None,
+            scale: None,
+            perspective: None,
+            perspective_origin: (Length::Percent(50.0), Length::Percent(50.0)),
+            preserve_3d: false,
+            backface_hidden: false,
+            origin_z: 0.0,
+            transform_box: TransformBox::ViewBox,
+            origin_specified: false,
+        }
+    }
 }
 
 // --------------------------------------------------------------- text / misc
@@ -1354,8 +1432,12 @@ pub struct Animation {
 }
 
 /// Simple affine matrix helpers for transforms: [a, b, c, d, e, f] with
-/// x' = a·x + c·y + e, y' = b·x + d·y + f.
+/// x' = a·x + c·y + e, y' = b·x + d·y + f. 3D functions contribute their
+/// flattened (orthographic) effect on the z = 0 plane.
 pub fn transform_matrix(ops: &[TransformOp], width: f32, height: f32, font_size: f32) -> [f32; 6] {
+    if !ops.iter().all(TransformOp::is_2d) {
+        return rabbithole_gfx::mat4::flatten_2d(&transform_matrix_3d(ops, width, height));
+    }
     let mut m = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
     for op in ops {
         let o = match op {
@@ -1364,13 +1446,62 @@ pub fn transform_matrix(ops: &[TransformOp], width: f32, height: f32, font_size:
                 [1.0, 0.0, 0.0, 1.0, x.resolve_or_zero(width), y.resolve_or_zero(height)]
             }
             TransformOp::Scale(x, y) => [*x, 0.0, 0.0, *y, 0.0, 0.0],
-            TransformOp::Rotate(a) => [a.cos(), a.sin(), -a.sin(), a.cos(), 0.0, 0.0],
+            TransformOp::Rotate(a) => {
+                let (s, c) = quarter_snap(*a);
+                [c, s, -s, c, 0.0, 0.0]
+            }
             TransformOp::Skew(x, y) => [1.0, y.tan(), x.tan(), 1.0, 0.0, 0.0],
             TransformOp::SkewX(x) => [1.0, 0.0, x.tan(), 1.0, 0.0, 0.0],
             TransformOp::SkewY(y) => [1.0, y.tan(), 0.0, 1.0, 0.0, 0.0],
             TransformOp::Matrix(mm) => *mm,
+            // 2D forms of 3D functions (lists with real 3D functions take
+            // the 3D path).
+            TransformOp::Translate3d(x, y, _) => [1.0, 0.0, 0.0, 1.0, x.resolve_or_zero(width), y.resolve_or_zero(height)],
+            TransformOp::Scale3d(x, y, _) => [*x, 0.0, 0.0, *y, 0.0, 0.0],
+            TransformOp::Rotate3d(x, y, z, a) if *x == 0.0 && *y == 0.0 => {
+                let a = if *z < 0.0 { -*a } else if *z == 0.0 { 0.0 } else { *a };
+                let (s, c) = quarter_snap(a);
+                [c, s, -s, c, 0.0, 0.0]
+            }
+            _ => rabbithole_gfx::mat4::flatten_2d(&op_matrix_3d(op, width, height)),
         };
         m = multiply_matrix(m, o);
+    }
+    m
+}
+
+/// (sin, cos) of an angle, exact at quarter turns (no 1e-8 residues that
+/// would turn a 180° rotation into a slightly skewed one).
+fn quarter_snap(a: f32) -> (f32, f32) {
+    let snap = |v: f32| if (v - v.round()).abs() < 1e-6 { v.round() } else { v };
+    (snap(a.sin()), snap(a.cos()))
+}
+
+/// The 4×4 matrix of one transform function (percentages against the
+/// reference box size).
+pub fn op_matrix_3d(op: &TransformOp, width: f32, height: f32) -> rabbithole_gfx::mat4::Mat4 {
+    use rabbithole_gfx::mat4;
+    match op {
+        TransformOp::Translate(x, y) => mat4::translate(x.resolve_or_zero(width), y.resolve_or_zero(height), 0.0),
+        TransformOp::Translate3d(x, y, z) => mat4::translate(x.resolve_or_zero(width), y.resolve_or_zero(height), *z),
+        TransformOp::Scale(x, y) => mat4::scale(*x, *y, 1.0),
+        TransformOp::Scale3d(x, y, z) => mat4::scale(*x, *y, *z),
+        TransformOp::Rotate(a) => mat4::rotate(0.0, 0.0, 1.0, *a),
+        TransformOp::Rotate3d(x, y, z, a) => mat4::rotate(*x, *y, *z, *a),
+        TransformOp::Skew(x, y) => mat4::from_2d(&[1.0, y.tan(), x.tan(), 1.0, 0.0, 0.0]),
+        TransformOp::SkewX(x) => mat4::from_2d(&[1.0, 0.0, x.tan(), 1.0, 0.0, 0.0]),
+        TransformOp::SkewY(y) => mat4::from_2d(&[1.0, y.tan(), 0.0, 1.0, 0.0, 0.0]),
+        TransformOp::Matrix(m) => mat4::from_2d(m),
+        TransformOp::Perspective(d) => mat4::perspective(*d),
+        TransformOp::Matrix3d(m) => mat4::from_css(m),
+    }
+}
+
+/// The 4×4 matrix of a transform list.
+pub fn transform_matrix_3d(ops: &[TransformOp], width: f32, height: f32) -> rabbithole_gfx::mat4::Mat4 {
+    let mut m = rabbithole_gfx::mat4::IDENTITY4;
+    for op in ops {
+        m = rabbithole_gfx::mat4::mul(&m, &op_matrix_3d(op, width, height));
     }
     m
 }
@@ -1560,6 +1691,8 @@ pub struct ComputedStyle {
     pub text_shadow: Vec<Shadow>,
     pub transform: Vec<TransformOp>,
     pub transform_origin: (Length, Length),
+    /// Individual transforms and 3D properties (`None`: all initial).
+    pub transform3d: Option<Box<Transform3dProps>>,
     pub outline_width: f32,
     pub outline_style: BorderStyle,
     /// `None` = `invert`/currentcolor
@@ -1620,6 +1753,8 @@ pub struct ComputedStyle {
     /// `mix-blend-mode` (see `rabbithole_gfx::blend_mode_index`; 0 =
     /// normal).
     pub mix_blend_mode: u8,
+    /// `isolation: isolate`.
+    pub isolate: bool,
     /// `text-wrap-style: balance` (inherited).
     pub text_wrap_balance: bool,
     /// `text-autospace` adds space between ideographs and other letters
@@ -1875,6 +2010,7 @@ impl ComputedStyle {
             text_shadow: Vec::new(),
             transform: Vec::new(),
             transform_origin: (Length::Percent(50.0), Length::Percent(50.0)),
+            transform3d: None,
             outline_width: 0.0,
             outline_style: BorderStyle::None,
             outline_color: None,
@@ -1904,6 +2040,7 @@ impl ComputedStyle {
             text_emphasis_right: true,
             ruby_under: false,
             mix_blend_mode: 0,
+            isolate: false,
             multicol: false,
             text_wrap_balance: false,
             text_autospace: false,
@@ -2169,14 +2306,67 @@ impl ComputedStyle {
         r
     }
 
+    /// A transform other than `none` (`transform` or an individual
+    /// transform property).
     pub fn has_transform(&self) -> bool {
-        !self.transform.is_empty()
+        !self.transform.is_empty() || self.transform3d.as_ref().is_some_and(|t| t.translate.is_some() || t.rotate.is_some() || t.scale.is_some())
+    }
+
+    /// The 3D properties, for writing.
+    pub fn transform3d_mut(&mut self) -> &mut Transform3dProps {
+        self.transform3d.get_or_insert_with(Default::default)
+    }
+
+    /// `perspective` in px (`None` = `none`).
+    pub fn perspective(&self) -> Option<f32> {
+        self.transform3d.as_ref().and_then(|t| t.perspective)
+    }
+
+    /// `transform-style: preserve-3d` as specified (see
+    /// [`ComputedStyle::preserves_3d`] for the used value).
+    pub fn preserve_3d(&self) -> bool {
+        self.transform3d.as_ref().is_some_and(|t| t.preserve_3d)
+    }
+
+    /// The used `transform-style`: grouping properties force `flat` (CSS
+    /// Transforms 2 §grouping property values).
+    pub fn preserves_3d(&self) -> bool {
+        self.preserve_3d()
+            && self.overflow_x == Overflow::Visible
+            && self.overflow_y == Overflow::Visible
+            && self.opacity >= 1.0
+            && self.filters.is_empty()
+            && self.clip_path.is_none()
+            && self.mix_blend_mode == 0
+            && !self.isolate
+            && self.clip_rect.is_none()
+            && self.mask_layers.iter().all(|l| matches!(l.image, BackgroundImage::None))
+            && !self.contain_paint
+    }
+
+    /// `backface-visibility: hidden`.
+    pub fn backface_hidden(&self) -> bool {
+        self.transform3d.as_ref().is_some_and(|t| t.backface_hidden)
+    }
+
+    /// The full transform list: `translate`, `rotate`, `scale`, then
+    /// `transform` (CSS Transforms 2 §ctm).
+    pub fn transform_ops(&self) -> std::borrow::Cow<'_, [TransformOp]> {
+        match self.transform3d.as_deref() {
+            Some(t) if t.translate.is_some() || t.rotate.is_some() || t.scale.is_some() => {
+                let mut v: Vec<TransformOp> = [&t.translate, &t.rotate, &t.scale].into_iter().flatten().cloned().collect();
+                v.extend(self.transform.iter().cloned());
+                std::borrow::Cow::Owned(v)
+            }
+            _ => std::borrow::Cow::Borrowed(&self.transform),
+        }
     }
 
     /// Does this element establish a stacking context?
     pub fn is_stacking_context(&self) -> bool {
         self.opacity < 1.0
             || self.has_transform()
+            || self.transform3d.as_ref().is_some_and(|t| t.perspective.is_some() || t.preserve_3d)
             || self.creates_stacking_context
             || (matches!(self.position, Position::Absolute | Position::Relative | Position::Sticky) && self.z_index.is_some())
             || self.position == Position::Fixed

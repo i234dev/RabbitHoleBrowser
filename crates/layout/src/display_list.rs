@@ -130,6 +130,55 @@ pub enum DisplayItem {
     /// Items inside are in viewport coordinates (not scrolled).
     PushFixed,
     PopFixed,
+    /// A box with `mix-blend-mode`: `items` painted offscreen (with their
+    /// coverage) and blended onto what is below with `mode` (see
+    /// `rabbithole_gfx::blend_mode_index`) and `opacity`.
+    Blended {
+        bounds: Rect,
+        mode: u8,
+        opacity: f32,
+        items: Vec<DisplayItem>,
+    },
+    /// An isolated group (a stacking context with blended descendants):
+    /// `items` composited offscreen from a transparent backdrop, so that
+    /// blend modes inside mix with the group only (CSS Compositing 1 §3.2).
+    Isolated {
+        bounds: Rect,
+        items: Vec<DisplayItem>,
+    },
+    /// A box with a 3D transform, or a plane of a 3D rendering context
+    /// (CSS Transforms 2): its painting mapped through a 4×4 matrix.
+    Transform3d(Box<Group3d>),
+}
+
+/// The painting of a box under a 3D transform.
+#[derive(Debug, Clone)]
+pub struct Group3d {
+    /// Maps the items' (document) coordinates into the parent's: the
+    /// box's transform preceded by its containing block's perspective.
+    pub matrix: rabbithole_gfx::mat4::Mat4,
+    /// `backface-visibility: hidden`.
+    pub backface_hidden: bool,
+    /// The used `transform-style` is `preserve-3d`: nested groups are
+    /// planes of the same 3D rendering context instead of being
+    /// flattened into this one.
+    pub preserve: bool,
+    /// `mix-blend-mode` of the box, applied when the group is composited.
+    pub blend: u8,
+    pub items: Vec<DisplayItem>,
+}
+
+/// How a box's containing block affects its 3D transform.
+#[derive(Debug, Clone, Copy)]
+struct Parent3d {
+    /// The containing block's `perspective` (document coordinates).
+    perspective: Option<rabbithole_gfx::mat4::Mat4>,
+    /// The containing block preserves 3D: the box is a plane of its 3D
+    /// rendering context.
+    preserve: bool,
+    /// Its element: only its DOM children are affected (not boxes inside
+    /// an inline child, CSS Transforms 2 §perspective).
+    node: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -338,6 +387,9 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         bounds,
         root,
         skip_root_bg: root_bg_painted,
+        canvas_bg: !bg.is_transparent(),
+        blends: 0,
+        snap_origin: (0.0, 0.0),
         sticky_scrollport: Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height),
         nested_port: false,
         flow_cb: Rect::default(),
@@ -349,6 +401,9 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         wm_bg: None,
         wm_m: None,
         in_clamped: false,
+        parents3d: Vec::new(),
+        child3d: 0,
+        next3d: 0,
     };
     p.paint_stacking_context(root, bounds);
     for (node, b) in top_layer {
@@ -365,6 +420,14 @@ struct Painter<'l, 't, 'a> {
     bounds: Rect,
     root: &'t LayoutBox,
     skip_root_bg: bool,
+    /// A page background was painted under the root group.
+    canvas_bg: bool,
+    /// Blended layers pushed so far (a stacking context whose painting
+    /// added some is isolated).
+    blends: usize,
+    /// Position of the nearest box under a 3D transform (its descendants'
+    /// offsets from it snap to whole pixels).
+    snap_origin: (f32, f32),
     sticky_scrollport: Rect,
     /// The sticky scrollport is an inner scroll container's.
     nested_port: bool,
@@ -395,6 +458,13 @@ struct Painter<'l, 't, 'a> {
     wm_m: Option<Matrix>,
     /// Collecting inside a box after a line-clamp point.
     in_clamped: bool,
+    /// 3D parents (perspective / preserve-3d containing blocks); deferred
+    /// boxes refer to them by index + 1 (0 = none).
+    parents3d: Vec<Parent3d>,
+    /// While collecting: the 3D parent of the children being collected.
+    child3d: u32,
+    /// The 3D parent of the stacking context about to be painted.
+    next3d: u32,
 }
 
 /// Painting phases of the in-flow content of a stacking context.
@@ -415,6 +485,8 @@ struct Deferred<'t> {
     /// Overflow clips (padding boxes) of ancestors between the stacking
     /// context root and this box that apply to it.
     clips: Vec<Rect>,
+    /// Its 3D parent (index + 1 into `Painter::parents3d`, 0 = none).
+    p3d: u32,
 }
 
 impl<'l, 't, 'a> Painter<'l, 't, 'a> {
@@ -565,7 +637,78 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 None => m,
             });
         }
-        if let Some(m) = root.transform_matrix() {
+        let parent3d = std::mem::take(&mut self.next3d);
+        let mut saved_snap = None;
+        let mut singular = false;
+        // A box under a 3D transform or in a 3D rendering context: its
+        // items are grouped (from `group3d.0`) and mapped at paint time.
+        let mut group3d: Option<(usize, usize, Group3d)> = None;
+        let blended = root.style.mix_blend_mode != 0 && root.style.has_transform();
+        let matrix = if root.wm_transform.is_none() && (parent3d != 0 || blended || root.style.transform3d.is_some() || !root.style.transform.iter().all(rabbithole_style::TransformOp::is_2d)) {
+            use rabbithole_gfx::mat4;
+            let mut dom_parent = if root.pseudo.is_some() { root.node } else { root.node.and_then(|n| self.ctx.doc.flat_parent(n)) };
+            // `display: contents` elements have no box: skip them.
+            while let Some(n) = dom_parent.filter(|&n| self.ctx.styles.get(n).is_some_and(|s| s.display == rabbithole_style::Display::Contents)) {
+                dom_parent = self.ctx.doc.flat_parent(n);
+            }
+            let p3d = (parent3d != 0).then(|| self.parents3d[parent3d as usize - 1]).filter(|p| p.node.is_some() && p.node == dom_parent);
+            let own = root.transform_matrix_3d().unwrap_or(mat4::IDENTITY4);
+            // A non-invertible transform hides the box and its content
+            // (CSS Transforms 2 §transform-rendering).
+            singular = mat4::determinant(&own).abs() < 1e-12;
+            let full = match p3d.and_then(|p| p.perspective) {
+                Some(p) => mat4::mul(&p, &own),
+                None => own,
+            };
+            let in_context = p3d.is_some_and(|p| p.preserve);
+            let preserve = root.style.preserves_3d();
+            let backface_hidden = root.style.backface_hidden();
+            // A blended box under a transform that resamples it composites
+            // from an offscreen group (its edges' coverage blends exactly).
+            let resampled = !(mat4::is_2d(&full) && full[0] == 1.0 && full[1] == 0.0 && full[4] == 0.0 && full[5] == 1.0);
+            // Like a composited layer painted at a whole-pixel offset, a
+            // box under a 3D transform has the fraction of its position
+            // applied after the transform (2D transforms keep painting at
+            // subpixel offsets).
+            // (Its offset from the nearest such ancestor, whose position
+            // already snapped.)
+            let snapped = if mat4::is_2d(&full) {
+                full
+            } else {
+                let (rx, ry) = (root.rect.x - self.snap_origin.0, root.rect.y - self.snap_origin.1);
+                saved_snap = Some(std::mem::replace(&mut self.snap_origin, (root.rect.x, root.rect.y)));
+                mat4::mul(&mat4::translate(rx.round() - rx, ry.round() - ry, 0.0), &full)
+            };
+            if in_context || preserve || mat4::is_projective(&full) || backface_hidden && !mat4::is_2d(&full) || blended && resampled {
+                let flat = mat4::flatten_2d(&full);
+                let inverse = crate::tree::invert_matrix(flat);
+                self.push_scope(HitScope::Transform(inverse));
+                // The mapping is not affine: no culling inside.
+                self.bounds = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
+                group3d = Some((self.list.items.len(), self.list.sticky.len(), Group3d { matrix: snapped, backface_hidden, preserve, blend: 0, items: Vec::new() }));
+                None
+            } else if mat4::is_2d(&full) && p3d.and_then(|p| p.perspective).is_none() {
+                // The 2D path (same arithmetic as without 3D properties).
+                root.transform_matrix()
+            } else {
+                Some(mat4::flatten_2d(&snapped))
+            }
+        } else {
+            root.transform_matrix()
+        };
+        if singular {
+            self.list.items.truncate(start);
+            self.list.sticky.truncate(sticky_start);
+            self.scope = saved_scope;
+            self.bounds = saved_bounds;
+            self.flipped = saved_flip;
+            self.wm_bg = saved_wm_bg;
+            if let Some(o) = saved_snap {
+                self.snap_origin = o;
+            }
+            return;
+        }
+        if let Some(m) = matrix {
             self.list.push(DisplayItem::PushTransform(m));
             let inverse = crate::tree::invert_matrix(m);
             self.push_scope(HitScope::Transform(inverse));
@@ -619,6 +762,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.flipped = saved_flip;
             self.wm_bg = saved_wm_bg;
             self.wm_m = saved_wm_m;
+            if let Some(o) = saved_snap {
+                self.snap_origin = o;
+            }
             return;
         }
         if !root.style.backdrop_filters.is_empty() && root.style.visibility != Visibility::Hidden {
@@ -637,26 +783,66 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
         let mask = self.mask_items(root);
-        let layer = layer || mask.is_some();
+        // A 3D group is painted offscreen: its blend mode applies when it
+        // is composited (outside the group), opacity and masks inside.
+        let blend_outside = group3d.is_some() && root.style.mix_blend_mode != 0;
+        // Other blended boxes (without masks) paint into an offscreen
+        // group composited with exact alpha (antialiased edges blend).
+        let blend_group = root.style.mix_blend_mode != 0 && !blend_outside && mask.is_none() && self.list.sticky.len() == sticky_start;
+        let layer = (layer || mask.is_some()) && !(blend_outside && opacity >= 1.0 && mask.is_none()) && !blend_group;
         if layer {
             self.list.push(DisplayItem::PushLayer(root.subtree_bounds()));
         }
         let filter_start = (self.list.items.len(), self.list.sticky.len());
+        let blends_before = self.blends;
         self.paint_stacking_context_inner(root);
         // `filter`: the painted items move into a filtered group (not
         // around sticky descendants, whose items are patched in place).
         if !root.style.filters.is_empty() && self.list.sticky.len() == filter_start.1 {
             let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
             let e = crate::filter::spread(&root.style.filters);
-            let b = root.subtree_bounds();
+            let mut b = root.subtree_bounds();
+            // 3D-transformed descendants may project far outside the boxes.
+            if items.iter().any(|it| matches!(it, DisplayItem::Transform3d(_))) {
+                if let Some(x) = crate::paint3d::extent(items.iter()) {
+                    // (A margin for the resampled edges.)
+                    b = b.union(&Rect::new(x.x - 2.0, x.y - 2.0, x.w + 4.0, x.h + 4.0));
+                }
+            }
             let bounds = Rect::new(b.x - e, b.y - e, b.w + 2.0 * e, b.h + 2.0 * e);
             self.list.push(DisplayItem::Filtered { bounds, filters: root.style.filters.clone(), items });
+        }
+        // Blended descendants mix with this group only: isolate it (the
+        // root element's group too, unless the page background painted
+        // under it is the root element's: CSS Compositing 1 §4.1).
+        if root.style.filters.is_empty()
+            && (!std::ptr::eq(root, self.root) || !self.canvas_bg)
+            && self.list.sticky.len() == filter_start.1
+            && self.blends > blends_before
+        {
+            let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
+            let mut bounds = root.subtree_bounds();
+            if let Some(x) = crate::paint3d::extent(items.iter()) {
+                bounds = bounds.union(&x);
+            }
+            self.list.push(DisplayItem::Isolated { bounds, items });
+            // Its blends need no outer isolation.
+            self.blends = blends_before;
         }
         if let Some(items) = mask {
             self.list.push(DisplayItem::LayerMask(items));
         }
-        if root.style.mix_blend_mode != 0 {
+        if blend_group && self.list.sticky.len() == filter_start.1 {
+            let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
+            let mut bounds = root.subtree_bounds();
+            if let Some(x) = crate::paint3d::extent(items.iter()) {
+                bounds = bounds.union(&x);
+            }
+            self.list.push(DisplayItem::Blended { bounds, mode: root.style.mix_blend_mode, opacity, items });
+            self.blends += 1;
+        } else if root.style.mix_blend_mode != 0 && !blend_outside {
             self.list.push(DisplayItem::LayerBlend(root.style.mix_blend_mode));
+            self.blends += 1;
         }
         if layer {
             self.list.push(DisplayItem::PopLayer(opacity));
@@ -667,7 +853,20 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if rect_clipped {
             self.list.push(DisplayItem::PopClip);
         }
+        if let Some((start, sticky_start, mut g)) = group3d {
+            // Sticky descendants keep the offset of this layout (they are
+            // not patched on scroll inside a 3D group).
+            self.list.sticky.truncate(sticky_start);
+            g.items = self.list.items.drain(start..).collect();
+            if blend_outside {
+                g.blend = root.style.mix_blend_mode;
+            }
+            self.list.push(DisplayItem::Transform3d(Box::new(g)));
+        }
         self.pop_wrappers(pushed_matrix, pushed_transform);
+        if let Some(o) = saved_snap {
+            self.snap_origin = o;
+        }
         self.scope = saved_scope;
         self.bounds = saved_bounds;
         self.flipped = saved_flip;
@@ -770,6 +969,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.push_scope(HitScope::Fixed);
             let vp = Rect::new(0.0, 0.0, self.ctx.viewport_width, self.ctx.viewport_height);
             self.list.fixed_bounds.push(d.b.subtree_bounds());
+            self.next3d = d.p3d;
             self.paint_stacking_context(d.b, vp);
             self.list.push(DisplayItem::PopFixed);
             self.scope = saved;
@@ -786,6 +986,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.sticky_scrollport = *r;
             self.nested_port = true;
         }
+        self.next3d = d.p3d;
         self.paint_stacking_context(d.b, d.cb);
         (self.sticky_scrollport, self.nested_port) = saved_port;
         for _ in &d.clips {
@@ -837,6 +1038,29 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// that belong to the current stacking context. Does not enter boxes
     /// that are themselves deferred.
     fn collect_deferred(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
+        let saved3d = self.child3d;
+        if b.kind != BoxKind::AnonymousBlock {
+            self.child3d = self.parent3d_of(b);
+        }
+        self.collect_deferred_in(b, cb, out, order, flow_clips, abs_clips);
+        self.child3d = saved3d;
+    }
+
+    /// The 3D parent `b` is for its children (0 = none).
+    fn parent3d_of(&mut self, b: &LayoutBox) -> u32 {
+        let Some(t) = b.style.transform3d.as_deref() else { return 0 };
+        if t.perspective.is_none() && !t.preserve_3d {
+            return 0;
+        }
+        let p = Parent3d { perspective: b.child_perspective(), preserve: b.style.preserves_3d(), node: b.node };
+        if p.perspective.is_none() && !p.preserve {
+            return 0;
+        }
+        self.parents3d.push(p);
+        self.parents3d.len() as u32
+    }
+
+    fn collect_deferred_in(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
         // Anonymous blocks and rows are transparent: a sticky cell moves
         // within its row group (or table).
@@ -859,7 +1083,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.in_clamped |= c.clamped;
             if c.fixed && c.flow == Flow::Absolute {
                 *order += 1;
-                out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new() });
+                out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new(), p3d: self.child3d });
                 continue;
             }
             if deferred {
@@ -867,11 +1091,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { flow_cb };
                 let clips = if c.flow == Flow::Absolute { abs_clips.to_vec() } else { flow_clips.to_vec() };
                 out.push(Deferred {
-                    z: if c.is_stacking_context() || c.is_positioned() { c.style.z_index.unwrap_or(0) } else { 0 },
+                    z: Self::z_index(b, c),
                     order: *order,
                     b: c,
                     cb: cb_rect,
                     clips: clips.clone(),
+                    p3d: self.child3d,
                 });
                 if Self::is_pseudo_stacking(c) {
                     let mut inner = clips;
@@ -910,6 +1135,15 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// with z-index auto / 0 keep painting inside `b`: in tree order that
     /// is the same place.
     fn collect_hoisted(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
+        let saved3d = self.child3d;
+        if b.kind != BoxKind::AnonymousBlock {
+            self.child3d = self.parent3d_of(b);
+        }
+        self.collect_hoisted_in(b, cb, out, order, flow_clips, abs_clips);
+        self.child3d = saved3d;
+    }
+
+    fn collect_hoisted_in(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
         for c in &b.children {
             if self.hoisted.contains(&(c as *const LayoutBox as usize)) || c.clamped {
@@ -920,19 +1154,19 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 if c.style.z_index.unwrap_or(0) != 0 {
                     *order += 1;
                     self.hoisted.insert(c as *const LayoutBox as usize);
-                    out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new() });
+                    out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new(), p3d: self.child3d });
                 }
                 continue;
             }
             let deferred = Self::is_deferred(c);
             let clips = if c.flow == Flow::Absolute { abs_clips } else { flow_clips };
             if deferred && c.is_stacking_context() {
-                let z = c.style.z_index.unwrap_or(0);
+                let z = Self::z_index(b, c);
                 if z != 0 {
                     *order += 1;
                     self.hoisted.insert(c as *const LayoutBox as usize);
                     let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { b.content_rect };
-                    out.push(Deferred { z, order: *order, b: c, cb: cb_rect, clips: clips.to_vec() });
+                    out.push(Deferred { z, order: *order, b: c, cb: cb_rect, clips: clips.to_vec(), p3d: self.child3d });
                 }
             } else if deferred {
                 if Self::is_pseudo_stacking(c) {
@@ -949,6 +1183,17 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 self.collect_hoisted(c, cb_for_children, out, order, flow_clips, abs_clips);
             }
+        }
+    }
+
+    /// The used `z-index` of `c` (a child of `b`): it applies to
+    /// positioned boxes and to flex and grid items only (CSS 2.1 §9.9.1,
+    /// Flexbox §4.3, Grid §9.5).
+    fn z_index(b: &LayoutBox, c: &LayoutBox) -> i32 {
+        if c.is_positioned() || matches!(b.formatting, Formatting::Flex | Formatting::Grid) {
+            c.style.z_index.unwrap_or(0)
+        } else {
+            0
         }
     }
 

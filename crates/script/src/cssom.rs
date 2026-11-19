@@ -559,7 +559,64 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         .to_string(),
         "pointer-events" => if s.pointer_events == rabbithole_style::PointerEvents::None { "none".into() } else { "auto".into() },
         "cursor" => s.cursor.into(),
-        "transform" => if s.transform.is_empty() { "none".into() } else { let m = rabbithole_style::transform_matrix(&s.transform, r.w, r.h, s.font_size); format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5]) },
+        "transform" => {
+            if s.transform.is_empty() {
+                "none".into()
+            } else if s.transform.iter().all(rabbithole_style::TransformOp::is_2d) {
+                let m = rabbithole_style::transform_matrix(&s.transform, r.w, r.h, s.font_size);
+                format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5])
+            } else {
+                let m = rabbithole_gfx::mat4::to_css(&rabbithole_style::transform_matrix_3d(&s.transform, r.w, r.h));
+                if rabbithole_gfx::mat4::is_2d(&rabbithole_gfx::mat4::from_css(&m)) {
+                    format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[4], m[5], m[12], m[13])
+                } else {
+                    format!("matrix3d({})", m.iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join(", "))
+                }
+            }
+        }
+        "transform-box" => match s.transform3d.as_ref().map(|t| t.transform_box).unwrap_or_default() {
+            rabbithole_style::TransformBox::ContentBox => "content-box",
+            rabbithole_style::TransformBox::BorderBox => "border-box",
+            rabbithole_style::TransformBox::FillBox => "fill-box",
+            rabbithole_style::TransformBox::StrokeBox => "stroke-box",
+            rabbithole_style::TransformBox::ViewBox => "view-box",
+        }
+        .to_string(),
+        "transform-style" => if s.preserve_3d() { "preserve-3d".into() } else { "flat".into() },
+        "backface-visibility" => if s.backface_hidden() { "hidden".into() } else { "visible".into() },
+        "perspective" => s.perspective().map_or("none".into(), |d| format!("{}px", d)),
+        "translate" | "rotate" | "scale" => {
+            let t = s.transform3d.as_deref();
+            let op = match prop {
+                "translate" => t.and_then(|t| t.translate.as_ref()),
+                "rotate" => t.and_then(|t| t.rotate.as_ref()),
+                _ => t.and_then(|t| t.scale.as_ref()),
+            };
+            let len = |l: &rabbithole_style::Length, base: f32| match l {
+                rabbithole_style::Length::Percent(p) if base == 0.0 => format!("{p}%"),
+                other => format!("{}px", other.resolve_or_zero(base)),
+            };
+            match op {
+                None => "none".into(),
+                Some(rabbithole_style::TransformOp::Translate3d(x, y, z)) => {
+                    let (x, y) = (len(x, 0.0), len(y, 0.0));
+                    if *z != 0.0 { format!("{x} {y} {z}px") } else if y != "0px" { format!("{x} {y}") } else { x }
+                }
+                Some(rabbithole_style::TransformOp::Rotate3d(x, y, z, a)) => {
+                    let deg = a.to_degrees();
+                    match (*x, *y, *z) {
+                        (x, y, z) if x == 0.0 && y == 0.0 && z > 0.0 => format!("{deg}deg"),
+                        (x, y, z) if y == 0.0 && z == 0.0 && x > 0.0 => format!("x {deg}deg"),
+                        (x, y, z) if x == 0.0 && z == 0.0 && y > 0.0 => format!("y {deg}deg"),
+                        (x, y, z) => format!("{x} {y} {z} {deg}deg"),
+                    }
+                }
+                Some(rabbithole_style::TransformOp::Scale3d(x, y, z)) => {
+                    if *z != 1.0 { format!("{x} {y} {z}") } else if x != y { format!("{x} {y}") } else { format!("{x}") }
+                }
+                Some(_) => "none".into(),
+            }
+        }
         "text-decoration" | "text-decoration-line" => {
             let mut parts = Vec::new();
             if s.text_decoration.underline {

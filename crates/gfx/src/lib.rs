@@ -11,6 +11,7 @@ pub mod fxhash;
 pub mod font_ext;
 pub mod image;
 pub mod paint;
+pub mod mat4;
 pub mod path;
 pub mod raster;
 pub mod stroke;

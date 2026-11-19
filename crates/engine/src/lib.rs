@@ -1648,6 +1648,18 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
                 "opacity" if s.opacity < 1.0 => Some(format!("{}", s.opacity)),
                 "display" if s.display.is_none() => Some("none".into()),
                 "visibility" if s.visibility == rabbithole_style::Visibility::Hidden => Some("hidden".into()),
+                "transform" => svg_transform_text(s),
+                "transform-origin" => s.transform3d.as_ref().filter(|t| t.origin_specified).map(|_| format!("{} {}", svg_length_text(&s.transform_origin.0), svg_length_text(&s.transform_origin.1))),
+                "transform-box" => s.transform3d.as_ref().map(|t| t.transform_box).filter(|b| *b != rabbithole_style::TransformBox::ViewBox).map(|b| {
+                    match b {
+                        rabbithole_style::TransformBox::ContentBox => "content-box",
+                        rabbithole_style::TransformBox::BorderBox => "border-box",
+                        rabbithole_style::TransformBox::FillBox => "fill-box",
+                        rabbithole_style::TransformBox::StrokeBox => "stroke-box",
+                        rabbithole_style::TransformBox::ViewBox => "view-box",
+                    }
+                    .to_string()
+                }),
                 _ => s.svg_props.iter().find(|(n, _)| n == prop).map(|(_, v)| rabbithole_svg::tokens_to_string(v).trim().to_string()),
             }
         };
@@ -1661,8 +1673,56 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
         }
         let scale = if w.max(h) < 256.0 { 2.0 } else { 1.0 };
         let (pw, ph) = ((w * scale).round().clamp(1.0, 2048.0) as u32, (h * scale).round().clamp(1.0, 2048.0) as u32);
+        // Without a viewBox (and both width and height), the laid-out size
+        // is the viewport: percentages resolve against it and user units
+        // are CSS px.
+        if tree.viewport_dependent() {
+            let tree = rabbithole_svg::SvgTree::from_dom_in(doc, n, &style_of, (w, h)).unwrap_or(tree);
+            images.insert(n, Arc::new(tree.rasterize_viewport(fonts, w, h, pw as f32 / w)));
+            continue;
+        }
         images.insert(n, Arc::new(tree.rasterize(fonts, pw, ph)));
     }
+}
+
+/// A length for the SVG renderer's transform parser: `Npx`, `N%` or
+/// `Apx+B%`.
+fn svg_length_text(l: &rabbithole_style::Length) -> String {
+    match l {
+        rabbithole_style::Length::Percent(p) => format!("{p}%"),
+        rabbithole_style::Length::Calc(px, pct) => format!("{px}px+{pct}%"),
+        other => format!("{}px", other.resolve_or_zero(0.0)),
+    }
+}
+
+/// The element's CSS transform (`translate`, `rotate`, `scale` and
+/// `transform`) for the SVG renderer, which resolves percentages against
+/// the element's transform box; 3D functions are flattened.
+fn svg_transform_text(s: &rabbithole_style::ComputedStyle) -> Option<String> {
+    use rabbithole_style::TransformOp as T;
+    if !s.has_transform() {
+        return None;
+    }
+    let mut out = String::new();
+    for op in s.transform_ops().iter() {
+        let f = match op {
+            T::Translate(x, y) | T::Translate3d(x, y, _) => format!("translate({}, {})", svg_length_text(x), svg_length_text(y)),
+            T::Scale(x, y) | T::Scale3d(x, y, _) => format!("scale({x}, {y})"),
+            T::Rotate(a) => format!("rotate({a}rad)"),
+            T::Rotate3d(x, y, z, a) if *x == 0.0 && *y == 0.0 && *z != 0.0 => format!("rotate({}rad)", if *z < 0.0 { -a } else { *a }),
+            T::Skew(x, y) => format!("skew({x}rad, {y}rad)"),
+            T::SkewX(x) => format!("skewX({x}rad)"),
+            T::SkewY(y) => format!("skewY({y}rad)"),
+            T::Matrix(m) => format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5]),
+            other => {
+                let m = rabbithole_gfx::mat4::flatten_2d(&rabbithole_style::op_matrix_3d(other, 0.0, 0.0));
+                format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5])
+            }
+        };
+        out.push_str(&f);
+        out.push(' ');
+    }
+    Some(out)
 }
 
 fn css_color(c: Color) -> String {
@@ -2130,9 +2190,9 @@ impl Page {
         let mut r = self.layout_rect_of(node)?;
         let mut cur = Some(node);
         while let Some(n) = cur {
-            if let Some(s) = self.styles.get(n).filter(|s| !s.transform.is_empty()) {
+            if let Some(s) = self.styles.get(n).filter(|s| s.has_transform()) {
                 if let Some(b) = self.layout_rect_of(n) {
-                    let m = rabbithole_style::transform_matrix(&s.transform, b.w, b.h, s.font_size);
+                    let m = rabbithole_style::transform_matrix(&s.transform_ops(), b.w, b.h, s.font_size);
                     let ox = b.x + s.transform_origin.0.resolve_or_zero(b.w);
                     let oy = b.y + s.transform_origin.1.resolve_or_zero(b.h);
                     let full = rabbithole_style::multiply_matrix(rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, ox, oy], m), [1.0, 0.0, 0.0, 1.0, -ox, -oy]);
@@ -2289,7 +2349,7 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
                 continue;
             }
             // A transformed box counts with its transformed bounds.
-            if !c.style.transform.is_empty() {
+            if c.style.has_transform() {
                 let b = rabbithole_layout::block_content_bounds(c);
                 add(u, &b, dx, dy);
                 continue;

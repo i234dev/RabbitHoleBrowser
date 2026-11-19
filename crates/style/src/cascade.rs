@@ -954,6 +954,11 @@ fn apply_declarations(
     if in_flex_or_grid && style.z_index.is_some() && !matches!(style.position, Position::Absolute | Position::Fixed) {
         style.creates_stacking_context = true;
     }
+    // A box with a hidden back face in a 3D rendering context is a plane of
+    // its own (as in browsers: it paints as a stacking context).
+    if style.transform3d.as_ref().is_some_and(|t| t.backface_hidden) && parent.preserves_3d() {
+        style.creates_stacking_context = true;
+    }
     // Properties declared `!important` win over animations (CSS Cascade 4
     // §6.1): remembered for the animation overlay of animated elements.
     if !style.animations.is_empty() && local.iter().any(|m| m.rank >= Rank::AuthorImportant) {
@@ -1972,7 +1977,34 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "text-shadow" => to.text_shadow = from.text_shadow.clone(),
         "transform" => to.transform = from.transform.clone(),
-        "transform-origin" => to.transform_origin = from.transform_origin,
+        "transform-origin" => {
+            to.transform_origin = from.transform_origin;
+            let (z, specified) = from.transform3d.as_ref().map_or((0.0, false), |t| (t.origin_z, t.origin_specified));
+            if z != 0.0 || specified || to.transform3d.is_some() {
+                let t = to.transform3d_mut();
+                t.origin_z = z;
+                t.origin_specified = specified;
+            }
+        }
+        "translate" | "rotate" | "scale" | "perspective" | "perspective-origin" | "transform-style" | "-webkit-transform-style" | "backface-visibility"
+        | "-webkit-backface-visibility" | "-webkit-perspective" | "-webkit-perspective-origin" | "transform-box" => {
+            let d = Transform3dProps::default();
+            let f = from.transform3d.as_deref().unwrap_or(&d);
+            if from.transform3d.is_none() && to.transform3d.is_none() {
+                return;
+            }
+            let t = to.transform3d_mut();
+            match prop {
+                "translate" => t.translate = f.translate.clone(),
+                "rotate" => t.rotate = f.rotate.clone(),
+                "scale" => t.scale = f.scale.clone(),
+                "perspective" | "-webkit-perspective" => t.perspective = f.perspective,
+                "perspective-origin" | "-webkit-perspective-origin" => t.perspective_origin = f.perspective_origin,
+                "transform-style" | "-webkit-transform-style" => t.preserve_3d = f.preserve_3d,
+                "transform-box" => t.transform_box = f.transform_box,
+                _ => t.backface_hidden = f.backface_hidden,
+            }
+        }
         "outline" | "outline-width" | "outline-style" | "outline-color" | "outline-offset" => {
             to.outline_width = from.outline_width;
             to.outline_style = from.outline_style;
@@ -2074,7 +2106,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "caption-side" => to.caption_side_bottom = from.caption_side_bottom,
         "empty-cells" => to.empty_cells_hide = from.empty_cells_hide,
         "scroll-margin-top" => to.scroll_margin_top = from.scroll_margin_top,
-        "isolation" | "will-change" => to.creates_stacking_context = from.creates_stacking_context,
+        "isolation" | "will-change" => {
+            to.creates_stacking_context = from.creates_stacking_context;
+            to.isolate = from.isolate;
+        }
         "mix-blend-mode" => {
             to.creates_stacking_context = from.creates_stacking_context;
             to.mix_blend_mode = from.mix_blend_mode;

@@ -972,3 +972,48 @@ fn object_view_box_and_background_clip_values() {
     assert!(s.background_layers[0].clip_text);
     assert_eq!(s.text_fill_color, Some(rabbithole_gfx::Color::TRANSPARENT));
 }
+
+#[test]
+fn transforms_3d_functions_and_properties() {
+    let s = one("transform: translate3d(1px, 2px, 3px) rotateX(90deg) perspective(100px) matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 5,6,7,1)");
+    assert_eq!(s.transform[0], TransformOp::Translate3d(Length::Px(1.0), Length::Px(2.0), 3.0));
+    assert!(matches!(s.transform[1], TransformOp::Rotate3d(x, y, z, a) if x == 1.0 && y == 0.0 && z == 0.0 && (a - std::f32::consts::FRAC_PI_2).abs() < 1e-6));
+    assert_eq!(s.transform[2], TransformOp::Perspective(Some(100.0)));
+    assert!(matches!(&s.transform[3], TransformOp::Matrix3d(m) if m[12] == 5.0 && m[14] == 7.0));
+    assert!(!s.transform.iter().all(TransformOp::is_2d));
+    // translateZ() takes no percentage; perspective() no negative length.
+    assert!(one("transform: translateZ(10%)").transform.is_empty());
+    assert!(one("transform: perspective(-1px)").transform.is_empty());
+    // Individual properties come first, in translate / rotate / scale order.
+    let s = one("translate: 10px 20px 30px; rotate: y 90deg; scale: 2 3; transform: translateX(5px)");
+    let t = s.transform3d.as_deref().unwrap();
+    assert_eq!(t.translate, Some(TransformOp::Translate3d(Length::Px(10.0), Length::Px(20.0), 30.0)));
+    assert!(matches!(t.rotate, Some(TransformOp::Rotate3d(x, y, z, _)) if x == 0.0 && y == 1.0 && z == 0.0));
+    assert_eq!(t.scale, Some(TransformOp::Scale3d(2.0, 3.0, 1.0)));
+    assert!(s.has_transform());
+    let ops = s.transform_ops();
+    assert_eq!(ops.len(), 4);
+    assert!(matches!(ops[3], TransformOp::Translate(..)));
+    assert!(one("rotate: 1 2 3 45deg").transform3d.is_some());
+    assert!(one("rotate: 45deg x y").transform3d.is_none());
+    assert!(one("scale: none").transform3d.is_none());
+    // A transform-origin z length.
+    let s = one("transform-origin: left top 12px");
+    assert_eq!(s.transform3d.as_ref().map(|t| t.origin_z), Some(12.0));
+}
+
+#[test]
+fn perspective_and_preserve_3d() {
+    let s = one("perspective: 500px; perspective-origin: 10px bottom");
+    assert_eq!(s.perspective(), Some(500.0));
+    assert_eq!(s.transform3d.as_ref().unwrap().perspective_origin, (Length::Px(10.0), Length::Percent(100.0)));
+    assert!(s.is_stacking_context());
+    let s = one("transform-style: preserve-3d; backface-visibility: hidden");
+    assert!(s.preserve_3d() && s.preserves_3d() && s.backface_hidden());
+    assert!(s.is_stacking_context());
+    // Grouping properties force a flat used value.
+    assert!(!one("transform-style: preserve-3d; opacity: 0.5").preserves_3d());
+    assert!(!one("transform-style: preserve-3d; overflow: hidden").preserves_3d());
+    assert!(!one("transform-style: preserve-3d; isolation: isolate").preserves_3d());
+    assert!(!one("perspective: none").is_stacking_context());
+}

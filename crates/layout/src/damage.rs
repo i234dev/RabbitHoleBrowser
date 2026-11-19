@@ -52,7 +52,7 @@ fn item_eq(a: &DisplayItem, b: &DisplayItem) -> bool {
 }
 
 /// Painted bounds of a drawing item in its local coordinates.
-fn item_bounds(item: &DisplayItem) -> Option<Rect> {
+pub(crate) fn item_bounds(item: &DisplayItem) -> Option<Rect> {
     use DisplayItem as D;
     Some(match item {
         D::Rect { rect, .. } | D::RectRadii { rect, .. } | D::Border { rect, .. } | D::Image { rect, .. } => *rect,
@@ -78,7 +78,7 @@ fn item_bounds(item: &DisplayItem) -> Option<Rect> {
             Rect::new(l - width, t - width, (x0 - x1).abs() + 2.0 * width, (y0 - y1).abs() + 2.0 * width)
         }
         D::PushLayer(r) | D::PushClip(r) | D::PushClipRounded(r, _) | D::PushClipPath { bounds: r, .. } => *r,
-        D::Filtered { bounds, .. } => *bounds,
+        D::Filtered { bounds, .. } | D::Isolated { bounds, .. } | D::Blended { bounds, .. } => *bounds,
         D::BackdropFilter { rect, filters, .. } => {
             let e = crate::filter::spread(filters);
             Rect::new(rect.x - e, rect.y - e, rect.w + 2.0 * e, rect.h + 2.0 * e)
@@ -175,6 +175,9 @@ fn range_damage(items: &[DisplayItem], from: usize, to: usize, scroll: (f32, f32
                     None => return false,
                 }
             }
+        }
+        if let DisplayItem::Transform3d(_) = it {
+            return false;
         }
         if let DisplayItem::PushTransform(m) = it {
             let pure = (m[0] - 1.0).abs() < 1e-6 && m[1].abs() < 1e-6 && m[2].abs() < 1e-6 && (m[3] - 1.0).abs() < 1e-6;

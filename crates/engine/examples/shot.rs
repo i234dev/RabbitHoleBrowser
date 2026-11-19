@@ -247,7 +247,7 @@ fn main() {
                 D::Text { .. } => "Text", D::Image { .. } => "Image", D::ImageTiled { .. } => "ImageTiled", D::Line { .. } => "Line",
                 D::PushClip(_) | D::PushClipRounded(..) | D::PushClipPath { .. } | D::PopClip => "Clip", D::PushTransform(_) | D::PopTransform => "Transform",
                 D::PushLayer(_) | D::PopLayer(_) | D::LayerMask(_) | D::LayerBlend(_) => "Layer", D::PushFixed | D::PopFixed => "Fixed",
-                D::Filtered { .. } | D::BackdropFilter { .. } => "Filter",
+                D::Filtered { .. } | D::BackdropFilter { .. } | D::Isolated { .. } | D::Blended { .. } => "Filter", D::Transform3d(_) => "Transform3d",
             };
             let single = DisplayList { items: vec![it.clone()], ..Default::default() };
             let t = std::time::Instant::now();

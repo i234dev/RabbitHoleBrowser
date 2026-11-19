@@ -1074,7 +1074,7 @@ fn offset_parent_of(n: NodeRef) -> Option<NodeId> {
             return Some(p);
         }
         if let Some(s) = style(p) {
-            if s.position != Position::Static || !s.transform.is_empty() {
+            if s.position != Position::Static || s.has_transform() {
                 return Some(p);
             }
         }

@@ -509,7 +509,7 @@ impl LayoutBox {
     /// box's CSS transform: the bounding box of the transformed corners
     /// (scrollable overflow follows transforms, CSS Overflow 3 §2.2).
     pub fn transformed_bounds(&self, r: Rect) -> Rect {
-        if self.style.transform.is_empty() || self.wm_transform.is_some() {
+        if !self.style.has_transform() || self.wm_transform.is_some() {
             return r;
         }
         let Some(m) = self.transform_matrix() else { return r };
@@ -554,17 +554,59 @@ impl LayoutBox {
             }
             return Some([m[0], m[1], m[2], m[3], m[4].round(), m[5].round()]);
         }
-        if self.style.transform.is_empty() {
+        if !self.style.has_transform() {
             return None;
         }
-        let r = self.rect;
-        let m = transform_matrix(&self.style.transform, r.w, r.h, self.style.font_size);
+        let ops = self.style.transform_ops();
+        if !ops.iter().all(rabbithole_style::TransformOp::is_2d) || self.style.transform3d.as_ref().is_some_and(|t| t.origin_z != 0.0) {
+            return self.transform_matrix_3d().map(|m| rabbithole_gfx::mat4::flatten_2d(&m));
+        }
+        let r = self.transform_reference_box();
+        let m = transform_matrix(&ops, r.w, r.h, self.style.font_size);
         let ox = r.x + self.style.transform_origin.0.resolve_or_zero(r.w);
         let oy = r.y + self.style.transform_origin.1.resolve_or_zero(r.h);
         // T(origin) × M × T(-origin)
         let t1 = [1.0, 0.0, 0.0, 1.0, ox, oy];
         let t2 = [1.0, 0.0, 0.0, 1.0, -ox, -oy];
         Some(rabbithole_style::multiply_matrix(rabbithole_style::multiply_matrix(t1, m), t2))
+    }
+
+    /// The transform reference box (`transform-box`; CSS boxes map
+    /// `fill-box` to the content box and `stroke-box` / `view-box` to the
+    /// border box).
+    pub fn transform_reference_box(&self) -> Rect {
+        match self.style.transform3d.as_ref().map(|t| t.transform_box) {
+            Some(rabbithole_style::TransformBox::ContentBox | rabbithole_style::TransformBox::FillBox) => self.content_rect,
+            _ => self.rect,
+        }
+    }
+
+    /// The 3D transform of this box (document coordinates, origin
+    /// applied), without any perspective from its containing block.
+    /// `None` without a transform (or for writing-mode wrappers).
+    pub fn transform_matrix_3d(&self) -> Option<rabbithole_gfx::mat4::Mat4> {
+        use rabbithole_gfx::mat4;
+        if self.wm_transform.is_some() || !self.style.has_transform() {
+            return None;
+        }
+        let r = self.transform_reference_box();
+        let m = rabbithole_style::transform_matrix_3d(&self.style.transform_ops(), r.w, r.h);
+        let ox = r.x + self.style.transform_origin.0.resolve_or_zero(r.w);
+        let oy = r.y + self.style.transform_origin.1.resolve_or_zero(r.h);
+        let oz = self.style.transform3d.as_ref().map_or(0.0, |t| t.origin_z);
+        Some(mat4::mul(&mat4::mul(&mat4::translate(ox, oy, oz), &m), &mat4::translate(-ox, -oy, -oz)))
+    }
+
+    /// The perspective this box applies to its children (`perspective`,
+    /// about `perspective-origin`), document coordinates.
+    pub fn child_perspective(&self) -> Option<rabbithole_gfx::mat4::Mat4> {
+        use rabbithole_gfx::mat4;
+        let t = self.style.transform3d.as_deref()?;
+        let d = t.perspective?;
+        let r = self.rect;
+        let ox = r.x + t.perspective_origin.0.resolve_or_zero(r.w);
+        let oy = r.y + t.perspective_origin.1.resolve_or_zero(r.h);
+        Some(mat4::mul(&mat4::mul(&mat4::translate(ox, oy, 0.0), &mat4::perspective(Some(d))), &mat4::translate(-ox, -oy, 0.0)))
     }
 
     /// `position: sticky` offset for the box given the nearest scrollport

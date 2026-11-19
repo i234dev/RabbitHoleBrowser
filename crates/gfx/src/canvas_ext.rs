@@ -254,7 +254,10 @@ impl Canvas {
         }
         // Solid (and non-uniform dashed/dotted drawn solid).
         let same_color = visible.iter().all(|&i| side_colors[i] == side_colors[visible[0]]);
-        if !has_radius && same_color && (is_identity(&self.transform()) || is_axis_aligned(&self.transform())) {
+        // Transparent sides with a width still own their half of the
+        // corners (mitred: CSS triangles).
+        let no_hidden_sides = (0..4).all(|i| widths[i] == 0.0 || visible.contains(&i));
+        if !has_radius && same_color && no_hidden_sides && (is_identity(&self.transform()) || is_axis_aligned(&self.transform())) {
             // Fast path: four bands.
             let [wt, wr, wb, wl] = widths;
             let c = side_colors[visible[0]];
@@ -654,7 +657,10 @@ impl Canvas {
                         if !bm.is_empty() {
                             // Glyph origin on the baseline in device space.
                             let along = Point::new(pen + g.x + g.dx, 0.0);
-                            let o = Point::new(origin.x + rot[0] * along.x, origin.y + rot[1] * along.x);
+                            // On a 1/64 px grid: equal positions computed
+                            // through different matrices draw the same.
+                            let q = |v: f32| (v * 64.0).round() / 64.0;
+                            let o = Point::new(q(origin.x + rot[0] * along.x), q(origin.y + rot[1] * along.x));
                             let local = [1.0, 0.0, -shear, 1.0, bm.left as f32 + shear * bm.top as f32, -(bm.top as f32)];
                             let mm = multiply(&[rot[0], rot[1], rot[2], rot[3], o.x, o.y], &local);
                             self.blit_mask_affine(&bm.coverage, bm.width, bm.height, &mm, color);
@@ -951,6 +957,73 @@ impl Canvas {
                     let a = (alpha.map(|a| a[y * layer.w + x] as f32).unwrap_or(255.0) * op + 0.5) as u32;
                     self.data[row + x] = blend(bg, Color::from_u32(mixed), a);
                 }
+            }
+        }
+    }
+
+    /// End a blended layer of an isolated group painted twice, over black
+    /// (`black`) and over white (`white`), in lockstep: where the group's
+    /// backdrop is transparent (the two renderings differ) the source and
+    /// backdrop alphas are recovered and composited with the blend mode
+    /// as the spec's group compositing does (CSS Compositing 1 §5.8),
+    /// keeping both renderings consistent.
+    pub fn end_layer_blend_isolated(black: &mut Canvas, white: &mut Canvas, opacity: f32, mode: u8, alpha: Option<&[u8]>) {
+        let (Some(lb), Some(lw)) = (black.layers.pop(), white.layers.pop()) else { return };
+        if lb.w != lw.w || lb.h != lw.h || lb.x0 != lw.x0 || lb.y0 != lw.y0 || alpha.is_some_and(|a| a.len() != lb.w * lb.h) {
+            return;
+        }
+        let op = opacity.clamp(0.0, 1.0);
+        let cw = black.width as usize;
+        let ch = |v: u32, s: u32| ((v >> s) & 0xff) as f32 / 255.0;
+        for y in 0..lb.h {
+            let row = (lb.y0 as usize + y) * cw + lb.x0 as usize;
+            for x in 0..lb.w {
+                let i = y * lb.w + x;
+                let (bk, bw) = (lb.saved[i], lw.saved[i]);
+                let (dk, dw) = (black.data[row + x], white.data[row + x]);
+                if dk == bk && dw == bw {
+                    continue;
+                }
+                if bk == bw {
+                    // Opaque backdrop: as a plain blended layer.
+                    let a = (alpha.map(|a| a[i] as f32).unwrap_or(255.0) * op + 0.5) as u32;
+                    black.data[row + x] = blend(bk, Color::from_u32(blend_pixel(mode, bk, dk)), a);
+                    white.data[row + x] = blend(bw, Color::from_u32(blend_pixel(mode, bw, dw)), a);
+                    continue;
+                }
+                let k = alpha.map(|a| a[i] as f32 / 255.0).unwrap_or(1.0) * op;
+                // Backdrop alpha and premultiplied colour.
+                let ab = (1.0 - [16, 8, 0].iter().map(|&s| ch(bw, s) - ch(bk, s)).sum::<f32>() / 3.0).clamp(0.0, 1.0);
+                // Source alpha: what of the backdrop shows through it.
+                let as_ = if ab < 1.0 - 1e-3 {
+                    let through = [16, 8, 0].iter().map(|&s| (ch(dw, s) - ch(dk, s)) / (ch(bw, s) - ch(bk, s)).max(1e-3)).sum::<f32>() / 3.0;
+                    (1.0 - through).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+                let mut cb_p = [0.0f32; 3];
+                let mut cs_p = [0.0f32; 3];
+                let (mut cb, mut cs) = (0u32, 0u32);
+                for (j, &sh) in [16u32, 8, 0].iter().enumerate() {
+                    cb_p[j] = ch(bk, sh);
+                    cs_p[j] = (ch(dk, sh) - cb_p[j] * (1.0 - as_)).max(0.0);
+                    cb |= to(if ab > 0.0 { cb_p[j] / ab } else { 0.0 }) << sh;
+                    cs |= to(if as_ > 0.0 { cs_p[j] / as_ } else { 0.0 }) << sh;
+                }
+                let mixed = blend_pixel(mode, cb, cs);
+                let sa = as_ * k;
+                let ao = sa + ab - sa * ab;
+                let mut out_k = [0.0f32; 3];
+                let mut out_w = [0.0f32; 3];
+                for (j, &sh) in [16u32, 8, 0].iter().enumerate() {
+                    let co = cs_p[j] * k * (1.0 - ab) + cb_p[j] * (1.0 - sa) + sa * ab * ch(mixed, sh);
+                    out_k[j] = co;
+                    out_w[j] = co + (1.0 - ao);
+                }
+                let pack = |c: [f32; 3]| c.iter().fold(0u32, |acc, v| (acc << 8) | ((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32));
+                black.data[row + x] = pack(out_k);
+                white.data[row + x] = pack(out_w);
             }
         }
     }
