@@ -891,6 +891,7 @@ impl MatchState {
                 return true;
             }
             match doc.parent(cur) {
+                Some(p) if doc.shadow_roots.is_empty() => cur = p,
                 Some(p) => cur = doc.shadow_host(p).unwrap_or(p),
                 None => return false,
             }

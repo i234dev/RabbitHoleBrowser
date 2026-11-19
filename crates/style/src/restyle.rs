@@ -625,7 +625,7 @@ fn state_chain(doc: &Document, node: Option<NodeId>) -> Vec<NodeId> {
     while let Some(node) = current {
         chain.push(node);
         // Shadow-including ancestors (as `:hover` / `:focus-within` match).
-        current = doc.parent(node).map(|p| doc.shadow_host(p).unwrap_or(p));
+        current = doc.parent(node).map(|p| if doc.shadow_roots.is_empty() { p } else { doc.shadow_host(p).unwrap_or(p) });
     }
     chain
 }
