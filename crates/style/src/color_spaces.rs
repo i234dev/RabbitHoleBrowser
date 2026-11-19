@@ -368,6 +368,97 @@ fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
     })
 }
 
+/// A color in relative color syntax (CSS Color 5 §4): the origin color's
+/// channels in the function's space become numbers named `r g b`, `h s l`,
+/// `l a b`, `x y z`, ... (and `alpha`) usable in its channel arguments,
+/// `calc()` included. `None` for an unsupported origin (`currentcolor`)
+/// or space.
+pub fn relative(f: &str, c: &[Token]) -> Option<Color> {
+    let inner = strip(c);
+    let comps: Vec<&[Token]> = components(inner).into_iter().filter(|c| !matches!(c, [Token::Whitespace])).collect();
+    let [from, origin, rest @ ..] = comps.as_slice() else { return None };
+    if !matches!(from, [Token::Ident(k)] if k.eq_ignore_ascii_case("from")) {
+        return None;
+    }
+    let (lin, alpha) = match parse_wide(origin) {
+        Some(w) => ([w[0] as f64, w[1] as f64, w[2] as f64], w[3] as f64),
+        None => match crate::values::parse_color_component(origin)? {
+            ColorValue::Color(col) => (linear_of(col), col.a as f64 / 255.0),
+            ColorValue::CurrentColor => return None,
+        },
+    };
+    let srgb = lin.map(gamma_encode);
+    let polar = |lab: Rgb| {
+        let c = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+        let h = if c < 1e-6 { 0.0 } else { lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0) };
+        [lab[0], c, h]
+    };
+    let (names, values, rest): ([&str; 3], Rgb, &[&[Token]]) = match f {
+        "rgb" | "rgba" => (["r", "g", "b"], srgb.map(|v| v * 255.0), rest),
+        "hsl" | "hsla" => {
+            let (h, s, l) = rgb_to_hsl(srgb);
+            (["h", "s", "l"], [h.unwrap_or(0.0), s * 100.0, l * 100.0], rest)
+        }
+        "hwb" => {
+            let (h, _, _) = rgb_to_hsl(srgb);
+            let w = srgb[0].min(srgb[1]).min(srgb[2]);
+            let b = 1.0 - srgb[0].max(srgb[1]).max(srgb[2]);
+            (["h", "w", "b"], [h.unwrap_or(0.0), w * 100.0, b * 100.0], rest)
+        }
+        "lab" => (["l", "a", "b"], linear_to_lab(lin), rest),
+        "oklab" => (["l", "a", "b"], linear_to_oklab(lin), rest),
+        "lch" => (["l", "c", "h"], polar(linear_to_lab(lin)), rest),
+        "oklch" => (["l", "c", "h"], polar(linear_to_oklab(lin)), rest),
+        "color" => {
+            let [[Token::Ident(space)], rest @ ..] = rest else { return None };
+            let space = space.to_ascii_lowercase();
+            let v = match space.as_str() {
+                "srgb" => srgb,
+                "srgb-linear" => lin,
+                "xyz" | "xyz-d65" => mul(&LSRGB_TO_XYZ65, lin),
+                "xyz-d50" => mul(&D65_TO_D50, mul(&LSRGB_TO_XYZ65, lin)),
+                _ => return None,
+            };
+            let names = if space.starts_with("xyz") { ["x", "y", "z"] } else { ["r", "g", "b"] };
+            (names, v, rest)
+        }
+        _ => return None,
+    };
+    // Substitute the channel keywords, then fold math functions into
+    // plain numbers for the ordinary parser.
+    let channel = |t: &Token| -> Option<Token> {
+        let Token::Ident(k) = t else { return None };
+        let k = k.to_ascii_lowercase();
+        if k == "alpha" {
+            return Some(Token::Number(alpha as f32));
+        }
+        names.iter().position(|n| *n == k).map(|i| Token::Number(values[i] as f32))
+    };
+    let mut out = vec![Token::Function(f.to_string())];
+    if f == "color" {
+        if let [[Token::Ident(space)], ..] = &comps[2..] {
+            out.push(Token::Ident(space.clone()));
+            out.push(Token::Whitespace);
+        }
+    }
+    for comp in rest {
+        let subst: Vec<Token> = comp.iter().map(|t| channel(t).unwrap_or_else(|| t.clone())).collect();
+        match subst.first() {
+            Some(Token::Function(name)) if matches!(name.to_ascii_lowercase().as_str(), "calc" | "min" | "max" | "clamp" | "abs" | "sign" | "round" | "mod" | "rem") => {
+                let n = crate::values::number(&subst)?;
+                out.push(Token::Number(n));
+            }
+            _ => out.extend(subst),
+        }
+        out.push(Token::Whitespace);
+    }
+    out.push(Token::CloseParen);
+    match crate::values::parse_color_component(&out)? {
+        ColorValue::Color(col) => Some(col),
+        ColorValue::CurrentColor => None,
+    }
+}
+
 /// Split function arguments at top-level commas.
 fn split_top_commas(toks: &[Token]) -> Vec<&[Token]> {
     let mut out = Vec::new();
@@ -731,6 +822,14 @@ mod tests {
         assert!(color("oklch(50% 0.1)").is_none());
         assert_eq!(color("contrast-color(#000)"), Some(Color::WHITE));
         assert_eq!(color("contrast-color(yellow)"), Some(Color::BLACK));
+        // Relative color syntax.
+        assert!(close(color("rgb(from red r g b)").unwrap(), red));
+        assert!(close(color("rgb(from red b g r)").unwrap(), Color::rgb(0, 0, 255)));
+        assert!(close(color("hsl(from red calc(h + 120) s l)").unwrap(), Color::rgb(0, 255, 0)));
+        assert!(close(color("oklch(from red l c h / 0.5)").unwrap(), Color::rgba(255, 0, 0, 128)));
+        assert!(close(color("lch(from blue l 0 h)").unwrap(), color("lch(29.57 0 0)").unwrap()));
+        assert!(close(color("color(from red srgb r g b / alpha)").unwrap(), red));
+        assert!(color("rgb(from currentcolor r g b)").is_none());
     }
 
     #[test]
