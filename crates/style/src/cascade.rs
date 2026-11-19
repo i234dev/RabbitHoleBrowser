@@ -1667,7 +1667,8 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.flex_basis = from.flex_basis;
             to.flex_basis_content = from.flex_basis_content;
         }
-        "flex-wrap" => to.flex_wrap = from.flex_wrap,
+        "flex-wrap" => { to.flex_wrap = from.flex_wrap; to.flex_wrap_balance = from.flex_wrap_balance; }
+        "flex-line-count" => to.flex_line_count = from.flex_line_count,
         "flex-flow" => {
             to.flex_direction = from.flex_direction;
             to.flex_wrap = from.flex_wrap;
@@ -1788,6 +1789,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "unicode-bidi" => to.unicode_bidi = from.unicode_bidi,
         "tab-size" => to.tab_size = from.tab_size,
         "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
+        "container-type" | "container" => to.container_size = from.container_size,
         "contain" => {
             to.contain_paint = from.contain_paint;
             to.contain_layout = from.contain_layout;
@@ -1802,7 +1804,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "font-variation-settings" => to.font_variation_settings = from.font_variation_settings.clone(),
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
-        "aspect-ratio" => to.aspect_ratio = from.aspect_ratio,
+        "aspect-ratio" => { to.aspect_ratio = from.aspect_ratio; to.aspect_ratio_auto = from.aspect_ratio_auto; }
         "image-rendering" => to.image_rendering_pixelated = from.image_rendering_pixelated,
         "accent-color" => to.accent_color = from.accent_color,
         "color-scheme" => to.color_scheme_dark = from.color_scheme_dark,
@@ -1870,6 +1872,25 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
             _ => {}
         }
     }
+}
+
+/// `fit-content(<length-percentage>)` of a width property (heights keep
+/// the keyword behaviour).
+fn fit_content_fn(c: &[Token], ctx: &LengthContext, width: bool) -> Option<Length> {
+    if !width {
+        return None;
+    }
+    let args = props::fn_args(c);
+    let [arg] = args.as_slice() else { return None };
+    let [arg] = arg.as_slice() else { return None };
+    let node = match resolve_len_no_auto(arg, ctx)? {
+        Length::Px(v) if v >= 0.0 => MathNode::Leaf(v, 0.0),
+        Length::Percent(p) if p >= 0.0 => MathNode::Leaf(0.0, p),
+        Length::Calc(px, p) => MathNode::Leaf(px, p),
+        Length::Math(id) => (*math_node(id)?).clone(),
+        _ => return None,
+    };
+    Some(Length::Math(intern_math(MathNode::FitContent(Box::new(node)))))
 }
 
 fn resolve_len(c: &[Token], ctx: &LengthContext) -> Option<Length> {
@@ -2526,9 +2547,22 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             // Shorthand: omitted longhands reset to their initial values.
             style.flex_direction = FlexDirection::Row;
             style.flex_wrap = FlexWrap::NoWrap;
+            style.flex_wrap_balance = false;
             for c in &comps {
                 match values::ident(c).as_deref() {
-                    Some("nowrap" | "wrap" | "wrap-reverse") => apply_property("flex-wrap", c, style, parent, ctx),
+                    Some("balance") => {
+                        style.flex_wrap_balance = true;
+                        if style.flex_wrap == FlexWrap::NoWrap {
+                            style.flex_wrap = FlexWrap::Wrap;
+                        }
+                    }
+                    Some("nowrap" | "wrap" | "wrap-reverse") => {
+                        let balance = style.flex_wrap_balance;
+                        apply_property("flex-wrap", c, style, parent, ctx);
+                        if balance && style.flex_wrap == FlexWrap::Wrap {
+                            style.flex_wrap_balance = true;
+                        }
+                    }
                     _ => apply_property("flex-direction", c, style, parent, ctx),
                 }
             }
@@ -2543,11 +2577,11 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     "max-content" | "-webkit-max-content" | "-moz-max-content" => Length::MaxContent,
                     "min-content" | "-webkit-min-content" | "-moz-min-content" => Length::MinContent,
                     "fit-content" | "-webkit-fit-content" | "-moz-fit-content" => Length::FitContent,
-                    "-webkit-fill-available" | "-moz-available" | "fill-available" | "stretch" => Length::Auto,
+                    "-webkit-fill-available" | "-moz-available" | "fill-available" | "stretch" => stretch_length(),
                     _ => return,
                 }
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
-                Length::FitContent
+                fit_content_fn(c0, ctx, name.ends_with("width")).unwrap_or(Length::FitContent)
             } else {
                 match resolve_len(c0, ctx) {
                     Some(l) => l,
@@ -2557,8 +2591,10 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             match name {
                 "width" => style.width = l,
                 "height" => style.height = l,
-                "min-width" => style.min_width = if l.is_auto() { Length::ZERO } else { l },
-                _ => style.min_height = if l.is_auto() { Length::ZERO } else { l },
+                // `auto` minimum sizes are the automatic minimum of flex
+                // and grid items (0 elsewhere).
+                "min-width" => style.min_width = l,
+                _ => style.min_height = l,
             }
         }
         "max-width" | "max-height" => {
@@ -2567,14 +2603,15 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
             let l = if let Some(kw) = values::ident(c0) {
                 match kw.as_str() {
-                    "none" | "-webkit-fill-available" | "-moz-available" | "stretch" => Length::Auto,
+                    "none" => Length::Auto,
+                    "-webkit-fill-available" | "-moz-available" | "fill-available" | "stretch" => stretch_length(),
                     "max-content" | "-webkit-max-content" | "-moz-max-content" => Length::MaxContent,
                     "min-content" | "-webkit-min-content" | "-moz-min-content" => Length::MinContent,
                     "fit-content" | "-webkit-fit-content" | "-moz-fit-content" => Length::FitContent,
                     _ => return,
                 }
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
-                Length::FitContent
+                fit_content_fn(c0, ctx, name == "max-width").unwrap_or(Length::FitContent)
             } else {
                 match resolve_len_no_auto(c0, ctx) {
                     Some(l) => l,

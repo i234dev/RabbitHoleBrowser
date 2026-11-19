@@ -255,7 +255,10 @@ fn sizing_keywords_and_replaced() {
     let s = one("width: min-content; min-height: max-content; max-width: fit-content(200px); object-fit: cover; object-position: 20% bottom; aspect-ratio: 16 / 9");
     assert_eq!(s.width, Length::MinContent);
     assert_eq!(s.min_height, Length::MaxContent);
-    assert_eq!(s.max_width, Length::FitContent);
+    // fit-content(<length>) keeps its argument for layout.
+    assert_eq!(fit_content_arg(s.max_width).map(|a| a.eval(0.0)), Some(200.0));
+    let s2 = one("height: stretch; min-width: -webkit-fill-available");
+    assert!(is_stretch(s2.height) && is_stretch(s2.min_width));
     assert_eq!(s.object_fit, ObjectFit::Cover);
     assert_eq!(s.object_position, (Length::Percent(20.0), Length::Percent(100.0)));
     assert!((s.aspect_ratio.unwrap() - 16.0 / 9.0).abs() < 1e-5);

@@ -407,7 +407,7 @@ impl<'a> Layouter<'a> {
                     } else {
                         justify_for_pass(cs.justify_self, cs.justify_self_flags, cs.direction == rabbithole_style::Direction::Rtl, mirror)
                     },
-                    align: if cs.align_self == ItemAlign::Auto { style.align_items } else { cs.align_self },
+                    align: last_baseline_as_end(if cs.align_self == ItemAlign::Auto { (style.align_items, style.align_items_flags) } else { (cs.align_self, cs.align_self_flags) }),
                 }
             })
             .collect();
@@ -863,6 +863,16 @@ fn align_offset(align: ItemAlign, auto_start: bool, auto_end: bool, free: f32, m
             ItemAlign::Center => free / 2.0,
             _ => 0.0,
         }
+    }
+}
+
+/// `last baseline` items share the end edge (their fallback alignment);
+/// lanes align them there.
+fn last_baseline_as_end((align, flags): (ItemAlign, rabbithole_style::AlignFlags)) -> ItemAlign {
+    if align == ItemAlign::Baseline && flags.has(rabbithole_style::AlignFlags::LAST) {
+        ItemAlign::FlexEnd
+    } else {
+        align
     }
 }
 

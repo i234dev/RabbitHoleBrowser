@@ -1575,8 +1575,10 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
         thread_local! {
             static SVG_FONTS: FontContext = FontContext::new();
         }
-        let img = SVG_FONTS.with(|fonts| tree.rasterize(fonts, pw, ph));
-        return Some(img.with_natural_size(w.round().max(1.0) as u32, h.round().max(1.0) as u32));
+        let mut img = SVG_FONTS.with(|fonts| tree.rasterize(fonts, pw, ph)).with_natural_size(w.round().max(1.0) as u32, h.round().max(1.0) as u32);
+        let (iw, ih, viewbox) = tree.intrinsic_size();
+        img.no_ratio = viewbox.is_none() && !(iw.is_some() && ih.is_some());
+        return Some(img);
     }
     Image::decode(bytes)
 }

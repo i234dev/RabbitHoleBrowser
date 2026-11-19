@@ -33,57 +33,90 @@ fn item_align(kw: &str, allow_auto: bool) -> Option<ItemAlign> {
         "normal" => ItemAlign::Normal,
         "flex-start" | "start" | "self-start" | "left" => ItemAlign::FlexStart,
         "flex-end" | "end" | "self-end" | "right" => ItemAlign::FlexEnd,
-        "center" => ItemAlign::Center,
+        // (`anchor-center` without an anchor behaves as center.)
+        "center" | "anchor-center" => ItemAlign::Center,
         "baseline" | "first" | "last" => ItemAlign::Baseline,
         "legacy" => ItemAlign::Normal,
         _ => return None,
     })
 }
 
-/// The keyword details of one alignment value (see [`AlignFlags`]).
-fn align_flags<'k>(kws: impl IntoIterator<Item = &'k str>) -> AlignFlags {
+/// One box-alignment value at the start of `kws`: its main keyword, its
+/// keyword details and how many keywords it used (`safe center`, `last
+/// baseline`, `legacy left`, ...). None when the value is invalid.
+/// `physical`: `left` / `right` are allowed (the inline axis only).
+fn align_prefix(kws: &[String], physical: bool) -> Option<(&str, AlignFlags, usize)> {
     let mut f = 0;
-    for kw in kws {
-        f |= match kw {
-            "safe" => AlignFlags::SAFE,
-            "last" => AlignFlags::LAST,
-            "self-start" | "self-end" => AlignFlags::SELF,
-            "left" => AlignFlags::LEFT,
-            "right" => AlignFlags::RIGHT,
-            "normal" => AlignFlags::NORMAL,
-            "flex-start" | "flex-end" => AlignFlags::FLEX,
-            _ => 0,
-        };
+    let mut i = 0;
+    let first = kws.first()?.as_str();
+    let overflow = matches!(first, "safe" | "unsafe");
+    let baseline_prefix = matches!(first, "first" | "last");
+    if overflow || baseline_prefix {
+        if first == "safe" {
+            f |= AlignFlags::SAFE;
+        }
+        if first == "last" {
+            f |= AlignFlags::LAST;
+        }
+        i = 1;
     }
-    AlignFlags(f)
-}
-
-/// The details of the first (`n == 0`) or second value of a `place-*`
-/// shorthand: a second value starts after the first value's keyword.
-fn place_flags(comps: &[&[Token]], n: usize) -> AlignFlags {
-    let words: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
-    let is_modifier = |w: &str| matches!(w, "safe" | "unsafe" | "first" | "last");
-    let mut split = 0;
-    while split < words.len() && is_modifier(&words[split]) {
-        split += 1;
+    let mut kw = kws.get(i)?.as_str();
+    i += 1;
+    // `legacy` combines with left/right/center (justify-items).
+    if kw == "legacy" && kws.get(i).is_some_and(|k| matches!(k.as_str(), "left" | "right" | "center")) {
+        kw = kws[i].as_str();
+        i += 1;
+    } else if matches!(kw, "left" | "right" | "center") && kws.get(i).is_some_and(|k| k == "legacy") {
+        i += 1;
     }
-    let (a, b) = words.split_at((split + 1).min(words.len()));
-    let part = if n == 0 || b.is_empty() { a } else { b };
-    align_flags(part.iter().map(String::as_str))
+    f |= match kw {
+        "self-start" | "self-end" => AlignFlags::SELF,
+        "left" => AlignFlags::LEFT,
+        "right" => AlignFlags::RIGHT,
+        "normal" => AlignFlags::NORMAL,
+        "flex-start" | "flex-end" => AlignFlags::FLEX,
+        _ => 0,
+    };
+    let positional = matches!(kw, "center" | "start" | "end" | "self-start" | "self-end" | "flex-start" | "flex-end" | "left" | "right" | "anchor-center");
+    if (overflow && !positional) || (baseline_prefix && kw != "baseline") || (!physical && matches!(kw, "left" | "right")) {
+        return None;
+    }
+    Some((kw, AlignFlags(f), i))
 }
 
-/// `left` / `right` exist only in the inline (justify-*) axis.
-fn physical(kw: &str) -> bool {
-    matches!(kw, "left" | "right")
+/// Identifiers of a value (None if any component is not one).
+fn idents(comps: &[&[Token]]) -> Option<Vec<String>> {
+    comps.iter().map(|c| values::ident(c)).collect()
 }
 
-/// Keywords in a value, skipping `safe`/`unsafe`/`first`/`last` modifiers.
-fn keywords(comps: &[&[Token]]) -> Vec<String> {
-    comps
-        .iter()
-        .filter_map(|c| values::ident(c))
-        .filter(|k| !matches!(k.as_str(), "safe" | "unsafe"))
-        .collect()
+/// A whole value of an item-alignment property.
+fn item_value(comps: &[&[Token]], allow_auto: bool, physical: bool) -> Option<(ItemAlign, AlignFlags)> {
+    let kws = idents(comps)?;
+    let (kw, flags, used) = align_prefix(&kws, physical)?;
+    (used == kws.len()).then_some(())?;
+    Some((item_align(kw, allow_auto)?, flags))
+}
+
+/// A whole value of a content-distribution property.
+fn content_value(comps: &[&[Token]], for_align_content: bool) -> Option<(ContentDistribution, AlignFlags)> {
+    let kws = idents(comps)?;
+    let (kw, flags, used) = align_prefix(&kws, !for_align_content)?;
+    (used == kws.len()).then_some(())?;
+    Some((content_distribution(kw, for_align_content)?, flags))
+}
+
+/// The two values of a `place-*` shorthand (the second defaults to the
+/// first): (align keyword, flags), (justify keyword, flags).
+fn place_values(comps: &[&[Token]]) -> Option<((String, AlignFlags), Option<(String, AlignFlags)>)> {
+    let kws = idents(comps)?;
+    let (a, af, used) = align_prefix(&kws, false)?;
+    let first = (a.to_string(), af);
+    if used == kws.len() {
+        return Some((first, None));
+    }
+    let (b, bf, used2) = align_prefix(&kws[used..], true)?;
+    (used + used2 == kws.len()).then_some(())?;
+    Some((first, Some((b.to_string(), bf))))
 }
 
 fn flex_basis(c: &[Token], ctx: &ApplyCtx) -> Option<(Length, bool)> {
@@ -160,6 +193,10 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             let mut basis = None;
             for c in comps {
                 if let Some(n) = values::number(c) {
+                    if n < 0.0 && matches!(c, [Token::Number(_)]) {
+                        return true;
+                    }
+                    let n = n.max(0.0);
                     if grow.is_none() {
                         grow = Some(n);
                     } else if shrink.is_none() {
@@ -187,13 +224,14 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             style.flex_basis = length;
             style.flex_basis_content = content;
         }
+        // Negative literal factors are invalid; math functions clamp.
         "flex-grow" | "-webkit-box-flex" => {
-            if let Some(n) = values::number(c0) {
+            if let Some(n) = values::number(c0).filter(|n| *n >= 0.0 || !matches!(c0, [Token::Number(_)])) {
                 style.flex_grow = n.max(0.0);
             }
         }
         "flex-shrink" => {
-            if let Some(n) = values::number(c0) {
+            if let Some(n) = values::number(c0).filter(|n| *n >= 0.0 || !matches!(c0, [Token::Number(_)])) {
                 style.flex_shrink = n.max(0.0);
             }
         }
@@ -204,16 +242,28 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             }
         }
         "flex-wrap" => {
-            if let Some(kw) = values::ident(c0) {
-                style.flex_wrap = match kw.as_str() {
-                    "nowrap" => FlexWrap::NoWrap,
-                    "wrap" => FlexWrap::Wrap,
-                    "wrap-reverse" => FlexWrap::WrapReverse,
-                    _ => return true,
-                };
+            // `nowrap | wrap | wrap-reverse | [balance || wrap-reverse]`.
+            let Some(kws) = idents(comps) else { return true };
+            let (wrap, balance) = match kws.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                ["nowrap"] => (FlexWrap::NoWrap, false),
+                ["wrap"] => (FlexWrap::Wrap, false),
+                ["wrap-reverse"] => (FlexWrap::WrapReverse, false),
+                ["balance"] => (FlexWrap::Wrap, true),
+                ["balance", "wrap-reverse"] | ["wrap-reverse", "balance"] => (FlexWrap::WrapReverse, true),
+                _ => return true,
+            };
+            style.flex_wrap = wrap;
+            style.flex_wrap_balance = balance;
+        }
+        "flex-line-count" => {
+            if values::is_ident(c0, "auto") {
+                style.flex_line_count = None;
+            } else if let Some(n) = values::number(c0).filter(|n| comps.len() == 1 && *n >= 1.0 && n.fract() == 0.0) {
+                style.flex_line_count = Some(n.min(1.0e6) as u32);
             }
         }
         "flex-flow" => {
+            style.flex_wrap_balance = false;
             for c in comps {
                 if let Some(kw) = values::ident(c) {
                     match kw.as_str() {
@@ -224,84 +274,85 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
                         "nowrap" => style.flex_wrap = FlexWrap::NoWrap,
                         "wrap" => style.flex_wrap = FlexWrap::Wrap,
                         "wrap-reverse" => style.flex_wrap = FlexWrap::WrapReverse,
+                        "balance" => {
+                            style.flex_wrap_balance = true;
+                            if style.flex_wrap == FlexWrap::NoWrap {
+                                style.flex_wrap = FlexWrap::Wrap;
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
         }
         "justify-content" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = content_distribution(kw, false) {
-                    style.justify_content = v;
-                    style.justify_content_flags = place_flags(comps, 0);
-                }
+            if let Some((v, m)) = content_value(comps, false) {
+                style.justify_content = v;
+                style.justify_content_flags = m;
             }
         }
         "align-content" => {
-            if let Some(kw) = keywords(comps).first().filter(|k| !physical(k)) {
-                if let Some(v) = content_distribution(kw, true) {
-                    style.align_content = v;
-                    style.align_content_flags = place_flags(comps, 0);
-                }
+            if let Some((v, m)) = content_value(comps, true) {
+                style.align_content = v;
+                style.align_content_flags = m;
             }
         }
         "align-items" => {
-            if let Some(kw) = keywords(comps).first().filter(|k| !physical(k)) {
-                if let Some(v) = item_align(kw, false) {
-                    style.align_items = v;
-                    style.align_items_flags = place_flags(comps, 0);
-                }
+            if let Some((v, m)) = item_value(comps, false, false) {
+                style.align_items = v;
+                style.align_items_flags = m;
             }
         }
         "align-self" => {
-            if let Some(kw) = keywords(comps).first().filter(|k| !physical(k)) {
-                if let Some(v) = item_align(kw, true) {
-                    style.align_self = v;
-                    style.align_self_flags = place_flags(comps, 0);
-                }
+            if let Some((v, m)) = item_value(comps, true, false) {
+                style.align_self = v;
+                style.align_self_flags = m;
             }
         }
         "justify-items" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = item_align(kw, false) {
-                    style.justify_items = v;
-                    style.justify_items_flags = place_flags(comps, 0);
-                }
+            if let Some((v, m)) = item_value(comps, false, true) {
+                style.justify_items = v;
+                style.justify_items_flags = m;
             }
         }
         "justify-self" => {
-            if let Some(kw) = keywords(comps).first() {
-                if let Some(v) = item_align(kw, true) {
-                    style.justify_self = v;
-                    style.justify_self_flags = place_flags(comps, 0);
-                }
+            if let Some((v, m)) = item_value(comps, true, true) {
+                style.justify_self = v;
+                style.justify_self_flags = m;
             }
         }
         "place-items" => {
-            let kws = keywords(comps);
-            if let Some(a) = kws.first().filter(|k| !physical(k)).and_then(|k| item_align(k, false)) {
-                style.align_items = a;
-                style.justify_items = kws.get(1).and_then(|k| item_align(k, false)).unwrap_or(a);
-                style.align_items_flags = place_flags(comps, 0);
-                style.justify_items_flags = place_flags(comps, 1);
+            if let Some(((a, am), second)) = place_values(comps) {
+                let (b, bm) = second.unwrap_or_else(|| (a.clone(), am));
+                if let (Some(av), Some(bv)) = (item_align(&a, false), item_align(&b, false)) {
+                    style.align_items = av;
+                    style.align_items_flags = am;
+                    style.justify_items = bv;
+                    style.justify_items_flags = bm;
+                }
             }
         }
         "place-self" => {
-            let kws = keywords(comps);
-            if let Some(a) = kws.first().filter(|k| !physical(k)).and_then(|k| item_align(k, true)) {
-                style.align_self = a;
-                style.justify_self = kws.get(1).and_then(|k| item_align(k, true)).unwrap_or(a);
-                style.align_self_flags = place_flags(comps, 0);
-                style.justify_self_flags = place_flags(comps, 1);
+            if let Some(((a, am), second)) = place_values(comps) {
+                let (b, bm) = second.unwrap_or_else(|| (a.clone(), am));
+                if let (Some(av), Some(bv)) = (item_align(&a, true), item_align(&b, true)) {
+                    style.align_self = av;
+                    style.align_self_flags = am;
+                    style.justify_self = bv;
+                    style.justify_self_flags = bm;
+                }
             }
         }
         "place-content" => {
-            let kws = keywords(comps);
-            if let Some(a) = kws.first().filter(|k| !physical(k)).and_then(|k| content_distribution(k, true)) {
-                style.align_content = a;
-                style.justify_content = kws.get(1).and_then(|k| content_distribution(k, false)).unwrap_or(a);
-                style.align_content_flags = place_flags(comps, 0);
-                style.justify_content_flags = place_flags(comps, 1);
+            if let Some(((a, am), second)) = place_values(comps) {
+                // A single baseline value sets justify-content to `start`.
+                let (b, bm) = second.unwrap_or_else(|| if a == "baseline" { ("start".to_string(), AlignFlags::default()) } else { (a.clone(), am) });
+                if let (Some(av), Some(bv)) = (content_distribution(&a, true), content_distribution(&b, false)) {
+                    style.align_content = av;
+                    style.align_content_flags = am;
+                    style.justify_content = bv;
+                    style.justify_content_flags = bm;
+                }
             }
         }
         "order" => {
@@ -351,6 +402,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
         }
         "-webkit-box-pack" => {
             if let Some(kw) = values::ident(c0) {
+                style.justify_content_flags = AlignFlags::default();
                 style.justify_content = match kw.as_str() {
                     "start" => ContentDistribution::FlexStart,
                     "end" => ContentDistribution::FlexEnd,
@@ -362,6 +414,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
         }
         "-webkit-box-align" => {
             if let Some(kw) = values::ident(c0) {
+                style.align_items_flags = AlignFlags::default();
                 style.align_items = match kw.as_str() {
                     "start" => ItemAlign::FlexStart,
                     "end" => ItemAlign::FlexEnd,

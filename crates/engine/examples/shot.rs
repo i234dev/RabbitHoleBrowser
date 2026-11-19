@@ -49,6 +49,9 @@ fn main() {
         }
     };
     let t2 = std::time::Instant::now();
+    if std::env::var("RH_DUMP_LAYOUT").is_ok() {
+        eprintln!("{}", page.layout.dump());
+    }
     if std::env::var("RH_DEBUG_ITEMS").is_ok() {
         for it in &page.display_list.items {
             if let rabbithole_engine::layout::DisplayItem::Image { rect, src, image, opacity, .. } = it {

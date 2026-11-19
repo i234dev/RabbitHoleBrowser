@@ -79,6 +79,13 @@ pub enum MathNode {
     Max(Vec<MathNode>),
     /// `clamp(min, value, max)`.
     Clamp(Box<[MathNode; 3]>),
+    /// `fit-content(<length-percentage>)` as a width: layout clamps the
+    /// argument between the min- and max-content sizes; elsewhere it
+    /// evaluates to the argument.
+    FitContent(Box<MathNode>),
+    /// The `stretch` sizing keyword: layout fills the containing block
+    /// with the margin box; elsewhere it evaluates to 100%.
+    Stretch,
 }
 
 impl MathNode {
@@ -93,6 +100,8 @@ impl MathNode {
                 let (lo, v, hi) = (a[0].eval(base), a[1].eval(base), a[2].eval(base));
                 v.min(hi).max(lo)
             }
+            MathNode::FitContent(a) => a.eval(base),
+            MathNode::Stretch => base,
         }
     }
     /// Does any term depend on the base?
@@ -102,6 +111,8 @@ impl MathNode {
             MathNode::Sum(v) | MathNode::Min(v) | MathNode::Max(v) => v.iter().any(|n| n.has_percent()),
             MathNode::Scale(n, _) => n.has_percent(),
             MathNode::Clamp(a) => a.iter().any(|n| n.has_percent()),
+            MathNode::FitContent(a) => a.has_percent(),
+            MathNode::Stretch => true,
         }
     }
     /// CSS serialisation (`min(100%, 500px)`, `calc(100% - 20px)`).
@@ -125,6 +136,8 @@ impl MathNode {
             MathNode::Min(v) => format!("min({})", list(v)),
             MathNode::Max(v) => format!("max({})", list(v)),
             MathNode::Clamp(a) => format!("clamp({})", list(&a[..])),
+            MathNode::FitContent(a) => format!("fit-content({})", a.to_css()),
+            MathNode::Stretch => "stretch".to_string(),
             MathNode::Leaf(px, p) if *p == 0.0 => format!("{}px", num(*px)),
             MathNode::Leaf(px, p) if *px == 0.0 => format!("{}%", num(*p)),
             other => format!("calc({})", inner(other)),
@@ -159,6 +172,26 @@ pub fn intern_math(n: MathNode) -> u32 {
 /// The interned expression `id`.
 pub fn math_node(id: u32) -> Option<std::sync::Arc<MathNode>> {
     MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get(id as usize).cloned()
+}
+
+/// The `stretch` sizing keyword as a length.
+pub fn stretch_length() -> Length {
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    Length::Math(*ID.get_or_init(|| intern_math(MathNode::Stretch)))
+}
+
+/// Whether `l` is the `stretch` sizing keyword.
+pub fn is_stretch(l: Length) -> bool {
+    matches!(l, Length::Math(_)) && l == stretch_length()
+}
+
+/// The argument of a `fit-content(<length-percentage>)` length.
+pub fn fit_content_arg(l: Length) -> Option<std::sync::Arc<MathNode>> {
+    let Length::Math(id) = l else { return None };
+    match &*math_node(id)? {
+        MathNode::FitContent(a) => Some(std::sync::Arc::new((**a).clone())),
+        _ => None,
+    }
 }
 
 /// Evaluate the interned expression `id` against `base`.
@@ -550,6 +583,58 @@ impl AlignFlags {
     pub const FLEX: u8 = 64;
     pub fn has(self, flag: u8) -> bool {
         self.0 & flag != 0
+    }
+}
+
+/// The positional keyword of a start/end-type alignment value, decoded
+/// from [`AlignFlags`] (`start` and `end` are stored as `FlexStart` /
+/// `FlexEnd` without the `FLEX` flag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlignPos {
+    /// `flex-start` / `flex-end`, or a value that is not start/end.
+    #[default]
+    Flex,
+    Start,
+    End,
+    SelfStart,
+    SelfEnd,
+    Left,
+    Right,
+}
+
+/// A decoded view of an alignment value's [`AlignFlags`]: its positional
+/// keyword, `safe` and `last baseline` (not stored in the style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AlignMods {
+    pub pos: AlignPos,
+    pub safe: bool,
+    pub last: bool,
+}
+
+impl AlignMods {
+    fn decode(start: bool, end: bool, f: AlignFlags) -> AlignMods {
+        let pos = if !(start || end) || f.has(AlignFlags::FLEX) || f.has(AlignFlags::NORMAL) {
+            AlignPos::Flex
+        } else if f.has(AlignFlags::LEFT) {
+            AlignPos::Left
+        } else if f.has(AlignFlags::RIGHT) {
+            AlignPos::Right
+        } else if f.has(AlignFlags::SELF) {
+            if start { AlignPos::SelfStart } else { AlignPos::SelfEnd }
+        } else if start {
+            AlignPos::Start
+        } else {
+            AlignPos::End
+        };
+        AlignMods { pos, safe: f.has(AlignFlags::SAFE), last: f.has(AlignFlags::LAST) }
+    }
+    /// Of an item alignment value (`align-self`, `justify-items`, ...).
+    pub fn of_item(v: ItemAlign, f: AlignFlags) -> AlignMods {
+        AlignMods::decode(v == ItemAlign::FlexStart, v == ItemAlign::FlexEnd, f)
+    }
+    /// Of a content distribution value (`justify-content`, ...).
+    pub fn of_content(v: ContentDistribution, f: AlignFlags) -> AlignMods {
+        AlignMods::decode(v == ContentDistribution::FlexStart, v == ContentDistribution::FlexEnd, f)
     }
 }
 
@@ -1180,6 +1265,12 @@ pub struct ComputedStyle {
     /// Its numeric storage is `Auto`; keep it distinct from the `auto` keyword.
     pub flex_basis_content: bool,
     pub flex_wrap: FlexWrap,
+    /// `flex-wrap: balance`: lines are balanced (with `flex_wrap` Wrap or
+    /// WrapReverse).
+    pub flex_wrap_balance: bool,
+    /// `flex-line-count` (None = `auto`): the minimum number of balanced
+    /// lines.
+    pub flex_line_count: Option<u32>,
     pub justify_content: ContentDistribution,
     pub align_items: ItemAlign,
     pub align_self: ItemAlign,
@@ -1332,6 +1423,8 @@ pub struct ComputedStyle {
     pub contain_paint: bool,
     pub contain_layout: bool,
     pub contain_size: bool,
+    /// `container-type: size`: a size container, which is size-contained.
+    pub container_size: bool,
     /// `contain-intrinsic-width` / `-height` (px; `None` = `none`): the
     /// size a size-contained box is laid out as.
     pub contain_intrinsic_width: Option<f32>,
@@ -1353,6 +1446,9 @@ pub struct ComputedStyle {
     pub object_fit: ObjectFit,
     pub object_position: (Length, Length),
     pub aspect_ratio: Option<f32>,
+    /// `aspect-ratio: auto <ratio>`: a replaced element's natural ratio
+    /// wins, and the ratio relates content boxes.
+    pub aspect_ratio_auto: bool,
     /// `image-rendering: pixelated | crisp-edges` (nearest-neighbour
     /// scaling). Inherited.
     pub image_rendering_pixelated: bool,
@@ -1451,6 +1547,8 @@ impl ComputedStyle {
             flex_basis: Length::Auto,
             flex_basis_content: false,
             flex_wrap: FlexWrap::NoWrap,
+            flex_wrap_balance: false,
+            flex_line_count: None,
             justify_content: ContentDistribution::FlexStart,
             align_items: ItemAlign::Normal,
             align_self: ItemAlign::Auto,
@@ -1535,6 +1633,7 @@ impl ComputedStyle {
             contain_paint: false,
             contain_layout: false,
             contain_size: false,
+            container_size: false,
             contain_intrinsic_width: None,
             contain_intrinsic_height: None,
             line_clamp_prefixed: false,
@@ -1545,6 +1644,7 @@ impl ComputedStyle {
             object_fit: ObjectFit::Fill,
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
             aspect_ratio: None,
+            aspect_ratio_auto: false,
             image_rendering_pixelated: false,
             accent_color: None,
             color_scheme_dark: false,

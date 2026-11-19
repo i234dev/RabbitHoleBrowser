@@ -23,6 +23,9 @@ pub struct Image {
     /// Placeholder for a resource that failed to load or decode (layout
     /// shows the broken-image icon / alt text instead).
     pub broken: bool,
+    /// The natural size is only the default object size: the image has
+    /// no natural aspect ratio (an SVG without width/height or viewBox).
+    pub no_ratio: bool,
 }
 
 /// Frames of an animated image plus its playback position. The current
@@ -150,7 +153,7 @@ impl Image {
 
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         debug_assert_eq!(rgba.len(), (width * height * 4) as usize);
-        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None, broken: false }
+        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None, broken: false, no_ratio: false }
     }
 
     /// Marker image for a failed load (1×1 transparent, natural size 0).
@@ -274,7 +277,7 @@ impl Image {
                 a.loop_count,
             ))
         });
-        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken }
+        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken, no_ratio: self.no_ratio }
     }
 
     /// Encode the current frame as PNG.
