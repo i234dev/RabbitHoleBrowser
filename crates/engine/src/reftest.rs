@@ -301,7 +301,15 @@ pub fn run_test_with_options(engine: &mut Engine, test_url: &str, src: &str, max
         Ok(f) => f,
         Err(e) => return Outcome::Error(e),
     };
+    // WPT "Multiple References": with several match references at least
+    // one must match; every mismatch reference must mismatch.
+    let has_match = meta.references.iter().any(|r| !r.mismatch);
+    let mut matched = false;
+    let mut first_failure: Option<Outcome> = None;
     for r in &meta.references {
+        if matched && !r.mismatch {
+            continue;
+        }
         let Some(ref_url) = base.join(&r.href) else { return Outcome::Error(format!("bad reference {}", r.href)) };
         let ref_url = ref_url.to_string();
         let frame = if ref_url.to_ascii_lowercase().ends_with(".png") {
@@ -325,7 +333,13 @@ pub fn run_test_with_options(engine: &mut Engine, test_url: &str, src: &str, max
             .or_else(|| meta.fuzzy.iter().find(|(u, _)| u.is_none()))
             .map(|(_, f)| *f);
         let (ok, pixels, max_delta) = compare_passes(&test, &frame, r.mismatch, fuzzy);
-        if !ok {
+        if ok {
+            if !r.mismatch {
+                matched = true;
+            }
+            continue;
+        }
+        if first_failure.is_none() {
             if let Some(dir) = dump {
                 let _ = std::fs::create_dir_all(dir);
                 let _ = test.save_png(&dir.join("test.png"));
@@ -333,8 +347,14 @@ pub fn run_test_with_options(engine: &mut Engine, test_url: &str, src: &str, max
                 let (_, img) = crate::diff::diff_frames_image(&test, &frame, &DiffOptions::default());
                 let _ = img.save_png(&dir.join("diff.png"));
             }
+        }
+        if r.mismatch {
             return Outcome::Fail { pixels, max_delta };
         }
+        first_failure.get_or_insert(Outcome::Fail { pixels, max_delta });
+    }
+    if has_match && !matched {
+        return first_failure.unwrap_or(Outcome::Fail { pixels: 0, max_delta: 0 });
     }
     Outcome::Pass
 }
