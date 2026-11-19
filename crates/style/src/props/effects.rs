@@ -447,6 +447,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.contain_paint = has("paint") || has("strict") || has("content");
                 style.contain_layout = has("layout") || has("strict") || has("content");
                 style.contain_size = has("size") || has("strict");
+                style.contain_inline_size = has("inline-size");
             }
             if name == "will-change" && kws.iter().any(|k| matches!(k.as_str(), "transform" | "opacity")) {
                 style.creates_stacking_context = true;

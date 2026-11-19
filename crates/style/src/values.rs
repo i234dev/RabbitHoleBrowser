@@ -684,7 +684,30 @@ fn strip_function(c: &[Token]) -> &[Token] {
     }
 }
 
+thread_local! {
+    /// Width and height `cq*` units of the element being styled resolve
+    /// against (its query containers, else the viewport).
+    static CONTAINER_UNITS: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 0.0)) };
+}
+
+/// Set the basis of `cqw`/`cqh`/`cqi`/`cqb`/`cqmin`/`cqmax` for the
+/// element about to be styled.
+pub fn set_container_unit_basis(width: f32, height: f32) {
+    CONTAINER_UNITS.with(|c| c.set((width, height)));
+}
+
 fn dimension(v: f32, unit: &str) -> Option<LengthValue> {
+    if let Some(cq) = unit.strip_prefix("cq") {
+        let (w, h) = CONTAINER_UNITS.with(|c| c.get());
+        let basis = match cq {
+            "w" | "i" => w,
+            "h" | "b" => h,
+            "min" => w.min(h),
+            "max" => w.max(h),
+            _ => return None,
+        };
+        return Some(LengthValue::Px(v * basis / 100.0));
+    }
     Some(match unit {
         "px" => LengthValue::Px(v),
         "em" => LengthValue::Em(v),

@@ -45,6 +45,21 @@ pub(crate) struct IndexedRule {
     pub(crate) ancestor_hashes: [u32; 4],
     /// Cascade layer rank (0 = unlayered; layers by first appearance).
     pub(crate) layer: u32,
+    /// Enclosing `@container` queries.
+    pub(crate) container: Option<std::sync::Arc<Vec<rabbithole_css::container::ContainerQuery>>>,
+    /// Some declaration uses `attr()` (resolved per element: the rule's
+    /// styles cannot be shared between elements).
+    pub(crate) uses_attr: bool,
+}
+
+impl IndexedRule {
+    /// The rule's container queries hold for `node`.
+    fn container_matches(&self, doc: &Document, node: NodeId, cx: &MatchCtx) -> bool {
+        match &self.container {
+            None => true,
+            Some(q) => rabbithole_css::container::matches(q, doc, node, self.selector.pseudo_element.is_some(), cx.opts.state, cx.style_source, cx.env),
+        }
+    }
 }
 
 /// Rules bucketed by the key of their rightmost compound selector. Owns
@@ -119,6 +134,8 @@ impl RuleIndex {
                     base: base.clone(),
                     ancestor_hashes: crate::restyle::ancestor_hashes(sel),
                     layer,
+                    container: rule.container.clone(),
+                    uses_attr: decls.iter().any(uses_attr),
                 });
                 if is_slotted_selector(sel) {
                     self.slotted.push(idx);
@@ -428,6 +445,26 @@ pub(crate) struct MatchCtx<'a, 'b, 'o> {
     /// Ancestor bloom filter for the element being styled (fast rejection
     /// of descendant/child selectors), when the traversal maintains one.
     pub(crate) bloom: Option<&'b crate::restyle::AncestorBloom>,
+    /// Styles of the ancestors (for container style queries).
+    pub(crate) style_source: Option<&'b dyn rabbithole_css::container::StyleSource>,
+}
+
+/// The styles and custom properties computed so far by a traversal.
+pub(crate) struct StyledSoFar<'a> {
+    pub(crate) styles: &'a [Option<Rc<ComputedStyle>>],
+    pub(crate) vars: &'a [Option<Rc<Vars>>],
+}
+
+impl rabbithole_css::container::StyleSource for StyledSoFar<'_> {
+    fn container_names(&self, n: NodeId) -> Option<Vec<String>> {
+        let s = self.styles.get(n)?.as_ref()?;
+        Some(s.container_names.as_deref().map(<[String]>::to_vec).unwrap_or_default())
+    }
+
+    fn custom_property(&self, n: NodeId, name: &str) -> Option<Option<Vec<Token>>> {
+        let vars = self.vars.get(n)?.as_ref()?;
+        Some(vars.get(name).map(|v| substitute_vars(v, vars, 0).unwrap_or_else(|| v.clone())))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -446,6 +483,7 @@ pub(crate) fn compute_element<'a>(
 ) -> ElementOut {
     let (env, opts, scopes) = (cx.env, cx.opts, cx.scopes);
     let mut rules: Vec<(usize, u32)> = Vec::new();
+    let mut need_attrs = false;
     matched.clear();
     let index = scopes.for_scope(doc.containing_shadow_root(node));
     let index_id = index as *const RuleIndex as usize;
@@ -457,7 +495,8 @@ pub(crate) fn compute_element<'a>(
                 continue;
             }
         }
-        if cx.matcher.matches(&r.selector, node) {
+        if cx.matcher.matches(&r.selector, node) && r.container_matches(doc, node, cx) {
+            need_attrs |= r.uses_attr;
             rules.push((index_id, ci as u32));
             for d in r.decls.iter() {
                 let rank = match (r.is_ua, d.important) {
@@ -482,7 +521,8 @@ pub(crate) fn compute_element<'a>(
         let ix = scopes.for_scope(Some(root));
         for &hi in &ix.host {
             let r = &ix.rules[hi];
-            if cx.matcher.matches(&r.selector, node) {
+            if cx.matcher.matches(&r.selector, node) && r.container_matches(doc, node, cx) {
+                need_attrs |= r.uses_attr;
                 rules.push((ix as *const RuleIndex as usize | 1, hi as u32));
                 for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
@@ -496,7 +536,8 @@ pub(crate) fn compute_element<'a>(
         let ix = scopes.for_scope(doc.containing_shadow_root(slot));
         for &si in &ix.slotted {
             let r = &ix.rules[si];
-            if matches_slotted(&r.selector, doc, node, slot, opts.state) {
+            if matches_slotted(&r.selector, doc, node, slot, opts.state) && r.container_matches(doc, node, cx) {
+                need_attrs |= r.uses_attr;
                 rules.push((ix as *const RuleIndex as usize | 2, si as u32));
                 for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
@@ -517,6 +558,10 @@ pub(crate) fn compute_element<'a>(
     };
     let is_root = doc.element(node).map(|e| e.tag == "html").unwrap_or(false);
     let slot = control_pseudo_slot(doc, node);
+    need_attrs |= style_attr.iter().any(uses_attr);
+    // `attr()` reads this element's attributes: no style sharing.
+    let _attrs = need_attrs.then(|| AttrScope::enter(doc.element(node).map(|e| e.attrs.clone()).unwrap_or_default()));
+    let share = if need_attrs { None } else { share };
     let key = share.as_ref().map(|_| ShareKey {
         parent: Rc::as_ptr(parent) as usize,
         vars: Rc::as_ptr(parent_vars) as usize,
@@ -536,6 +581,8 @@ pub(crate) fn compute_element<'a>(
             return out;
         }
     }
+    let (cq_w, cq_h) = rabbithole_css::container::unit_basis(doc, node, opts.state, env);
+    crate::values::set_container_unit_basis(cq_w, cq_h);
     let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root, slot, memo);
     if let (Some(cache), Some(k)) = (share, key) {
         if cache.map.len() > 200_000 {
@@ -622,7 +669,7 @@ fn custom_properties(local: &[Matched], parent_vars: &Rc<Vars>, memo: Option<&mu
     if own.peek().is_none() {
         return parent_vars.clone();
     }
-    if let Some(Some(prev)) = memo.as_deref() {
+    if let Some(Some(prev)) = memo.as_deref().filter(|_| !attrs_active()) {
         if Rc::ptr_eq(&prev.parent, parent_vars) {
             let mut it = prev.own.iter();
             let same = own.clone().all(|m| it.next().map(|(n, v)| *n == m.decl.name && *v == m.decl.value).unwrap_or(false)) && it.next().is_none();
@@ -632,10 +679,23 @@ fn custom_properties(local: &[Matched], parent_vars: &Rc<Vars>, memo: Option<&mu
         }
     }
     let mut vars: Rc<Vars> = parent_vars.clone();
+    let attrs = attrs_active();
     for m in own.clone() {
+        // `attr()` refers to the declaring element: substitute it here.
+        let value = if attrs && m.decl.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("attr"))) {
+            match substitute_attrs_only(&m.decl.value, &vars) {
+                Some(v) => std::borrow::Cow::Owned(v),
+                None => {
+                    Rc::make_mut(&mut vars).remove(&m.decl.name);
+                    continue;
+                }
+            }
+        } else {
+            std::borrow::Cow::Borrowed(&m.decl.value)
+        };
         // Redeclaring the inherited value keeps sharing the parent's map.
-        if vars.get(&m.decl.name) != Some(&m.decl.value) {
-            Rc::make_mut(&mut vars).insert(m.decl.name.clone(), m.decl.value.clone());
+        if vars.get(&m.decl.name) != Some(&*value) {
+            Rc::make_mut(&mut vars).insert(m.decl.name.clone(), value.into_owned());
         }
     }
     if let Some(slot) = memo {
@@ -646,6 +706,38 @@ fn custom_properties(local: &[Matched], parent_vars: &Rc<Vars>, memo: Option<&mu
         });
     }
     vars
+}
+
+/// Substitute the `attr()` functions of a custom property value, keeping
+/// its `var()` references for the elements that use it.
+fn substitute_attrs_only(value: &[Token], vars: &Vars) -> Option<Vec<Token>> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut i = 0;
+    while i < value.len() {
+        if matches!(&value[i], Token::Function(f) if f.eq_ignore_ascii_case("attr")) {
+            let start = i;
+            let mut depth = 0i32;
+            while i < value.len() {
+                match value[i] {
+                    Token::Function(_) | Token::OpenParen => depth += 1,
+                    Token::CloseParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            out.extend(substitute_attr(&value[start + 1..i.min(value.len())], vars, 0)?);
+            i += 1;
+        } else {
+            out.push(value[i].clone());
+            i += 1;
+        }
+    }
+    Some(out)
 }
 
 /// The cascade proper for one element whose matching declarations are
@@ -850,7 +942,7 @@ fn apply_declarations(
         if m.decl.name.starts_with("--") {
             continue;
         }
-        if m.decl.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var"))) {
+        if needs_substitution(&m.decl.value) && (m.decl.name != "content" || uses_attr(m.decl) || m.decl.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var")))) {
             match substitute_vars(&m.decl.value, vars, 0) {
                 Some(v) => resolved.push((m.decl.name.as_str(), std::borrow::Cow::Owned(v), m.base)),
                 None => continue,
@@ -1304,6 +1396,157 @@ fn parse_unicode_range(text: &str) -> Option<(u32, u32)> {
 
 // ------------------------------------------------------------ custom props
 
+thread_local! {
+    /// Attributes of the element being styled while some matched
+    /// declaration uses `attr()`.
+    static ELEMENT_ATTRS: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Makes an element's attributes available to `attr()` for a scope.
+struct AttrScope;
+
+impl AttrScope {
+    fn enter(attrs: Vec<(String, String)>) -> AttrScope {
+        ELEMENT_ATTRS.with(|a| *a.borrow_mut() = Some(attrs));
+        AttrScope
+    }
+}
+
+impl Drop for AttrScope {
+    fn drop(&mut self) {
+        ELEMENT_ATTRS.with(|a| *a.borrow_mut() = None);
+    }
+}
+
+/// Does a declaration need `attr()` substituted at computed-value time?
+/// (`content: attr(name)` without type or fallback is resolved by layout,
+/// which keeps such rules shareable.)
+fn uses_attr(d: &Declaration) -> bool {
+    let mut calls = d.value.iter().enumerate().filter(|(_, t)| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("attr"))).peekable();
+    if calls.peek().is_none() {
+        return false;
+    }
+    if d.name != "content" {
+        return true;
+    }
+    calls.any(|(i, _)| {
+        let inner: Vec<&Token> = d.value[i + 1..].iter().take_while(|t| **t != Token::CloseParen).filter(|t| !matches!(t, Token::Whitespace)).collect();
+        !matches!(inner.as_slice(), [Token::Ident(_)])
+    })
+}
+
+/// `attr()` can be substituted (an element's attributes are in scope).
+fn attrs_active() -> bool {
+    ELEMENT_ATTRS.with(|a| a.borrow().is_some())
+}
+
+/// Does `value` hold a function substituted at computed-value time?
+fn needs_substitution(value: &[Token]) -> bool {
+    let attrs = attrs_active();
+    value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || (attrs && f.eq_ignore_ascii_case("attr"))))
+}
+
+/// Does a value parse as one of the types of an `attr()` `type(...)`
+/// syntax (`<color>`, `<length> | <percentage>`, `*`, ...)?
+fn attr_type_matches(syntax: &[Token], value: &[Token]) -> bool {
+    let value: Vec<Token> = value.iter().filter(|t| !matches!(t, Token::Whitespace)).cloned().collect();
+    let one = |ty: &str| -> bool {
+        let v = value.as_slice();
+        match ty {
+            "*" => true,
+            "color" => values::parse_color_component(v).is_some(),
+            "length" => matches!(v, [Token::Dimension(..)] | [Token::Number(_)]) && values::parse_length(v).is_some_and(|l| !matches!(l, values::LengthValue::Percent(_) | values::LengthValue::Auto)),
+            "percentage" => matches!(v, [Token::Percentage(_)]),
+            "length-percentage" => matches!(v, [Token::Percentage(_)]) || (matches!(v, [Token::Dimension(..)] | [Token::Number(_)]) && values::parse_length(v).is_some()),
+            "number" => matches!(v, [Token::Number(_)]),
+            "integer" => matches!(v, [Token::Number(n)] if n.fract() == 0.0),
+            "angle" => matches!(v, [Token::Dimension(_, u)] if matches!(u.to_ascii_lowercase().as_str(), "deg" | "rad" | "grad" | "turn")),
+            "time" => matches!(v, [Token::Dimension(_, u)] if matches!(u.to_ascii_lowercase().as_str(), "s" | "ms")),
+            "resolution" => matches!(v, [Token::Dimension(_, u)] if matches!(u.to_ascii_lowercase().as_str(), "dpi" | "dpcm" | "dppx" | "x")),
+            "custom-ident" | "ident" => matches!(v, [Token::Ident(_)]),
+            "string" => matches!(v, [Token::String(_)]),
+            _ => false,
+        }
+    };
+    // `<a> | <b>`: any alternative.
+    let mut alternatives = Vec::new();
+    let mut i = 0;
+    while i < syntax.len() {
+        match &syntax[i] {
+            Token::Delim('*') => alternatives.push("*".to_string()),
+            Token::Delim('<') => {
+                if let (Some(Token::Ident(n)), Some(Token::Delim('>'))) = (syntax.get(i + 1), syntax.get(i + 2)) {
+                    alternatives.push(n.to_ascii_lowercase());
+                    i += 2;
+                } else {
+                    return false;
+                }
+            }
+            Token::Delim('|') | Token::Whitespace => {}
+            _ => return false,
+        }
+        i += 1;
+    }
+    !value.is_empty() && alternatives.iter().any(|a| one(a))
+}
+
+/// The substitution of `attr(<name> <type>?, <fallback>?)` (CSS Values 5
+/// §7.7); `None` when it is invalid at computed-value time.
+fn substitute_attr(inner: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token>> {
+    let comma = inner.iter().position(|t| *t == Token::Comma);
+    let head: Vec<&Token> = inner[..comma.unwrap_or(inner.len())].iter().filter(|t| !matches!(t, Token::Whitespace)).collect();
+    let fallback = comma.map(|p| &inner[p + 1..]);
+    // `[<ns-prefix>? '|']? <ident>`: only the null namespace (`*|` is
+    // invalid in attr()).
+    let (name, rest) = match head.as_slice() {
+        [Token::Ident(n), rest @ ..] => (n.to_ascii_lowercase(), rest),
+        [Token::Delim('|'), Token::Ident(n), rest @ ..] => (n.to_ascii_lowercase(), rest),
+        _ => return None,
+    };
+    let raw = ELEMENT_ATTRS.with(|a| a.borrow().as_ref().and_then(|attrs| attrs.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone())));
+    let use_fallback = |fb: Option<&[Token]>| -> Option<Vec<Token>> { substitute_vars(fb?, vars, depth + 1) };
+    enum Kind {
+        String,
+        Syntax(Vec<Token>),
+        Unit(String),
+    }
+    let kind = match rest {
+        [] => Kind::String,
+        [Token::Ident(k)] if k.eq_ignore_ascii_case("raw-string") => Kind::String,
+        [Token::Ident(u)] => Kind::Unit(u.to_ascii_lowercase()),
+        [Token::Delim('%')] => Kind::Unit("%".into()),
+        [Token::Function(f), ..] if f.eq_ignore_ascii_case("type") => {
+            let start = inner.iter().position(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("type")))?;
+            let end = inner[start..].iter().position(|t| *t == Token::CloseParen)? + start;
+            Kind::Syntax(inner[start + 1..end].to_vec())
+        }
+        _ => return None,
+    };
+    let Some(raw) = raw else {
+        return match (kind, fallback) {
+            (_, Some(fb)) => use_fallback(Some(fb)),
+            (Kind::String, None) => Some(vec![Token::String(String::new())]),
+            _ => None,
+        };
+    };
+    match kind {
+        Kind::String => Some(vec![Token::String(raw)]),
+        Kind::Syntax(syntax) => {
+            let toks = rabbithole_css::Tokenizer::tokenize(raw.trim());
+            // Attribute values never substitute further functions.
+            if !toks.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("attr"))) && attr_type_matches(&syntax, &toks) {
+                Some(toks)
+            } else {
+                use_fallback(fallback)
+            }
+        }
+        Kind::Unit(unit) => match rabbithole_css::Tokenizer::tokenize(raw.trim()).as_slice() {
+            [Token::Number(n)] => Some(vec![if unit == "%" { Token::Percentage(*n) } else { Token::Dimension(*n, unit) }]),
+            _ => use_fallback(fallback),
+        },
+    }
+}
+
 fn substitute_vars(value: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token>> {
     if depth > 8 {
         return None;
@@ -1312,6 +1555,28 @@ fn substitute_vars(value: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token
     let mut i = 0;
     while i < value.len() {
         match &value[i] {
+            Token::Function(f) if f.eq_ignore_ascii_case("attr") && attrs_active() => {
+                let start = i;
+                let mut depth_p = 0i32;
+                let mut end = value.len();
+                while i < value.len() {
+                    match value[i] {
+                        Token::Function(_) | Token::OpenParen => depth_p += 1,
+                        Token::CloseParen => {
+                            depth_p -= 1;
+                            if depth_p == 0 {
+                                end = i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let inner = &value[start + 1..end.min(value.len())];
+                i = end + 1;
+                out.extend(substitute_attr(inner, vars, depth)?);
+            }
             Token::Function(f) if f.eq_ignore_ascii_case("var") => {
                 // find matching close paren
                 let start = i;
@@ -2099,11 +2364,20 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.tab_size_length = from.tab_size_length;
         }
         "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
-        "container-type" | "container" => to.container_size = from.container_size,
+        "container-type" | "container" | "container-name" => {
+            if prop != "container-name" {
+                to.container_size = from.container_size;
+                to.container_inline = from.container_inline;
+            }
+            if prop != "container-type" {
+                to.container_names = from.container_names.clone();
+            }
+        }
         "contain" => {
             to.contain_paint = from.contain_paint;
             to.contain_layout = from.contain_layout;
             to.contain_size = from.contain_size;
+            to.contain_inline_size = from.contain_inline_size;
             to.creates_stacking_context = from.creates_stacking_context;
         }
         "-webkit-line-clamp" | "line-clamp" => {

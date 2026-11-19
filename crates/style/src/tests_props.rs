@@ -1048,3 +1048,45 @@ fn revert_and_revert_layer_roll_back_the_cascade() {
     let (doc, t) = styled("<div>x</div>", "div { display: inline; display: revert }");
     assert_eq!(style_of(&doc, &t, "div").display, Display::Block);
 }
+
+#[test]
+fn container_queries_and_units() {
+    let css = ".c { container: card / inline-size; --theme: dark } \
+               @container card (min-width: 300px) { p { width: 10cqw } } \
+               @container (width < 300px) { p { height: 7px } } \
+               @container style(--theme: dark) { p { color: green } } \
+               @container style(--theme: light) { p { color: red } }";
+    let doc = rabbithole_html::parse("<div class=c><p>x</p></div>");
+    let sheets = vec![parse_stylesheet(css)];
+    let div = doc.find_element("div").unwrap();
+    // Before layout measured the container, size queries are unknown.
+    let t = style_tree(&doc, &sheets, &env());
+    let p = style_of(&doc, &t, "p");
+    assert_eq!(p.color, rabbithole_gfx::Color::rgb(0, 128, 0));
+    assert!(style_of(&doc, &t, "div").container_inline);
+    assert_eq!(p.width, Length::Auto);
+    let mut state = MatchState::default();
+    let info = rabbithole_css::container::ContainerInfo { width: 400.0, height: 50.0, names: vec!["card".into()], font_size: 16.0, ..Default::default() };
+    state.containers = std::sync::Arc::new([(div, info)].into_iter().collect());
+    let resolve = |_: &str, raw: &str| Some(raw.to_string());
+    let opts = StyleOptions { state: &state, resolve_url: &resolve, document_base: "" };
+    let t = style_tree_with(&doc, &sheets, &env(), &opts);
+    let p = style_of(&doc, &t, "p");
+    assert_eq!(p.width, Length::Px(40.0));
+    assert_eq!(p.height, Length::Auto);
+}
+
+#[test]
+fn typed_attr_substitution() {
+    let (doc, t) = styled(
+        "<div data-c=green data-w=40 data-l='3px'><p data-c=nonsense>x</p><span>y</span></div>",
+        "div { background-color: attr(data-c type(<color>)); width: attr(data-w px); height: attr(data-l type(<length>)); --s: attr(data-c) } \
+         p { background-color: attr(data-c type(<color>), blue) } \
+         span { content: attr(data-missing, 'fb') }",
+    );
+    let d = style_of(&doc, &t, "div");
+    assert_eq!(d.background_color, rabbithole_gfx::Color::rgb(0, 128, 0));
+    assert_eq!(d.width, Length::Px(40.0));
+    assert_eq!(d.height, Length::Px(3.0));
+    assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(0, 0, 255));
+}

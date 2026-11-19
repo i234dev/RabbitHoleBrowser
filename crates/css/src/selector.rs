@@ -876,6 +876,9 @@ pub struct MatchState {
     /// Links (`<a>` / `<area>` with `href`) whose destination was visited:
     /// they match `:visited` instead of `:link`.
     pub visited: std::sync::Arc<std::collections::HashSet<NodeId>>,
+    /// Query containers measured by the last layout (`@container`, `cq*`
+    /// units).
+    pub containers: std::sync::Arc<std::collections::HashMap<NodeId, crate::container::ContainerInfo>>,
 }
 
 impl MatchState {

@@ -1,6 +1,7 @@
 //! CSS parsing: tokenizer, selectors and a stylesheet/declaration parser
 //! with `@media` evaluation and `@import` discovery.
 
+pub mod container;
 pub mod selector;
 pub mod supports;
 pub mod tokenizer;
@@ -25,6 +26,8 @@ pub struct StyleRule {
     /// unlayered rules. A rule without selectors only records a layer's
     /// place in the layer order (`@layer a, b;`).
     pub layer: Option<std::sync::Arc<str>>,
+    /// Enclosing `@container` queries (all must hold).
+    pub container: Option<std::sync::Arc<Vec<container::ContainerQuery>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +335,24 @@ fn assign_layer(rules: &mut [Rule], name: &str) {
     }
 }
 
+/// Put `rules` under the container query `q` (outside the queries they
+/// already have).
+fn assign_container(rules: &mut [Rule], q: &container::ContainerQuery) {
+    for r in rules {
+        match r {
+            Rule::Style(s) => {
+                let mut list = vec![q.clone()];
+                if let Some(inner) = &s.container {
+                    list.extend(inner.iter().cloned());
+                }
+                s.container = Some(std::sync::Arc::new(list));
+            }
+            Rule::Media { rules, .. } | Rule::Supports { rules, .. } => assign_container(rules, q),
+            _ => {}
+        }
+    }
+}
+
 pub fn parse_stylesheet(src: &str) -> Stylesheet {
     // `<style>` text of XHTML documents wrapped in a CDATA section (the
     // XML parser drops the markers; our HTML parser keeps them as text).
@@ -481,11 +502,20 @@ impl<'a> Parser<'a> {
                                         format!("#anon{n}")
                                     });
                                     // Register the layer even when it is empty.
-                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(name.as_str())) }));
+                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(name.as_str())), container: None }));
                                     assign_layer(&mut inner_rules, &name);
                                     rules.extend(inner_rules);
                                 }
-                                "container" | "scope" => {
+                                "container" => {
+                                    // An invalid prelude drops the rule.
+                                    if let Some(q) = container::parse(prelude) {
+                                        let mut sub = Parser { toks: inner, pos: 0 };
+                                        let mut inner_rules = if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) };
+                                        assign_container(&mut inner_rules, &q);
+                                        rules.extend(inner_rules);
+                                    }
+                                }
+                                "scope" => {
                                     // Transparent grouping.
                                     let mut sub = Parser { toks: inner, pos: 0 };
                                     rules.extend(if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) });
@@ -529,7 +559,7 @@ impl<'a> Parser<'a> {
                             if name == "layer" && parent.is_none() {
                                 // `@layer a, b;` fixes the order of layers.
                                 for n in layer_names(prelude) {
-                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(n.as_str())) }));
+                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(n.as_str())), container: None }));
                                 }
                             }
                         }
@@ -578,7 +608,7 @@ impl<'a> Parser<'a> {
             let mut sub = Parser { toks: &self.toks[start..end], pos: 0 };
             if at_rule || block {
                 if !declarations.is_empty() {
-                    rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations: std::mem::take(&mut declarations), layer: None }));
+                    rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations: std::mem::take(&mut declarations), layer: None, container: None }));
                 }
                 rules.extend(sub.parse_rule_context(false, Some(parent.clone()), depth + 1));
             } else {
@@ -586,7 +616,7 @@ impl<'a> Parser<'a> {
             }
         }
         if !declarations.is_empty() {
-            rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations, layer: None }));
+            rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations, layer: None, container: None }));
         }
         rules
     }

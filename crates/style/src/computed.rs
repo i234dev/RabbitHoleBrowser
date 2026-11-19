@@ -1649,8 +1649,15 @@ pub struct ComputedStyle {
     pub contain_paint: bool,
     pub contain_layout: bool,
     pub contain_size: bool,
+    /// `contain: inline-size`.
+    pub contain_inline_size: bool,
     /// `container-type: size`: a size container, which is size-contained.
     pub container_size: bool,
+    /// `container-type: inline-size` or `size`: a query container (and
+    /// inline-size contained).
+    pub container_inline: bool,
+    /// `container-name`s.
+    pub container_names: Option<std::rc::Rc<[String]>>,
     /// `contain-intrinsic-width` / `-height` (px; `None` = `none`): the
     /// size a size-contained box is laid out as.
     pub contain_intrinsic_width: Option<f32>,
@@ -1902,7 +1909,10 @@ impl ComputedStyle {
             contain_paint: false,
             contain_layout: false,
             contain_size: false,
+            contain_inline_size: false,
             container_size: false,
+            container_inline: false,
+            container_names: None,
             contain_intrinsic_width: None,
             contain_intrinsic_height: None,
             line_clamp_prefixed: false,

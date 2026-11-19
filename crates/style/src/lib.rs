@@ -24,6 +24,8 @@ pub use rabbithole_css::{Declaration, MatchState, MediaEnv, PseudoElement, Style
 use rabbithole_dom::{Document, NodeId};
 use std::collections::HashMap;
 
+pub use props::misc::take_containers_seen;
+
 /// Let `@supports` (parsed by `rabbithole_css`) check declarations
 /// against the property grammars of this crate.
 pub fn install_supports_validator() {

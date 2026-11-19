@@ -1019,6 +1019,11 @@ impl StyleEngine {
                 }
             }
         }
+        if old_state.containers != new_state.containers {
+            // Query containers were (re)measured: container queries and
+            // `cq*` units may resolve differently anywhere.
+            m.global = true;
+        }
         if old_state.target_id != new_state.target_id && inval.target != 0 {
             for id in [old_state.target_id.as_deref(), new_state.target_id.as_deref()].into_iter().flatten() {
                 if let Some(e) = doc.element_by_id(id) {
@@ -1167,7 +1172,8 @@ impl StyleEngine {
             let mut root_fs = root_fs;
             let (style, vars) = if recompute {
                 recomputed += 1;
-                let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: Some(&bloom) };
+                let so_far = crate::cascade::StyledSoFar { styles: &tree.styles, vars: &self.vars };
+                let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: Some(&bloom), style_source: Some(&so_far) };
                 let out: ElementOut = compute_element(doc, node, &parent, &pvars, root_fs, &cx, &mut decls, Some(&mut share), &mut candidates, &mut matched, Some(&mut self.vars_memo[node]));
                 self.inherit_dep[node] = out.inherit_dep;
                 if node == html {
@@ -1319,7 +1325,15 @@ impl StyleEngine {
             None => (Rc::new(ComputedStyle::initial()), Rc::new(HashMap::new()), 16.0),
         };
         let matcher = SelectorMatcher::new(doc, opts.state);
-        let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: None };
+        let so_far = tree.map(|t| crate::cascade::StyledSoFar { styles: &t.styles, vars: &self.vars });
+        let cx = MatchCtx {
+            scopes: &self.index,
+            env: &self.env,
+            opts,
+            matcher: &matcher,
+            bloom: None,
+            style_source: so_far.as_ref().map(|s| s as &dyn rabbithole_css::container::StyleSource),
+        };
         for &node in &chain {
             let out = compute_element(doc, node, &parent, &vars, root_fs, &cx, &mut decls, None, &mut candidates, &mut matched, None);
             if node == html {
