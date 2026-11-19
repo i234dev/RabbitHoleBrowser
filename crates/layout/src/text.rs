@@ -377,14 +377,14 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
 /// Caches text widths per (font, size).
 pub(crate) struct Measurer<'a> {
     pub fonts: &'a FontContext,
-    cache: HashMap<(usize, u32), HashMap<String, f32>>,
+    cache: rabbithole_gfx::fxhash::FxHashMap<(usize, u32), rabbithole_gfx::fxhash::FxHashMap<String, f32>>,
 }
 
 impl<'a> Measurer<'a> {
     pub fn new(fonts: &'a FontContext) -> Self {
         Measurer {
             fonts,
-            cache: HashMap::new(),
+            cache: Default::default(),
         }
     }
 

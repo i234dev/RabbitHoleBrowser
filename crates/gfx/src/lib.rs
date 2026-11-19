@@ -7,6 +7,7 @@ pub mod canvas;
 pub mod canvas_ext;
 pub mod diff;
 pub mod font;
+pub mod fxhash;
 pub mod font_ext;
 pub mod image;
 pub mod paint;

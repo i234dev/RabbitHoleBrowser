@@ -31,6 +31,22 @@ pub struct LengthContext {
 thread_local! {
     static UNIT_FONTS: std::cell::RefCell<Option<std::rc::Rc<rabbithole_gfx::FontContext>>> = const { std::cell::RefCell::new(None) };
     static UNIT_CACHE: std::cell::RefCell<std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), (f32, f32, f32)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// The last few `font_units` results (consecutive elements mostly share
+    /// their font): looked up without building the cache key.
+    static UNIT_RECENT: std::cell::RefCell<Vec<RecentUnits>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct RecentUnits {
+    families: Vec<String>,
+    generic: u8,
+    weight: u16,
+    italic: bool,
+    generation: (u64, u64),
+    units: (f32, f32, f32),
+}
+
+fn clear_recent_units() {
+    UNIT_RECENT.with(|r| r.borrow_mut().clear());
 }
 
 /// Fonts used to resolve the font-relative units `ch` and `ex` on this
@@ -38,11 +54,13 @@ thread_local! {
 pub fn set_unit_fonts(fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>) {
     UNIT_FONTS.with(|f| *f.borrow_mut() = fonts);
     UNIT_CACHE.with(|c| c.borrow_mut().clear());
+    clear_recent_units();
 }
 
 /// Forget the cached `ch` / `ex` (fonts were added).
 pub fn clear_unit_cache() {
     UNIT_CACHE.with(|c| c.borrow_mut().clear());
+    clear_recent_units();
 }
 
 thread_local! {
@@ -63,6 +81,7 @@ pub struct FontUnitScope {
 }
 
 pub fn scope_unit_fonts(fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>, skip: Vec<String>) -> FontUnitScope {
+    clear_recent_units();
     FontUnitScope {
         fonts: UNIT_FONTS.with(|f| std::mem::replace(&mut *f.borrow_mut(), fonts)),
         cache: UNIT_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut())),
@@ -80,6 +99,7 @@ impl Drop for FontUnitScope {
         UNIT_FONTS.with(|f| *f.borrow_mut() = self.fonts.take());
         UNIT_CACHE.with(|c| *c.borrow_mut() = std::mem::take(&mut self.cache));
         UNIT_SKIP.with(|s| *s.borrow_mut() = std::mem::take(&mut self.skip));
+        clear_recent_units();
     }
 }
 
@@ -101,8 +121,29 @@ pub fn font_units(style: &crate::ComputedStyle) -> (f32, f32, f32) {
     UNIT_FONTS.with(|f| {
         let f = f.borrow();
         let Some(fonts) = f.as_ref() else { return (0.5, 0.5, 1.0) };
-        let key = (style.font_family_list.join(","), style.font_family as u8, style.font_weight, style.is_italic(), fonts.selection_generation());
+        let generation = fonts.selection_generation();
+        let (generic, weight, italic) = (style.font_family as u8, style.font_weight, style.is_italic());
+        let recent = UNIT_RECENT.with(|r| {
+            r.borrow()
+                .iter()
+                .find(|e| e.generation == generation && e.generic == generic && e.weight == weight && e.italic == italic && e.families == style.font_family_list)
+                .map(|e| e.units)
+        });
+        if let Some(v) = recent {
+            return v;
+        }
+        let remember = |units: (f32, f32, f32)| {
+            UNIT_RECENT.with(|r| {
+                let mut r = r.borrow_mut();
+                if r.len() >= 4 {
+                    r.remove(0);
+                }
+                r.push(RecentUnits { families: style.font_family_list.clone(), generic, weight, italic, generation, units });
+            })
+        };
+        let key = (style.font_family_list.join(","), generic, weight, italic, generation);
         if let Some(v) = UNIT_CACHE.with(|c| c.borrow().get(&key).copied()) {
+            remember(v);
             return v;
         }
         let list: Vec<String> = UNIT_SKIP.with(|s| {
@@ -111,6 +152,7 @@ pub fn font_units(style: &crate::ComputedStyle) -> (f32, f32, f32) {
         });
         let v = fonts.unit_metrics(&list, style.font_family, style.font_weight, style.is_italic());
         UNIT_CACHE.with(|c| c.borrow_mut().insert(key, v));
+        remember(v);
         v
     })
 }

@@ -8,7 +8,7 @@
 
 use crate::font::{FontContext, FontId};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use crate::fxhash::FxHashMap as HashMap;
 use std::rc::Rc;
 
 /// A font's decoration line metrics in px: (position upwards from the
@@ -43,7 +43,10 @@ pub(crate) struct ShapingState {
     /// Face index → SFNT bytes (None: unavailable) and whether the face
     /// has layout tables worth shaping with (GSUB / GPOS / kern).
     data: RefCell<HashMap<usize, Option<(Rc<Vec<u8>>, bool, bool)>>>,
-    cache: RefCell<HashMap<(usize, Box<str>, u8), Rc<UnitRun>>>,
+    /// Shaped runs by (face, features and direction key), then text.
+    cache: RefCell<HashMap<(usize, u8), HashMap<Box<str>, Rc<UnitRun>>>>,
+    /// Runs in `cache`.
+    cache_len: std::cell::Cell<usize>,
     /// Faces that are another face shaped with OpenType features (CSS
     /// `font-feature-settings` / `font-variant-*`): face → (base, features).
     pub(crate) variants: RefCell<HashMap<usize, (usize, Rc<[FontFeature]>)>>,
@@ -82,7 +85,11 @@ impl ShapeFeatures {
 impl FontContext {
     /// The face a feature variant shapes with (the face itself otherwise).
     pub(crate) fn variant_base(&self, idx: usize) -> usize {
-        self.shaping.variants.borrow().get(&idx).map(|v| v.0).unwrap_or(idx)
+        let variants = self.shaping.variants.borrow();
+        if variants.is_empty() {
+            return idx;
+        }
+        variants.get(&idx).map(|v| v.0).unwrap_or(idx)
     }
 
     /// Does `font` substitute glyphs for the OpenType feature `tag` (e.g.
@@ -282,8 +289,8 @@ impl FontContext {
             Some(false) => 4,
             Some(true) => 8,
         };
-        let key = (idx, Box::<str>::from(text), features.key() | dir_key);
-        if let Some(r) = self.shaping.cache.borrow().get(&key) {
+        let key = (idx, features.key() | dir_key);
+        if let Some(r) = self.shaping.cache.borrow().get(&key).and_then(|m| m.get(text)) {
             return Some(Rc::clone(r));
         }
         let (data, _, _) = self.shaping_data(idx)?;
@@ -330,10 +337,12 @@ impl FontContext {
             .collect();
         let run = Rc::new(UnitRun { glyphs, upem: face.units_per_em() as f32 });
         let mut cache = self.shaping.cache.borrow_mut();
-        if cache.len() > 60_000 {
+        if self.shaping.cache_len.get() > 60_000 {
             cache.clear();
+            self.shaping.cache_len.set(0);
         }
-        cache.insert(key, Rc::clone(&run));
+        cache.entry(key).or_default().insert(Box::from(text), Rc::clone(&run));
+        self.shaping.cache_len.set(self.shaping.cache_len.get() + 1);
         Some(run)
     }
 }

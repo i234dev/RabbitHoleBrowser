@@ -113,6 +113,8 @@ pub(crate) struct Layouter<'a> {
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
     font_cache: HashMap<(String, u16, bool, u16), FontId>,
+    /// The last `font_cache` lookup: (families, weight, italic, stretch) → font.
+    last_font: Option<(Vec<String>, u16, bool, u16, FontId)>,
     /// (face, feature props by address, inter-character) → feature variant
     /// (the computed styles outlive a layout pass).
     feature_cache: HashMap<(usize, usize, bool), FontId>,
@@ -392,6 +394,7 @@ impl<'a> Layouter<'a> {
             flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
+            last_font: None,
             feature_cache: HashMap::new(),
             abs_cb: HashMap::new(),
             center_blocks: false,
@@ -466,12 +469,23 @@ impl<'a> Layouter<'a> {
 
     fn font_for_family(&mut self, style: &ComputedStyle) -> FontId {
         if self.font_ext && !style.font_family_list.is_empty() {
-            let key = (style.font_family_list.join(","), style.font_weight, style.is_italic(), style.font_stretch);
-            if let Some(f) = self.font_cache.get(&key) {
-                return *f;
+            // Consecutive text mostly shares its font: compare with the
+            // last lookup before building the cache key.
+            if let Some((families, weight, italic, stretch, f)) = &self.last_font {
+                if *weight == style.font_weight && *italic == style.is_italic() && *stretch == style.font_stretch && *families == style.font_family_list {
+                    return *f;
+                }
             }
-            let f = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
-            self.font_cache.insert(key, f);
+            let key = (style.font_family_list.join(","), style.font_weight, style.is_italic(), style.font_stretch);
+            let f = match self.font_cache.get(&key) {
+                Some(f) => *f,
+                None => {
+                    let f = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
+                    self.font_cache.insert(key, f);
+                    f
+                }
+            };
+            self.last_font = Some((style.font_family_list.clone(), style.font_weight, style.is_italic(), style.font_stretch, f));
             return f;
         }
         self.ctx.fonts.select(style.font_family, style.font_weight, style.is_italic())
