@@ -301,7 +301,12 @@ pub(crate) fn break_after_spaces(rules: &Rules, a: Option<char>, b: char) -> boo
 /// byte offsets where a new part starts (empty when there is none).
 pub(crate) fn split_points(rules: &Rules, word: &str, out: &mut Vec<usize>) {
     out.clear();
-    if rules.word_break != 3 && rules.line_break != 3 && word.bytes().all(|b| b.is_ascii_alphanumeric()) {
+    // ASCII letters, digits and the punctuation that never allows a break
+    // inside a word (IS, QU and the AL symbols) have no opportunity.
+    if rules.word_break != 3
+        && rules.line_break != 3
+        && word.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b',' | b'.' | b':' | b';' | b'\'' | b'"' | b'#' | b'&' | b'*' | b'<' | b'=' | b'>' | b'@' | b'^' | b'_' | b'`' | b'~'))
+    {
         return;
     }
     let anywhere = rules.line_break == 3;
