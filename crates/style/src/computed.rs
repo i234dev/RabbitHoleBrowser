@@ -854,6 +854,50 @@ pub enum BackgroundImage {
     },
 }
 
+/// A `border-image-width` / `border-image-outset` value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BorderImageWidth {
+    /// A multiple of the border width.
+    Number(f32),
+    Length(Length),
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderImageRepeat {
+    Stretch,
+    Repeat,
+    Round,
+    Space,
+}
+
+/// The `border-image` longhands (CSS Backgrounds 3 §6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderImage {
+    pub source: BackgroundImage,
+    /// Top, right, bottom, left insets: `Px` = image pixels (a number),
+    /// or `Percent` of the image size.
+    pub slice: [Length; 4],
+    pub fill: bool,
+    pub width: [BorderImageWidth; 4],
+    pub outset: [BorderImageWidth; 4],
+    /// (horizontal, vertical).
+    pub repeat: (BorderImageRepeat, BorderImageRepeat),
+}
+
+impl Default for BorderImage {
+    fn default() -> Self {
+        BorderImage {
+            source: BackgroundImage::None,
+            slice: [Length::Percent(100.0); 4],
+            fill: false,
+            width: [BorderImageWidth::Number(1.0); 4],
+            outset: [BorderImageWidth::Number(0.0); 4],
+            repeat: (BorderImageRepeat::Stretch, BorderImageRepeat::Stretch),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BackgroundSize {
     Auto,
@@ -1379,6 +1423,8 @@ pub struct ComputedStyle {
     /// `mask-image` layers (with `mask-size`, `-position`, `-repeat`,
     /// `-origin`, `-clip`): the alpha of their images masks the box.
     pub mask_layers: Vec<BackgroundLayer>,
+    /// `border-image-*` (None: all initial).
+    pub border_image: Option<Box<BorderImage>>,
     /// Corner radii (top-left, top-right, bottom-right, bottom-left), each
     /// (horizontal, vertical). `border_radius` keeps the largest for
     /// compatibility with older code paths.
@@ -1644,6 +1690,7 @@ impl ComputedStyle {
             justify_self: ItemAlign::Auto,
             background_layers: Vec::new(),
             mask_layers: Vec::new(),
+            border_image: None,
             border_radii: [(Length::ZERO, Length::ZERO); 4],
             box_shadow: Vec::new(),
             text_shadow: Vec::new(),

@@ -46,13 +46,32 @@ impl SvgTree {
     /// Parse a standalone SVG document shown as an image of concrete size
     /// `viewport` (percentages resolve against it when there is no viewBox).
     pub fn parse_in(xml: &str, viewport: Option<(f32, f32)>) -> Option<SvgTree> {
+        Self::parse_view(xml, viewport, None)
+    }
+
+    /// Like [`SvgTree::parse_in`], showing the `<view>` element whose id is
+    /// `fragment` (SVG 2 §8.11: its viewBox / preserveAspectRatio replace
+    /// the root's).
+    pub fn parse_view(xml: &str, viewport: Option<(f32, f32)>, fragment: Option<&str>) -> Option<SvgTree> {
         // Drop the XML prolog / DOCTYPE; the HTML parser treats the rest as
         // foreign content once the <svg> element starts.
         let start = xml.find("<svg").or_else(|| xml.find("<SVG"))?;
         let body = &xml[start..];
         let doc = rabbithole_html::parse(&format!("<!doctype html><html><body>{body}</body></html>"));
         let root = doc.find_element("svg")?;
-        parse::build_in(&doc, root, &|_, _| None, viewport).map(|built| SvgTree { built })
+        let view = fragment.filter(|f| !f.is_empty()).and_then(|f| {
+            doc.descendants(root).into_iter().find(|&n| doc.is_element(n, "view") && doc.attr(n, "id") == Some(f))
+        });
+        let view_box = view.and_then(|v| doc.attr(v, "viewBox").or_else(|| doc.attr(v, "viewbox"))).and_then(units::parse_viewbox);
+        let view_par = view.and_then(|v| doc.attr(v, "preserveAspectRatio").or_else(|| doc.attr(v, "preserveaspectratio")).map(|p| units::parse_aspect_ratio(Some(p))));
+        let mut built = parse::build_in(&doc, root, &|_, _| None, viewport.or(view_box.map(|v| (v.w, v.h))))?;
+        if let Some(vb) = view_box {
+            built.viewbox = Some(vb);
+        }
+        if let Some(par) = view_par {
+            built.par = par;
+        }
+        Some(SvgTree { built })
     }
 
     /// Build from an `<svg>` element already in a DOM (inline SVG).

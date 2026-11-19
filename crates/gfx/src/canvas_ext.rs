@@ -747,7 +747,8 @@ impl Canvas {
                     } else if downscale {
                         crate::canvas::sample_box(image, u0.max(src.x), v0.max(src.y), u1.min(src.right()), v1.min(src.bottom()))
                     } else {
-                        crate::canvas::sample_bilinear(image, (u0 + u1) * 0.5 - 0.5, (v0 + v1) * 0.5 - 0.5)
+                        // Filtering never reads outside the source rect.
+                        crate::canvas::sample_bilinear(image, clamp_center((u0 + u1) * 0.5, src.x, src.right()) - 0.5, clamp_center((v0 + v1) * 0.5, src.y, src.bottom()) - 0.5)
                     };
                     let cx = span_coverage(px as f32, d.x, d.right());
                     let mut alpha = (a * op * cx * cy + 0.5) as u32;
@@ -785,7 +786,11 @@ impl Canvas {
                     }
                     let u = src.x + (p.x - dest.x) * sx;
                     let v = src.y + (p.y - dest.y) * sy;
-                    let s = if self.image_smoothing { crate::canvas::sample_bilinear(image, u - 0.5, v - 0.5) } else { crate::canvas::sample_nearest(image, u, v) };
+                    let s = if self.image_smoothing {
+                        crate::canvas::sample_bilinear(image, clamp_center(u, src.x, src.right()) - 0.5, clamp_center(v, src.y, src.bottom()) - 0.5)
+                    } else {
+                        crate::canvas::sample_nearest(image, u, v)
+                    };
                     for i in 0..3 {
                         acc[i] += s[i] * s[3];
                     }
@@ -1207,4 +1212,15 @@ pub fn blend_pixel(mode: u8, backdrop: u32, source: u32) -> u32 {
     };
     let q = |v: f32| ((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32) & 0xff;
     (q(out[0]) << 16) | (q(out[1]) << 8) | q(out[2])
+}
+
+/// A bilinear sample centre kept half a pixel inside `lo..hi`, so the
+/// filter only reads source pixels of that span.
+#[inline]
+fn clamp_center(c: f32, lo: f32, hi: f32) -> f32 {
+    if hi - lo <= 1.0 {
+        (lo + hi) * 0.5
+    } else {
+        c.clamp(lo + 0.5, hi - 0.5)
+    }
 }

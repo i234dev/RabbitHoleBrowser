@@ -1787,6 +1787,22 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.border_radius = from.border_radius;
         }
         "box-shadow" => to.box_shadow = from.box_shadow.clone(),
+        "border-image" | "-webkit-border-image" => to.border_image = from.border_image.clone(),
+        "border-image-source" | "border-image-slice" | "border-image-width" | "border-image-outset" | "border-image-repeat" => {
+            let src = from.border_image.as_deref().cloned().unwrap_or_default();
+            let mut bi = to.border_image.as_deref().cloned().unwrap_or_default();
+            match prop {
+                "border-image-source" => bi.source = src.source,
+                "border-image-slice" => {
+                    bi.slice = src.slice;
+                    bi.fill = src.fill;
+                }
+                "border-image-width" => bi.width = src.width,
+                "border-image-outset" => bi.outset = src.outset,
+                _ => bi.repeat = src.repeat,
+            }
+            to.border_image = Some(Box::new(bi));
+        }
         "text-shadow" => to.text_shadow = from.text_shadow.clone(),
         "transform" => to.transform = from.transform.clone(),
         "transform-origin" => to.transform_origin = from.transform_origin,

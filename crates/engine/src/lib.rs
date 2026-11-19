@@ -674,8 +674,9 @@ impl Loader {
         let mut keys: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
         let mut consider = |s: &rabbithole_style::ComputedStyle| {
-            for layer in s.background_layers.iter().chain(s.mask_layers.iter()) {
-                if let rabbithole_style::BackgroundImage::Url(u) = &layer.image {
+            let border = s.border_image.as_deref().map(|b| &b.source);
+            for image in s.background_layers.iter().chain(s.mask_layers.iter()).map(|l| &l.image).chain(border) {
+                if let rabbithole_style::BackgroundImage::Url(u) = image {
                     if seen.insert(u.clone()) {
                         keys.push(u.clone());
                     }
@@ -752,7 +753,7 @@ impl Loader {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some((u, resp)) = jobs.get(i) else { break };
                     let td = std::time::Instant::now();
-                    let img = resp.as_ref().and_then(|r| decode_image(&r.body, &r.content_type, &u.path)).map(Arc::new);
+                    let img = resp.as_ref().and_then(|r| decode_image(&r.body, &r.content_type, &u.path, u.fragment.as_deref())).map(Arc::new);
                     if debug {
                         eprintln!("[decode] {:?} {} -> {}", td.elapsed(), u, img.as_ref().map(|i| format!("{}x{}{}", i.width, i.height, if i.is_animated() { " animated" } else { "" })).unwrap_or_else(|| "none".into()));
                     }
@@ -1565,13 +1566,14 @@ fn empty_layout() -> LayoutTree {
 
 /// Decode a raster image, or rasterize an SVG document at its intrinsic
 /// size (×2 for crispness when scaled, capped at 2048 px).
-fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
+fn decode_image(bytes: &[u8], content_type: &str, path: &str, fragment: Option<&str>) -> Option<Image> {
     let looks_svg = content_type.contains("svg")
         || path.to_ascii_lowercase().ends_with(".svg")
         || (bytes.len() > 5 && bytes.iter().take(512).any(|&b| b == b'<') && std::str::from_utf8(&bytes[..bytes.len().min(2048)]).map(|s| s.contains("<svg")).unwrap_or(false));
     if looks_svg {
         let text = decode_text(bytes, None);
-        let tree = rabbithole_svg::SvgTree::parse(&text)?;
+        let fragment = fragment.map(str::to_string);
+        let tree = rabbithole_svg::SvgTree::parse_view(&text, None, fragment.as_deref())?;
         let (w, h) = tree.resolve_size(None, None);
         let scale = if w.max(h) < 512.0 { 2.0 } else { 1.0 };
         let (pw, ph) = ((w * scale).round().clamp(1.0, 2048.0) as u32, (h * scale).round().clamp(1.0, 2048.0) as u32);
@@ -1589,7 +1591,7 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
             (Some(_), Some(_)) => None,
             _ => viewbox.filter(|v| v.w > 0.0 && v.h > 0.0).map(|v| v.w / v.h),
         };
-        img.vector = Some(Arc::new(rabbithole_gfx::image::Vector::new(iw, ih, ratio, Box::new(SvgImageRender { text }))));
+        img.vector = Some(Arc::new(rabbithole_gfx::image::Vector::new(iw, ih, ratio, Box::new(SvgImageRender { text, fragment }))));
         return Some(img);
     }
     Image::decode(bytes)
@@ -1599,6 +1601,8 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
 /// size; renderings are cached by the image).
 struct SvgImageRender {
     text: String,
+    /// The `<view>` shown (URL fragment).
+    fragment: Option<String>,
 }
 
 impl rabbithole_gfx::image::VectorRender for SvgImageRender {
@@ -1606,7 +1610,7 @@ impl rabbithole_gfx::image::VectorRender for SvgImageRender {
         thread_local! {
             static SVG_FONTS: FontContext = FontContext::new();
         }
-        let tree = rabbithole_svg::SvgTree::parse_in(&self.text, Some((w, h)))?;
+        let tree = rabbithole_svg::SvgTree::parse_view(&self.text, Some((w, h)), self.fragment.as_deref())?;
         Some(SVG_FONTS.with(|fonts| tree.rasterize_viewport(fonts, w, h, scale)))
     }
 }

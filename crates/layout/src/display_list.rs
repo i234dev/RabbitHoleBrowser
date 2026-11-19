@@ -1043,7 +1043,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
         background::paint_box_shadows(self.list, &geom, &style.box_shadow, true);
-        if style.has_visible_border() {
+        // A border image replaces the border styles (CSS Backgrounds 3 §6).
+        let border_image = style.border_image.as_deref().is_some_and(|bi| {
+            crate::border_image::paint_border_image(self.list, &geom, bi, self.ctx.background_images, style.image_rendering_pixelated)
+        });
+        if style.has_visible_border() && !border_image {
             let bw = style.border_width;
             let bs = style.border_style;
             let bc = style.border_color;

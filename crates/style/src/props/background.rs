@@ -651,9 +651,214 @@ fn apply_mask(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &A
     true
 }
 
+/// 1–4 values expanded to (top, right, bottom, left).
+fn four<T: Copy>(v: &[T]) -> Option<[T; 4]> {
+    Some(match v.len() {
+        1 => [v[0]; 4],
+        2 => [v[0], v[1], v[0], v[1]],
+        3 => [v[0], v[1], v[2], v[1]],
+        4 => [v[0], v[1], v[2], v[3]],
+        _ => return None,
+    })
+}
+
+/// `border-image-slice`: [<number> | <percentage>]{1,4} && fill?
+fn parse_bi_slice(comps: &[&[Token]]) -> Option<([Length; 4], bool)> {
+    let mut fill = false;
+    let mut vals = Vec::new();
+    for (i, c) in comps.iter().enumerate() {
+        if values::is_ident(c, "fill") {
+            // `fill` comes first or last.
+            if fill || (i != 0 && i != comps.len() - 1) {
+                return None;
+            }
+            fill = true;
+            continue;
+        }
+        match c {
+            [Token::Number(n)] if *n >= 0.0 => vals.push(Length::Px(*n)),
+            [Token::Percentage(p)] if *p >= 0.0 => vals.push(Length::Percent(*p)),
+            _ => return None,
+        }
+    }
+    Some((four(&vals)?, fill))
+}
+
+/// `border-image-width` (`auto` allowed) / `border-image-outset`.
+fn parse_bi_widths(comps: &[&[Token]], ctx: &LengthContext, outset: bool) -> Option<[BorderImageWidth; 4]> {
+    let mut vals = Vec::new();
+    for c in comps {
+        let v = if !outset && values::is_ident(c, "auto") {
+            BorderImageWidth::Auto
+        } else if let [Token::Number(n)] = c {
+            if *n < 0.0 {
+                return None;
+            }
+            BorderImageWidth::Number(*n)
+        } else {
+            let l = super::len_no_auto(c, ctx)?;
+            if outset && matches!(l, Length::Percent(_)) {
+                return None;
+            }
+            if matches!(l, Length::Px(v) if v < 0.0) || matches!(l, Length::Percent(v) if v < 0.0) {
+                return None;
+            }
+            BorderImageWidth::Length(l)
+        };
+        vals.push(v);
+    }
+    four(&vals)
+}
+
+fn parse_bi_repeat(comps: &[&[Token]]) -> Option<(BorderImageRepeat, BorderImageRepeat)> {
+    let one = |c: &[Token]| -> Option<BorderImageRepeat> {
+        Some(match values::ident(c)?.as_str() {
+            "stretch" => BorderImageRepeat::Stretch,
+            "repeat" => BorderImageRepeat::Repeat,
+            "round" => BorderImageRepeat::Round,
+            "space" => BorderImageRepeat::Space,
+            _ => return None,
+        })
+    };
+    match comps {
+        [a] => {
+            let r = one(a)?;
+            Some((r, r))
+        }
+        [a, b] => Some((one(a)?, one(b)?)),
+        _ => None,
+    }
+}
+
+/// The `border-image` shorthand: <source> || <slice> [/ <width>? [/ <outset>]?]? || <repeat>.
+fn parse_border_image(comps: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<BorderImage> {
+    let mut out = BorderImage::default();
+    let (mut seen_src, mut seen_slice, mut seen_repeat) = (false, false, false);
+    let is_slice_tok = |c: &[Token]| matches!(c, [Token::Number(_)] | [Token::Percentage(_)]) || values::is_ident(c, "fill");
+    let is_repeat_tok = |c: &[Token]| matches!(values::ident(c).as_deref(), Some("stretch" | "repeat" | "round" | "space"));
+    let mut i = 0;
+    while i < comps.len() {
+        let c = comps[i];
+        if !seen_src {
+            if let Some(img) = parse_image(c, current, ctx) {
+                out.source = img;
+                seen_src = true;
+                i += 1;
+                continue;
+            }
+        }
+        if !seen_slice && is_slice_tok(c) {
+            let mut j = i;
+            while j < comps.len() && is_slice_tok(comps[j]) {
+                j += 1;
+            }
+            let (slice, fill) = parse_bi_slice(&comps[i..j])?;
+            out.slice = slice;
+            out.fill = fill;
+            seen_slice = true;
+            i = j;
+            // `/ width` and `/ outset`.
+            let slash = |k: usize| k < comps.len() && matches!(comps[k], [Token::Delim('/')]);
+            if slash(i) {
+                i += 1;
+                let mut j = i;
+                while j < comps.len() && !slash(j) && !is_repeat_tok(comps[j]) && parse_image(comps[j], current, ctx).is_none() {
+                    j += 1;
+                }
+                if j > i {
+                    out.width = parse_bi_widths(&comps[i..j], ctx, false)?;
+                }
+                i = j;
+                if slash(i) {
+                    i += 1;
+                    let mut j = i;
+                    while j < comps.len() && !is_repeat_tok(comps[j]) && parse_image(comps[j], current, ctx).is_none() {
+                        j += 1;
+                    }
+                    if j == i {
+                        return None;
+                    }
+                    out.outset = parse_bi_widths(&comps[i..j], ctx, true)?;
+                    i = j;
+                } else if comps.get(i - 1).is_some_and(|c| matches!(c, [Token::Delim('/')])) {
+                    // A slash with neither width nor outset.
+                    return None;
+                }
+            }
+            continue;
+        }
+        if !seen_repeat && is_repeat_tok(c) {
+            let mut j = i + 1;
+            if j < comps.len() && is_repeat_tok(comps[j]) {
+                j += 1;
+            }
+            out.repeat = parse_bi_repeat(&comps[i..j])?;
+            seen_repeat = true;
+            i = j;
+            continue;
+        }
+        return None;
+    }
+    Some(out)
+}
+
+fn apply_border_image(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) {
+    let current = style.color;
+    let mut bi = style.border_image.as_deref().cloned().unwrap_or_default();
+    match name {
+        "border-image" | "-webkit-border-image" => {
+            if comps.len() == 1 && values::is_ident(comps[0], "none") {
+                style.border_image = None;
+                return;
+            }
+            let Some(mut parsed) = parse_border_image(comps, current, ctx) else { return };
+            if name == "-webkit-border-image" {
+                // The legacy property always fills the middle and its
+                // widths, when given, are the border widths.
+                parsed.fill = true;
+            }
+            bi = parsed;
+        }
+        "border-image-source" => {
+            if comps.len() != 1 {
+                return;
+            }
+            match parse_image(comps[0], current, ctx) {
+                Some(img) => bi.source = img,
+                None => return,
+            }
+        }
+        "border-image-slice" => match parse_bi_slice(comps) {
+            Some((slice, fill)) => {
+                bi.slice = slice;
+                bi.fill = fill;
+            }
+            None => return,
+        },
+        "border-image-width" => match parse_bi_widths(comps, ctx, false) {
+            Some(w) => bi.width = w,
+            None => return,
+        },
+        "border-image-outset" => match parse_bi_widths(comps, ctx, true) {
+            Some(w) => bi.outset = w,
+            None => return,
+        },
+        "border-image-repeat" => match parse_bi_repeat(comps) {
+            Some(r) => bi.repeat = r,
+            None => return,
+        },
+        _ => return,
+    }
+    style.border_image = if bi == BorderImage::default() { None } else { Some(Box::new(bi)) };
+}
+
 pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) -> bool {
     if name.contains("mask") {
         return apply_mask(name, comps, style, ctx);
+    }
+    if name.starts_with("border-image") || name == "-webkit-border-image" {
+        apply_border_image(name, comps, style, ctx);
+        return true;
     }
     let name = match name {
         "-webkit-background-size" => "background-size",
