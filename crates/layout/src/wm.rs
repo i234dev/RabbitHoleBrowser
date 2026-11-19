@@ -359,8 +359,7 @@ fn prepare_children(b: &mut LayoutBox, cache: &mut Cache) {
         }
         let vertical = c.style.writing_mode.is_vertical() && !c.style.layout_transposed;
         // Images are not turned; table parts cannot leave their table.
-        let element = !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Image) && !table_internal(b, c);
-        if vertical && element {
+        if vertical && !matches!(c.kind, BoxKind::Text | BoxKind::LineBreak | BoxKind::Image) && !table_internal(b, c) {
             let c = std::mem::replace(&mut b.children[i], LayoutBox::new(BoxKind::Block, None, b.style.clone()));
             b.children[i] = wrap(c, cache, false, WritingMode::HorizontalTb);
         } else if !vertical {

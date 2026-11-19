@@ -179,6 +179,23 @@ fn has_inset(s: &ComputedStyle) -> bool {
 /// (a block decorating box insets its decorations per paragraph).
 const BLOCK_BOX: usize = usize::MAX - 1;
 
+/// A fragment's text as painted: tabs and no-break spaces as spaces,
+/// without soft hyphens.
+fn paint_text(text: &str) -> Rc<str> {
+    let b = text.as_bytes();
+    if !b.iter().any(|&x| x == b'\t' || x == 0xC2) {
+        return Rc::from(text);
+    }
+    let tab = b.contains(&b'\t');
+    let shy = text.contains('\u{ad}');
+    let nbsp = text.contains('\u{a0}');
+    match (tab, shy, nbsp) {
+        (false, false, false) => Rc::from(text),
+        (false, false, true) => Rc::from(text.replace('\u{a0}', " ")),
+        _ => text.chars().filter(|c| *c != '\u{ad}').map(|c| if c == '\t' || c == '\u{a0}' { ' ' } else { c }).collect::<String>().into(),
+    }
+}
+
 /// Per item, the inline box (its Open item index) whose `top` /
 /// `bottom` / `text-*` / `middle` alignment moves it: the outermost such
 /// box enclosing it (`usize::MAX` for none). Empty when no inline box
@@ -450,16 +467,20 @@ impl<'a> Layouter<'a> {
         }
         // Combined-upright compositions break like their text (a letter
         // among letters), not like atomic inlines: (child, first, last).
-        let tcy: Vec<(usize, char, char)> = b
-            .children
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.wm_tcy)
-            .filter_map(|(i, c)| match c.children.first().and_then(|r| r.items.first()) {
-                Some(InlineItem::Text { text, .. }) => Some((i, text.chars().next()?, text.chars().next_back()?)),
-                _ => None,
-            })
-            .collect();
+        // (Only vertical lines have them.)
+        let tcy: Vec<(usize, char, char)> = if !b.style.layout_transposed {
+            Vec::new()
+        } else {
+            b.children
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.wm_tcy)
+                .filter_map(|(i, c)| match c.children.first().and_then(|r| r.items.first()) {
+                    Some(InlineItem::Text { text, .. }) => Some((i, text.chars().next()?, text.chars().next_back()?)),
+                    _ => None,
+                })
+                .collect()
+        };
         let pieces = self.build_pieces(&b.items, &b.style, &tcy);
         b.pieces = Some(pieces);
     }
@@ -807,7 +828,7 @@ impl<'a> Layouter<'a> {
                 rel: rel.clone(),
                 rel_kids: rel_kids.clone(),
                 parent_open: parent_open.clone(),
-                in_inline: in_inline.clone(),
+                in_inline: &in_inline,
                 inset_seen: std::collections::HashSet::new(),
                 inset_fixups: Vec::new(),
                 inset_total: std::collections::HashMap::new(),
@@ -979,7 +1000,7 @@ struct InlineLayout<'l, 'a> {
     /// See [`open_parents`].
     parent_open: Vec<Option<usize>>,
     /// Per item, the aligned inline box moving it (see `inline_nesting`).
-    in_inline: Vec<usize>,
+    in_inline: &'l [usize],
     /// Inline elements with decoration insets already met on a line.
     inset_seen: std::collections::HashSet<usize>,
     inset_fixups: Vec<InsetFixup>,
@@ -2146,6 +2167,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     /// The static positions of the line's inline-level absolutes, moved
     /// with the line's content: mirrored in a right-to-left line (where
     /// the position is the hypothetical box's right edge), then aligned.
+    #[cold]
+    #[inline(never)]
     fn place_line_abs(&mut self, shift_x: f32) {
         if self.line_abs.is_empty() {
             return;
@@ -2407,10 +2430,66 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.justified = shift;
     }
 
+    /// The inline boxes of the current line aligned by `top` / `bottom` /
+    /// `text-*` / `middle`, which move as a whole: (box, mode, raise of
+    /// its alphabetic baseline, extents above / below it, its central
+    /// shift).
+    #[cold]
+    #[inline(never)]
+    fn aligned_groups(&mut self, central: bool, line_over_bottom: bool) -> Vec<(usize, u8, f32, f32, f32, f32)> {
+        let central_shift = |tm: &TextMetrics| if central { (tm.asc - tm.desc) / 2.0 } else { 0.0 };
+        let mut groups: Vec<(usize, u8, f32, f32, f32, f32)> = Vec::new();
+        // One pass over the line: each aligned box's extents from its
+        // own strut and its text.
+        let mut last_item = usize::MAX;
+        for f in &self.cur.frags {
+            let PFKind::Text { item, .. } = &f.kind else { continue };
+            let g = self.in_inline.get(*item).copied().unwrap_or(usize::MAX);
+            if g == usize::MAX || *item == last_item {
+                continue;
+            }
+            last_item = *item;
+            let k = match groups.iter().position(|x| x.0 == g) {
+                Some(k) => k,
+                None => {
+                    let gtm = self.lay.text_metrics(&self.style(g).clone());
+                    groups.push((g, 0, 0.0, gtm.above, gtm.below, central_shift(&gtm)));
+                    groups.len() - 1
+                }
+            };
+            let tm = self.lay.text_metrics(&self.style(*item).clone());
+            let rel = central_shift(&tm) - groups[k].5;
+            groups[k].3 = groups[k].3.max(tm.above - rel);
+            groups[k].4 = groups[k].4.max(tm.below + rel);
+        }
+        let (asc_p, desc_p, c_p) = (self.strut.asc, self.strut.desc, central_shift(&self.strut));
+        for grp in &mut groups {
+            let (ga, gb) = (grp.3, grp.4);
+            let va = match (self.style(grp.0).vertical_align, line_over_bottom) {
+                (VerticalAlign::Top, true) => VerticalAlign::Bottom,
+                (VerticalAlign::Bottom, true) => VerticalAlign::Top,
+                (VerticalAlign::TextTop, true) => VerticalAlign::TextBottom,
+                (VerticalAlign::TextBottom, true) => VerticalAlign::TextTop,
+                (v, _) => v,
+            };
+            (grp.1, grp.2) = match va {
+                VerticalAlign::Top => (1, 0.0),
+                VerticalAlign::Bottom => (2, 0.0),
+                VerticalAlign::TextTop => (0, asc_p - c_p - ga),
+                VerticalAlign::TextBottom => (0, gb - desc_p - c_p),
+                VerticalAlign::Middle if central => (0, -(ga - gb) / 2.0),
+                _ => (0, 0.25 * self.strut.size - (ga - gb) / 2.0),
+            };
+        }
+        groups
+    }
+
     fn finish_line(&mut self, forced: bool) {
         if !self.cur.has_content && !forced {
             if self.cur.frags.is_empty() {
-                self.place_line_abs(0.0);
+                if !self.line_abs.is_empty() {
+                    self.place_line_abs(0.0);
+                }
                 return;
             }
         }
@@ -2496,46 +2575,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         // Inline boxes aligned by `top` / `bottom` / `text-*` / `middle`
         // move as a whole: (box, mode, raise of its alphabetic baseline or
         // its extents above / below it).
-        let mut groups: Vec<(usize, u8, f32, f32, f32)> = Vec::new();
+        let mut groups: Vec<(usize, u8, f32, f32, f32, f32)> = Vec::new();
         if !self.in_inline.is_empty() {
-            for f in &self.cur.frags {
-                let PFKind::Text { item, .. } = &f.kind else { continue };
-                let g = self.in_inline.get(*item).copied().unwrap_or(usize::MAX);
-                if g == usize::MAX || groups.iter().any(|x| x.0 == g) {
-                    continue;
-                }
-                let gstyle = self.style(g).clone();
-                let gtm = self.lay.text_metrics(&gstyle);
-                let cg = central_shift(&gtm);
-                let (mut ga, mut gb) = (gtm.above, gtm.below);
-                for f2 in &self.cur.frags {
-                    if let PFKind::Text { item: i2, .. } = &f2.kind {
-                        if self.in_inline.get(*i2).copied() == Some(g) {
-                            let tm = self.lay.text_metrics(&self.style(*i2).clone());
-                            let rel = central_shift(&tm) - cg;
-                            ga = ga.max(tm.above - rel);
-                            gb = gb.max(tm.below + rel);
-                        }
-                    }
-                }
-                let (asc_p, desc_p, c_p) = (self.strut.asc, self.strut.desc, central_shift(&self.strut));
-                let va = match (gstyle.vertical_align, line_over_bottom) {
-                    (VerticalAlign::Top, true) => VerticalAlign::Bottom,
-                    (VerticalAlign::Bottom, true) => VerticalAlign::Top,
-                    (VerticalAlign::TextTop, true) => VerticalAlign::TextBottom,
-                    (VerticalAlign::TextBottom, true) => VerticalAlign::TextTop,
-                    (v, _) => v,
-                };
-                let (mode, raise) = match va {
-                    VerticalAlign::Top => (1, 0.0),
-                    VerticalAlign::Bottom => (2, 0.0),
-                    VerticalAlign::TextTop => (0, asc_p - c_p - ga),
-                    VerticalAlign::TextBottom => (0, gb - desc_p - c_p),
-                    VerticalAlign::Middle if central => (0, -(ga - gb) / 2.0),
-                    _ => (0, 0.25 * self.strut.size - (ga - gb) / 2.0),
-                };
-                groups.push((g, mode, raise, ga, gb));
-            }
+            groups = self.aligned_groups(central, line_over_bottom);
         }
         let mut a = self.strut.above;
         let mut d = self.strut.below;
@@ -2555,11 +2597,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     // logical bottom: the raises flip.
                     let c = central_shift(&tm);
                     let flip = |v: f32| if line_over_bottom { -v } else { v };
-                    let group = self.in_inline.get(*item).and_then(|g| groups.iter().find(|x| x.0 == *g)).copied();
+                    let group = if groups.is_empty() { None } else { self.in_inline.get(*item).and_then(|g| groups.iter().find(|x| x.0 == *g)).copied() };
                     let (mut mode, mut rel) = (0, 0.0);
                     let shift = match (group, style.vertical_align) {
-                        (Some((g, gmode, raise, _, _)), _) => {
-                            let cg = central_shift(&self.lay.text_metrics(&self.style(g).clone()));
+                        (Some((_, gmode, raise, _, _, cg)), _) => {
                             mode = gmode;
                             rel = c - cg;
                             raise - rel
@@ -2722,7 +2763,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             }
         };
 
-        self.place_line_abs(shift_x);
+        if !self.line_abs.is_empty() {
+            self.place_line_abs(shift_x);
+        }
         let mut fragments: Vec<Fragment> = Vec::with_capacity(self.cur.frags.len() + self.cur.bg.len());
         for bg in &self.cur.bg {
             let style = self.style(bg.item).clone();
@@ -2789,7 +2832,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                         kind: FragmentKind::Text {
-                            text: if text.bytes().any(|b| b == b'\t' || b == 0xAD || b == 0xA0) && text.contains(['\t', '\u{ad}', '\u{a0}']) { Rc::from(text.replace('\t', " ").replace('\u{ad}', "").replace('\u{a0}', " ").as_str()) } else { Rc::from(text.as_str()) },
+                            text: paint_text(&text),
                             font: tm.font,
                             size: tm.size,
                             color: style.text_fill_color.unwrap_or(style.color),

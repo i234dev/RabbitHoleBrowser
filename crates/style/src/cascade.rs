@@ -3212,7 +3212,17 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             return;
         }
     }
-    if let Some((start, end, pair)) = logical_pair(name) {
+    // In horizontal-tb (and, for the inline axis, left-to-right) the
+    // flow-relative margin / padding shorthands are the physical pairs:
+    // applied directly (the user-agent sheet's paragraphs and lists).
+    let direct = !style.writing_mode.is_vertical()
+        && match name {
+            "margin-block" | "padding-block" => true,
+            "margin-inline" | "padding-inline" => style.direction != Direction::Rtl,
+            _ => false,
+        }
+        && wide_keyword(value).is_none();
+    if let Some((start, end, pair)) = logical_pair(name).filter(|_| !direct) {
         let comps = values::components(value);
         if pair && wide_keyword(value).is_none() && comps.len() == 2 {
             apply_property(start, comps[0], style, parent, ctx);
@@ -3449,7 +3459,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "padding-inline" | "padding-block" => {
-            if let Some(v) = two_values(&comps, |c| resolve_len_no_auto(c, ctx)) {
+            if let Some(v) = two_values(&comps, |c| non_negative(c).then(|| resolve_len_no_auto(c, ctx)).flatten()) {
                 if name == "padding-inline" {
                     style.padding.left = v.0;
                     style.padding.right = v.1;
