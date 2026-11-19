@@ -579,10 +579,20 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // Legacy `clip` of absolutely positioned boxes.
         let rect_clipped = match root.style.clip_rect {
             Some(edges) if root.flow == Flow::Absolute => {
-                let r = root.rect;
+                // (The clip is physical: a vertical-mode wrapper — whose
+                // contents are already turned here — maps it.)
+                let turned = root.wm_transform.and(self.wm_m);
+                let r = match (turned, saved_wm_m) {
+                    (Some(_), Some(outer)) => rabbithole_gfx::path::transform_rect_bounds(&outer, root.rect),
+                    _ => root.rect,
+                };
                 let at = |l: rabbithole_style::Length, auto: f32| if l.is_auto() { auto } else { l.resolve_or_zero(0.0) };
                 let (top, right, bottom, left) = (at(edges[0], 0.0), at(edges[1], r.w), at(edges[2], r.h), at(edges[3], 0.0));
                 let c = Rect::new(r.x + left, r.y + top, (right - left).max(0.0), (bottom - top).max(0.0));
+                let c = match turned.and_then(crate::tree::invert_matrix) {
+                    Some(inv) => rabbithole_gfx::path::transform_rect_bounds(&inv, c),
+                    None => c,
+                };
                 self.list.push(DisplayItem::PushClip(c));
                 self.push_scope(HitScope::Clip(c));
                 true

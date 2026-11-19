@@ -245,6 +245,9 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
     ws.position = phys.position;
     ws.inset = phys.inset;
     ws.z_index = phys.z_index;
+    // The legacy `clip` of an absolutely positioned box: the wrapper is
+    // the positioned box now.
+    ws.clip_rect = phys.clip_rect;
     ws.float = phys.float;
     ws.clear = phys.clear;
     ws.margin = phys.margin;
@@ -314,6 +317,7 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
         inner.background_layers = Vec::new();
     }
     inner.margin = Edges::all(Length::ZERO);
+    inner.clip_rect = None;
     inner.float = Float::None;
     inner.clear = rabbithole_style::Clear::None;
     if phys.position != Position::Static {
