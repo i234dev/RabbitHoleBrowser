@@ -406,6 +406,26 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             if name == "font-variant" {
                 apply_font_variant(comps, style);
             }
+            // The OpenType caps features (used when the font has them).
+            let caps: Vec<rabbithole_gfx::FontFeature> = kws
+                .iter()
+                .flat_map(|k| -> Vec<rabbithole_gfx::FontFeature> {
+                    match k.as_str() {
+                        "small-caps" => vec![(*b"smcp", 1)],
+                        "all-small-caps" => vec![(*b"c2sc", 1), (*b"smcp", 1)],
+                        "petite-caps" => vec![(*b"pcap", 1)],
+                        "all-petite-caps" => vec![(*b"c2pc", 1), (*b"pcap", 1)],
+                        "unicase" => vec![(*b"unic", 1)],
+                        "titling-caps" => vec![(*b"titl", 1)],
+                        _ => Vec::new(),
+                    }
+                })
+                .collect();
+            if name == "font-variant-caps" || !caps.is_empty() || kws.iter().any(|k| k == "normal" || k == "none") {
+                let mut f = style.font_features.as_deref().cloned().unwrap_or_default();
+                f.caps = caps;
+                style.font_features = if f == FontFeatureProps::default() { None } else { Some(Rc::new(f)) };
+            }
         }
         // none | [ex-height | cap-height | ch-width | ic-width | ic-height]?
         // [from-font | <number [0,∞]>]

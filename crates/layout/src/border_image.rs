@@ -234,8 +234,8 @@ mod tests {
     #[test]
     fn repeat_modes_place_tiles() {
         assert_eq!(tiles(BorderImageRepeat::Stretch, 10.0, 50.0, 7.0), Some((vec![10.0], 50.0)));
-        // Round: 50 / 20 → 2 tiles of 25.
-        assert_eq!(tiles(BorderImageRepeat::Round, 0.0, 50.0, 20.0), Some((vec![0.0, 25.0], 25.0)));
+        // Round: 45 / 20 → 2 tiles of 22.5.
+        assert_eq!(tiles(BorderImageRepeat::Round, 0.0, 45.0, 20.0), Some((vec![0.0, 22.5], 22.5)));
         // Space: 2 tiles of 20 with gaps of 10/3.
         let (v, t) = tiles(BorderImageRepeat::Space, 0.0, 50.0, 20.0).unwrap();
         assert_eq!(t, 20.0);

@@ -314,7 +314,27 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
         if f.ends_with("image-set") {
             return parse_image_set_value(c, current, ctx);
         }
-        if f == "image" || f == "cross-fade" {
+        if f == "image" {
+            // image([<url> | <string>]? , <color>?): the first image, else a
+            // solid color image (no natural size).
+            let args = super::fn_args(c);
+            for arg in &args {
+                if let [t] = arg.as_slice() {
+                    if let Some(u) = crate::cascade::url_of(t) {
+                        return Some(BackgroundImage::Url(ctx.url(&u)));
+                    }
+                    if let [Token::String(s)] = t {
+                        return Some(BackgroundImage::Url(ctx.url(s)));
+                    }
+                }
+            }
+            if let Some(col) = args.last().filter(|a| a.len() == 1).and_then(|a| color(a[0], current)) {
+                let stop = GradientStop { color: col, position: None, hint: false };
+                return Some(BackgroundImage::LinearGradient { direction: GradientDirection::Corner(0, 1), stops: vec![stop.clone(), stop], repeating: false, interp: crate::ColorInterp::default() });
+            }
+            return None;
+        }
+        if f == "cross-fade" {
             for arg in super::fn_args(c) {
                 for t in arg {
                     if let Some(u) = crate::cascade::url_of(t) {

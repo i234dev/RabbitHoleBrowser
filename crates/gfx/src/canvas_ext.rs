@@ -433,7 +433,18 @@ impl Canvas {
             if srect.is_empty() {
                 return;
             }
-            let sradii = radii.map(|(h, v)| ((h + spread).max(0.0), (v + spread).max(0.0)));
+            // Spreading a corner radius smaller than the spread grows it
+            // less (CSS Backgrounds 3 §7.1.1): spread × (1 + (r/s − 1)³).
+            let grow = |r: f32| {
+                if r <= 0.0 {
+                    0.0
+                } else if spread > 0.0 && r < spread {
+                    r + spread * (1.0 + (r / spread - 1.0).powi(3))
+                } else {
+                    (r + spread).max(0.0)
+                }
+            };
+            let sradii = radii.map(|(h, v)| (grow(h), grow(v)));
             let shadow_shape = RoundedBox::new(srect, sradii);
             // Region: shadow rect padded by the blur, limited to clip ± pad.
             let region = Rect::new(srect.x - pad, srect.y - pad, srect.w + 2.0 * pad, srect.h + 2.0 * pad);

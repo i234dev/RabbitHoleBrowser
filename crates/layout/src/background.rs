@@ -73,7 +73,11 @@ impl BoxGeometry {
 /// Resolved border-box radii of a laid out box.
 pub(crate) fn box_radii(b: &LayoutBox) -> Radii {
     let r = b.style.resolved_radii(b.rect.w, b.rect.h);
-    if r.iter().all(|(h, v)| *h <= 0.0 || *v <= 0.0) && b.style.border_radius > 0.0 {
+    // The legacy single radius applies only when no corner radius was set
+    // (`25px 0` is a square corner, not a fallback).
+    let zero = |l: &Length| matches!(l, Length::Px(v) | Length::Percent(v) if *v == 0.0);
+    let unset = b.style.border_radii.iter().all(|(h, v)| zero(h) && zero(v));
+    if unset && b.style.border_radius > 0.0 {
         // Older single-value radius (kept for compatibility).
         let v = b.style.border_radius.min(b.rect.w / 2.0).min(b.rect.h / 2.0).max(0.0);
         return [(v, v); 4];
@@ -610,27 +614,12 @@ pub(crate) fn resolve_stops(stops: &[GradientStop], len: f32) -> Vec<ColorStop> 
     out
 }
 
-/// Stops of a repeating gradient whose period is zero paint the average
-/// color (CSS Images 3 §3.6).
+/// A repeating gradient whose period is zero paints the color of its last
+/// stop (CSS Images 4 §3.6 "gradient normalization").
 fn degenerate_repeat(stops: &[ColorStop]) -> Option<Paint> {
     let first = stops.first()?.offset;
-    let last = stops.last()?.offset;
-    if last - first > 1e-6 {
-        return None;
-    }
-    let n = stops.len() as f32;
-    let (mut r, mut g, mut b, mut a) = (0.0, 0.0, 0.0, 0.0);
-    for s in stops {
-        let al = s.color.a as f32 / 255.0;
-        r += s.color.r as f32 * al;
-        g += s.color.g as f32 * al;
-        b += s.color.b as f32 * al;
-        a += al;
-    }
-    if a <= 0.0 {
-        return Some(Paint::Solid(Color::TRANSPARENT));
-    }
-    Some(Paint::Solid(Color::rgba((r / a).round() as u8, (g / a).round() as u8, (b / a).round() as u8, (a / n * 255.0).round() as u8)))
+    let last = stops.last()?;
+    (last.offset - first <= 1e-6).then(|| Paint::Solid(last.color))
 }
 
 /// Stops for a gradient interpolated in another color space: each

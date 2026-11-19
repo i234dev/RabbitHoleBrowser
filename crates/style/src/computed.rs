@@ -858,6 +858,9 @@ pub enum BackgroundImage {
 /// OpenType features it turns on or off.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FontFeatureProps {
+    /// `font-variant-caps` (`smcp`, `c2sc`...; synthesized when the font
+    /// lacks them).
+    pub caps: Vec<rabbithole_gfx::FontFeature>,
     pub ligatures: Vec<rabbithole_gfx::FontFeature>,
     pub position: Vec<rabbithole_gfx::FontFeature>,
     pub numeric: Vec<rabbithole_gfx::FontFeature>,
@@ -882,7 +885,7 @@ impl FontFeatureProps {
         let mut out: Vec<rabbithole_gfx::FontFeature> = Vec::new();
         let kern = self.kerning.map(|k| (*b"kern", k as u32));
         let lang = self.language.map(|t| (*rabbithole_gfx::LANGUAGE_TAG, u32::from_be_bytes(t)));
-        for f in lang.iter().chain(kern.iter()).chain(&self.ligatures).chain(&self.position).chain(&self.numeric).chain(&self.east_asian).chain(&self.alternates).chain(&self.alternates_resolved).chain(&self.settings) {
+        for f in lang.iter().chain(kern.iter()).chain(&self.caps).chain(&self.ligatures).chain(&self.position).chain(&self.numeric).chain(&self.east_asian).chain(&self.alternates).chain(&self.alternates_resolved).chain(&self.settings) {
             out.retain(|g| g.0 != f.0);
             out.push(*f);
         }

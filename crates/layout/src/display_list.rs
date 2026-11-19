@@ -1517,14 +1517,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         };
         let mut placed = Rect::new(dest.x + ox, dest.y + oy, dw, dh);
         // With a view box, the placed rect is the view box: the whole image
-        // extends around it and only the view box shows.
-        let mut view_clip: Option<Rect> = None;
+        // extends around it (cut by the overflow clip, not the view box).
         if let Some((v, n)) = view {
             if v.w <= 0.0 || v.h <= 0.0 {
                 return;
             }
             let (sx, sy) = (dw / v.w, dh / v.h);
-            view_clip = Some(placed);
             placed = Rect::new(placed.x - v.x * sx, placed.y - v.y * sy, n.0 * sx, n.1 * sy);
         }
         let (dw, dh) = (placed.w, placed.h);
@@ -1538,7 +1536,6 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             if b.style.overflow_x.clips() { edge.w } else { placed.w },
             if b.style.overflow_y.clips() { edge.h } else { placed.h },
         );
-        let clip = view_clip.map_or(clip, |v| v.intersect(&clip));
         let shown = placed.intersect(&clip);
         if shown.is_empty() || dw <= 0.0 || dh <= 0.0 {
             return;

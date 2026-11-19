@@ -1921,7 +1921,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                                 variations: if style.applied_decorations.is_empty() { Vec::new() } else { style.font_variation_settings.clone() },
                             },
                             shadows: style.text_shadow.clone(),
-                            small_caps: style.font_variant_small_caps,
+                            // Synthesized unless the font has real small capitals.
+                            small_caps: style.font_variant_small_caps && !self.lay.ctx.fonts.has_feature(tm.font, *b"smcp"),
                             oblique,
                             emphasis: if item == MARKER_ITEM { None } else { emphasis_of(&style) },
                         },

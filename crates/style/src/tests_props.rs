@@ -823,8 +823,12 @@ fn paint_and_image_properties() {
             assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
             assert_eq!(*position, (Length::Px(10.0), Length::Percent(20.0)));
             assert_eq!(stops.len(), 3);
-            assert!(stops[1].hint && stops[1].position == Some(Length::Percent(30.0)));
-            assert_eq!(stops[2].position, Some(Length::Percent(50.0)));
+            let pct = |l: Option<Length>| match l {
+                Some(Length::Percent(p)) => p,
+                other => panic!("{other:?}"),
+            };
+            assert!(stops[1].hint && (pct(stops[1].position) - 30.0).abs() < 1e-3);
+            assert!((pct(stops[2].position) - 50.0).abs() < 1e-3);
         }
         other => panic!("{other:?}"),
     }

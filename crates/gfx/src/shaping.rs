@@ -51,6 +51,8 @@ pub(crate) struct ShapingState {
     pub(crate) variant_ids: RefCell<HashMap<(usize, Rc<[FontFeature]>), usize>>,
     /// Default features of a face (`@font-face { font-feature-settings }`).
     pub(crate) face_features: RefCell<HashMap<usize, Rc<[FontFeature]>>>,
+    /// (face, tag) → does the face's GSUB have that feature?
+    gsub_features: RefCell<HashMap<(usize, [u8; 4]), bool>>,
 }
 
 /// An OpenType feature setting: tag and value (0 = off, 1 = on, or an
@@ -86,6 +88,26 @@ impl FontContext {
     /// `font` shaped with OpenType `features` (an unbound copy of the
     /// face; the same id for the same request). Features apply to the runs
     /// this face renders, not to fallback faces.
+    /// Does `font` substitute glyphs for the OpenType feature `tag` (e.g.
+    /// `smcp`: real small capitals instead of synthesized ones)?
+    pub fn has_feature(&self, font: FontId, tag: [u8; 4]) -> bool {
+        let base = self.variant_base(font.0);
+        if let Some(&v) = self.shaping.gsub_features.borrow().get(&(base, tag)) {
+            return v;
+        }
+        let v = self
+            .shaping_data(base)
+            .and_then(|(b, _, _)| {
+                let face = rustybuzz::ttf_parser::Face::parse(&b, 0).ok()?;
+                let gsub = face.tables().gsub?;
+                let want = rustybuzz::ttf_parser::Tag::from_bytes(&tag);
+                Some(gsub.features.into_iter().any(|f| f.tag == want))
+            })
+            .unwrap_or(false);
+        self.shaping.gsub_features.borrow_mut().insert((base, tag), v);
+        v
+    }
+
     /// Default OpenType features of a face (the `font-feature-settings`
     /// descriptor of its `@font-face` rule).
     pub fn set_face_features(&self, font: FontId, features: &[FontFeature]) {

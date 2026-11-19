@@ -1874,7 +1874,12 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.font_variant_small_caps = from.font_variant_small_caps;
             to.font_features = from.font_features.clone();
         }
-        "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
+        "font-variant-caps" => {
+            to.font_variant_small_caps = from.font_variant_small_caps;
+            let mut f = to.font_features.as_deref().cloned().unwrap_or_default();
+            f.caps = from.font_features.as_ref().map(|g| g.caps.clone()).unwrap_or_default();
+            to.font_features = if f == FontFeatureProps::default() { None } else { Some(std::rc::Rc::new(f)) };
+        }
         "font-feature-settings" | "font-kerning" | "font-variant-ligatures" | "font-variant-position" | "font-variant-numeric"
         | "font-variant-east-asian" | "font-variant-alternates" | "font-language-override" => {
             let src = from.font_features.as_deref().cloned().unwrap_or_default();
