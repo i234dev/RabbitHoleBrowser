@@ -194,9 +194,16 @@ fn is_mark(c: char) -> bool {
     matches!(c.general_category(), GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark | GeneralCategory::EnclosingMark)
 }
 
+/// Letters of cursive scripts that join their neighbours (Arabic, Syriac,
+/// N'Ko, Mongolian).
+fn joins(c: char) -> bool {
+    matches!(c as u32, 0x0620..=0x064A | 0x066E..=0x06D3 | 0x06FA..=0x06FF | 0x0710..=0x074F | 0x0750..=0x077F | 0x07CA..=0x07EA | 0x0860..=0x086A | 0x08A0..=0x08C9 | 0x1820..=0x1878 | 0xFB50..=0xFDFF | 0xFE70..=0xFEFC)
+}
+
 fn letter_range(text: &str, ws: WhiteSpace) -> Extent {
     let newline_breaks = !matches!(ws, WhiteSpace::Normal | WhiteSpace::Nowrap);
-    let space = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+    // White space, including non-collapsible spaces (Zs).
+    let space = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}') || c.general_category() == GeneralCategory::SpaceSeparator;
     let mut it = text.char_indices().peekable();
     // Leading white space.
     let mut start = None;
@@ -204,9 +211,14 @@ fn letter_range(text: &str, ws: WhiteSpace) -> Extent {
         if c == '\n' && newline_breaks {
             return Extent::Stop;
         }
-        if space(c) || c == '\u{200B}' {
+        if matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}' | '\u{200B}') {
             it.next();
             continue;
+        }
+        if space(c) {
+            // Text starting with a non-collapsible space (no-break space,
+            // en space, ...) has no first letter (as in browsers).
+            return Extent::Stop;
         }
         start = Some(i);
         break;
@@ -215,10 +227,14 @@ fn letter_range(text: &str, ws: WhiteSpace) -> Extent {
     // Preceding punctuation (with spaces between it and the letter).
     let mut letter = None;
     for (i, c) in it.by_ref() {
-        if is_punct(c) || (c == ' ' && i > start) {
+        if is_punct(c) || (space(c) && c != '\n' && i > start) {
             continue;
         }
         if space(c) || c.is_control() {
+            return Extent::Stop;
+        }
+        if joins(c) && text[i + c.len_utf8()..].chars().find(|&n| !is_mark(n)).is_some_and(joins) {
+            // Splitting a cursive word would break its joining forms.
             return Extent::Stop;
         }
         letter = Some((i, c));
@@ -254,6 +270,9 @@ mod tests {
         assert_eq!(letter_range("(T)est", WhiteSpace::Normal), Extent::Letter(0, 3));
         assert_eq!(letter_range("\u{201C}A\u{201D}, b", WhiteSpace::Normal), Extent::Letter(0, 8));
         assert_eq!(letter_range("   ", WhiteSpace::Normal), Extent::Skip);
+        assert_eq!(letter_range("\u{a0}", WhiteSpace::Normal), Extent::Stop);
+        assert_eq!(letter_range("\u{2002}B", WhiteSpace::Normal), Extent::Stop);
+        assert_eq!(letter_range("\u{639}\u{627}", WhiteSpace::Normal), Extent::Stop);
         assert_eq!(letter_range("\u{201C}", WhiteSpace::Normal), Extent::Punct(0, 3));
         assert_eq!(letter_range("\nx", WhiteSpace::Pre), Extent::Stop);
         // A dash is not first-letter punctuation.
