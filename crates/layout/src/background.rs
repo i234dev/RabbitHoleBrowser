@@ -12,6 +12,15 @@ use rabbithole_style::{
 };
 use std::collections::HashMap;
 
+/// The pixels an image shows for `style`: without its EXIF orientation
+/// under `image-orientation: none`.
+pub(crate) fn oriented(img: &Arc<Image>, style: &ComputedStyle) -> Arc<Image> {
+    match (&img.unoriented, style.image_orientation_none) {
+        (Some(raw), true) => raw.clone(),
+        _ => img.clone(),
+    }
+}
+
 /// The three boxes of an element plus its radii.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BoxGeometry {
@@ -154,7 +163,7 @@ pub(crate) fn paint_backgrounds(
         if matches!(layer.image, BackgroundImage::None) {
             continue;
         }
-        paint_layer(list, geom, layer, images, viewport, style.image_rendering_pixelated);
+        paint_layer(list, geom, layer, images, viewport, style);
     }
 }
 
@@ -204,7 +213,8 @@ enum LayerImage<'a> {
     Gradient(&'a BackgroundImage),
 }
 
-fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLayer, images: &HashMap<String, Arc<Image>>, viewport: Rect, pixelated: bool) {
+fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLayer, images: &HashMap<String, Arc<Image>>, viewport: Rect, style: &ComputedStyle) {
+    let pixelated = style.image_rendering_pixelated;
     let clip_rect = area_rect(geom, layer.clip);
     let clip_radii = area_radii(geom, layer.clip);
     if clip_rect.is_empty() {
@@ -213,7 +223,7 @@ fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLay
     let area = if layer.fixed { viewport } else { area_rect(geom, layer.origin) };
     let image = match &layer.image {
         BackgroundImage::Url(url) => match images.get(url) {
-            Some(img) if !img.broken => LayerImage::Raster(img.clone()),
+            Some(img) if !img.broken => LayerImage::Raster(oriented(img, style)),
             _ => return,
         },
         BackgroundImage::None => return,

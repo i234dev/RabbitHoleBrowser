@@ -29,6 +29,9 @@ pub struct Image {
     /// A vector image (SVG): optional natural dimensions and a renderer
     /// for any concrete size. `rgba` holds a rendering at the default size.
     pub vector: Option<Arc<Vector>>,
+    /// The pixels as stored, when EXIF orientation turned them
+    /// (`image-orientation: none` shows these).
+    pub unoriented: Option<Arc<Image>>,
 }
 
 /// Renders a vector image at a concrete size of `w`×`h` CSS px into
@@ -204,12 +207,49 @@ impl Image {
         if img.width == 0 || img.height == 0 {
             return None;
         }
-        Some(img.limit_pixels(opts.max_pixels))
+        let img = img.limit_pixels(opts.max_pixels);
+        // EXIF orientation (CSS Images 3 §5.3 `image-orientation: from-image`).
+        match exif_orientation(bytes, fmt) {
+            Some(o @ 2..=8) if img.anim.is_none() => Some(img.oriented(o)),
+            _ => Some(img),
+        }
+    }
+
+    /// The image turned by an EXIF orientation (2–8), keeping the stored
+    /// pixels as [`Image::unoriented`].
+    pub fn oriented(self, o: u8) -> Image {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let swap = o >= 5;
+        let (dw, dh) = if swap { (h, w) } else { (w, h) };
+        let mut rgba = vec![0u8; dw * dh * 4];
+        for y in 0..dh {
+            for x in 0..dw {
+                let (sx, sy) = match o {
+                    2 => (w - 1 - x, y),
+                    3 => (w - 1 - x, h - 1 - y),
+                    4 => (x, h - 1 - y),
+                    5 => (y, x),
+                    6 => (y, h - 1 - x),
+                    7 => (w - 1 - y, h - 1 - x),
+                    8 => (w - 1 - y, x),
+                    _ => (x, y),
+                };
+                let si = (sy * w + sx) * 4;
+                let di = (y * dw + x) * 4;
+                rgba[di..di + 4].copy_from_slice(&self.rgba[si..si + 4]);
+            }
+        }
+        let (nw, nh) = if swap { (self.natural_height, self.natural_width) } else { (self.natural_width, self.natural_height) };
+        let mut out = Image::new(dw as u32, dh as u32, rgba);
+        out.natural_width = nw;
+        out.natural_height = nh;
+        out.unoriented = Some(Arc::new(self));
+        out
     }
 
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         debug_assert_eq!(rgba.len(), (width * height * 4) as usize);
-        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None, broken: false, no_ratio: false, vector: None }
+        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None, broken: false, no_ratio: false, vector: None, unoriented: None }
     }
 
     /// Marker image for a failed load (1×1 transparent, natural size 0).
@@ -353,7 +393,10 @@ impl Image {
                 a.loop_count,
             ))
         });
-        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken, no_ratio: self.no_ratio, vector: self.vector.clone() }
+        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken, no_ratio: self.no_ratio, vector: self.vector.clone(), unoriented: self.unoriented.as_ref().map(|u| {
+            let swapped = u.width == self.height && u.height == self.width && self.width != self.height;
+            Arc::new(if swapped { u.resized(nh, nw) } else { u.resized(nw, nh) })
+        }) }
     }
 
     /// Encode the current frame as PNG.
@@ -666,4 +709,87 @@ mod tests {
         assert!(supports_mime("image/webp"));
         assert!(!supports_mime("image/jxl"));
     }
+}
+
+/// The EXIF orientation tag (1–8) of a JPEG (APP1), PNG (`eXIf`) or WebP
+/// (`EXIF` chunk) file.
+pub fn exif_orientation(bytes: &[u8], fmt: Format) -> Option<u8> {
+    let tiff: &[u8] = match fmt {
+        Format::Jpeg => {
+            let mut i = 2;
+            let mut found = None;
+            while i + 4 <= bytes.len() {
+                if bytes[i] != 0xFF {
+                    break;
+                }
+                let marker = bytes[i + 1];
+                if marker == 0xDA || marker == 0xD9 {
+                    break;
+                }
+                let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+                let data = bytes.get(i + 4..i + 2 + len)?;
+                if marker == 0xE1 && data.starts_with(b"Exif\0\0") {
+                    found = Some(&data[6..]);
+                    break;
+                }
+                i += 2 + len;
+            }
+            found?
+        }
+        Format::Png => {
+            let mut i = 8;
+            let mut found = None;
+            while i + 8 <= bytes.len() {
+                let len = u32::from_be_bytes(bytes[i..i + 4].try_into().ok()?) as usize;
+                let kind = &bytes[i + 4..i + 8];
+                if kind == b"IDAT" || kind == b"IEND" {
+                    break;
+                }
+                if kind == b"eXIf" {
+                    found = bytes.get(i + 8..i + 8 + len);
+                    break;
+                }
+                i += 12 + len;
+            }
+            found?
+        }
+        Format::WebP => {
+            let mut i = 12;
+            let mut found = None;
+            while i + 8 <= bytes.len() {
+                let len = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().ok()?) as usize;
+                if &bytes[i..i + 4] == b"EXIF" {
+                    let d = bytes.get(i + 8..i + 8 + len)?;
+                    found = Some(d.strip_prefix(b"Exif\0\0").unwrap_or(d));
+                    break;
+                }
+                i += 8 + len + (len & 1);
+            }
+            found?
+        }
+        _ => return None,
+    };
+    let le = match tiff.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16_at = |o: usize| -> Option<u16> {
+        let b: [u8; 2] = tiff.get(o..o + 2)?.try_into().ok()?;
+        Some(if le { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        let b: [u8; 4] = tiff.get(o..o + 4)?.try_into().ok()?;
+        Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+    };
+    let ifd = u32_at(4)? as usize;
+    let count = u16_at(ifd)? as usize;
+    for k in 0..count.min(512) {
+        let e = ifd + 2 + k * 12;
+        if u16_at(e)? == 0x0112 {
+            let v = u16_at(e + 8)?;
+            return (1..=8).contains(&v).then_some(v as u8);
+        }
+    }
+    None
 }

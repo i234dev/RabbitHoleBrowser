@@ -856,6 +856,37 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
     if name.contains("mask") {
         return apply_mask(name, comps, style, ctx);
     }
+    if name == "image-orientation" {
+        // from-image | none | [<angle> || flip] (angles are legacy: treated
+        // as from-image).
+        if comps.len() == 1 && values::is_ident(comps[0], "none") {
+            style.image_orientation_none = true;
+        } else if comps.len() == 1 && values::is_ident(comps[0], "from-image") {
+            style.image_orientation_none = false;
+        }
+        return true;
+    }
+    if name == "overflow-clip-margin" {
+        // <visual-box> || <length [0,∞]>
+        let mut area = None;
+        let mut len = None;
+        for c in comps {
+            if let (None, Some(b)) = (area, parse_box(c)) {
+                area = Some(b);
+            } else if let (None, Some(px)) = (len, super::len_no_auto(c, ctx).and_then(|l| match l {
+                Length::Px(v) if v >= 0.0 => Some(v),
+                _ => None,
+            })) {
+                len = Some(px);
+            } else {
+                return true;
+            }
+        }
+        if area.is_some() || len.is_some() {
+            style.overflow_clip_margin = (area.unwrap_or(BoxArea::PaddingBox), len.unwrap_or(0.0));
+        }
+        return true;
+    }
     if name.starts_with("border-image") || name == "-webkit-border-image" {
         apply_border_image(name, comps, style, ctx);
         return true;

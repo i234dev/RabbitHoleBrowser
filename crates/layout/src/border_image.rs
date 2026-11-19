@@ -18,11 +18,12 @@ enum Source<'a> {
 
 /// Paint the border image of a box. Returns false when there is nothing to
 /// draw (no source, or it is not loaded): the border styles paint instead.
-pub(crate) fn paint_border_image(list: &mut DisplayList, geom: &BoxGeometry, bi: &BorderImage, images: &HashMap<String, Arc<Image>>, pixelated: bool) -> bool {
+pub(crate) fn paint_border_image(list: &mut DisplayList, geom: &BoxGeometry, bi: &BorderImage, images: &HashMap<String, Arc<Image>>, style: &rabbithole_style::ComputedStyle) -> bool {
+    let pixelated = style.image_rendering_pixelated;
     let source = match &bi.source {
         BackgroundImage::None => return false,
         BackgroundImage::Url(u) => match images.get(u) {
-            Some(img) if !img.broken => Source::Raster(img.clone()),
+            Some(img) if !img.broken => Source::Raster(crate::background::oriented(img, style)),
             _ => return false,
         },
         g => Source::Gradient(g),

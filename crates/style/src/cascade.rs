@@ -1668,6 +1668,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.overflow_y = from.overflow_y;
         }
         "overflow-x" => to.overflow_x = from.overflow_x,
+        "overflow-clip-margin" => to.overflow_clip_margin = from.overflow_clip_margin,
         "overflow-y" => to.overflow_y = from.overflow_y,
         "visibility" => to.visibility = from.visibility,
         "z-index" => to.z_index = from.z_index,
@@ -1845,6 +1846,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "object-position" => to.object_position = from.object_position,
         "aspect-ratio" => { to.aspect_ratio = from.aspect_ratio; to.aspect_ratio_auto = from.aspect_ratio_auto; }
         "image-rendering" => to.image_rendering_pixelated = from.image_rendering_pixelated,
+        "image-orientation" => to.image_orientation_none = from.image_orientation_none,
         "accent-color" => to.accent_color = from.accent_color,
         "color-scheme" => to.color_scheme_dark = from.color_scheme_dark,
         "content" => to.content = from.content.clone(),

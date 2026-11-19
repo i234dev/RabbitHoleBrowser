@@ -433,7 +433,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     /// Overflow clipping in local coordinates, bounded by the painting area.
     fn overflow_clip_rect(&self, b: &LayoutBox) -> Rect {
-        let pr = b.padding_rect();
+        let pr = Self::overflow_clip_edge(b).0;
         let (clip_x, clip_y) = b.overflow_clip_axes();
         // The unconstrained axis needs only cover the current painting area.
         // Bounds are already mapped back through any ancestor transforms.
@@ -447,9 +447,42 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     /// Push an overflow clip (paint + hit scope); returns the scope to
     /// restore with `pop_clip`.
+    /// The overflow clip edge and its radii: the padding box, or for
+    /// `overflow: clip` / paint containment the `overflow-clip-margin`
+    /// visual box outset by its margin (CSS Overflow 3 §3.2).
+    fn overflow_clip_edge(b: &LayoutBox) -> (Rect, Radii) {
+        use rabbithole_style::{BoxArea, Overflow};
+        let s = &b.style;
+        let outer = box_radii(b);
+        let padding_radii = || background::inner_radii(outer, &s.border_width);
+        // The margin applies to `overflow: clip` (and paint containment
+        // without a scroll container); replaced elements never scroll, so
+        // any clipping overflow value clips at that edge.
+        let scrolls = |o: Overflow| matches!(o, Overflow::Hidden | Overflow::Scroll | Overflow::Auto);
+        let clip_kind = b.kind == BoxKind::Image && (s.overflow_x.clips() || s.overflow_y.clips())
+            || !scrolls(s.overflow_x) && !scrolls(s.overflow_y) && (s.contain_paint || s.overflow_x == Overflow::Clip || s.overflow_y == Overflow::Clip);
+        if !clip_kind || s.overflow_clip_margin == (BoxArea::PaddingBox, 0.0) {
+            return (b.padding_rect(), padding_radii());
+        }
+        let (area, margin) = s.overflow_clip_margin;
+        let (rect, radii) = match area {
+            BoxArea::BorderBox => (b.rect, outer),
+            BoxArea::PaddingBox => (b.padding_rect(), padding_radii()),
+            BoxArea::ContentBox => {
+                let p = b.padding_rect();
+                let c = b.content_rect;
+                let pad = rabbithole_style::Edges { top: c.y - p.y, right: p.right() - c.right(), bottom: p.bottom() - c.bottom(), left: c.x - p.x };
+                (c, background::inner_radii(padding_radii(), &pad))
+            }
+        };
+        let grow = |r: f32| if r > 0.0 { r + margin } else { 0.0 };
+        let rect = Rect::new(rect.x - margin, rect.y - margin, rect.w + 2.0 * margin, rect.h + 2.0 * margin);
+        (rect, radii.map(|(h, v)| (grow(h), grow(v))))
+    }
+
     fn push_clip(&mut self, b: &LayoutBox) -> Option<u32> {
         let pr = self.overflow_clip_rect(b);
-        let radii = background::inner_radii(box_radii(b), &b.style.border_width);
+        let radii = Self::overflow_clip_edge(b).1;
         // CSS Overflow 3: a clip/visible pair does not round the content clip.
         if b.overflow_clip_axes() == (true, true) && radii.iter().any(|(h, v)| *h > 0.0 && *v > 0.0) {
             self.list.push(DisplayItem::PushClipRounded(pr, radii));
@@ -1056,7 +1089,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         background::paint_box_shadows(self.list, &geom, &style.box_shadow, true);
         // A border image replaces the border styles (CSS Backgrounds 3 §6).
         let border_image = style.border_image.as_deref().is_some_and(|bi| {
-            crate::border_image::paint_border_image(self.list, &geom, bi, self.ctx.background_images, style.image_rendering_pixelated)
+            crate::border_image::paint_border_image(self.list, &geom, bi, self.ctx.background_images, style)
         });
         if style.has_visible_border() && !border_image {
             let bw = style.border_width;
@@ -1415,9 +1448,17 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             other => other.resolve_or_zero(dest.h),
         };
         let placed = Rect::new(dest.x + ox, dest.y + oy, dw, dh);
-        // Clip the placed image to the content box and compute the source
-        // sub-rectangle actually shown.
-        let shown = placed.intersect(&dest);
+        // Clip the placed image to the overflow clip edge (the content box
+        // by default: `overflow: clip; overflow-clip-margin: content-box`)
+        // on clipped axes, and compute the source sub-rectangle shown.
+        let edge = if b.style.overflow_x.clips() || b.style.overflow_y.clips() { Self::overflow_clip_edge(b).0 } else { placed };
+        let clip = Rect::new(
+            if b.style.overflow_x.clips() { edge.x } else { placed.x },
+            if b.style.overflow_y.clips() { edge.y } else { placed.y },
+            if b.style.overflow_x.clips() { edge.w } else { placed.w },
+            if b.style.overflow_y.clips() { edge.h } else { placed.h },
+        );
+        let shown = placed.intersect(&clip);
         if shown.is_empty() || dw <= 0.0 || dh <= 0.0 {
             return;
         }

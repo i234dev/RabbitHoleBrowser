@@ -164,6 +164,7 @@ meter { width: 5em; }
 img, video, audio, canvas, embed, iframe, svg, math, picture, source { display: inline-block; }
 picture, source { display: inline; }
 img { vertical-align: baseline; }
+img, video, canvas, embed, object { overflow: clip; overflow-clip-margin: content-box; }
 iframe { border: 2px solid #c0c0c0; width: 300px; height: 150px; }
 video { object-fit: contain; }
 audio { display: none; }

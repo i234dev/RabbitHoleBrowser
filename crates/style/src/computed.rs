@@ -1353,6 +1353,9 @@ pub struct ComputedStyle {
     pub list_style_position: ListStylePosition,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
+    /// `overflow-clip-margin`: the box the overflow clip edge starts from
+    /// and how far (px) it is outset (CSS Overflow 3 §3.2).
+    pub overflow_clip_margin: (BoxArea, f32),
     pub visibility: Visibility,
     pub z_index: Option<i32>,
     /// `cursor` keyword (one of [`CURSOR_KEYWORDS`]).
@@ -1566,6 +1569,8 @@ pub struct ComputedStyle {
     /// `image-rendering: pixelated | crisp-edges` (nearest-neighbour
     /// scaling). Inherited.
     pub image_rendering_pixelated: bool,
+    /// `image-orientation: none`: EXIF orientation is not applied.
+    pub image_orientation_none: bool,
     /// `accent-color` (`None` = auto). Inherited.
     pub accent_color: Option<Color>,
     /// `color-scheme` includes `dark` (and not `light` first): native
@@ -1653,6 +1658,7 @@ impl ComputedStyle {
             list_style_position: ListStylePosition::Outside,
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Visible,
+            overflow_clip_margin: (BoxArea::PaddingBox, 0.0),
             visibility: Visibility::Visible,
             z_index: None,
             cursor: "auto",
@@ -1765,6 +1771,7 @@ impl ComputedStyle {
             aspect_ratio: None,
             aspect_ratio_auto: false,
             image_rendering_pixelated: false,
+            image_orientation_none: false,
             accent_color: None,
             color_scheme_dark: false,
             content: Content::Normal,
@@ -1837,6 +1844,7 @@ impl ComputedStyle {
             font_variant_small_caps: parent.font_variant_small_caps,
             font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
+            image_orientation_none: parent.image_orientation_none,
             accent_color: parent.accent_color,
             color_scheme_dark: parent.color_scheme_dark,
             quotes: parent.quotes.clone(),
@@ -1897,6 +1905,7 @@ impl ComputedStyle {
             && self.font_variant_small_caps == o.font_variant_small_caps
             && self.font_variation_settings == o.font_variation_settings
             && self.image_rendering_pixelated == o.image_rendering_pixelated
+            && self.image_orientation_none == o.image_orientation_none
             && self.accent_color == o.accent_color
             && self.color_scheme_dark == o.color_scheme_dark
             && self.quotes == o.quotes
