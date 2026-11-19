@@ -50,10 +50,13 @@ pub(crate) struct IndexedRule {
     /// Some declaration uses `attr()` (resolved per element: the rule's
     /// styles cannot be shared between elements).
     pub(crate) uses_attr: bool,
+    /// Some declaration is `revert` / `revert-layer`.
+    pub(crate) uses_rollback: bool,
 }
 
 impl IndexedRule {
     /// The rule's container queries hold for `node`.
+    #[inline]
     fn container_matches(&self, doc: &Document, node: NodeId, cx: &MatchCtx) -> bool {
         match &self.container {
             None => true,
@@ -136,6 +139,7 @@ impl RuleIndex {
                     layer,
                     container: rule.container.clone(),
                     uses_attr: decls.iter().any(uses_attr),
+                    uses_rollback: decls.iter().any(|d| rollback_keyword(d).is_some()),
                 });
                 if is_slotted_selector(sel) {
                     self.slotted.push(idx);
@@ -497,6 +501,7 @@ pub(crate) fn compute_element<'a>(
     let (env, opts, scopes) = (cx.env, cx.opts, cx.scopes);
     let mut rules: Vec<(usize, u32)> = Vec::new();
     let mut need_attrs = false;
+    let mut rollback = false;
     matched.clear();
     let index = scopes.for_scope(doc.containing_shadow_root(node));
     let index_id = index as *const RuleIndex as usize;
@@ -510,6 +515,7 @@ pub(crate) fn compute_element<'a>(
         }
         if cx.matcher.matches(&r.selector, node) && r.container_matches(doc, node, cx) {
             need_attrs |= r.uses_attr;
+            rollback |= r.uses_rollback;
             rules.push((index_id, ci as u32));
             for d in r.decls.iter() {
                 let rank = match (r.is_ua, d.important) {
@@ -536,6 +542,7 @@ pub(crate) fn compute_element<'a>(
             let r = &ix.rules[hi];
             if cx.matcher.matches(&r.selector, node) && r.container_matches(doc, node, cx) {
                 need_attrs |= r.uses_attr;
+                rollback |= r.uses_rollback;
                 rules.push((ix as *const RuleIndex as usize | 1, hi as u32));
                 for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
@@ -551,6 +558,7 @@ pub(crate) fn compute_element<'a>(
             let r = &ix.rules[si];
             if matches_slotted(&r.selector, doc, node, slot, opts.state) && r.container_matches(doc, node, cx) {
                 need_attrs |= r.uses_attr;
+                rollback |= r.uses_rollback;
                 rules.push((ix as *const RuleIndex as usize | 2, si as u32));
                 for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
@@ -572,6 +580,7 @@ pub(crate) fn compute_element<'a>(
     let is_root = doc.element(node).map(|e| e.tag == "html").unwrap_or(false);
     let slot = control_pseudo_slot(doc, node);
     need_attrs |= style_attr.iter().any(uses_attr);
+    rollback |= style_attr.iter().any(|d| rollback_keyword(d).is_some());
     // `attr()` reads this element's attributes: no style sharing.
     let _attrs = need_attrs.then(|| AttrScope::enter(doc.element(node).map(|e| e.attrs.clone()).unwrap_or_default()));
     let share = if need_attrs { None } else { share };
@@ -596,7 +605,7 @@ pub(crate) fn compute_element<'a>(
     }
     let (cq_w, cq_h) = rabbithole_css::container::unit_basis(doc, node, opts.state, env);
     crate::values::set_container_unit_basis(cq_w, cq_h);
-    let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root, slot, memo);
+    let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root, slot, memo, rollback);
     if let (Some(cache), Some(k)) = (share, key) {
         if cache.map.len() > 200_000 {
             cache.map.clear();
@@ -768,6 +777,7 @@ fn cascade_matched(
     is_root: bool,
     slot: Option<PseudoElement>,
     memo: Option<&mut Option<VarsMemo>>,
+    rollback: bool,
 ) -> ElementOut {
 
     let mut local: Vec<Matched> = Vec::with_capacity(matched.len() + presentational.len() + style_attr.len());
@@ -794,7 +804,9 @@ fn cascade_matched(
         });
     }
     local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
-    roll_back(&mut local);
+    if rollback {
+        roll_back(&mut local);
+    }
 
     // Custom properties.
     let vars = custom_properties(&local, parent_vars, memo);
@@ -807,7 +819,9 @@ fn cascade_matched(
         return out;
     }
     pseudo_local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
-    roll_back(&mut pseudo_local);
+    if rollback {
+        roll_back(&mut pseudo_local);
+    }
     // Form controls never have markers: their marker slot carries the
     // style of their own pseudo-element (`::placeholder`, ...).
     let slot_pseudo = slot.unwrap_or(PseudoElement::Marker);
@@ -911,9 +925,6 @@ fn rollback_keyword(d: &Declaration) -> Option<bool> {
 /// declarations of the same cascade layer (`revert-layer`) or origin
 /// (`revert`), so the value rolls back to the earlier layers / origins.
 fn roll_back(local: &mut Vec<Matched>) {
-    if !local.iter().any(|m| rollback_keyword(m.decl).is_some()) {
-        return;
-    }
     let origin = |r: Rank| match r {
         Rank::UaNormal | Rank::UaImportant => 0,
         Rank::ShadowNormal | Rank::ShadowImportant => 1,

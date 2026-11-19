@@ -882,6 +882,8 @@ pub struct MatchState {
 }
 
 impl MatchState {
+    /// Is `node` `ancestor` or one of its shadow-including ancestors (a
+    /// shadow host contains what its shadow tree contains)?
     fn is_or_contains(doc: &Document, ancestor: Option<NodeId>, node: NodeId) -> bool {
         let Some(mut cur) = ancestor else { return false };
         loop {
@@ -889,7 +891,7 @@ impl MatchState {
                 return true;
             }
             match doc.parent(cur) {
-                Some(p) => cur = p,
+                Some(p) => cur = doc.shadow_host(p).unwrap_or(p),
                 None => return false,
             }
         }
@@ -1552,6 +1554,18 @@ mod tests {
     fn parse(s: &str) -> Vec<Selector> {
         let toks = Tokenizer::tokenize(s);
         SelectorParser::new(&toks).parse_list().expect("valid selector")
+    }
+
+    #[test]
+    fn focus_within_and_hover_reach_shadow_hosts() {
+        let mut doc = rabbithole_html::parse("<div id=host></div>");
+        let host = doc.element_by_id("host").unwrap();
+        let root = doc.attach_shadow(host);
+        let inner = doc.create_element("input", Vec::new());
+        doc.append_child(root, inner);
+        let state = MatchState { focused: Some(inner), hovered: Some(inner), ..MatchState::default() };
+        assert!(matches_with(&parse(":focus-within")[0], &doc, host, &state));
+        assert!(matches_with(&parse(":hover")[0], &doc, host, &state));
     }
 
     #[test]
