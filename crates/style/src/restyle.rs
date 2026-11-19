@@ -670,6 +670,8 @@ impl StyleEngine {
         tree.before = vec![None; n];
         tree.after = vec![None; n];
         tree.marker = vec![None; n];
+        tree.first_letter = vec![None; n];
+        tree.first_line = vec![None; n];
         self.vars = vec![None; n];
         self.vars_memo = (0..n).map(|_| None).collect();
         self.inherit_dep = vec![false; n];
@@ -748,7 +750,7 @@ impl StyleEngine {
             self.collect_aux(tree, author, opts);
         }
         let n = doc.nodes.len();
-        for v in [&mut tree.styles, &mut tree.before, &mut tree.after, &mut tree.marker] {
+        for v in [&mut tree.styles, &mut tree.before, &mut tree.after, &mut tree.marker, &mut tree.first_letter, &mut tree.first_line] {
             if v.len() < n {
                 v.resize(n, None);
             }
@@ -1061,6 +1063,8 @@ impl StyleEngine {
                     tree.before[d] = None;
                     tree.after[d] = None;
                     tree.marker[d] = None;
+                    tree.first_letter[d] = None;
+                    tree.first_line[d] = None;
                 }
             }
         }
@@ -1150,6 +1154,8 @@ impl StyleEngine {
                     (&mut tree.before[node], if hidden { None } else { out.before }),
                     (&mut tree.after[node], if hidden { None } else { out.after }),
                     (&mut tree.marker[node], if hidden { None } else { out.marker }),
+                    (&mut tree.first_letter[node], if hidden { None } else { out.first_letter }),
+                    (&mut tree.first_line[node], if hidden { None } else { out.first_line }),
                 ] {
                     match (slot.as_ref(), new) {
                         (Some(o), Some(nw)) if Rc::ptr_eq(o, &nw) || **o == *nw => {}
@@ -1160,6 +1166,9 @@ impl StyleEngine {
                         }
                     }
                 }
+                // (Layout looks these up only once any element has one.)
+                tree.any_first_letter |= tree.first_letter[node].is_some();
+                tree.any_first_line |= tree.first_line[node].is_some();
                 let changed = !old.as_ref().map(|o| Rc::ptr_eq(o, &style)).unwrap_or(false);
                 if !all && (changed || pseudo_changed) {
                     changes.push(StyleChange { node, old: old.clone(), new: Some(style.clone()), pseudo_changed });
@@ -1181,6 +1190,8 @@ impl StyleEngine {
                             tree.before[d] = None;
                             tree.after[d] = None;
                             tree.marker[d] = None;
+                            tree.first_letter[d] = None;
+                            tree.first_line[d] = None;
                         }
                     }
                 }
@@ -1276,6 +1287,8 @@ fn clear_styles(doc: &Document, tree: &mut StyledTree, node: NodeId) {
             tree.before[d] = None;
             tree.after[d] = None;
             tree.marker[d] = None;
+            tree.first_letter[d] = None;
+            tree.first_line[d] = None;
         }
     }
 }

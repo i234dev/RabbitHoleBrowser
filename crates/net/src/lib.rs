@@ -38,4 +38,4 @@ pub use websocket::{WebSocket, WsEvent, WsMessage};
 pub use eventsource::{EventSource, SseEvent};
 pub use netlog::{NetLog, NetLogEntry};
 pub use robots::{Robots, BOT_TOKEN};
-pub use charset::{decode_text, decode_text_with_encoding, sniff_meta_charset};
+pub use charset::{decode_css, decode_text, decode_text_with_encoding, sniff_meta_charset};

@@ -1316,6 +1316,29 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             }
             self.finish_line(false);
         }
+        if !self.cur.has_content && !self.bfc.is_empty() {
+            // The line is at least as tall as the box: it must clear the
+            // floats beside that whole height (CSS 2.1 §9.5), moving down
+            // when the box does not fit beside them.
+            let h = self.children[c].margin_rect().h.max(self.strut_h());
+            for _ in 0..64 {
+                let (l, r) = self.bfc.available(self.cur.y, h, self.content_x, self.content_w);
+                let unchanged = (l - self.cur.left).abs() < 0.01 && (r - self.cur.align_right).abs() < 0.01;
+                if unchanged && w <= r - l + 0.01 {
+                    break;
+                }
+                if w > r - l + 0.01 && w <= self.content_w + 0.01 && self.cur.frags.is_empty() {
+                    if let Some(ny) = self.bfc.next_y(self.cur.y) {
+                        self.start_line(ny);
+                        continue;
+                    }
+                }
+                if !unchanged {
+                    self.narrow_line(l, r);
+                }
+                break;
+            }
+        }
         self.consume_pending_space();
         if break_before {
             self.cur.break_at = Some(self.cur.frags.len());
@@ -1350,6 +1373,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
         // The current (empty) line shrinks around the new float.
         let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
+        self.narrow_line(l, r);
+    }
+
+    /// Move the current line's edges to `[l, r)` (floats beside it).
+    fn narrow_line(&mut self, l: f32, r: f32) {
         let shift = l - self.cur.left;
         self.cur.left = l;
         self.cur.right = match self.wrap_limits.get(self.group).copied().flatten() {
@@ -2443,7 +2471,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                                 skip_spaces: skip_spaces.get(fi).copied().unwrap_or((0.0, 0.0)),
                             },
                             shadows: style.text_shadow.clone(),
-                            small_caps: style.font_variant_small_caps,
+                            // (Drawn as synthesized small caps; without
+                            // synthesis only a face with real ones has them.)
+                            small_caps: style.font_variant_small_caps && (style.font_synthesis_small_caps || self.lay.ctx.fonts.has_small_caps(tm.font)),
                             oblique,
                             emphasis: if item == MARKER_ITEM { None } else { emphasis_of(&style) },
                         },

@@ -392,6 +392,8 @@ pub enum VerticalAlign {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderStyle {
     None,
+    /// `hidden`: no border, and it wins collapsed border conflicts.
+    Hidden,
     Solid,
     Dashed,
     Dotted,
@@ -400,7 +402,7 @@ pub enum BorderStyle {
 
 impl BorderStyle {
     pub fn is_visible(&self) -> bool {
-        !matches!(self, BorderStyle::None)
+        !matches!(self, BorderStyle::None | BorderStyle::Hidden)
     }
 }
 
@@ -1478,6 +1480,9 @@ pub struct ComputedStyle {
     pub wrap_inside_avoid: bool,
     /// `font-synthesis` allows a synthesized oblique (inherited).
     pub font_synthesis_style: bool,
+    /// `font-synthesis-small-caps` is `auto` (inherited): small caps may be
+    /// synthesized.
+    pub font_synthesis_small_caps: bool,
     /// `line-break` (inherited): 0 auto/normal, 1 loose, 2 strict,
     /// 3 anywhere.
     pub line_break: u8,
@@ -1524,6 +1529,15 @@ pub struct ComputedStyle {
     /// matched against `@font-face` and system fonts before the generic
     /// `font_family` fallback.
     pub font_family_list: Vec<String>,
+    /// The `font-family` list is the generic `monospace` alone: its
+    /// `medium` size is 13px, as in browsers (inherited).
+    pub font_monospace_only: bool,
+    /// The font size comes from an absolute keyword (`medium`, the initial
+    /// value, ...) through inheritance: it follows the family's own
+    /// `medium` (inherited).
+    pub font_size_keyword: bool,
+    /// `font-kerning: none` (inherited).
+    pub font_kerning_none: bool,
     pub font_variant_small_caps: bool,
     /// `font-variation-settings` (inherited): axis tag and value.
     pub font_variation_settings: Vec<([u8; 4], f32)>,
@@ -1716,6 +1730,7 @@ impl ComputedStyle {
             text_autospace: false,
             wrap_inside_avoid: false,
             font_synthesis_style: true,
+            font_synthesis_small_caps: true,
             line_break: 0,
             line_height_tight: false,
             text_underline_position: UnderlinePosition::default(),
@@ -1737,6 +1752,9 @@ impl ComputedStyle {
             line_clamp_prefixed: false,
             webkit_box: false,
             font_family_list: Vec::new(),
+            font_monospace_only: false,
+            font_size_keyword: true,
+            font_kerning_none: false,
             font_variant_small_caps: false,
             font_variation_settings: Vec::new(),
             object_fit: ObjectFit::Fill,
@@ -1802,6 +1820,7 @@ impl ComputedStyle {
             text_wrap_balance: parent.text_wrap_balance,
             text_autospace: parent.text_autospace,
             font_synthesis_style: parent.font_synthesis_style,
+            font_synthesis_small_caps: parent.font_synthesis_small_caps,
             line_break: parent.line_break,
             line_height_tight: parent.line_height_tight,
             text_underline_position: parent.text_underline_position,
@@ -1822,6 +1841,9 @@ impl ComputedStyle {
             tab_size: parent.tab_size,
             tab_size_length: parent.tab_size_length,
             font_family_list: parent.font_family_list.clone(),
+            font_monospace_only: parent.font_monospace_only,
+            font_size_keyword: parent.font_size_keyword,
+            font_kerning_none: parent.font_kerning_none,
             font_variant_small_caps: parent.font_variant_small_caps,
             font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
@@ -1857,6 +1879,9 @@ impl ComputedStyle {
     pub fn inherited_eq(&self, o: &ComputedStyle) -> bool {
         self.color == o.color
             && self.font_family == o.font_family
+            && self.font_monospace_only == o.font_monospace_only
+            && self.font_size_keyword == o.font_size_keyword
+            && self.font_kerning_none == o.font_kerning_none
             && self.font_size == o.font_size
             && self.font_weight == o.font_weight
             && self.font_stretch == o.font_stretch
@@ -1884,6 +1909,7 @@ impl ComputedStyle {
             && self.text_wrap_balance == o.text_wrap_balance
             && self.text_autospace == o.text_autospace
             && self.font_synthesis_style == o.font_synthesis_style
+            && self.font_synthesis_small_caps == o.font_synthesis_small_caps
             && self.line_break == o.line_break
             && self.line_height_tight == o.line_height_tight
             && self.text_underline_position == o.text_underline_position

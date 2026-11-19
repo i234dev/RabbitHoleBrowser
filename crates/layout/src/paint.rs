@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 fn style_code(s: BorderStyle) -> u8 {
     match s {
-        BorderStyle::None => 0,
+        BorderStyle::None | BorderStyle::Hidden => 0,
         BorderStyle::Solid => 0,
         BorderStyle::Dashed => 1,
         BorderStyle::Dotted => 2,

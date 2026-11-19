@@ -244,6 +244,7 @@ impl FontContext {
 
     /// True when `font` is an upright face chosen for an italic request.
     pub fn needs_synthetic_italic(&self, font: FontId, italic: bool) -> bool {
+        let font = font.face();
         if !italic {
             return false;
         }
@@ -253,6 +254,7 @@ impl FontContext {
 
     /// True when `font` is a non-bold face chosen for a bold request.
     pub fn needs_synthetic_bold(&self, font: FontId, weight: u16) -> bool {
+        let font = font.face();
         if weight < 600 {
             return false;
         }
@@ -279,6 +281,7 @@ impl FontContext {
 
     /// Family name of a face.
     pub fn family_of(&self, font: FontId) -> String {
+        let font = font.face();
         self.faces.borrow().get(font.0).map(|s| s.family.clone()).unwrap_or_default()
     }
 }

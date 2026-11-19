@@ -70,6 +70,12 @@ pub(crate) struct Layouter<'a> {
     /// Intrinsic sizing: the stretched definite height of the next box
     /// measured (a flex item in a container with a definite height).
     pub(crate) intrinsic_forced_h: Option<f32>,
+    /// Floats: the height of the band beside floats that the next
+    /// auto-height formatting context laid out must fit (a retry after its
+    /// first layout came out taller than the space it was given).
+    float_band: Option<f32>,
+    /// A box is being refitted beside floats (nested layouts do not refit).
+    refitting: bool,
     /// Pooled working storage of flex layout.
     pub(crate) flex_scratch: Vec<crate::flex::FlexScratch>,
     /// Whether `FontContext::select_family` & co. are implemented.
@@ -171,11 +177,14 @@ fn abs_align_fraction(align: ItemAlign, mods: rabbithole_style::AlignMods, rtl: 
 /// width), narrowed or moved below them.
 #[cold]
 #[inline(never)]
-fn avoid_floats(style: &ComputedStyle, bfc: &Bfc, cb: &Cb, (mut x, mut y, mut content_w): (f32, f32, f32), pb_h: f32, ml: f32, mr: f32) -> (f32, f32, f32) {
+/// `band_h` is the box's border-box height when known before its layout:
+/// it must clear the floats beside all of it.
+#[allow(clippy::too_many_arguments)]
+fn avoid_floats(style: &ComputedStyle, bfc: &Bfc, cb: &Cb, (mut x, mut y, mut content_w): (f32, f32, f32), pb_h: f32, ml: f32, mr: f32, band_h: f32) -> (f32, f32, f32) {
     let cbw = cb.width;
     let mut guard = 0;
     loop {
-        let (l, r) = bfc.available(y, 1.0, cb.x, cb.width);
+        let (l, r) = bfc.available(y, band_h.max(1.0), cb.x, cb.width);
         if l <= cb.x && r >= cb.x + cb.width {
             break;
         }
@@ -183,12 +192,19 @@ fn avoid_floats(style: &ComputedStyle, bfc: &Bfc, cb: &Cb, (mut x, mut y, mut co
         // containing block; next to floats only its own margins count.
         let (sml, smr) = (style.margin.left.resolve(cbw).unwrap_or(0.0), style.margin.right.resolve(cbw).unwrap_or(0.0));
         let outer = content_w + pb_h + sml + smr;
-        if style.width.is_auto() || rabbithole_style::is_stretch(style.width) {
+        if (style.width.is_auto() || rabbithole_style::is_stretch(style.width)) && (r - l - ml - mr > 0.0 || bfc.next_y(y).is_none()) {
+            // (No room at all beside the floats: further down.)
             content_w = (r - l - ml - mr - pb_h).max(0.0);
             x = l + ml;
             break;
         } else if outer <= r - l + 0.01 {
-            x = l + sml;
+            // Auto margins share the space left beside the floats.
+            let free = r - l - outer;
+            x = match (style.margin.left.is_auto(), style.margin.right.is_auto()) {
+                (true, true) => l + free / 2.0,
+                (true, false) => l + free,
+                _ => l + sml,
+            };
             break;
         }
         match bfc.next_y(y) {
@@ -255,6 +271,26 @@ fn zero_or_auto_height(l: Length, cb_h: Option<f32>) -> bool {
     }
 }
 
+/// Is the height of `b` (a child of a box whose height is definite when
+/// `parent_definite`) definite, as a base for its children's percentage
+/// offsets? Flex and grid items are handled by the caller.
+fn height_definite(b: &LayoutBox, parent_definite: bool) -> bool {
+    if b.kind == BoxKind::AnonymousBlock {
+        return parent_definite;
+    }
+    let s = &b.style;
+    match s.height {
+        Length::Px(_) => true,
+        Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => {
+            b.flow == Flow::Absolute && !s.inset.top.is_auto() && !s.inset.bottom.is_auto()
+                || b.kind == BoxKind::Image
+                || s.aspect_ratio.is_some()
+                || b.wm_wrapper
+        }
+        _ => parent_definite,
+    }
+}
+
 fn is_zero_len(l: Length) -> bool {
     match l {
         Length::Px(v) => v == 0.0,
@@ -317,6 +353,8 @@ impl<'a> Layouter<'a> {
             width_intrinsic: None,
             intrinsic_cb_used: false,
             intrinsic_forced_h: None,
+            float_band: None,
+            refitting: false,
             flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
@@ -366,6 +404,12 @@ impl<'a> Layouter<'a> {
     /// Font for a style: the first available family of `font-family`
     /// (web fonts / system fonts) or the generic fallback.
     pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
+        let f = self.face_for(style);
+        // `font-kerning: none`: the face's runs are shaped without kerning.
+        if style.font_kerning_none { f.without_kerning() } else { f }
+    }
+
+    fn face_for(&mut self, style: &ComputedStyle) -> FontId {
         if self.font_ext && !style.font_family_list.is_empty() {
             let key = (style.font_family_list.join(","), style.font_weight, style.is_italic(), style.font_stretch);
             if let Some(f) = self.font_cache.get(&key) {
@@ -411,7 +455,8 @@ impl<'a> Layouter<'a> {
         if root.style.position == Position::Static {
             self.layout_abs_descendants(&mut root, icb);
         }
-        self.apply_relative(&mut root, vp_w, vp_h);
+        let root_definite = height_definite(&root, true);
+        self.apply_relative(&mut root, vp_w, Some(vp_h), root_definite);
         let (max_r, max_b) = bounds(&root);
         doc_h = doc_h.max(max_b);
         if debug {
@@ -615,8 +660,20 @@ impl<'a> Layouter<'a> {
             y = y.max(bfc.clear_y(style.clear));
         }
         // A BFC root placed next to floats narrows (or moves below them).
-        if b.bfc_root && b.flow.is_in_flow() && matches!(mode, WidthMode::Fill) && !bfc.is_empty() {
-            (x, y, content_w) = avoid_floats(&style, bfc, cb, (x, y, content_w), pb_h, ml, mr);
+        // (Block-level tables too: they are as wide as their contents.)
+        let table = matches!(b.formatting, Formatting::Table | Formatting::TableWrapper) && b.kind != BoxKind::InlineBlock && style.display.is_block_level();
+        // An auto-height formatting context placed beside floats is checked
+        // against them again once its height is known.
+        let mut recheck_floats = false;
+        if b.bfc_root && b.flow.is_in_flow() && (matches!(mode, WidthMode::Fill) || table) && !bfc.is_empty() {
+            let known_h = self.resolve_height(&style, cb.height, pb_v);
+            recheck_floats = known_h.is_none() && forced_h.is_none() && !self.refitting;
+            let band_h = known_h.map(|h| h + pb_v).or(self.float_band.take()).unwrap_or(1.0);
+            if table {
+                (x, y, content_w) = self.table_beside_floats(b, bfc, cb, (x, y, content_w), pb_h, band_h, mode);
+            } else {
+                (x, y, content_w) = avoid_floats(&style, bfc, cb, (x, y, content_w), pb_h, ml, mr, band_h);
+            }
         }
 
         b.rect = Rect::new(x, y, content_w + pb_h, 0.0);
@@ -822,6 +879,50 @@ impl<'a> Layouter<'a> {
         }
         b.fixed = style.position == Position::Fixed;
         self.finish_scroll_container(b);
+        if let Some(fl) = b.node.filter(|_| self.ctx.styles.any_first_line).and_then(|n| self.ctx.styles.pseudo(n, rabbithole_css::PseudoElement::FirstLine)) {
+            crate::first_letter::apply_first_line_color(b, fl);
+        }
+        if recheck_floats && b.rect.h > 1.0 {
+            self.refit_beside_floats(b, cb, bfc, mode);
+        }
+    }
+
+    /// An auto-height formatting context laid out beside floats must not
+    /// overlap the floats beside its whole border box (CSS 2.1 §9.5): lay
+    /// it out again in the space left over its height at the same place,
+    /// else below the next float edge.
+    #[cold]
+    #[inline(never)]
+    fn refit_beside_floats(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, mode: WidthMode) {
+        self.refitting = true;
+        self.refit_loop(b, cb, bfc, mode);
+        self.refitting = false;
+    }
+
+    fn refit_loop(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, mode: WidthMode) {
+        for _ in 0..8 {
+            let (y, h) = (b.rect.y, b.rect.h);
+            let (l, r) = bfc.available(y, h, cb.x, cb.width);
+            if l <= b.rect.x + 0.01 && r >= b.rect.right() - 0.01 {
+                return;
+            }
+            let (ml, mr) = (b.margin.left.max(0.0), b.margin.right.max(0.0));
+            let narrower = r - l - ml - mr;
+            if narrower > 0.01 && narrower + 0.01 < b.rect.w && b.style.width.is_auto() {
+                // Same place, in the space left beside its whole height.
+                self.float_band = Some(h);
+                self.layout_block(b, cb, y, bfc, mode);
+                self.float_band = None;
+                continue;
+            }
+            match bfc.next_y(y).filter(|ny| *ny < y + h) {
+                Some(ny) => {
+                    self.float_band = None;
+                    self.layout_block(b, cb, ny, bfc, mode);
+                }
+                None => return,
+            }
+        }
     }
 
     /// Center a form control's contents in its content box, or apply
@@ -999,7 +1100,23 @@ impl<'a> Layouter<'a> {
                 Flow::Absolute => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
                     let block = !b.children[i].style.display_before_blockification.is_inline_level();
-                    let x = content_x + if block && b.style.direction == rabbithole_style::Direction::Rtl { cb.width } else { 0.0 };
+                    // (In right-to-left containers the static position is
+                    // the box's right edge.)
+                    let rtl = b.style.direction == rabbithole_style::Direction::Rtl;
+                    let mut x = content_x + if rtl { cb.width } else { 0.0 };
+                    if !block {
+                        // An inline-level box would start an (empty) line
+                        // beside the floats there, aligned by `text-align`.
+                        let (l, r) = if bfc.is_empty() { (content_x, content_x + cb.width) } else { bfc.available(cursor + off, 1.0, content_x, cb.width) };
+                        use rabbithole_style::TextAlign as T;
+                        x = match b.style.text_align {
+                            T::Left => l,
+                            T::Right => r,
+                            T::Center => (l + r) / 2.0,
+                            T::End => if rtl { l } else { r },
+                            T::Start | T::Justify => if rtl { r } else { l },
+                        };
+                    }
                     b.children[i].static_pos = (x, cursor + off);
                     b.children[i].static_align = None;
                 }
@@ -1304,6 +1421,45 @@ impl<'a> Layouter<'a> {
     }
 
     #[inline]
+    /// Place a block-level table (or table wrapper) beside floats: at the
+    /// first position where its width for the space left by the floats
+    /// fits there (CSS 2.1 §9.5).
+    #[allow(clippy::too_many_arguments)]
+    #[cold]
+    fn table_beside_floats(&mut self, b: &mut LayoutBox, bfc: &Bfc, cb: &Cb, (x, y, content_w): (f32, f32, f32), pb_h: f32, band_h: f32, mode: WidthMode) -> (f32, f32, f32) {
+        let style = b.style.clone();
+        let (sml, smr) = (style.margin.left.resolve(cb.width).unwrap_or(0.0), style.margin.right.resolve(cb.width).unwrap_or(0.0));
+        let mut yy = y;
+        for _ in 0..100 {
+            let (l, r) = bfc.available(yy, band_h.max(1.0), cb.x, cb.width);
+            if l <= cb.x && r >= cb.x + cb.width {
+                return (x, yy, content_w);
+            }
+            // Only an auto width depends on the space left (percentages
+            // resolve against the containing block).
+            let auto = if b.formatting == Formatting::TableWrapper {
+                b.children.iter().find(|c| c.formatting == Formatting::Table).is_some_and(|t| t.style.width.is_auto())
+            } else {
+                style.width.is_auto()
+            };
+            let w = if !auto {
+                content_w
+            } else if b.formatting == Formatting::TableWrapper {
+                self.wrapped_table_width(b, (r - l - sml - smr).max(0.0), mode)
+            } else {
+                self.compute_width(b, r - l, cb.height, pb_h, Some(sml), Some(smr), mode).0
+            };
+            if w + pb_h + sml + smr <= r - l + 0.01 {
+                return (l + sml, yy, w);
+            }
+            match bfc.next_y(yy) {
+                Some(ny) => yy = ny,
+                None => break,
+            }
+        }
+        (x, y, content_w)
+    }
+
     fn resolve_height(&self, style: &ComputedStyle, cb_h: Option<f32>, pb_v: f32) -> Option<f32> {
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v };
         match style.height {
@@ -1388,7 +1544,10 @@ impl<'a> Layouter<'a> {
         // The shape of an alternative label is not an image aspect ratio.
         // Only decoded dimensions, a pair of attributes or explicit CSS may
         // couple the axes; height:40px must not stretch the label's width.
-        let ratio_size = if b.image.as_ref().is_some_and(|i| i.no_ratio) { (0.0, 0.0) } else { natural.unwrap_or((b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0))) };
+        // Frames have no natural aspect ratio (their default 300×150 size
+        // is only a fallback size).
+        let frame = b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("iframe" | "frame")));
+        let ratio_size = if frame || b.image.as_ref().is_some_and(|i| i.no_ratio) { (0.0, 0.0) } else { natural.unwrap_or((b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0))) };
         let natural_ratio = if ratio_size.0 > 0.0 && ratio_size.1 > 0.0 { Some(ratio_size.0 / ratio_size.1) } else { None };
         let css_ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite());
         // `auto <ratio>` prefers the natural ratio.
@@ -1569,7 +1728,7 @@ impl<'a> Layouter<'a> {
                         .or_else(|| self.abs_cb.get(&n).copied())
                 });
                 let block_level = matches!(b.formatting, Formatting::Block | Formatting::Inline) && !b.children[i].style.display_before_blockification.is_inline_level();
-                let static_right = block_level && b.style.direction == rabbithole_style::Direction::Rtl;
+                let static_right = (block_level || b.formatting == Formatting::Block) && b.style.direction == rabbithole_style::Direction::Rtl;
                 // The static-position rectangle of a block-level box: the
                 // parent's content box in the inline axis, its static
                 // position in the block axis (CSS Position §4.1).
@@ -1599,6 +1758,14 @@ impl<'a> Layouter<'a> {
         } else {
             cb
         };
+        // A box in the top layer is laid out as a child of the initial
+        // containing block: its static position is the ICB's origin.
+        let mut static_right = static_right;
+        if !self.ctx.doc.top_layer.is_empty() && c.abs_node().is_some_and(|n| self.ctx.doc.top_layer.contains(&n)) {
+            c.static_pos = (0.0, 0.0);
+            c.static_align = None;
+            static_right = false;
+        }
         let style = c.style.clone();
         let l = style.inset.left.resolve(cb.w);
         let r = style.inset.right.resolve(cb.w);
@@ -1613,7 +1780,10 @@ impl<'a> Layouter<'a> {
         let pb_v = p.top + p.bottom + style.border_width.top + style.border_width.bottom;
         let ratio = style.aspect_ratio.filter(|r| *r > 0.0 && c.kind != BoxKind::Image);
         let mut ratio_stretched_height = None;
+        // A table's auto width is shrink-to-fit, even between two insets.
+        let table = matches!(c.formatting, Formatting::Table | Formatting::TableWrapper);
         let (mut mode, mut avail) = match (l, r, style.width.is_auto()) {
+            (Some(l), Some(r), true) if table => (WidthMode::ShrinkToFit, (cb.w - l - r).max(0.0)),
             (Some(l), Some(r), true) => (WidthMode::Fixed((cb.w - l - r - ml - mr - pb_h).max(0.0)), cb.w),
             _ => {
                 // With both insets auto the box starts at its static
@@ -1687,7 +1857,10 @@ impl<'a> Layouter<'a> {
         // With both insets and a definite size, auto margins share the
         // remaining space (CSS 2.1 §10.3.7 / §10.6.4: centering with
         // `inset: 0; margin: auto`).
-        let sized_w = !style.width.is_auto() || c.kind == BoxKind::Image || ratio.is_some();
+        // (An auto width that max-width / min-width changed counts as
+        // specified: CSS 2.1 §10.4 recomputes with it.)
+        let clamped_w = !table && style.width.is_auto() && matches!((l, r), (Some(l), Some(r)) if (c.rect.w + ml + mr - (cb.w - l - r)).abs() > 0.01);
+        let sized_w = !style.width.is_auto() || c.kind == BoxKind::Image || ratio.is_some() || clamped_w;
         let sized_h = !style.height.is_auto() || c.kind == BoxKind::Image || ratio.is_some();
         let x = if let (Some(l), Some(r), true) = (l, r, sized_w) {
             let free = cb.w - l - r - c.rect.w;
@@ -1771,12 +1944,33 @@ impl<'a> Layouter<'a> {
         c.static_pos = static_pos;
     }
 
-    /// Apply `position: relative` offsets after layout.
-    fn apply_relative(&mut self, b: &mut LayoutBox, cbw: f32, cbh: f32) {
+    /// Apply `position: relative` offsets after layout. `cbh` is the
+    /// containing block's height when definite (percentage `top`/`bottom`
+    /// against an indefinite height compute to `auto`, CSS 2.1 §9.3.2);
+    /// `definite` says whether `b`'s own height is.
+    fn apply_relative(&mut self, b: &mut LayoutBox, cbw: f32, cbh: Option<f32>, definite: bool) {
         let (iw, ih) = (b.content_rect.w, b.content_rect.h);
         if !b.reused_layout {
-            for c in &mut b.children {
-                self.apply_relative(c, iw, ih);
+            // Flex and grid items are sized by their container: their
+            // heights (and the container's, for them) count as definite.
+            let items = matches!(b.formatting, Formatting::Flex | Formatting::Grid);
+            // Anonymous blocks are transparent to percentages (CSS 2.1 §10.5).
+            // Table parts resolve their children's offsets against their
+            // specified height.
+            let table_part = matches!(b.formatting, Formatting::Table | Formatting::TableRow) || crate::table::is_row_group(b);
+            let inner_h = if b.kind == BoxKind::AnonymousBlock {
+                cbh
+            } else if table_part {
+                match b.style.height {
+                    Length::Px(h) => Some(h),
+                    _ => None,
+                }
+            } else {
+                (definite || items).then_some(ih)
+            };
+            for i in 0..b.children.len() {
+                let d = items || height_definite(&b.children[i], definite);
+                self.apply_relative(&mut b.children[i], iw, inner_h, d);
             }
         }
         let mut want = (0.0, 0.0);
@@ -1788,12 +1982,12 @@ impl<'a> Layouter<'a> {
                 .resolve(cbw)
                 .or_else(|| s.inset.right.resolve(cbw).map(|v| -v))
                 .unwrap_or(0.0);
-            let dy = s
-                .inset
-                .top
-                .resolve(cbh)
-                .or_else(|| s.inset.bottom.resolve(cbh).map(|v| -v))
-                .unwrap_or(0.0);
+            let vertical = |l: Length| match cbh {
+                Some(h) => l.resolve(h),
+                None if l.has_percent() => None,
+                None => l.resolve(0.0),
+            };
+            let dy = vertical(s.inset.top).or_else(|| vertical(s.inset.bottom).map(|v| -v)).unwrap_or(0.0);
             want = (dx, dy);
         }
         // Boxes reused from the previous layout may carry their offset

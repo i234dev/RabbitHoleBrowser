@@ -813,3 +813,63 @@ fn border_shape_and_corner_shape() {
     assert_eq!(one("corner-shape: superellipse(0)").corner_shape, [CornerShape::Bevel; 4]);
     assert_eq!(one("corner-shape: round; corner-top-left-shape: square").corner_shape[0], CornerShape::Square);
 }
+
+#[test]
+fn per_side_border_inherit_and_negative_sizes() {
+    let (doc, t) = styled("<div><p>x</p></div>", "div { border-left: 7px solid rgb(0, 0, 255) } p { border-left: inherit; border-top-width: inherit }");
+    let p = style_of(&doc, &t, "p");
+    assert_eq!(p.border_width.left, 7.0);
+    assert_eq!(p.border_style.left, BorderStyle::Solid);
+    assert_eq!(p.border_color.left, rabbithole_gfx::Color::rgb(0, 0, 255));
+    // The parent's top border has no style: its computed width is 0.
+    assert_eq!(p.border_width.top, 0.0);
+
+    let s = one("max-height: 10px; max-height: -1px; height: 5px; height: -5%; min-width: -2px");
+    assert_eq!(s.max_height, Length::Px(10.0));
+    assert_eq!(s.height, Length::Px(5.0));
+    assert_eq!(s.min_width, Length::Auto);
+}
+
+#[test]
+fn first_letter_style_is_computed() {
+    let (doc, t) = styled("<p>Text</p>", "p::first-letter { font-size: 30px; float: left }");
+    let n = doc.find_element("p").unwrap();
+    let fl = t.pseudo(n, PseudoElement::FirstLetter).expect("::first-letter style");
+    assert_eq!(fl.font_size, 30.0);
+    assert_eq!(fl.float, Float::Left);
+}
+
+#[test]
+fn monospace_alone_has_a_13px_medium() {
+    let (doc, t) = styled(
+        "<div><pre>a</pre><code>b</code><p>c</p><span>d</span></div><section><pre>e</pre></section>",
+        "div { font-family: monospace } p { font-family: monospace, monospace } span { font-family: serif } section { font-size: 12px } code { font-size: 2em }",
+    );
+    assert_eq!(style_of(&doc, &t, "div").font_size, 13.0);
+    assert_eq!(style_of(&doc, &t, "pre").font_size, 13.0);
+    // A relative size follows the parent's used size.
+    assert_eq!(style_of(&doc, &t, "code").font_size, 26.0);
+    // Not the generic alone: the ordinary medium.
+    assert_eq!(style_of(&doc, &t, "p").font_size, 16.0);
+    assert_eq!(style_of(&doc, &t, "span").font_size, 16.0);
+    // An explicit size is kept whatever the family.
+    let n = doc.find_element("section").unwrap();
+    let pre = doc.children(n).find(|&c| doc.is_element(c, "pre")).unwrap();
+    assert_eq!(t.get(pre).unwrap().font_size, 12.0);
+}
+
+#[test]
+fn font_kerning_none_is_inherited_and_reset_by_font() {
+    let (doc, t) = styled("<div><p>a</p><span>b</span></div>", "div { font-kerning: none } span { font: 12px serif }");
+    assert!(style_of(&doc, &t, "div").font_kerning_none);
+    assert!(style_of(&doc, &t, "p").font_kerning_none);
+    assert!(!style_of(&doc, &t, "span").font_kerning_none);
+}
+
+#[test]
+fn font_synthesis_small_caps() {
+    assert!(one("").font_synthesis_small_caps);
+    assert!(!one("font-synthesis-small-caps: none").font_synthesis_small_caps);
+    assert!(!one("font-synthesis: weight style").font_synthesis_small_caps);
+    assert!(one("font-synthesis: small-caps").font_synthesis_small_caps);
+}

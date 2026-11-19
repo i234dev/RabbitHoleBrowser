@@ -7,6 +7,12 @@ use rabbithole_css::Token;
 
 /// Family names (as written, generic keywords excluded) from a
 /// comma-separated `font-family` component list.
+/// Is the family list exactly the generic `monospace`?
+pub fn monospace_only(comps: &[&[Token]]) -> bool {
+    let fams = values::split_commas(comps);
+    fams.len() == 1 && matches!(fams[0].as_slice(), [[Token::Ident(s)]] if s.eq_ignore_ascii_case("monospace"))
+}
+
 pub fn family_names(comps: &[&[Token]]) -> Vec<String> {
     let mut out = Vec::new();
     for fam in values::split_commas(comps) {
@@ -335,6 +341,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             }
         }
         "font-family" => {
+            style.font_monospace_only = monospace_only(comps);
             style.font_family_list = family_names(comps);
             if let Some(f) = crate::cascade::family_of(comps) {
                 style.font_family = f;
@@ -438,7 +445,16 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         "font-synthesis" => {
             let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
             style.font_synthesis_style = kws.iter().any(|k| k == "style");
+            style.font_synthesis_small_caps = kws.iter().any(|k| k == "small-caps");
         }
+        "font-synthesis-small-caps" => match comps {
+            [c] => match values::ident(c).as_deref() {
+                Some("auto") => style.font_synthesis_small_caps = true,
+                Some("none") => style.font_synthesis_small_caps = false,
+                _ => return true,
+            },
+            _ => return true,
+        },
         "font-synthesis-style" => match comps {
             [c] => match values::ident(c).as_deref() {
                 Some("auto") => style.font_synthesis_style = true,
@@ -513,7 +529,12 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 _ => return true,
             };
         }
-        "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
+        "font-kerning" => match values::ident(c0).as_deref() {
+            Some("none") => style.font_kerning_none = true,
+            Some("auto" | "normal") => style.font_kerning_none = false,
+            _ => {}
+        },
+        "text-rendering" | "font-stretch" | "font-feature-settings"
         | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
         | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"

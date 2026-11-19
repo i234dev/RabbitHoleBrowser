@@ -395,3 +395,159 @@ fn fixed_box_paints_in_tree_order_with_positioned_siblings() {
     let fixed = list.items.iter().position(|i| matches!(i, crate::DisplayItem::PushFixed)).expect("fixed scope");
     assert!(fixed < red);
 }
+
+/// `::first-letter` wraps the first letter and its punctuation, inside a
+/// nested block, in an inline box (or a float when floated).
+#[test]
+fn first_letter_wraps_letter_in_nested_block() {
+    use crate::tree::{Flow, InlineItem};
+    let fx = Fx::new("<div id=d><p id=p>  \"Txy</p></div>", "div::first-letter { font-size: 40px } p { margin: 0 }");
+    let tree = fx.layout();
+    let node = fx.doc.element_by_id("p").unwrap();
+    fn find(b: &LayoutBox, n: usize) -> Option<&LayoutBox> {
+        if b.node == Some(n) && b.kind == BoxKind::Block {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| find(c, n))
+    }
+    let p = find(&tree.root, node).unwrap();
+    let texts: Vec<(String, f32)> = p.items.iter().filter_map(|i| match i {
+        InlineItem::Text { text, style, .. } => Some((text.to_string(), style.font_size)),
+        _ => None,
+    }).collect();
+    assert!(texts.iter().any(|(t, s)| t == "\"T" && *s == 40.0), "{texts:?}");
+    assert!(texts.iter().any(|(t, s)| t == "xy" && *s == 16.0), "{texts:?}");
+
+    let fx = Fx::new("<div id=d>Drop cap</div>", "div::first-letter { float: left; font-size: 50px }");
+    let tree = fx.layout();
+    let node = fx.doc.element_by_id("d").unwrap();
+    let d = find(&tree.root, node).unwrap();
+    assert!(d.children.iter().any(|c| c.flow == Flow::FloatLeft && c.rect.h > 40.0), "{}", tree.dump());
+}
+
+/// Percentage `top` against an indefinite containing block height is
+/// `auto`; against a definite one it resolves.
+#[test]
+fn relative_percent_top_needs_definite_height() {
+    let fx = Fx::new(
+        "<div style='min-height:100px'><div id=a style='height:10px;position:relative;top:50%'></div></div>\
+         <div style='height:100px'><div id=b style='height:10px;position:relative;top:50%'></div></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    assert!(close(fx.rect(&tree, "a").y, 0.0));
+    assert!(close(fx.rect(&tree, "b").y, 150.0));
+}
+
+/// A block inside a relatively positioned inline moves with it.
+#[test]
+fn block_in_relative_inline_is_offset() {
+    let fx = Fx::new("<div style='height:100px'><span style='position:relative;left:30px;top:20px'><div id=b style='height:10px'></div></span></div>", "body { margin: 0 }");
+    let tree = fx.layout();
+    let r = fx.rect(&tree, "b");
+    assert!(close(r.x, 30.0) && close(r.y, 20.0), "{r:?}");
+}
+
+fn box_of<'t>(fx: &Fx, tree: &'t LayoutTree, id: &str) -> &'t LayoutBox {
+    let node = fx.doc.element_by_id(id).unwrap();
+    fn find(b: &LayoutBox, n: usize) -> Option<&LayoutBox> {
+        if b.node == Some(n) && b.kind != BoxKind::Text && b.pseudo.is_none() {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| find(c, n))
+    }
+    find(&tree.root, node).unwrap()
+}
+
+/// Column-group borders take part in collapsed border resolution.
+#[test]
+fn collapsed_borders_include_column_groups() {
+    let fx = Fx::new(
+        "<table style='border-collapse:collapse'><colgroup style='border:4px solid green'><col><col></colgroup><tr><td id=a>x</td><td id=b>y</td></tr></table>",
+        "",
+    );
+    let tree = fx.layout();
+    let a = box_of(&fx, &tree, "a");
+    assert!(a.style.border_width.left > 0.0 && a.style.border_width.top > 0.0, "{:?}", a.style.border_width);
+    // No border between the two columns of the group.
+    assert_eq!(a.style.border_width.right, 0.0);
+}
+
+/// A table with an auto width goes beside a float, narrowed to the space
+/// left; an atomic inline starting a line clears floats over its height.
+#[test]
+fn tables_and_atomics_beside_floats() {
+    let fx = Fx::new(
+        "<div style='width:300px'><div style='float:left;width:100px;height:50px'></div>\
+         <table id=t style='border-spacing:0'><tr><td style='padding:0'><span style='display:inline-block;width:150px;height:10px'></span> <span style='display:inline-block;width:150px;height:10px'></span></td></tr></table></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    let t = fx.rect(&tree, "t");
+    assert!(close(t.x, 100.0) && t.w <= 200.01, "{t:?}");
+
+    let fx = Fx::new(
+        "<div style='width:400px'><div style='float:left;clear:left;width:50px;height:75px'></div><div style='float:left;clear:left;width:100px;height:75px'></div>\
+         <span style='display:inline-block;vertical-align:top;width:200px;height:50px'></span><span id=s style='display:inline-block;vertical-align:top;width:200px;height:50px'></span></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    let s = fx.rect(&tree, "s");
+    assert!(close(s.x, 100.0) && close(s.y, 50.0), "{s:?}");
+}
+
+/// An absolutely positioned table between two insets keeps its
+/// shrink-to-fit width.
+#[test]
+fn absolute_table_between_insets_shrinks_to_fit() {
+    let fx = Fx::new(
+        "<div style='position:relative;width:400px;height:100px'><table id=t style='position:absolute;left:1px;right:1px;border-spacing:0'><tr><td style='padding:0'><div style='width:50px;height:10px'></div></td></tr></table></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    let t = fx.rect(&tree, "t");
+    assert!(close(t.x, 1.0) && close(t.w, 50.0), "{t:?}");
+}
+
+/// `::first-line` colors the text of the first formatted line only.
+#[test]
+fn first_line_color_applies_to_first_line() {
+    use crate::tree::FragmentKind;
+    let fx = Fx::new(
+        "<div id=d style='width:60px'><p id=p>aaa bbb ccc ddd eee fff</p></div>",
+        "body { margin: 0 } p { margin: 0; color: rgb(255, 0, 0) } div::first-line { color: rgb(0, 128, 0) }",
+    );
+    let tree = fx.layout();
+    let p = box_of(&fx, &tree, "p");
+    assert!(p.lines.len() > 1);
+    let colors = |i: usize| -> Vec<rabbithole_gfx::Color> {
+        p.lines[i].fragments.iter().filter_map(|f| match &f.kind { FragmentKind::Text { color, .. } => Some(*color), _ => None }).collect()
+    };
+    // The paragraph sets its own color: the div's first line does not
+    // override it.
+    assert!(colors(0).iter().all(|c| *c == rabbithole_gfx::Color::rgb(255, 0, 0)));
+
+    let fx = Fx::new(
+        "<p id=p style='width:60px'>aaa bbb ccc ddd eee fff</p>",
+        "body { margin: 0 } p { margin: 0; color: rgb(255, 0, 0) } p::first-line { color: rgb(0, 128, 0) }",
+    );
+    let tree = fx.layout();
+    let p = box_of(&fx, &tree, "p");
+    let first: Vec<_> = p.lines[0].fragments.iter().filter_map(|f| match &f.kind { FragmentKind::Text { color, .. } => Some(*color), _ => None }).collect();
+    let second: Vec<_> = p.lines[1].fragments.iter().filter_map(|f| match &f.kind { FragmentKind::Text { color, .. } => Some(*color), _ => None }).collect();
+    assert!(!first.is_empty() && first.iter().all(|c| *c == rabbithole_gfx::Color::rgb(0, 128, 0)));
+    assert!(second.iter().all(|c| *c == rabbithole_gfx::Color::rgb(255, 0, 0)));
+}
+
+/// An auto width between two insets limited by max-width is recomputed
+/// as specified: auto margins then center the box (CSS 2.1 §10.4).
+#[test]
+fn absolute_max_width_between_insets_centers_with_auto_margins() {
+    let fx = Fx::new(
+        "<div style='position:relative;width:400px;height:100px'><div id=a style='position:absolute;left:0;right:0;max-width:100px;margin:0 auto;height:10px'></div></div>",
+        "body { margin: 0 }",
+    );
+    let tree = fx.layout();
+    let a = fx.rect(&tree, "a");
+    assert!(close(a.x, 150.0) && close(a.w, 100.0), "{a:?}");
+}

@@ -15,7 +15,7 @@ use crate::block::{horizontal_extras, Cb, Layouter, WidthMode};
 use crate::float::Bfc;
 use crate::tree::{BoxKind, Flow, Formatting, LayoutBox};
 use rabbithole_gfx::{Color, Rect};
-use rabbithole_style::{BorderStyle, BoxSizing, ComputedStyle, Display, Edges, Length, VerticalAlign};
+use rabbithole_style::{BorderStyle, BoxSizing, ComputedStyle, Display, Edges, Length, Position, VerticalAlign};
 use std::rc::Rc;
 
 pub(crate) fn is_row_group(b: &LayoutBox) -> bool {
@@ -94,6 +94,25 @@ fn span_attr(doc: &rabbithole_dom::Document, b: &LayoutBox, name: &str) -> Optio
     digits.parse::<u32>().ok()
 }
 
+/// The width of a column (group) clamped by its `min-width` /
+/// `max-width` (CSS 2.1 §10.4 applies them to columns): a fixed length
+/// within the limits, or the minimum when the width is auto.
+fn column_width(style: &ComputedStyle, width: Length) -> Length {
+    let px = |l: Length| match l {
+        Length::Px(v) => Some(v),
+        _ => None,
+    };
+    let (min, max) = (px(style.min_width), px(style.max_width));
+    match width {
+        Length::Px(w) => Length::Px(w.min(max.unwrap_or(f32::INFINITY)).max(min.unwrap_or(0.0))),
+        Length::Auto => match min {
+            Some(m) if m > 0.0 => Length::Px(m),
+            _ => width,
+        },
+        other => other,
+    }
+}
+
 /// Build the slot grid of a table (HTML table model, simplified).
 fn build_grid(table: &LayoutBox, doc: &rabbithole_dom::Document) -> Grid {
     let mut g = Grid::default();
@@ -131,14 +150,14 @@ fn build_grid(table: &LayoutBox, doc: &rabbithole_dom::Document) -> Grid {
             if cols.is_empty() {
                 let span = span_attr(doc, c, "span").unwrap_or(1).clamp(1, 1000) as usize;
                 for _ in 0..span {
-                    g.col_widths.push(c.style.width);
+                    g.col_widths.push(column_width(&c.style, c.style.width));
                 }
                 ncol_elems += span;
             } else {
                 for j in cols {
                     let k = &c.children[j];
                     let span = span_attr(doc, k, "span").unwrap_or(1).clamp(1, 1000) as usize;
-                    let w = if k.style.width.is_auto() { c.style.width } else { k.style.width };
+                    let w = if k.style.width.is_auto() { column_width(&c.style, c.style.width) } else { column_width(&k.style, k.style.width) };
                     for _ in 0..span {
                         g.col_widths.push(w);
                     }
@@ -150,7 +169,7 @@ fn build_grid(table: &LayoutBox, doc: &rabbithole_dom::Document) -> Grid {
         } else {
             let span = span_attr(doc, c, "span").unwrap_or(1).clamp(1, 1000) as usize;
             for _ in 0..span {
-                g.col_widths.push(c.style.width);
+                g.col_widths.push(column_width(&c.style, c.style.width));
             }
             g.col_boxes.push(ColBox { path: (i, None), first: ncol_elems, span });
             ncol_elems += span;
@@ -339,6 +358,16 @@ impl<'a> Layouter<'a> {
             let border_box = cell.style.box_sizing == BoxSizing::BorderBox;
             let (cmin, cmax) = self.intrinsic(cell);
             let (mut cmin, mut cmax) = (cmin + ex, cmax + ex);
+            // `max-width` / `min-width` limit a cell's fixed width.
+            let width = match width {
+                Length::Px(w) => Length::Px(match (cell.style.max_width, cell.style.min_width) {
+                    (Length::Px(m), Length::Px(n)) => w.min(m).max(n),
+                    (Length::Px(m), _) => w.min(m),
+                    (_, Length::Px(n)) => w.max(n),
+                    _ => w,
+                }),
+                other => other,
+            };
             let fixed = match width {
                 Length::Px(w) => {
                     let w = if border_box { w.max(ex) } else { w + ex };
@@ -668,6 +697,24 @@ impl<'a> Layouter<'a> {
             }
             i += 1;
         }
+        // Positioned rows and row groups are the containing blocks of
+        // their absolutely positioned descendants (rows first: a group's
+        // walk stops at positioned rows).
+        if g.rows.iter().any(|p| row_ref(b, *p).style.position != Position::Static) {
+            for p in g.rows.iter() {
+                let row = row_mut(b, *p);
+                if row.style.position != Position::Static {
+                    let r = row.rect;
+                    self.layout_abs_descendants(row, r);
+                }
+            }
+        }
+        for i in 0..b.children.len() {
+            if is_row_group(&b.children[i]) && b.children[i].style.position != Position::Static {
+                let r = b.children[i].rect;
+                self.layout_abs_descendants(&mut b.children[i], r);
+            }
+        }
         // Columns (painted beneath rows and cells).
         let (gy, gh) = if nrows > 0 { (row_y[0], row_y[nrows - 1] + row_h[nrows - 1] - row_y[0]) } else { (content_y, 0.0) };
         for cbx in &g.col_boxes {
@@ -778,10 +825,17 @@ impl<'a> Layouter<'a> {
                 BorderStyle::Solid => 4,
                 BorderStyle::Dashed => 3,
                 BorderStyle::Dotted => 2,
-                BorderStyle::None => 0,
+                BorderStyle::None | BorderStyle::Hidden => 0,
             }
         }
         fn better(a: Cand, b: Cand) -> Cand {
+            // `hidden` suppresses every other border (CSS 2.1 §17.6.2.1).
+            if a.1 == BorderStyle::Hidden {
+                return a;
+            }
+            if b.1 == BorderStyle::Hidden {
+                return b;
+            }
             let ka = (a.0, style_rank(a.1), a.3);
             let kb = (b.0, style_rank(b.1), b.3);
             if kb.0 > ka.0 || (kb.0 == ka.0 && (kb.1 > ka.1 || (kb.1 == ka.1 && kb.2 > ka.2))) {
@@ -790,10 +844,46 @@ impl<'a> Layouter<'a> {
                 a
             }
         }
-        const CELL: u8 = 4;
-        const ROW: u8 = 3;
-        const GROUP: u8 = 2;
-        const TABLE: u8 = 0;
+        const CELL: u8 = 6;
+        const ROW: u8 = 5;
+        const GROUP: u8 = 4;
+        const COL: u8 = 3;
+        const COLGROUP: u8 = 2;
+        const TABLE: u8 = 1;
+        // Column and column-group styles per column (their boxes carry no
+        // borders: read them from the cascade).
+        let mut col_style: Vec<Option<Rc<ComputedStyle>>> = vec![None; ncols];
+        let mut colgroup: Vec<Option<(usize, Rc<ComputedStyle>)>> = vec![None; ncols];
+        for x in &g.col_boxes {
+            let bx = match x.path.1 {
+                Some(j) => &table.children[x.path.0].children[j],
+                None => &table.children[x.path.0],
+            };
+            let st = orig(bx);
+            let is_group = x.path.1.is_none() && bx.style.display == Display::TableColumnGroup;
+            for k in x.first..(x.first + x.span).min(ncols) {
+                if is_group {
+                    colgroup[k] = Some((x.path.0, st.clone()));
+                } else {
+                    col_style[k] = Some(st.clone());
+                }
+            }
+        }
+        let has_cols = !g.col_boxes.is_empty();
+        let group_id = |k: usize| colgroup[k].as_ref().map(|(i, _)| *i);
+        let col_side = |cand: Cand, k: usize, sd: usize| -> Cand {
+            let mut cand = cand;
+            if let Some(cs) = &col_style[k] {
+                cand = better(cand, side(cs, sd, COL));
+            }
+            cand
+        };
+        let group_side = |cand: Cand, k: usize, sd: usize| -> Cand {
+            match &colgroup[k] {
+                Some((_, gs)) => better(cand, side(gs, sd, COLGROUP)),
+                None => cand,
+            }
+        };
         let mut new_cells: Vec<[Cand; 4]> = Vec::with_capacity(g.cells.len());
         for (i, c) in g.cells.iter().enumerate() {
             let s = &cell_styles[i];
@@ -819,6 +909,11 @@ impl<'a> Layouter<'a> {
                 }
             }
             if c.row == 0 {
+                if has_cols {
+                    for k in c.col..=last_col.min(ncols - 1) {
+                        top = group_side(col_side(top, k, 0), k, 0);
+                    }
+                }
                 top = better(top, side(&tstyle, 0, TABLE));
             }
             // Bottom.
@@ -841,10 +936,27 @@ impl<'a> Layouter<'a> {
                 }
             }
             if last_row + 1 == nrows {
+                if has_cols {
+                    for k in c.col..=last_col.min(ncols - 1) {
+                        bottom = group_side(col_side(bottom, k, 2), k, 2);
+                    }
+                }
                 bottom = better(bottom, side(&tstyle, 2, TABLE));
             }
             // Left.
             let mut left = side(s, 3, CELL);
+            if has_cols && c.col < ncols {
+                left = col_side(left, c.col, 3);
+                if c.col > 0 {
+                    left = col_side(left, c.col - 1, 1);
+                }
+                if c.col == 0 || group_id(c.col - 1) != group_id(c.col) {
+                    left = group_side(left, c.col, 3);
+                    if c.col > 0 {
+                        left = group_side(left, c.col - 1, 1);
+                    }
+                }
+            }
             if c.col > 0 {
                 if let Some(j) = g.slots[c.row][c.col - 1] {
                     left = better(left, side(&cell_styles[j], 1, CELL));
@@ -858,6 +970,18 @@ impl<'a> Layouter<'a> {
             }
             // Right.
             let mut right = side(s, 1, CELL);
+            if has_cols && last_col < ncols {
+                right = col_side(right, last_col, 1);
+                if last_col + 1 < ncols {
+                    right = col_side(right, last_col + 1, 3);
+                }
+                if last_col + 1 == ncols || group_id(last_col + 1) != group_id(last_col) {
+                    right = group_side(right, last_col, 1);
+                    if last_col + 1 < ncols {
+                        right = group_side(right, last_col + 1, 3);
+                    }
+                }
+            }
             if last_col + 1 < ncols {
                 if let Some(j) = g.slots[c.row][last_col + 1] {
                     right = better(right, side(&cell_styles[j], 3, CELL));

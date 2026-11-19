@@ -60,6 +60,14 @@ pub struct StyledTree {
     pub after: Vec<Option<Rc<ComputedStyle>>>,
     /// `::marker` styles; `Some` when any `::marker` rule matched.
     pub marker: Vec<Option<Rc<ComputedStyle>>>,
+    /// `::first-letter` styles; `Some` when any `::first-letter` rule matched.
+    pub first_letter: Vec<Option<Rc<ComputedStyle>>>,
+    /// `::first-line` styles; `Some` when any `::first-line` rule matched.
+    pub first_line: Vec<Option<Rc<ComputedStyle>>>,
+    /// Some element has (or had, since the last full restyle) a
+    /// `::first-letter` / `::first-line` style.
+    pub any_first_letter: bool,
+    pub any_first_line: bool,
     pub font_faces: Vec<FontFace>,
     /// `@keyframes` by name: (offsets, declarations) per frame, raw.
     pub keyframes: HashMap<String, Vec<(Vec<f32>, Vec<Declaration>)>>,
@@ -78,6 +86,8 @@ impl StyledTree {
             PseudoElement::Before => &self.before,
             PseudoElement::After => &self.after,
             PseudoElement::Marker => &self.marker,
+            PseudoElement::FirstLetter => &self.first_letter,
+            PseudoElement::FirstLine => &self.first_line,
             _ => return None,
         };
         v.get(id).and_then(|s| s.as_ref())
@@ -89,6 +99,10 @@ impl StyledTree {
             before: Vec::new(),
             after: Vec::new(),
             marker: Vec::new(),
+            first_letter: Vec::new(),
+            first_line: Vec::new(),
+            any_first_letter: false,
+            any_first_line: false,
             font_faces: Vec::new(),
             keyframes: HashMap::new(),
             root_font_size: 16.0,

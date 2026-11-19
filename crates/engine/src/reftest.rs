@@ -473,6 +473,23 @@ fn handle(mut stream: TcpStream, root: &Path, options: Options) {
     let rel = percent_decode(path.trim_start_matches('/'));
     let safe = !rel.split('/').any(|s| s == "..");
     let file: PathBuf = root.join(&rel);
+    // WPT `<file>.headers` sidecars add (or replace) response headers.
+    let mut extra = String::new();
+    let mut ct_override: Option<String> = None;
+    if safe {
+        let mut side = file.clone().into_os_string();
+        side.push(".headers");
+        if let Ok(h) = std::fs::read_to_string(&side) {
+            for line in h.lines() {
+                let Some((k, v)) = line.split_once(':') else { continue };
+                if k.trim().eq_ignore_ascii_case("content-type") {
+                    ct_override = Some(v.trim().to_string());
+                } else if !k.trim().is_empty() {
+                    extra.push_str(&format!("{}: {}\r\n", k.trim(), v.trim()));
+                }
+            }
+        }
+    }
     let (status, body, ct) = match (safe, std::fs::read(&file)) {
         (true, Ok(b)) if options.mouse_actions && rel == "resources/testdriver-vendor.js" && b.is_empty() => {
             ("200 OK", actions::VENDOR.as_bytes().to_vec(), "text/javascript")
@@ -480,7 +497,8 @@ fn handle(mut stream: TcpStream, root: &Path, options: Options) {
         (true, Ok(b)) if file.is_file() => ("200 OK", b, content_type(&file)),
         _ => ("404 Not Found", b"not found".to_vec(), "text/plain"),
     };
-    let head = format!("HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len());
+    let ct = if status.starts_with("200") { ct_override.as_deref().unwrap_or(ct) } else { ct };
+    let head = format!("HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n{extra}\r\n", body.len());
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(&body);
 }

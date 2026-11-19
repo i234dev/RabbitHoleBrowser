@@ -144,15 +144,21 @@ impl<'a> Builder<'a> {
         let floated = !out_of_flow && style.float != Float::None;
         let kind = if out_of_flow || floated {
             BoxKind::Block
-        } else if style.display == Display::Inline {
-            BoxKind::Inline
-        } else if style.display.is_inline_level() {
-            BoxKind::InlineBlock
         } else {
-            BoxKind::Block
+            match style.display {
+                Display::Inline => BoxKind::Inline,
+                Display::TableCell => BoxKind::TableCell,
+                Display::TableRow => BoxKind::TableRow,
+                Display::Table => BoxKind::Table,
+                d if d.is_inline_level() => BoxKind::InlineBlock,
+                _ => BoxKind::Block,
+            }
         };
         let mut b = LayoutBox::new(kind, Some(node), style.clone());
         b.pseudo = Some(which);
+        if style.display == Display::ListItem && which != PseudoElement::Marker {
+            b.marker_text = list_marker_text(doc, node, &style);
+        }
         b.flow = if out_of_flow {
             Flow::Absolute
         } else if floated {
@@ -169,7 +175,18 @@ impl<'a> Builder<'a> {
         if kind == BoxKind::Inline {
             b.children = children;
             b.formatting = Formatting::Inline;
+        } else if !(out_of_flow || floated) && matches!(style.display, Display::Table | Display::InlineTable) {
+            // Table-level generated content gets the table fix-ups.
+            let captions = self.finish_table(&mut b, children);
+            return Some(self.wrap_table(b, captions));
+        } else if kind == BoxKind::TableRow {
+            self.finish_row(&mut b, children);
+        } else if crate::table::is_row_group(&b) {
+            self.finish_row_group(&mut b, children);
         } else {
+            if kind == BoxKind::TableCell {
+                b.bfc_root = true;
+            }
             self.finish_container(&mut b, children, false);
         }
         Some(b)
@@ -251,12 +268,15 @@ impl<'a> Builder<'a> {
         if matches!(style.display, Display::TableColumn | Display::TableColumnGroup) {
             // Columns only matter inside tables (widths, backgrounds); the
             // fix-up drops them elsewhere. They have no borders or padding.
+            // (Their counter properties still apply.)
+            self.apply_counters(&style);
             let mut b = LayoutBox::new(BoxKind::Block, Some(node), Rc::new(without_box_edges(&style)));
             b.formatting = Formatting::None;
             if style.display == Display::TableColumnGroup {
                 for c in doc.child_elements(node) {
                     if let Some(cs) = self.ctx.styles.get(c) {
                         if cs.display == Display::TableColumn {
+                            self.apply_counters(cs);
                             let mut col = LayoutBox::new(BoxKind::Block, Some(c), Rc::new(without_box_edges(cs)));
                             col.formatting = Formatting::None;
                             b.children.push(col);
@@ -525,6 +545,19 @@ impl<'a> Builder<'a> {
                     }
                     let mut c = c;
                     c.counter_touch = true;
+                    if style.position == Position::Relative {
+                        // A block inside a relatively positioned inline
+                        // moves with it: an anonymous block carries the
+                        // inline's offsets.
+                        let mut s = anonymous_style(&style, Display::Block);
+                        s.position = Position::Relative;
+                        s.inset = style.inset;
+                        let mut w = LayoutBox::new(BoxKind::AnonymousBlock, None, Rc::new(s));
+                        w.counter_touch = true;
+                        w.children = vec![c];
+                        w.formatting = Formatting::Block;
+                        c = w;
+                    }
                     parts.push(c);
                 } else {
                     run.push(c);
@@ -579,6 +612,10 @@ impl<'a> Builder<'a> {
                     // is its inline content.
                     if b.marker_text.is_some() && b.children.is_empty() && b.items.is_empty() && style.list_style_position == rabbithole_style::ListStylePosition::Inside {
                         b.formatting = Formatting::Inline;
+                    }
+                    let first_letter = self.ctx.styles.any_first_letter && !matches!(tag, "input" | "select" | "textarea");
+                    if let Some(fl) = first_letter.then(|| self.ctx.styles.pseudo(node, PseudoElement::FirstLetter)).flatten() {
+                        crate::first_letter::apply(&mut b, fl);
                     }
                 }
             }
