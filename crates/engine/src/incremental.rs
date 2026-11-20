@@ -63,6 +63,9 @@ pub struct IncrementalState {
     layout_dirty: bool,
     /// The display list is out of date.
     dl_dirty: bool,
+    /// Rasterized inline `<svg>` roots that use filters: rasterized again
+    /// when their content changes.
+    filtered_svgs: HashSet<NodeId>,
     /// Inputs of the last layout, to detect changes made behind our back.
     images_seen: HashMap<NodeId, usize>,
     bg_seen: Vec<(String, usize)>,
@@ -329,6 +332,8 @@ impl Engine {
         let mut anim_full = fresh;
         // Elements this flush started rendering (incremental restyles).
         let mut newly_styled: Vec<NodeId> = Vec::new();
+        // Elements restyled (only collected while filtered SVGs exist).
+        let mut restyled: Vec<NodeId> = Vec::new();
         let anim_snapshot = page.anim.snapshot(&page.styles);
         if fresh {
             let mut se = StyleEngine::new(&page.sheets, &env);
@@ -352,6 +357,9 @@ impl Engine {
             } else {
                 incr.stats.style_incremental += 1;
                 incr.stats.elements_restyled += out.recomputed as u64;
+                if !incr.filtered_svgs.is_empty() {
+                    restyled.extend(out.changes.iter().map(|c| c.node));
+                }
                 for c in &out.changes {
                     if c.old.as_ref().is_none_or(|s| s.display.is_none()) {
                         newly_styled.push(c.node);
@@ -387,12 +395,46 @@ impl Engine {
         incr.dl_dirty = true;
         page.background = canvas_background(&page.doc, &page.styles);
         if fresh || log.overflow || anim_full {
-            rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, None);
+            rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, None, &mut page.incr.filtered_svgs);
         } else {
             // Only newly rendered elements can be SVGs without an image.
-            let roots: Vec<NodeId> = std::mem::take(&mut newly_styled).into_iter().filter(|&n| page.doc.is_element(n, "svg")).collect();
+            let mut roots: Vec<NodeId> = std::mem::take(&mut newly_styled).into_iter().filter(|&n| page.doc.is_element(n, "svg")).collect();
+            // Filtered SVGs whose content changed are rasterized again.
+            if !page.incr.filtered_svgs.is_empty() {
+                let doc = &page.doc;
+                let filtered = &page.incr.filtered_svgs;
+                let mut stale: Vec<NodeId> = Vec::new();
+                let mut consider = |n: NodeId| {
+                    let mut top = None;
+                    let mut cur = Some(n);
+                    while let Some(c) = cur {
+                        if doc.is_element(c, "svg") {
+                            top = Some(c);
+                        }
+                        cur = doc.parent(c);
+                    }
+                    if let Some(t) = top.filter(|t| filtered.contains(t) && !stale.contains(t)) {
+                        stale.push(t);
+                    }
+                };
+                for m in &log.entries {
+                    match m {
+                        Mutation::Attr { node, .. } | Mutation::Node { node } | Mutation::Text { node } => consider(*node),
+                        Mutation::Children { parent, .. } => consider(*parent),
+                    }
+                }
+                for &n in &restyled {
+                    consider(n);
+                }
+                for t in stale {
+                    page.images.remove(&t);
+                    if !roots.contains(&t) {
+                        roots.push(t);
+                    }
+                }
+            }
             if !roots.is_empty() {
-                rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, Some(&roots));
+                rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, Some(&roots), &mut page.incr.filtered_svgs);
             }
         }
         if anim_full {

@@ -146,6 +146,11 @@ impl SvgTree {
         Some((paint::transform_path(&path, &m), rule))
     }
 
+    /// Does any element use the `filter` property?
+    pub fn has_filters(&self) -> bool {
+        self.built.nodes.iter().any(|n| n.spec.filter.as_ref().is_some_and(|f| !f.is_empty()))
+    }
+
     /// The `<filter>` element with this `id` (for `filter: url(#id)` on
     /// CSS boxes).
     pub fn filter(&self, id: &str) -> Option<std::sync::Arc<filter::FilterDef>> {
