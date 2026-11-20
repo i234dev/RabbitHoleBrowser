@@ -102,7 +102,8 @@ pub(crate) fn resolve_urls(b: &crate::tree::LayoutBox, ops: &[FilterOp], ctx: &c
         Some(x) => b.rect.union(&x),
         None => b.rect,
     };
-    Some(Some(Arc::new(UrlFilters { defs, rect, viewport: (ctx.viewport_width, ctx.viewport_height) })))
+    // Percentages of user-space lengths refer to the reference box.
+    Some(Some(Arc::new(UrlFilters { defs, rect, viewport: (rect.w, rect.h) })))
 }
 
 /// Bounds (layout coordinates) of the transformed descendants among

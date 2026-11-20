@@ -400,8 +400,10 @@ impl FilterDef {
                     ops::displace(&i, &map, sub, plx(*scale), ply(*scale), *xc, *yc)
                 }
                 PrimKind::Convolve { order, kernel, divisor, bias, target, edge, preserve_alpha } => {
-                    let (i, s) = fetch(&input(0));
-                    ops::convolve(&i, sub, s, *order, kernel, *divisor, *bias, *target, *edge, *preserve_alpha)
+                    // The input image spans the filter region (transparent
+                    // outside its subregion): edge modes extend it there.
+                    let (i, _) = fetch(&input(0));
+                    ops::convolve(&i, sub, region, *order, kernel, *divisor, *bias, *target, *edge, *preserve_alpha)
                 }
                 PrimKind::DropShadow { dx, dy, sx: bx, sy: by, color } => {
                     let (i, _) = fetch(&input(0));
