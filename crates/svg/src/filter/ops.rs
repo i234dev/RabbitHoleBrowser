@@ -126,12 +126,13 @@ pub fn convert_space(p: &mut Pixels, r: IRect, to_linear: bool) {
         for x in r.x0.max(0)..r.x1.min(w as i32) {
             let c = &mut p.px[y as usize * w + x as usize];
             let a = c[3];
-            if a <= 0.0 {
+            if a <= 0.0 || c[0] == 0.0 && c[1] == 0.0 && c[2] == 0.0 {
                 continue;
             }
+            let inv = 4095.0 / a;
             for k in 0..3 {
-                let v = (c[k] / a).clamp(0.0, 1.0);
-                c[k] = lut[(v * 4095.0 + 0.5) as usize] * a;
+                let v = (c[k] * inv).clamp(0.0, 4095.0);
+                c[k] = lut[(v + 0.5) as usize] * a;
             }
         }
     }
@@ -164,42 +165,41 @@ pub fn color_matrix(p: &mut Pixels, r: IRect, m: &[f32; 20]) {
     });
 }
 
-/// A box blur pass along rows (`horizontal`) or columns over `r`: each
-/// output is the mean of the inputs from `i - left` to `i + right`
-/// (transparent outside `r`).
-fn box_pass(src: &Pixels, dst: &mut Pixels, r: IRect, left: usize, right: usize, horizontal: bool, line: &mut Vec<[f32; 4]>) {
-    let w = src.w;
-    let (n, lines, start, lstart) = if horizontal {
-        (r.width().max(0) as usize, r.height().max(0) as usize, r.x0 as usize, r.y0 as usize)
-    } else {
-        (r.height().max(0) as usize, r.width().max(0) as usize, r.y0 as usize, r.x0 as usize)
-    };
+/// A box blur pass along rows (`horizontal`) or columns over `r` of a
+/// `w`-wide plane of `N`-channel pixels: each output is the mean of the
+/// inputs from `i - left` to `i + right` (transparent outside `r`).
+#[allow(clippy::too_many_arguments)]
+fn box_pass<const N: usize>(src: &[[f32; N]], dst: &mut [[f32; N]], w: usize, r: IRect, left: usize, right: usize, horizontal: bool, line: &mut Vec<[f32; N]>) {
+    if !horizontal {
+        box_pass_rows(src, dst, w, r, left, right, line);
+        return;
+    }
+    let (n, x0) = (r.width().max(0) as usize, r.x0 as usize);
     let norm = 1.0 / (left + right + 1) as f32;
-    let idx = |l: usize, i: usize| if horizontal { (lstart + l) * w + start + i } else { (start + i) * w + lstart + l };
-    for l in 0..lines {
+    for y in r.y0 as usize..r.y1.max(0) as usize {
+        let base = y * w + x0;
         line.clear();
-        line.extend((0..n).map(|i| src.px[idx(l, i)]));
-        let mut acc = [0.0f32; 4];
-        // Window for output 0: inputs [-left, right].
+        line.extend_from_slice(&src[base..base + n]);
+        let out = &mut dst[base..base + n];
+        let mut acc = [0.0f32; N];
         for v in line.iter().take(right.min(n.saturating_sub(1)) + 1) {
-            for k in 0..4 {
+            for k in 0..N {
                 acc[k] += v[k];
             }
         }
         for i in 0..n {
-            let o = &mut dst.px[idx(l, i)];
-            for k in 0..4 {
-                o[k] = acc[k] * norm;
+            for k in 0..N {
+                out[i][k] = acc[k] * norm;
             }
-            let add = i + right + 1;
-            if add < n {
-                for k in 0..4 {
-                    acc[k] += line[add][k];
+            if i + right + 1 < n {
+                let a = line[i + right + 1];
+                for k in 0..N {
+                    acc[k] += a[k];
                 }
             }
             if i >= left {
                 let s = line[i - left];
-                for k in 0..4 {
+                for k in 0..N {
                     acc[k] -= s[k];
                 }
             }
@@ -207,13 +207,53 @@ fn box_pass(src: &Pixels, dst: &mut Pixels, r: IRect, left: usize, right: usize,
     }
 }
 
+/// The vertical box pass, sweeping whole rows (cache friendly): `acc`
+/// holds the running column sums.
+fn box_pass_rows<const N: usize>(src: &[[f32; N]], dst: &mut [[f32; N]], w: usize, r: IRect, left: usize, right: usize, acc: &mut Vec<[f32; N]>) {
+    let (x0, cw) = (r.x0 as usize, r.width().max(0) as usize);
+    let (y0, n) = (r.y0 as usize, r.height().max(0) as usize);
+    let norm = 1.0 / (left + right + 1) as f32;
+    acc.clear();
+    acc.resize(cw, [0.0; N]);
+    let row = |y: usize| &src[(y0 + y) * w + x0..(y0 + y) * w + x0 + cw];
+    for y in 0..=right.min(n.saturating_sub(1)) {
+        for (a, v) in acc.iter_mut().zip(row(y)) {
+            for k in 0..N {
+                a[k] += v[k];
+            }
+        }
+    }
+    for y in 0..n {
+        let out = &mut dst[(y0 + y) * w + x0..(y0 + y) * w + x0 + cw];
+        for (o, a) in out.iter_mut().zip(acc.iter()) {
+            for k in 0..N {
+                o[k] = a[k] * norm;
+            }
+        }
+        if y + right + 1 < n {
+            for (a, v) in acc.iter_mut().zip(row(y + right + 1)) {
+                for k in 0..N {
+                    a[k] += v[k];
+                }
+            }
+        }
+        if y >= left {
+            for (a, v) in acc.iter_mut().zip(row(y - left)) {
+                for k in 0..N {
+                    a[k] -= v[k];
+                }
+            }
+        }
+    }
+}
+
 /// Exact Gaussian along one axis (small deviations).
-fn gauss_pass(src: &Pixels, dst: &mut Pixels, r: IRect, sigma: f32, horizontal: bool, line: &mut Vec<[f32; 4]>) {
+#[allow(clippy::too_many_arguments)]
+fn gauss_pass<const N: usize>(src: &[[f32; N]], dst: &mut [[f32; N]], w: usize, r: IRect, sigma: f32, horizontal: bool, line: &mut Vec<[f32; N]>) {
     let rad = (sigma * 3.0).ceil() as i32;
     let mut kern: Vec<f32> = (-rad..=rad).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
     let s: f32 = kern.iter().sum();
     kern.iter_mut().for_each(|k| *k /= s);
-    let w = src.w;
     let (n, lines, start, lstart) = if horizontal {
         (r.width().max(0) as usize, r.height().max(0) as usize, r.x0 as usize, r.y0 as usize)
     } else {
@@ -222,49 +262,47 @@ fn gauss_pass(src: &Pixels, dst: &mut Pixels, r: IRect, sigma: f32, horizontal: 
     let idx = |l: usize, i: usize| if horizontal { (lstart + l) * w + start + i } else { (start + i) * w + lstart + l };
     for l in 0..lines {
         line.clear();
-        line.extend((0..n).map(|i| src.px[idx(l, i)]));
+        line.extend((0..n).map(|i| src[idx(l, i)]));
         for i in 0..n as i32 {
-            let mut acc = [0.0f32; 4];
+            let mut acc = [0.0f32; N];
             let lo = (i - rad).max(0);
             let hi = (i + rad).min(n as i32 - 1);
             for j in lo..=hi {
                 let kv = kern[(j - i + rad) as usize];
                 let v = line[j as usize];
-                for k in 0..4 {
+                for k in 0..N {
                     acc[k] += v[k] * kv;
                 }
             }
-            dst.px[idx(l, i as usize)] = acc;
+            dst[idx(l, i as usize)] = acc;
         }
     }
 }
 
-fn blur_axis(p: &mut Pixels, tmp: &mut Pixels, r: IRect, sigma: f32, horizontal: bool, line: &mut Vec<[f32; 4]>) {
+fn blur_axis<const N: usize>(p: &mut Vec<[f32; N]>, tmp: &mut Vec<[f32; N]>, w: usize, r: IRect, sigma: f32, horizontal: bool, line: &mut Vec<[f32; N]>) {
     if sigma <= 0.0 {
         return;
     }
     if sigma < 2.0 {
-        gauss_pass(p, tmp, r, sigma, horizontal, line);
+        gauss_pass(p, tmp, w, r, sigma, horizontal, line);
         std::mem::swap(p, tmp);
         return;
     }
     // Three box blurs (Filter Effects 1 §feGaussianBlur).
     let d = (sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0 + 0.5).floor().max(1.0) as usize;
-    if d % 2 == 1 {
-        let h = d / 2;
-        for _ in 0..3 {
-            box_pass(p, tmp, r, h, h, horizontal, line);
-            std::mem::swap(p, tmp);
-        }
-    } else {
-        let h = d / 2;
-        box_pass(p, tmp, r, h, h - 1, horizontal, line);
-        std::mem::swap(p, tmp);
-        box_pass(p, tmp, r, h - 1, h, horizontal, line);
-        std::mem::swap(p, tmp);
-        box_pass(p, tmp, r, h, h, horizontal, line);
+    let h = d / 2;
+    let passes = if d % 2 == 1 { [(h, h), (h, h), (h, h)] } else { [(h, h - 1), (h - 1, h), (h, h)] };
+    for (left, right) in passes {
+        box_pass(p, tmp, w, r, left, right, horizontal, line);
         std::mem::swap(p, tmp);
     }
+}
+
+fn blur_plane<const N: usize>(p: &mut Vec<[f32; N]>, w: usize, r: IRect, sx: f32, sy: f32) {
+    let mut tmp = vec![[0.0f32; N]; p.len()];
+    let mut line = Vec::with_capacity(w.max(p.len() / w.max(1)));
+    blur_axis(p, &mut tmp, w, r, sx, true, &mut line);
+    blur_axis(p, &mut tmp, w, r, sy, false, &mut line);
 }
 
 /// Gaussian blur of the pixels within `r` with deviations (sx, sy) px.
@@ -273,10 +311,17 @@ pub fn blur(p: &mut Pixels, r: IRect, sx: f32, sy: f32) {
     if r.is_empty() || (sx <= 0.0 && sy <= 0.0) {
         return;
     }
-    let mut tmp = Pixels::new(p.w, p.h);
-    let mut line = Vec::with_capacity(p.w.max(p.h));
-    blur_axis(p, &mut tmp, r, sx, true, &mut line);
-    blur_axis(p, &mut tmp, r, sy, false, &mut line);
+    // Alpha-only images (SourceAlpha, shadows) blur one channel.
+    if p.px.iter().all(|c| c[0] == 0.0 && c[1] == 0.0 && c[2] == 0.0) {
+        let mut a: Vec<[f32; 1]> = p.px.iter().map(|c| [c[3]]).collect();
+        blur_plane(&mut a, p.w, r, sx, sy);
+        for (c, v) in p.px.iter_mut().zip(a) {
+            c[3] = v[0];
+        }
+        return;
+    }
+    let w = p.w;
+    blur_plane(&mut p.px, w, r, sx, sy);
 }
 
 /// Translate by whole device pixels (dx, dy) (bilinear for fractions).

@@ -240,12 +240,12 @@ impl FilterDef {
     /// Run the filter on `source` (premultiplied sRGB, the buffer's whole
     /// size). The result is sRGB, clipped to the filter region.
     pub fn apply(&self, source: &Pixels, env: &FilterEnv) -> Pixels {
-        self.apply_tainted(source, env, false)
+        self.apply_tainted(source.clone(), env, false)
     }
 
     /// [`FilterDef::apply`] with a source that may be tainted (an earlier
     /// `drop-shadow()` used `currentcolor`).
-    pub fn apply_tainted(&self, source: &Pixels, env: &FilterEnv, source_tainted: bool) -> Pixels {
+    pub fn apply_tainted(&self, source: Pixels, env: &FilterEnv, source_tainted: bool) -> Pixels {
         let (w, h) = (source.w, source.h);
         let buf = IRect::new(0, 0, w as i32, h as i32);
         let Some(region_user) = self.region(env.bbox, env.viewport) else { return Pixels::new(w, h) };
@@ -258,7 +258,7 @@ impl FilterDef {
         // Primitive lengths (user units or bbox fractions) to pixels.
         let plx = |v: f32| if self.prim_bbox { v * env.bbox.w } else { v } * sx;
         let ply = |v: f32| if self.prim_bbox { v * env.bbox.h } else { v } * sy;
-        let mut src = source.clone();
+        let mut src = source;
         ops::clip_to(&mut src, region);
         struct Res {
             px: Pixels,
@@ -325,8 +325,17 @@ impl FilterDef {
             .intersect(&region);
             let linear = p.linear;
             let tainted = p.tainted || ins.iter().any(|i| matches!(i, Ok(k) if results[*k].tainted) || source_tainted && matches!(i, Err(Input::SourceGraphic | Input::SourceAlpha)));
+            let map_tainted = match ins.get(1).cloned().unwrap_or(Err(Input::SourceGraphic)) {
+                Ok(k) => results[k].tainted,
+                Err(Input::SourceGraphic | Input::SourceAlpha) => source_tainted,
+                Err(_) => false,
+            };
             let mut fetch = |i: &Result<usize, Input>| -> (Pixels, IRect) {
                 let (mut px, sub, lin) = match i {
+                    // A result read for the last time is moved, not copied.
+                    Ok(k) if last_use[*k] == pi && ins.iter().filter(|j| matches!(j, Ok(x) if x == k)).count() == 1 => {
+                        (std::mem::replace(&mut results[*k].px, Pixels { w, h, px: Vec::new() }), results[*k].sub, results[*k].linear)
+                    }
                     Ok(k) => (results[*k].px.clone(), results[*k].sub, results[*k].linear),
                     Err(Input::SourceAlpha) => {
                         let a = source_alpha.get_or_insert_with(|| {
@@ -336,9 +345,10 @@ impl FilterDef {
                             }
                             a
                         });
-                        (a.clone(), region, false)
+                        // (Colourless: the same in either colour space.)
+                        (a.clone(), region, linear)
                     }
-                    Err(Input::Transparent) => (Pixels::new(w, h), region, false),
+                    Err(Input::Transparent) => (Pixels::new(w, h), region, linear),
                     Err(_) => (src.clone(), region, false),
                 };
                 if lin != linear {
@@ -413,7 +423,7 @@ impl FilterDef {
                     ops::tile(&i, s, sub)
                 }
                 PrimKind::Turbulence { bx, by, octaves, seed, stitch, fractal } => turbulence(w, h, sub, &env.m, sub_user, (*bx, *by), *octaves, *seed, *stitch, *fractal),
-                PrimKind::Displacement { .. } if matches!(input(1), Ok(k) if results[k].tainted) || source_tainted && matches!(input(1), Err(Input::SourceGraphic | Input::SourceAlpha)) => {
+                PrimKind::Displacement { .. } if map_tainted => {
                     // A tainted displacement map is not used.
                     fetch(&input(0)).0
                 }
@@ -1035,7 +1045,7 @@ pub fn apply_chain(items: &[FilterItem], defs: &dyn Fn(&str) -> Option<Arc<Filte
                 tainted |= matches!(op, rabbithole_style::FilterOp::DropShadow { current: true, .. });
                 css::apply(&mut cur, std::slice::from_ref(op), scale)
             }
-            Err(def) => cur = def.apply_tainted(&cur, env, tainted),
+            Err(def) => cur = def.apply_tainted(cur, env, tainted),
         }
     }
     Some(cur)
