@@ -2711,7 +2711,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // With `line-height: normal`, the fonts that fallback uses for
             // the text count too, each with its own half-leading (CSS
             // Inline 3 §5.1; Blink's used fonts).
-            if let (PFKind::Text { text, item }, Some(tm), 0, false) = (&f.kind, fm.tm, fm.mode, central) {
+            // (Not for ellipses, which never grow the line.)
+            if let (PFKind::Text { text, item }, Some(tm), 0, false) = (&f.kind, fm.tm, fm.mode, central || matches!(&f.kind, PFKind::Text { item: MARKER_ITEM, .. })) {
                 let st = self.style(*item);
                 if st.line_height.is_none() && !st.line_height_tight {
                     for ff in self.lay.ctx.fonts.fallback_faces(tm.font, text) {

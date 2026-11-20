@@ -538,12 +538,14 @@ impl FontContext {
         self.metrics(self.first_available_face(font), size)
     }
 
-    /// The faces other than `font` itself that render characters of
-    /// `text` (font fallback): with `line-height: normal` their metrics
+    /// The faces other than the first available one of `font` that render
+    /// characters of `text` (font fallback, `unicode-range`): with `line-height: normal` their metrics
     /// also count in the line box (CSS Inline 3 §5.1, as in browsers).
     pub fn fallback_faces(&self, font: FontId, text: &str) -> Vec<FontId> {
         let primary = self.resolve_index(font.0);
-        if text.is_ascii() {
+        // (The first available face's metrics are the strut's already.)
+        let first = self.resolve_index(self.first_available_face(font).0);
+        if text.is_ascii() && first == primary {
             let cover = self.ascii_cover(primary);
             if text.bytes().all(|b| b <= b' ' || b == 0x7F || cover & (1u128 << b) != 0) {
                 return Vec::new();
@@ -555,7 +557,7 @@ impl FontContext {
                 continue;
             }
             let (f, g) = self.lookup(primary, ch);
-            if f != primary && g != 0 && !out.contains(&FontId(f)) {
+            if f != first && g != 0 && !out.contains(&FontId(f)) {
                 out.push(FontId(f));
             }
         }
