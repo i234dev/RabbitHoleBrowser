@@ -1523,6 +1523,15 @@ fn n_get_elements_by_class_name(realm: &mut Realm, this: Value, args: &[Value]) 
     let n = this_node(realm, &this, "getElementsByClassName")?;
     let classes: Vec<String> = arg_str(realm, args, 0)?.split_whitespace().map(|s| s.to_string()).collect();
     let found = with_doc(n.doc, |doc| {
+        // Document-wide lookups of a rare class go through the class index.
+        if n.node == Document::ROOT && !classes.is_empty() {
+            if let Some(c) = doc.class_candidates(&classes[0]) {
+                let mut c = c.to_vec();
+                c.retain(|&d| doc.element(d).map(|e| classes.iter().all(|k| e.has_class(k))).unwrap_or(false));
+                doc.retain_descendants_in_order(Document::ROOT, &mut c);
+                return c.into_iter().map(|d| NodeRef { doc: n.doc, node: d }).collect();
+            }
+        }
         doc.descendants(n.node)
             .skip(1)
             .filter(|&d| doc.element(d).map(|e| !classes.is_empty() && classes.iter().all(|c| e.has_class(c))).unwrap_or(false))
@@ -1942,6 +1951,7 @@ mod selector_pass_tests {
             console.log(document.getElementById('s'), q('[data-id="z"]'), q('[data-id="z"]', root), root.querySelectorAll('.fresh').length);
             // Selector lists merge in tree order.
             console.log([...document.querySelectorAll('[data-id="3"], #list > [data-id="1"]')].map(e => e.dataset.id).join());
+            console.log(document.getElementsByClassName('fresh').length, document.getElementsByClassName('item c3')[0].dataset.id, document.getElementsByClassName('c3 other').length);
         "#);
         assert_eq!(out, [
             "7 7 null 3 null",
@@ -1956,6 +1966,7 @@ mod selector_pass_tests {
             "x x null 50",
             "null null s 1",
             "1,3",
+            "2 3 0",
         ]);
         assert!(env.errors().is_empty(), "{:?}", env.errors());
     }
