@@ -704,7 +704,7 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
     // A template's markup is its content's (the template stays the
     // context element).
     let is_template = with_doc(n.doc, |doc| doc.element(n.node).map(|e| e.tag == "template" && e.ns == rabbithole_dom::Namespace::Html).unwrap_or(false));
-    let (frag, frag_body) = match parse_fragment_for(n, &context, html) {
+    let (mut frag, frag_body) = match parse_fragment_for(n, &context, html) {
         Ok(r) => r,
         Err(msg) => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to set the 'innerHTML' property on 'Element': The provided markup is invalid XML ({msg})."))),
     };
@@ -713,8 +713,9 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
     let added = with_doc(n.doc, |doc| {
         doc.clear_children(n.node);
         let mut added = Vec::new();
-        for c in frag.children(frag_body) {
-            let copy = doc.import_subtree(&frag, c);
+        let kids: Vec<rabbithole_dom::NodeId> = frag.children(frag_body).collect();
+        for c in kids {
+            let copy = doc.import_subtree_taking(&mut frag, c);
             doc.append_child(n.node, copy);
             added.push(NodeRef { doc: n.doc, node: copy });
         }

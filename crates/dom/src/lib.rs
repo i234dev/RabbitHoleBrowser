@@ -761,6 +761,40 @@ impl Document {
         copy
     }
 
+    /// [`Document::import_subtree`] from a document that is dropped
+    /// afterwards: node data is moved out of `other` instead of copied.
+    pub fn import_subtree_taking(&mut self, other: &mut Document, root: NodeId) -> NodeId {
+        let copy = self.create(NodeData::Comment(String::new()));
+        self.copy_attr_namespaces_from(Some(other), root, copy);
+        self.copy_node_kind(Some(other), root, copy);
+        self.nodes[copy].data = std::mem::replace(&mut other.nodes[root].data, NodeData::Comment(String::new()));
+        if let Some(state) = other.option_states.get(&root).copied() {
+            self.option_states.insert(copy, state);
+        }
+        if let Some(v) = other.control_values.get(&root) {
+            self.control_values.insert(copy, v.clone());
+        }
+        if let Some(&c) = other.checkedness.get(&root) {
+            self.checkedness.insert(copy, c);
+        }
+        let mut cur = other.nodes[root].first_child;
+        while let Some(c) = cur {
+            cur = other.nodes[c].next_sibling;
+            let cc = self.import_subtree_taking(other, c);
+            self.append_child(copy, cc);
+        }
+        if let Some(&content) = other.template_contents.get(&root) {
+            let target = self.template_content(copy);
+            let mut cur = other.nodes[content].first_child;
+            while let Some(c) = cur {
+                cur = other.nodes[c].next_sibling;
+                let cc = self.import_subtree_taking(other, c);
+                self.append_child(target, cc);
+            }
+        }
+        copy
+    }
+
     /// Remove all children of `parent` (detached, not freed).
     pub fn clear_children(&mut self, parent: NodeId) {
         let children: Vec<NodeId> = self.children(parent).collect();
