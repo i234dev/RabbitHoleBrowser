@@ -245,6 +245,30 @@ enum Repr {
     Dict(Box<Dict>),
 }
 
+/// Iterator over the properties of a [`PropertyMap`] in insertion order
+/// (allocates nothing).
+pub enum PropIter<'a> {
+    Shaped(std::iter::Zip<std::slice::Iter<'a, PropertyKey>, std::slice::Iter<'a, Property>>),
+    Dict(std::slice::Iter<'a, Option<(PropertyKey, Property)>>),
+}
+
+impl<'a> Iterator for PropIter<'a> {
+    type Item = (&'a PropertyKey, &'a Property);
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PropIter::Shaped(it) => it.next(),
+            PropIter::Dict(it) => it.find_map(|e| e.as_ref().map(|(k, p)| (k, p))),
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            PropIter::Shaped(it) => it.size_hint(),
+            PropIter::Dict(it) => (0, it.size_hint().1),
+        }
+    }
+}
+
 /// Insertion-ordered property storage (shape mode or dictionary mode).
 #[derive(Debug, Clone)]
 pub struct PropertyMap {
@@ -573,6 +597,14 @@ impl PropertyMap {
     /// Keys in spec order: integer indices ascending, then strings in
     /// insertion order, then symbols in insertion order.
     pub fn keys(&self) -> Vec<PropertyKey> {
+        // Usually every key is a plain string name: insertion order is
+        // already the answer.
+        let plain = |k: &PropertyKey| matches!(k, PropertyKey::String(s) if s.as_array_index().is_none());
+        if self.iter().all(|(k, _)| plain(k)) {
+            let mut out = Vec::with_capacity(self.len());
+            out.extend(self.iter().map(|(k, _)| k.clone()));
+            return out;
+        }
         let mut ints: Vec<(u32, PropertyKey)> = Vec::new();
         let mut strs = Vec::new();
         let mut syms = Vec::new();
@@ -592,7 +624,7 @@ impl PropertyMap {
         out
     }
 
-    pub fn iter(&self) -> Box<dyn Iterator<Item = (&PropertyKey, &Property)> + '_> {
+    pub fn iter(&self) -> PropIter<'_> {
         match &self.repr {
             Repr::Shaped(shape) => {
                 let values = &self.values;
@@ -605,9 +637,9 @@ impl PropertyMap {
                 // only for the duration of this borrow of `self` (no shape
                 // transition can happen while `self` is borrowed).
                 let slice: &[PropertyKey] = unsafe { &(&*keys)[..values.len()] };
-                Box::new(slice.iter().zip(values.iter()))
+                PropIter::Shaped(slice.iter().zip(values.iter()))
             }
-            Repr::Dict(d) => Box::new(d.entries.iter().flatten().map(|(k, p)| (k, p))),
+            Repr::Dict(d) => PropIter::Dict(d.entries.iter()),
         }
     }
 
