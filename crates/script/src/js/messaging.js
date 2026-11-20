@@ -19,7 +19,10 @@
     const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
     const ports = list.filter((t) => t instanceof MessagePort);
     for (const p of ports) if (p[S].detached) throw domError('Port at index 0 is already neutered.', 'DataCloneError');
-    return { data: g.structuredClone(data), ports };
+    const cloned = g.structuredClone(data);
+    // Transferred buffers are detached in the sender.
+    for (const t of list) if (t instanceof ArrayBuffer && typeof t.transfer === 'function' && !t.detached) t.transfer();
+    return { data: cloned, ports };
   }
 
   // --------------------------------------------------------------- ports
@@ -47,12 +50,14 @@
     const st = port[S];
     if (st.scheduled || !st.queue.length) return;
     st.scheduled = true;
+    // One task per message: microtasks queued by a handler (promise
+    // reactions installing the next handler) run before the next message.
     task(() => {
       st.scheduled = false;
-      while (st.queue.length && st.started) {
-        const { data, ports } = st.queue.shift();
-        port.dispatchEvent(new g.MessageEvent('message', { data, ports, origin: '' }));
-      }
+      if (!st.queue.length || !st.started) return;
+      const { data, ports } = st.queue.shift();
+      port.dispatchEvent(new g.MessageEvent('message', { data, ports, origin: '' }));
+      flush(port);
     });
   }
   class MessageChannel {

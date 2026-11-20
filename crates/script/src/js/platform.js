@@ -794,13 +794,14 @@
     st.scheduled = true;
     setTimeout(() => {
       st.scheduled = false;
-      while (st.queue.length && swMessagesEnabled()) {
-        const { m, source } = st.queue.shift();
-        const worker = swWorker(source), origin = new URL(worker.scriptURL || swBase()).origin;
-        let data, ports;
-        try { ports = swIncoming('worker', source, m.ports); data = swClone.deserialize(m.d, ports); } catch (e) { swContainer.dispatchEvent(new g.MessageEvent('messageerror', { origin, source: worker })); continue; }
-        swContainer.dispatchEvent(new g.MessageEvent('message', { data, origin, lastEventId: '', source: worker, ports: Object.freeze(ports) }));
-      }
+      if (!st.queue.length || !swMessagesEnabled()) return;
+      const { m, source } = st.queue.shift();
+      const worker = swWorker(source), origin = new URL(worker.scriptURL || swBase()).origin;
+      let data, ports, ok = true;
+      try { ports = swIncoming('worker', source, m.ports); data = swClone.deserialize(m.d, ports); } catch (e) { ok = false; }
+      if (ok) swContainer.dispatchEvent(new g.MessageEvent('message', { data, origin, lastEventId: '', source: worker, ports: Object.freeze(ports) }));
+      else swContainer.dispatchEvent(new g.MessageEvent('messageerror', { origin, source: worker }));
+      swFlushMessages();
     }, 0);
   }
   if (g.document && typeof g.document.addEventListener === 'function') g.document.addEventListener('DOMContentLoaded', swFlushMessages);
