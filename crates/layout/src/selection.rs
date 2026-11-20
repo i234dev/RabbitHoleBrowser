@@ -11,6 +11,11 @@ use rabbithole_style::highlight::{PaintHighlights, SelectionStyles};
 use rabbithole_style::{StyledTree, UserSelect};
 use std::collections::HashMap;
 
+/// Combining marks (the common blocks).
+fn is_mark(c: char) -> bool {
+    matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
+}
+
 fn is_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c' | '\u{a0}')
 }
@@ -50,7 +55,11 @@ pub fn align_fragments(data: &str, shown: &[&str]) -> Vec<Vec<u32>> {
     for text in shown {
         let chars: Vec<char> = text.chars().collect();
         let mut offs = Vec::with_capacity(chars.len() + 1);
-        for (i, &c) in chars.iter().enumerate() {
+        let mut next = 0;
+        while next < chars.len() {
+            let i = next;
+            let c = chars[i];
+            next += 1;
             if is_space(c) {
                 if pos < src.len() && is_space(src[pos]) {
                     offs.push(u16_at[pos]);
@@ -67,11 +76,26 @@ pub fn align_fragments(data: &str, shown: &[&str]) -> Vec<Vec<u32>> {
                 }
                 continue;
             }
-            while pos < src.len() && (is_space(src[pos]) || src[pos] == '\u{ad}') && !(src[pos] == '\u{ad}' && c == '-') {
+            // Collapsed spaces, soft hyphens and combining marks a
+            // transform removed are not shown.
+            while pos < src.len() && (is_space(src[pos]) || src[pos] == '\u{ad}' || (is_mark(src[pos]) && !is_mark(c) && src[pos] != c)) && !(src[pos] == '\u{ad}' && c == '-') {
                 pos += 1;
             }
             let inserted_hyphen = matches!(c, '-' | '\u{2010}') && i + 1 == chars.len() && src.get(pos).is_none_or(|&s| s != c && s != '\u{ad}');
             offs.push(u16_at[pos.min(src.len())]);
+            // A character that text-transform expands (ß -> SS): its
+            // extra characters map to it too.
+            if let Some(&sc) = src.get(pos).filter(|&&sc| sc != c) {
+                for exp in [sc.to_uppercase().collect::<Vec<char>>(), sc.to_lowercase().collect::<Vec<char>>()] {
+                    if exp.len() > 1 && chars[i..].starts_with(&exp) {
+                        for _ in 1..exp.len() {
+                            offs.push(u16_at[pos]);
+                        }
+                        next += exp.len() - 1;
+                        break;
+                    }
+                }
+            }
             if !inserted_hyphen && pos < src.len() {
                 pos += 1;
             }
@@ -222,6 +246,8 @@ mod tests {
         assert_eq!(offs[0], vec![0, 1, 2, 3]);
         assert_eq!(offs[1][0], 3);
         assert_eq!(offs[1][6], 10); // x after the surrogate pair
+        let sharp = align_fragments("straße x", &["STRASSE X"]);
+        assert_eq!(sharp[0], vec![0, 1, 2, 3, 4, 4, 5, 6, 7, 8]);
         let auto = align_fragments("hyphen", &["hy-", "phen"]);
         assert_eq!(auto[0], vec![0, 1, 2, 2]);
         assert_eq!(auto[1][0], 2);

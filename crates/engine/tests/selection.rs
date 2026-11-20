@@ -219,12 +219,11 @@ fn selection_pseudo_element_colors_and_inheritance() {
     assert!(count(&engine, &page, (0, 128, 0), (0, 0, 400, 25)) > 200);
     assert!(count(&engine, &page, (255, 255, 0), (0, 0, 400, 25)) > 10);
     assert_eq!(count(&engine, &page, HIGHLIGHT, (0, 0, 400, 25)), 0);
-    // The span inherits no background from div::selection (highlight
-    // inheritance passes only inherited properties); with no author colors
-    // of its own it gets the default ones.
+    // The span's highlight inherits div::selection's background (highlight
+    // inheritance), which also suppresses the default colors.
     let d_top = page.rect_of(page.doc.element_by_id("d").unwrap()).unwrap().y as u32;
-    assert_eq!(count(&engine, &page, (0, 0, 255), (0, d_top, 400, 22)), 0);
-    assert!(count(&engine, &page, HIGHLIGHT, (0, d_top, 400, 22)) > 100);
+    assert!(count(&engine, &page, (0, 0, 255), (0, d_top, 400, 22)) > 100);
+    assert_eq!(count(&engine, &page, HIGHLIGHT, (0, d_top, 400, 22)), 0);
     // user-select: none text is not highlighted.
     let n_top = page.rect_of(page.doc.element_by_id("n").unwrap()).unwrap().y as u32;
     assert_eq!(count(&engine, &page, HIGHLIGHT, (0, n_top, 400, 22)), 0);

@@ -4339,7 +4339,7 @@ mod subject_cover_tests {
 /// element's highlight style: CSS Pseudo-Elements 4 §3.5 "highlight
 /// inheritance"). Returns `None` when no rule matches, else the style and
 /// the names of the declared properties.
-pub(crate) fn highlight_pseudo_style(doc: &Document, node: NodeId, parent: &ComputedStyle, vars: &Vars, root_font_size: f32, cx: &MatchCtx<'_, '_, '_>, which: PseudoElement) -> Option<(ComputedStyle, Vec<String>)> {
+pub(crate) fn highlight_pseudo_style(doc: &Document, node: NodeId, parent: &ComputedStyle, vars: &Rc<Vars>, root_font_size: f32, cx: &MatchCtx<'_, '_, '_>, which: PseudoElement) -> Option<(ComputedStyle, Vec<String>)> {
     let index = cx.scopes.for_scope(doc.containing_shadow_root(node));
     let mut candidates = Vec::new();
     index.candidates(doc, node, &mut candidates);
@@ -4363,8 +4363,26 @@ pub(crate) fn highlight_pseudo_style(doc: &Document, node: NodeId, parent: &Comp
         return None;
     }
     local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
-    let names = local.iter().map(|m| m.decl.name.to_ascii_lowercase()).collect();
-    Some((apply_declarations(&local, vars, parent, root_font_size, cx.env, cx.opts, false, true), names))
+    // Custom properties set in the highlight pseudo apply to it.
+    let vars = custom_properties(&local, vars, None);
+    // The properties the highlight sets: the winning declaration of each,
+    // unless it is invalid or rolls back (`unset`, `revert`).
+    let mut winners: HashMap<String, &Declaration> = HashMap::new();
+    for m in &local {
+        if !m.decl.name.starts_with("--") && supports_declaration(&m.decl.name, &m.decl.value) != Some(false) {
+            winners.insert(m.decl.name.to_ascii_lowercase(), m.decl);
+        }
+    }
+    let is_ident = |d: &Declaration, words: &[&str]| matches!(&d.value[..], [Token::Ident(w)] if words.iter().any(|x| w.eq_ignore_ascii_case(x)));
+    let names = winners
+        .into_iter()
+        .filter(|(_, d)| !matches!(wide_keyword(&d.value), Some(Wide::Unset)))
+        // `color: currentcolor` / `inherit` reach the originating color
+        // through highlight inheritance: leave it unset.
+        .filter(|(n, d)| !(n == "color" && is_ident(d, &["currentcolor", "inherit"])))
+        .map(|(n, d)| if (n == "background-color" || n == "background") && is_ident(d, &["currentcolor"]) { "background-color:currentcolor".to_string() } else { n })
+        .collect();
+    Some((apply_declarations(&local, &vars, parent, root_font_size, cx.env, cx.opts, false, true), names))
 }
 
 /// Whether any rule of the index styles the pseudo-element `which`.

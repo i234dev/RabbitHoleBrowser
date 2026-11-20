@@ -462,3 +462,114 @@ impl Page {
         text
     }
 }
+
+impl Page {
+    /// Text nodes of the body in tree order (not inside script, style,
+    /// template or head content).
+    fn caret_text_nodes(&self) -> Vec<NodeId> {
+        let Some(root) = self.doc.body().or_else(|| self.doc.html_element()) else { return Vec::new() };
+        let mut out = Vec::new();
+        for n in self.doc.descendants(root) {
+            if self.doc.text(n).is_some_and(|t| !t.is_empty()) {
+                let hidden = self.doc.ancestor_or_self(n, |a| matches!(self.doc.tag(a), Some("script" | "style" | "template" | "head" | "title" | "noscript")));
+                if hidden.is_none() {
+                    out.push(n);
+                }
+            }
+        }
+        out
+    }
+
+    /// The caret position one character (or word) before or after `p`,
+    /// over the document's text (keyboard selection: shift+arrows).
+    pub fn moved_position(&self, p: BoundaryPoint, forward: bool, word: bool) -> BoundaryPoint {
+        let texts = self.caret_text_nodes();
+        if texts.is_empty() {
+            return p;
+        }
+        let units = |n: NodeId| -> Vec<u16> { self.doc.text(n).unwrap_or("").encode_utf16().collect() };
+        // Start: the text position at or after p.
+        let (mut i, mut o) = match texts.iter().position(|&t| t == p.node) {
+            Some(i) => (i, p.offset),
+            None => match texts.iter().position(|&t| self.doc.compare_points(BoundaryPoint { node: t, offset: self.doc.node_length(t) }, p) != std::cmp::Ordering::Less) {
+                Some(i) => (i, 0),
+                None => (texts.len() - 1, self.doc.node_length(texts[texts.len() - 1])),
+            },
+        };
+        let mut data = units(texts[i]);
+        // One step: the unit crossed, if any.
+        let mut step = |i: &mut usize, o: &mut usize, data: &mut Vec<u16>| -> Option<u16> {
+            if forward {
+                while *o >= data.len() {
+                    if *i + 1 >= texts.len() {
+                        return None;
+                    }
+                    *i += 1;
+                    *o = 0;
+                    *data = units(texts[*i]);
+                }
+                let u = data[*o];
+                *o += 1;
+                if (0xD800..0xDC00).contains(&u) && *o < data.len() {
+                    *o += 1;
+                }
+                Some(u)
+            } else {
+                while *o == 0 {
+                    if *i == 0 {
+                        return None;
+                    }
+                    *i -= 1;
+                    *data = units(texts[*i]);
+                    *o = data.len();
+                }
+                *o -= 1;
+                let u = data[*o];
+                if (0xDC00..0xE000).contains(&u) && *o > 0 {
+                    *o -= 1;
+                }
+                Some(u)
+            }
+        };
+        let is_word = |u: u16| char::from_u32(u as u32).is_some_and(|c| c.is_alphanumeric() || c == '_') || (0xD800..0xE000).contains(&u);
+        if !word {
+            step(&mut i, &mut o, &mut data);
+        } else {
+            // Skip separators, then the word.
+            loop {
+                let (si, so, sd) = (i, o, data.clone());
+                match step(&mut i, &mut o, &mut data) {
+                    Some(u) if !is_word(u) => continue,
+                    Some(_) => {
+                        (i, o, data) = (si, so, sd);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            // A word ends at its block's edge.
+            let block = |n: NodeId| {
+                let mut cur = self.doc.parent(n);
+                while let Some(e) = cur {
+                    if self.styles.get(e).is_some_and(|s| !matches!(s.display, rabbithole_style::Display::Inline | rabbithole_style::Display::Contents)) {
+                        return Some(e);
+                    }
+                    cur = self.doc.parent(e);
+                }
+                None
+            };
+            loop {
+                let (si, so, sd) = (i, o, data.clone());
+                match step(&mut i, &mut o, &mut data) {
+                    Some(u) if is_word(u) && (i == si || block(texts[i]) == block(texts[si])) => continue,
+                    Some(_) => {
+                        (i, o, data) = (si, so, sd);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+        BoundaryPoint { node: texts[i], offset: o }
+    }
+}

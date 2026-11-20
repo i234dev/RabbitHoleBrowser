@@ -62,6 +62,8 @@ struct Press {
     selecting: bool,
     /// `user-select: contain` element the selection must stay inside.
     contain: Option<NodeId>,
+    /// Text control whose caret / selection a drag moves.
+    control: Option<NodeId>,
     dragged: bool,
     double: bool,
 }
@@ -1361,6 +1363,14 @@ impl Worker {
                 if dist > DRAG_THRESHOLD {
                     p.dragged = true;
                 }
+                if let Some(c) = p.control.filter(|_| p.dragged) {
+                    // Selecting inside the text control being edited.
+                    if self.edit.as_ref().is_some_and(|e| e.node == c) {
+                        self.place_caret_from_click(c, doc, true);
+                    }
+                    self.page_op(|engine, page| ((), engine.pointer_move(page, x, y, mods)));
+                    return;
+                }
                 if p.dragged && p.selecting {
                     let contain = p.contain;
                     if let Some(page) = self.page.as_ref() {
@@ -1514,7 +1524,7 @@ impl Worker {
         }
         if button == 1 {
             // auxclick (and opening the link in a new tab) on release.
-            self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, dragged: false, double: false });
+            self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, control: None, dragged: false, double: false });
             return;
         }
         if button != 0 {
@@ -1529,10 +1539,24 @@ impl Worker {
             match kind {
                 ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other => {
                     if !down.prevented {
+                        let editing_already = self.edit.as_ref().is_some_and(|e| e.node == c);
                         self.begin_edit(c);
-                        self.place_caret_from_click(c, doc);
+                        self.place_caret_from_click(c, doc, mods.shift && editing_already);
+                        if let Some(edit) = self.edit.as_mut() {
+                            if click_count >= 3 {
+                                edit.buf.select_all();
+                            } else if click_count == 2 {
+                                // The word around the caret.
+                                edit.buf.move_left(false, true);
+                                edit.buf.move_right(true, true);
+                            }
+                        }
+                        if click_count >= 2 {
+                            self.publish_edit_selection();
+                        }
                     }
-                    self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, dragged: false, double: false });
+                    let control = (!down.prevented && click_count < 2).then_some(c);
+                    self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, control, dragged: false, double: false });
                     return;
                 }
                 ControlKind::Select => {
@@ -1540,7 +1564,7 @@ impl Worker {
                     if !down.prevented {
                         self.open_select_dropdown(c);
                     }
-                    self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, dragged: false, double: false });
+                    self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, control: None, dragged: false, double: false });
                     return;
                 }
                 ControlKind::File => self.send(FromContent::Status("File uploads are not supported yet".into())),
@@ -1552,7 +1576,7 @@ impl Worker {
             self.dirty = true;
         }
         let (selecting, contain) = if down.prevented { (false, None) } else { self.start_selection(doc, node, mods.shift, click_count) };
-        self.press = Some(Press { button, start: (x, y), selecting, contain, dragged: false, double });
+        self.press = Some(Press { button, start: (x, y), selecting, contain, control: None, dragged: false, double });
     }
 
     fn pointer_up(&mut self, x: f32, y: f32, button: u8, mods: Modifiers, inside: bool) {
@@ -1790,7 +1814,7 @@ impl Worker {
         self.page.as_ref().map(|page| page.doc.attr(node, "readonly").is_none() && page.doc.attr(node, "disabled").is_none()).unwrap_or(false)
     }
 
-    fn place_caret_from_click(&mut self, control: NodeId, doc: (f32, f32)) {
+    fn place_caret_from_click(&mut self, control: NodeId, doc: (f32, f32), extend: bool) {
         let Some(page) = self.page.as_ref() else { return };
         let Some(rect) = page.rect_of(control) else { return };
         let text = page.control_text(control);
@@ -1807,7 +1831,7 @@ impl Worker {
             }
         }
         if let Some(edit) = self.edit.as_mut() {
-            edit.buf.set_caret(best, false);
+            edit.buf.set_caret(best, extend);
         }
         self.publish_edit_selection();
         self.dirty = true;
@@ -1973,6 +1997,17 @@ impl Worker {
         let shift = k.mods.shift;
         let vh = self.view.viewport.height;
         let page_step = (vh - LINE_SCROLL).max(LINE_SCROLL);
+        // Shift+arrows extend the document selection by characters (or
+        // words with Ctrl), like caret browsing.
+        if shift && matches!(k.key.as_str(), "ArrowLeft" | "ArrowRight") {
+            let focus = self.page.as_ref().and_then(|p| p.doc.selection()).map(|s| s.focus());
+            if let Some(focus) = focus {
+                let forward = k.key == "ArrowRight";
+                let to = self.page.as_ref().map(|p| p.moved_position(focus, forward, ctrl)).unwrap_or(focus);
+                self.change_selection(|page| page.doc.extend_selection(to));
+                return;
+            }
+        }
         match k.key.as_str() {
             "ArrowDown" => self.scroll_by(0.0, LINE_SCROLL),
             "ArrowUp" => self.scroll_by(0.0, -LINE_SCROLL),

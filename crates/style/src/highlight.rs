@@ -16,6 +16,8 @@ use std::rc::Rc;
 pub struct HighlightStyle {
     pub color: Option<Color>,
     pub background: Option<Color>,
+    /// `background-color: currentcolor`: the highlight's text color.
+    pub background_is_currentcolor: bool,
     pub text_fill: Option<Color>,
     pub shadows: Option<Vec<Shadow>>,
     /// `text-decoration` of the highlight: lines, color, style.
@@ -25,7 +27,7 @@ pub struct HighlightStyle {
 impl HighlightStyle {
     /// No `::selection` rule applies: the UA default colors are used.
     pub fn is_unstyled(&self) -> bool {
-        self.color.is_none() && self.background.is_none() && self.text_fill.is_none() && self.shadows.is_none() && self.decoration.is_none()
+        self.color.is_none() && self.background.is_none() && !self.background_is_currentcolor && self.text_fill.is_none() && self.shadows.is_none() && self.decoration.is_none()
     }
 }
 
@@ -63,19 +65,22 @@ pub fn default_selection_colors() -> (Color, Color) {
 
 /// Resolve one element's highlight style from its matched `::selection`
 /// style (`own`: style and declared property names) and its parent's
-/// resolved highlight style.
+/// resolved highlight style. Under highlight inheritance every highlight
+/// property the author set reaches the descendants' highlights, so a
+/// parent's `background-color` suppresses the UA defaults below it too
+/// (CSS Pseudo-Elements 4 §3.5, paired defaults).
 pub(crate) fn resolve(own: Option<&(ComputedStyle, Vec<String>)>, parent: Option<&HighlightStyle>) -> HighlightStyle {
     let inherited = parent.cloned().unwrap_or_default();
     let Some((style, names)) = own else {
-        // Only the inherited properties carry over.
-        return HighlightStyle { color: inherited.color, text_fill: inherited.text_fill, shadows: inherited.shadows, background: None, decoration: None };
+        return inherited;
     };
     let has = |pred: &dyn Fn(&str) -> bool| names.iter().any(|n| pred(n) || n == "all");
     HighlightStyle {
         color: if has(&|n| n == "color") { Some(style.color) } else { inherited.color },
-        background: if has(&|n| n == "background" || n == "background-color") { Some(style.background_color) } else { None },
+        background: if has(&|n| n == "background" || n == "background-color") { Some(style.background_color) } else if has(&|n| n == "background-color:currentcolor") { None } else { inherited.background },
+        background_is_currentcolor: if has(&|n| n == "background" || n == "background-color") { false } else { has(&|n| n == "background-color:currentcolor") || inherited.background_is_currentcolor },
         text_fill: if has(&|n| n == "-webkit-text-fill-color") { style.text_fill_color.or(Some(style.color)) } else { inherited.text_fill },
         shadows: if has(&|n| n == "text-shadow") { Some(style.text_shadow.clone()) } else { inherited.shadows },
-        decoration: if has(&|n| n.starts_with("text-decoration")) { Some((style.text_decoration, style.text_decoration_color, style.text_decoration_style)) } else { None },
+        decoration: if has(&|n| n.starts_with("text-decoration")) { Some((style.text_decoration, style.text_decoration_color, style.text_decoration_style)) } else { inherited.decoration },
     }
 }

@@ -85,6 +85,13 @@ fn clicks_pick_words_paragraphs_and_shift_extends() {
     press(&h, 70.0, 20.0, mods(false, false), 2);
     release(&h, 70.0, 20.0, mods(false, false));
     assert_eq!(selected(&h, &rx), "brave");
+    // Shift+arrows extend it by characters, with Ctrl by words.
+    for (k, ctrl) in [("ArrowRight", false), ("ArrowRight", false)] {
+        h.send(ToContent::Key(KeyInput { key: k.into(), mods: mods(true, ctrl), pressed: true, ..Default::default() }));
+    }
+    assert_eq!(selected(&h, &rx), "brave w");
+    h.send(ToContent::Key(KeyInput { key: "ArrowRight".into(), mods: mods(true, true), pressed: true, ..Default::default() }));
+    assert_eq!(selected(&h, &rx), "brave world");
     press(&h, 70.0, 60.0, mods(false, false), 3);
     release(&h, 70.0, 60.0, mods(false, false));
     assert_eq!(selected(&h, &rx), "Second bold line");
@@ -141,4 +148,32 @@ fn selection_highlight_is_painted_in_frames() {
     wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if highlight(f) == 0)).expect("a frame without the highlight");
     eval(&h, &rx, "getSelection().selectAllChildren(document.getElementById('a'))");
     wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if highlight(f) > 500)).expect("script selection painted");
+}
+
+#[test]
+fn text_controls_select_by_drag_and_clicks() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    load(&h, r#"<!doctype html><style>body{margin:0}input{font:20px monospace;width:300px;height:30px;padding:0;border:0}</style><input id=f value="hello world">"#);
+    wait_for(&rx, 1, Duration::from_secs(20), is_frame).expect("first frame");
+    let f = "document.getElementById('f')";
+    // Drag from the start over the first word.
+    press(&h, 1.0, 15.0, mods(false, false), 1);
+    h.send(ToContent::PointerMove { x: 30.0, y: 15.0, mods: mods(false, false) });
+    h.send(ToContent::PointerMove { x: 61.0, y: 15.0, mods: mods(false, false) });
+    release(&h, 61.0, 15.0, mods(false, false));
+    let (r, _) = eval(&h, &rx, &format!("{f}.selectionStart + ',' + {f}.selectionEnd"));
+    assert_eq!(r, "0,5");
+    // Double click: the word under the pointer.
+    press(&h, 100.0, 15.0, mods(false, false), 1);
+    release(&h, 100.0, 15.0, mods(false, false));
+    press(&h, 100.0, 15.0, mods(false, false), 2);
+    release(&h, 100.0, 15.0, mods(false, false));
+    let (r, _) = eval(&h, &rx, &format!("{f}.value.slice({f}.selectionStart, {f}.selectionEnd)"));
+    assert_eq!(r, "world");
+    // Triple click: everything.
+    press(&h, 100.0, 15.0, mods(false, false), 3);
+    release(&h, 100.0, 15.0, mods(false, false));
+    let (r, _) = eval(&h, &rx, &format!("{f}.selectionStart + ',' + {f}.selectionEnd"));
+    assert_eq!(r, "0,11");
 }

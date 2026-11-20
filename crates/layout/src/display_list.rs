@@ -2135,7 +2135,21 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 (None, false) => None,
             }
         };
-        let styles: Vec<Option<HighlightStyle>> = ranges.iter().map(|r| resolve(r.2)).collect();
+        let base_color = match &item {
+            DisplayItem::Text { color, .. } => *color,
+            _ => Color::BLACK,
+        };
+        let styles: Vec<Option<HighlightStyle>> = ranges
+            .iter()
+            .map(|r| {
+                resolve(r.2).map(|mut h| {
+                    if h.background_is_currentcolor {
+                        h.background = Some(h.color.unwrap_or(base_color));
+                    }
+                    h
+                })
+            })
+            .collect();
         // Clips extend well past the glyph box (ascenders, italics).
         let pad = f.rect.h.max(size) * 2.0 + 64.0;
         let (top, height) = (f.rect.y - pad, f.rect.h + 2.0 * pad);

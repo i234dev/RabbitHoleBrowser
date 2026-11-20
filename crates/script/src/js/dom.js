@@ -691,7 +691,8 @@
     SEL.range = range || null; SEL.backward = !!backward;
     changed();
   }
-  const inDocument = (node) => node.getRootNode && node.getRootNode() === document;
+  // In the document, shadow trees included.
+  const inDocument = (node) => node.getRootNode && node.getRootNode({ composed: true }) === document;
   function selCheckOffset(node, offset, method) {
     if (node.nodeType === 10) throw domError(`Failed to execute '${method}' on 'Selection': The node provided is of type 'DocumentType'.`, 'InvalidNodeTypeError');
     if (offset > nodeLength(node)) throw domError(`Failed to execute '${method}' on 'Selection': There is no child at offset ${offset}.`, 'IndexSizeError');
@@ -796,7 +797,7 @@
     addRange(range) {
       selArgs(arguments, 1, 'addRange');
       if (!(range instanceof Range)) throw new TypeError("Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'.");
-      if (rootOf(range.startContainer) !== document || selRange()) return;
+      if (!inDocument(range.startContainer) || selRange()) return;
       setSel(range, false);
     }
     removeRange(range) {
@@ -845,7 +846,9 @@
       if (!inDocument(an) || !inDocument(fn)) return;
       const nr = document.createRange(), s = nr[S];
       let backward = false;
-      if (comparePoints(an, ao, fn, fo) <= 0) { s.sc = an; s.so = ao; s.ec = fn; s.eo = fo; }
+      // A range cannot span trees: collapsed at the focus then.
+      if (rootOf(an) !== rootOf(fn)) { s.sc = s.ec = fn; s.so = s.eo = fo; }
+      else if (comparePoints(an, ao, fn, fo) <= 0) { s.sc = an; s.so = ao; s.ec = fn; s.eo = fo; }
       else { s.sc = fn; s.so = fo; s.ec = an; s.eo = ao; backward = true; }
       setSel(nr, backward);
     }
@@ -861,11 +864,31 @@
     modify(alter, direction, granularity) {
       alter = String(alter).toLowerCase(); direction = String(direction).toLowerCase(); granularity = String(granularity).toLowerCase();
       if (alter !== 'move' && alter !== 'extend') return;
-      const fwd = direction === 'forward' || direction === 'right' ? true : direction === 'backward' || direction === 'left' ? false : null;
+      let fwd = direction === 'forward' || direction === 'right' ? true : direction === 'backward' || direction === 'left' ? false : null;
       if (fwd === null) return;
       if (!['character', 'word', 'sentence', 'line', 'paragraph', 'lineboundary', 'sentenceboundary', 'paragraphboundary', 'documentboundary'].includes(granularity)) return;
       const r = selRange();
       if (!r) return;
+      // Nothing to do outside the focused editing host.
+      const host = document.activeElement;
+      if (host && host.isContentEditable && !host.contains(this.focusNode)) return;
+      // Left and right are visual: in right-to-left text they go backward
+      // and forward. Characters and words follow the text's own direction
+      // around the focus, line edges the paragraph's.
+      if (direction === 'left' || direction === 'right') {
+        const fnode = this.focusNode, fo = this.focusOffset;
+        let rtl = null;
+        if ((granularity === 'character' || granularity === 'word') && fnode.nodeType === 3) {
+          const around = fnode.data.slice(Math.max(0, fo - 1), fo + 1);
+          if (/[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(around)) rtl = true;
+          else if (/[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF]/.test(around)) rtl = false;
+        }
+        if (rtl === null) {
+          const el = fnode.nodeType === 1 ? fnode : fnode.parentElement;
+          rtl = !!(el && g.getComputedStyle && g.getComputedStyle(el).direction === 'rtl');
+        }
+        if (rtl) fwd = !fwd;
+      }
       const texts = textNodes();
       if (!texts.length) return;
       let from;
@@ -886,7 +909,7 @@
       selArgs(arguments, 1, 'containsNode');
       selNode(node, 'containsNode', 1);
       const r = selRange();
-      if (!r || rootOf(node) !== rootOf(r.startContainer)) return false;
+      if (!r || !inDocument(node) || rootOf(node) !== rootOf(r.startContainer)) return false;
       const len = nodeLength(node);
       if (allowPartial) return comparePoints(r.startContainer, r.startOffset, node, len) <= 0 && comparePoints(r.endContainer, r.endOffset, node, 0) >= 0;
       return comparePoints(r.startContainer, r.startOffset, node, 0) <= 0 && comparePoints(r.endContainer, r.endOffset, node, len) >= 0;
