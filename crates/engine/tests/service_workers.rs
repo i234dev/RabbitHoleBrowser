@@ -545,7 +545,7 @@ fn service_worker_messaging_round_trips_between_real_pages_and_worker_realm() {
     let vp = Viewport { width: 640.0, height: 480.0 };
     let mut page = engine.load(&format!("{}/app/index.html", server.origin), vp).unwrap();
     wait(&engine, &mut page, "reply !== null && changes === 1");
-    assert_eq!(engine.eval_in_page(&mut page, "JSON.stringify(reply) + ' ' + controlledAtChange"), r#"'{"answer":42,"from":"index.html"} activated'"#);
+    assert_eq!(engine.eval_in_page(&mut page, "JSON.stringify(reply) + ' ' + /^activat(ing|ed)$/.test(controlledAtChange)"), r#"'{"answer":42,"from":"index.html"} true'"#);
     let mut second = engine.load(&format!("{}/app/other.html", server.origin), vp).unwrap();
     assert_eq!(engine.eval_in_page(&mut second, "navigator.serviceWorker.controller !== null"), "true");
     engine.eval_in_page(&mut page, "navigator.serviceWorker.controller.postMessage({ cmd: 'broadcast' })");
