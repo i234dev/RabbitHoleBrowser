@@ -155,7 +155,7 @@ pub enum PseudoElement {
     FileSelectorButton,
     /// `::highlight(name)` (CSS Custom Highlight API), by name atom (see
     /// [`highlight_atom`]).
-    Highlight(u32),
+    Highlight(u16),
     SpellingError,
     GrammarError,
     TargetText,
@@ -165,19 +165,21 @@ static HIGHLIGHT_NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Ve
 
 /// The atom of a custom highlight name (`::highlight(name)`,
 /// `CSS.highlights` keys): equal names get equal atoms.
-pub fn highlight_atom(name: &str) -> u32 {
+pub fn highlight_atom(name: &str) -> u16 {
     let mut names = HIGHLIGHT_NAMES.lock().unwrap_or_else(|e| e.into_inner());
     match names.iter().position(|n| n == name) {
-        Some(i) => i as u32,
+        Some(i) => i as u16,
+        // (Past the table's capacity, names share the last atom.)
+        None if names.len() >= u16::MAX as usize => u16::MAX,
         None => {
             names.push(name.to_string());
-            (names.len() - 1) as u32
+            (names.len() - 1) as u16
         }
     }
 }
 
 /// The name of a highlight atom.
-pub fn highlight_name(atom: u32) -> Option<String> {
+pub fn highlight_name(atom: u16) -> Option<String> {
     HIGHLIGHT_NAMES.lock().unwrap_or_else(|e| e.into_inner()).get(atom as usize).cloned()
 }
 

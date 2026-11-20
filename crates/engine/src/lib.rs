@@ -23,7 +23,7 @@ pub mod scripting;
 pub mod select;
 mod text;
 
-pub use select::{SelectStart, Selection, TextRun};
+pub use select::{SelectStart, TextRun};
 
 pub use forms::{ChosenFile, ControlKind};
 pub use pointer::{ClickAction, Modifiers};

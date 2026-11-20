@@ -25,13 +25,6 @@ pub struct TextRun {
     pub frag: usize,
 }
 
-/// A selection: highlight rectangles plus the selected text.
-#[derive(Debug, Clone, Default)]
-pub struct Selection {
-    pub rects: Vec<Rect>,
-    pub text: String,
-}
-
 fn collect_runs(b: &LayoutBox, out: &mut Vec<TextRun>) {
     for line in &b.lines {
         for f in &line.fragments {
@@ -153,79 +146,6 @@ impl Page {
         let mut out = Vec::new();
         collect_runs(&self.layout.root, &mut out);
         out
-    }
-
-    /// Select the text between two document points (in either order).
-    pub fn select_between(&self, fonts: &FontContext, a: (f32, f32), b: (f32, f32)) -> Selection {
-        let runs = self.text_runs();
-        if runs.is_empty() {
-            return Selection::default();
-        }
-        let mut start = locate(fonts, &runs, a.0, a.1);
-        let mut end = locate(fonts, &runs, b.0, b.1);
-        if start > end {
-            std::mem::swap(&mut start, &mut end);
-        }
-        if start == end {
-            return Selection::default();
-        }
-        let mut sel = Selection::default();
-        let mut last_bottom: Option<f32> = None;
-        for i in start.0..=end.0 {
-            let run = &runs[i];
-            let s = if i == start.0 { start.1 } else { 0 };
-            let e = if i == end.0 { end.1 } else { run.text.len() };
-            if s >= e {
-                continue;
-            }
-            let x0 = run.rect.x + x_at(fonts, run, s);
-            let x1 = run.rect.x + x_at(fonts, run, e);
-            sel.rects.push(Rect::new(x0, run.rect.y, (x1 - x0).max(1.0), run.rect.h));
-            // Insert a newline when the next run is on a lower line.
-            if let Some(lb) = last_bottom {
-                if run.rect.y >= lb - 1.0 {
-                    sel.text.push('\n');
-                } else if !sel.text.ends_with(' ') && !run.text[s..e].starts_with(' ') {
-                    sel.text.push(' ');
-                }
-            }
-            sel.text.push_str(&run.text[s..e]);
-            last_bottom = Some(run.rect.bottom());
-        }
-        sel
-    }
-
-    /// Select the word under a point (double-click).
-    pub fn select_word_at(&self, fonts: &FontContext, x: f32, y: f32) -> Selection {
-        let runs = self.text_runs();
-        if runs.is_empty() {
-            return Selection::default();
-        }
-        let (ri, idx) = locate(fonts, &runs, x, y);
-        let run = &runs[ri];
-        let text = &run.text;
-        let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '\'';
-        let mut s = idx.min(text.len());
-        while s > 0 {
-            let prev = text[..s].chars().next_back().unwrap();
-            if !is_word(prev) {
-                break;
-            }
-            s -= prev.len_utf8();
-        }
-        let mut e = idx.min(text.len());
-        for ch in text[e..].chars() {
-            if !is_word(ch) {
-                break;
-            }
-            e += ch.len_utf8();
-        }
-        if s >= e {
-            return Selection::default();
-        }
-        let x0 = run.rect.x + x_at(fonts, run, s);
-        let x1 = run.rect.x + x_at(fonts, run, e);
-        Selection { rects: vec![Rect::new(x0, run.rect.y, x1 - x0, run.rect.h)], text: text[s..e].to_string() }
     }
 
     /// Case-insensitive find: highlight rects for every match (one rect
