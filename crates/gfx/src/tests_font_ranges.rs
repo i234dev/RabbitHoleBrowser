@@ -92,3 +92,24 @@ fn weight_matching_between_400_and_500() {
     only_light_heavy.add_font_data("W2", 600, false, SANS_BOLD).unwrap();
     assert_eq!(only_light_heavy.select_family(&["W2".into()], Family::Sans, 400, false), l);
 }
+
+/// One variable font file serves several weights (as font services do):
+/// each face is drawn at its own `font-weight` descriptor.
+#[test]
+fn variable_faces_use_their_descriptor_weight() {
+    let font = crate::font_ext::instance::variable_bar_font();
+    let fc = FontContext::new();
+    let regular = fc.add_font_data_ranged("Var", 400, false, (100, 100), Some(LATIN), &font).unwrap();
+    let bold = fc.add_font_data_ranged("Var", 700, false, (100, 100), Some(LATIN), &font).unwrap();
+    assert_ne!(regular, bold);
+    assert_eq!(fc.measure(regular, 1000.0, "I"), 300.0);
+    assert_eq!(fc.measure(bold, 1000.0, "I"), 420.0);
+    assert_eq!(fc.select_family(&["Var".into()], Family::Sans, 700, false), bold);
+    assert!(!fc.needs_synthetic_bold(bold, 700));
+    // The bar is drawn wider: the instance's outline, not the default one.
+    let width = |id| {
+        let g = fc.shape(id, 100.0, "I", 0.0)[0].glyph;
+        fc.rasterize(id, g, 100.0).width
+    };
+    assert!(width(bold) > width(regular) + 1);
+}

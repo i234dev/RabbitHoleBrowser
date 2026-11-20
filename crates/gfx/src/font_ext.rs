@@ -1,6 +1,7 @@
 //! Web fonts (`@font-face`: TTF/OTF/WOFF/WOFF2), system font discovery and
 //! CSS family matching.
 
+pub mod instance;
 pub mod sfnt;
 pub mod sysfonts;
 pub mod woff;
@@ -96,8 +97,21 @@ impl FontContext {
         if family.is_empty() {
             return None;
         }
-        let family_lower = family.to_ascii_lowercase();
         let weight = weight.clamp(1, 1000);
+        // A variable font is drawn at the axis values its descriptors
+        // select (CSS Fonts 4 §5.1: the descriptors clamp the variations).
+        let mut axes = vec![(*b"wght", weight as f32)];
+        if stretch.0 == stretch.1 {
+            axes.push((*b"wdth", stretch.0 as f32));
+        }
+        if italic {
+            axes.push((*b"ital", 1.0));
+        }
+        let sfnt = match instance::instantiate(sfnt.as_ref(), &axes) {
+            Some(static_font) => std::borrow::Cow::Owned(static_font),
+            None => sfnt,
+        };
+        let family_lower = family.to_ascii_lowercase();
         let (existing_binding, existing_data) = {
             let faces = self.faces.borrow();
             let mut binding = None;
