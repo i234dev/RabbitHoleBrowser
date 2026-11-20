@@ -1417,3 +1417,25 @@ fn margin_trim_block_trims_leading_and_trailing_child_margins() {
     assert_eq!(ps[1].rect.y - ps[0].rect.bottom(), 20.0);
     assert_eq!(c.content_rect.h, 10.0 + 20.0 + 10.0);
 }
+
+#[test]
+fn consecutive_floats_add_up_in_a_shrink_to_fit_container() {
+    // A floated list of floated items inside an inline-block: at
+    // max-content the items sit side by side, so the inline-block is as
+    // wide as all of them and they stay on one line.
+    let fx = Fixture::new(
+        "<div style='display:inline-block'><ul style='float:left'><li id=a>a</li><li id=b>b</li><li id=c>c</li></ul></div>\
+         <div style='clear:both;display:inline-block'><p style='float:left'><span id=l1>l</span><span id=r1>r</span><span id=l2>l</span></p></div>",
+        "html,body,ul,p{margin:0;padding:0} ul{list-style:none} li{float:left;width:40px;height:10px;margin-right:4px} \
+         span{display:block;width:30px;height:10px} #l1,#l2{float:left} #r1{float:right} #l2{clear:left}",
+    );
+    let tree = fx.layout();
+    let a = fx.doc.element_by_id("a");
+    let c = fx.doc.element_by_id("c");
+    assert_eq!(tree.node_at(5.0, 5.0), a);
+    assert_eq!(tree.node_at(95.0, 5.0), c, "the third float stays on the first line");
+    // Left and right floats share the line; a clear starts a new one.
+    assert_eq!(tree.node_at(5.0, 15.0), fx.doc.element_by_id("l1"));
+    assert_eq!(tree.node_at(35.0, 15.0), fx.doc.element_by_id("r1"));
+    assert_eq!(tree.node_at(5.0, 25.0), fx.doc.element_by_id("l2"));
+}
