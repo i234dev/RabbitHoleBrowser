@@ -376,8 +376,10 @@ pub struct CookieJar {
     touched: HashSet<CookieKey>,
     /// `clear()` since the last sync: the file's cookies are not merged.
     cleared: bool,
-    /// Modification time of the file when last read or written.
-    synced: Option<SystemTime>,
+    /// Hash of the file's contents when last read or written. Contents,
+    /// not the modification time: two writes within the file system's
+    /// timestamp granularity (common on Windows) keep the same time.
+    synced: Option<u64>,
 }
 
 /// What identifies a stored cookie (RFC 6265bis §5.7, step 23).
@@ -742,20 +744,20 @@ impl CookieJar {
         // Write a sibling file and rename it, so a reader (another window
         // process sharing the profile) never sees a half-written jar.
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-        std::fs::write(&tmp, self.to_netscape())?;
+        let text = self.to_netscape();
+        std::fs::write(&tmp, &text)?;
         std::fs::rename(&tmp, path)?;
         self.dirty = false;
         self.touched.clear();
         self.cleared = false;
-        self.synced = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        self.synced = Some(content_hash(&text));
         Ok(())
     }
 
     pub fn load(path: &Path) -> std::io::Result<CookieJar> {
-        let synced = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         let text = std::fs::read_to_string(path)?;
         let mut jar = CookieJar::from_netscape(&text);
-        jar.synced = synced;
+        jar.synced = Some(content_hash(&text));
         Ok(jar)
     }
 
@@ -766,12 +768,12 @@ impl CookieJar {
     /// updated, or deleted persistent cookies) — then write it if this jar
     /// has changes. Session cookies stay in memory.
     pub fn sync(&mut self, path: &Path) -> std::io::Result<()> {
-        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        if mtime.is_some() && mtime != self.synced {
-            if let Ok(text) = std::fs::read_to_string(path) {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let hash = content_hash(&text);
+            if Some(hash) != self.synced {
                 self.merge(CookieJar::from_netscape(&text));
+                self.synced = Some(hash);
             }
-            self.synced = mtime;
         }
         if self.dirty {
             self.save(path)?;
@@ -807,6 +809,15 @@ impl CookieJar {
         }
         m
     }
+}
+
+/// Hash identifying a cookie file's contents (change detection between
+/// window processes).
+fn content_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(test)]
