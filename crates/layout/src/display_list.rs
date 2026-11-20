@@ -585,7 +585,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     /// Paint `root` as a stacking context (CSS 2.1 Appendix E).
     fn paint_stacking_context(&mut self, root: &'t LayoutBox, cb: Rect) {
-        if root.style.visibility == Visibility::Hidden && root.children.is_empty() && root.lines.is_empty() {
+        // (`url()` filters can paint without any content: feFlood.)
+        if root.style.visibility == Visibility::Hidden && root.children.is_empty() && root.lines.is_empty() && !root.style.filters.iter().any(|f| matches!(f, rabbithole_style::FilterOp::Url(_))) {
             return;
         }
         let saved_scope = self.scope;

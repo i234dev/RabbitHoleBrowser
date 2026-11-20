@@ -220,6 +220,22 @@ impl SvgTree {
         }
     }
 
+    /// Rasterize the image of concrete size `vw`×`vh` (user units of the
+    /// referencing content) seen through `m` (image space → pixels) into a
+    /// transparent `pw`×`ph` buffer.
+    pub(crate) fn rasterize_stretched(&self, fonts: &FontContext, vw: f32, vh: f32, m: rabbithole_gfx::Matrix, pw: usize, ph: usize) -> filter::Pixels {
+        let render = |bg: Color| {
+            let mut c = Canvas::new(pw as u32, ph as u32);
+            c.clear(bg);
+            c.push_transform(m);
+            self.render_mode(&mut c, fonts, Rect::new(0.0, 0.0, vw, vh), true);
+            c.data
+        };
+        let black = render(Color::BLACK);
+        let white = render(Color::WHITE);
+        filter::css::from_black_white(&black, &white, pw, ph)
+    }
+
     /// Rasterize to an RGBA image with a transparent background.
     pub fn rasterize(&self, fonts: &FontContext, width: u32, height: u32) -> Image {
         self.rasterize_mode(fonts, width, height, None)

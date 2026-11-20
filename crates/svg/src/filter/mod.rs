@@ -125,6 +125,9 @@ fn svg_data_image(href: &str) -> Option<SvgRef> {
     let view_box = frag.and_then(|f| f.strip_prefix("svgView(viewBox(")).and_then(|r| r.split(')').next()).map(|v| parse_number_list(&v.replace(',', " ")));
     let view_id = frag.filter(|f| !f.starts_with("svgView("));
     let mut tree = crate::SvgTree::parse_view(&text, None, view_id)?;
+    // feImage fits SVG images like `<image>`: the root's own
+    // preserveAspectRatio does not apply.
+    tree.built.par = crate::units::AspectRatio { align: None, slice: false };
     if let Some(v) = view_box.filter(|v| v.len() == 4 && v[2] > 0.0 && v[3] > 0.0) {
         tree.built.viewbox = Some(crate::units::ViewBox { x: v[0], y: v[1], w: v[2], h: v[3] });
     }
@@ -417,15 +420,22 @@ impl FilterDef {
                     let mut out = Pixels::new(w, h);
                     if let (Some(svg), Some(fonts)) = (svg, env.fonts) {
                         let (iw, ih) = match svg.0.intrinsic_size() {
+                            (Some(a), Some(b), _) => (a, b),
                             (_, _, Some(vb)) => (vb.w, vb.h),
-                            (Some(a), Some(b), None) => (a, b),
                             _ => (sub_user.w, sub_user.h),
                         };
                         let dest = crate::paint::fit_image(iw, ih, sub_user, *par);
-                        let scale = (sx * sy).sqrt().max(1e-3);
-                        if dest.w > 0.0 && dest.h > 0.0 && dest.w * dest.h * scale * scale < 1.6e7 {
-                            let img = svg.0.rasterize_viewport(fonts, dest.w, dest.h, scale);
-                            draw_image(&mut out, &img, dest, AspectRatio { align: None, slice: false }, &env.m, if par.slice { sub.intersect(&to_irect(transform_rect_bounds(&env.m, sub_user))) } else { sub });
+                        let clip = sub.intersect(&to_irect(transform_rect_bounds(&env.m, dest)));
+                        let clip = if par.slice { clip.intersect(&to_irect(transform_rect_bounds(&env.m, sub_user))) } else { clip };
+                        if dest.w > 0.0 && dest.h > 0.0 && !clip.is_empty() {
+                            // Only the visible part, at the buffer's resolution.
+                            let m = crate::units::multiply(&crate::units::translate(-(clip.x0 as f32), -(clip.y0 as f32)), &crate::units::multiply(&env.m, &crate::units::translate(dest.x, dest.y)));
+                            let (pw, ph) = (clip.width() as usize, clip.height() as usize);
+                            let part = svg.0.rasterize_stretched(fonts, dest.w, dest.h, m, pw, ph);
+                            for y in 0..ph {
+                                let row = (clip.y0 as usize + y) * w + clip.x0 as usize;
+                                out.px[row..row + pw].copy_from_slice(&part.px[y * pw..(y + 1) * pw]);
+                            }
                         }
                     } else if let Some(img) = image {
                         draw_image(&mut out, &img.0, sub_user, *par, &env.m, sub);
