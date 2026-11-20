@@ -30,6 +30,11 @@ pub trait HostEnv {
     fn mark_dom_dirty(&mut self);
     /// Force restyle + layout now (before geometry queries).
     fn ensure_layout(&mut self);
+    /// The document selection as rendered text (`Selection.toString()`),
+    /// when the embedder lays the document out.
+    fn selection_text(&mut self) -> Option<String> {
+        None
+    }
     /// Border box of a node in document coordinates (after `ensure_layout`).
     fn node_rect(&mut self, node: NodeId) -> Option<Rect>;
     /// `getClientRects()` boxes of a node (document coordinates): by

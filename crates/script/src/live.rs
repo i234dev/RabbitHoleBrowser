@@ -259,6 +259,15 @@ fn selection_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
     Ok(Value::Number(generation as f64))
 }
 
+/// `selectionText()`: the selection as rendered text, or `null` when the
+/// embedder has no layout.
+fn selection_text(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+    match crate::env::with_env(|env| env.selection_text()) {
+        Some(t) => Ok(Value::str(&t)),
+        None => Ok(Value::Null),
+    }
+}
+
 /// `selectionSetBackward(backward)`: change the selection's direction.
 fn selection_set_backward(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let backward = realm.to_boolean(&arg(args, 0));
@@ -284,4 +293,5 @@ pub(crate) fn install(realm: &mut Realm, natives: rabbithole_js::ObjectId) {
     realm.define_method(natives, "selectionSync", 1, selection_sync);
     realm.define_method(natives, "selectionSet", 3, selection_set);
     realm.define_method(natives, "selectionSetBackward", 1, selection_set_backward);
+    realm.define_method(natives, "selectionText", 0, selection_text);
 }

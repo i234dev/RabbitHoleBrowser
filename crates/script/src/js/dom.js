@@ -883,7 +883,13 @@
       if (allowPartial) return comparePoints(r.startContainer, r.startOffset, node, len) <= 0 && comparePoints(r.endContainer, r.endOffset, node, 0) >= 0;
       return comparePoints(r.startContainer, r.startOffset, node, 0) <= 0 && comparePoints(r.endContainer, r.endOffset, node, len) >= 0;
     }
-    toString() { const r = selRange(); return r ? r.toString() : ''; }
+    toString() {
+      const r = selRange();
+      if (!r || r.collapsed) return '';
+      // As rendered (line breaks, collapsed white space), like innerText.
+      const t = N.selectionText();
+      return t === null ? r.toString() : t;
+    }
   }
   tag(Selection, 'Selection');
   define('Selection', Selection);

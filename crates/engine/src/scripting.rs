@@ -259,6 +259,11 @@ impl HostEnv for EngineEnv<'_> {
             self.page.script.dom_dirty = true;
         }
     }
+    fn selection_text(&mut self) -> Option<String> {
+        self.ensure_layout();
+        let fonts = self.page.fonts.clone();
+        Some(self.page.selection_text(&fonts))
+    }
     fn ensure_layout(&mut self) {
         if self.page.anim.script.is_some() && self.engine.sync_script_animations(self.page) {
             self.page.script.dom_dirty = true;

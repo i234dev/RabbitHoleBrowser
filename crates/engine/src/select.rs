@@ -459,9 +459,6 @@ impl Page {
             text.push_str(if text.ends_with('\n') || text.is_empty() { part.trim_start_matches(' ') } else { part });
             last_bottom = Some(run.rect.bottom());
         }
-        while text.ends_with(' ') {
-            text.pop();
-        }
         text
     }
 }
