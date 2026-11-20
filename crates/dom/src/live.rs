@@ -60,6 +60,7 @@ impl Document {
     }
 
     pub fn remove_live_point(&mut self, id: usize) {
+        self.selection_slot_released(id);
         free(&mut self.live_points, id);
     }
 

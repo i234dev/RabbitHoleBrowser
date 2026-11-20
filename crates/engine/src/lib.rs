@@ -23,7 +23,7 @@ pub mod scripting;
 pub mod select;
 mod text;
 
-pub use select::{Selection, TextRun};
+pub use select::{SelectStart, TextRun};
 
 pub use forms::{ChosenFile, ControlKind};
 pub use pointer::{ClickAction, Modifiers};
@@ -1428,7 +1428,7 @@ impl Engine {
     /// and inner scroll offsets).
     pub fn rebuild_display_list(&self, page: &mut Page) {
         let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
-        let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, incr, .. } = page;
+        let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, incr, state, base_url: page_base, .. } = page;
         let ctx = LayoutContext {
             doc,
             styles,
@@ -1440,9 +1440,28 @@ impl Engine {
             scroll_offsets,
             page_scroll: *page_scroll,
         };
-        let old = std::mem::replace(display_list, rabbithole_layout::build_display_list(layout, &ctx));
+        // Highlight styles, only while something is selected or
+        // highlighted.
+        let highlights = highlight_styles(doc, styles, incr, state, page_base);
+        let old = std::mem::replace(display_list, rabbithole_layout::build_display_list_with_highlights(layout, &ctx, highlights.as_ref()));
         incr.display_list_replaced(old);
         incr.mark_display_list_clean();
+    }
+
+    /// Repaint when the document selection or the custom highlights
+    /// changed since the display list was built (cheap when they did not).
+    /// Returns whether it was rebuilt.
+    pub fn sync_selection(&self, page: &mut Page) -> bool {
+        let now = page.doc.selection().filter(|s| !s.is_collapsed());
+        if now == page.display_list.selection && page.doc.custom_highlights_key() == page.display_list.highlights_key {
+            return false;
+        }
+        if page.incr.dirty() {
+            self.flush_display_list(page);
+        } else {
+            self.rebuild_display_list(page);
+        }
+        true
     }
 
     /// Change the viewport (window resize).
@@ -1767,6 +1786,45 @@ fn css_color(c: Color) -> String {
 
 fn media_env(viewport: Viewport, scripting: bool) -> MediaEnv {
     MediaEnv { width: viewport.width, height: viewport.height, screen: true, scripting }
+}
+
+/// The highlight pseudo-element styles needed to paint the selection and
+/// the custom highlights (`None` when nothing is highlighted).
+fn highlight_styles(doc: &Document, styles: &rabbithole_style::StyledTree, incr: &incremental::IncrementalState, state: &rabbithole_style::MatchState, base: &Url) -> Option<rabbithole_style::highlight::PaintHighlights> {
+    let sel = doc.selection().filter(|s| !s.is_collapsed());
+    if sel.is_none() && doc.custom_highlights().is_empty() {
+        return None;
+    }
+    let se = incr.style_engine()?;
+    let base_str = base.to_string();
+    let opts = rabbithole_style::StyleOptions { state, resolve_url: &|b, r| resolve_url(b, r), document_base: &base_str };
+    let originating = |ranges: &mut dyn Iterator<Item = (rabbithole_dom::BoundaryPoint, rabbithole_dom::BoundaryPoint)>| {
+        let mut elements: Vec<NodeId> = Vec::new();
+        for (a, b) in ranges {
+            elements.extend(doc.text_in_range(a, b).into_iter().filter_map(|(t, _, _)| doc.flat_parent(t).or_else(|| doc.parent(t))));
+        }
+        elements.sort_unstable();
+        elements.dedup();
+        elements
+    };
+    let mut out = rabbithole_style::highlight::PaintHighlights::default();
+    if let Some(sel) = sel {
+        let elements = originating(&mut std::iter::once((sel.start, sel.end)));
+        out.selection = Some(se.selection_styles(doc, &opts, styles, &elements));
+    }
+    // Painting order: priority, then registration order (later on top).
+    let mut custom: Vec<(usize, &str, i32, Vec<(rabbithole_dom::BoundaryPoint, rabbithole_dom::BoundaryPoint)>)> = doc.custom_highlight_ranges().into_iter().enumerate().map(|(i, (n, p, r))| (i, n, p, r)).collect();
+    custom.sort_by_key(|c| (c.2, c.0));
+    for (_, name, _, ranges) in custom {
+        if ranges.is_empty() {
+            continue;
+        }
+        let which = rabbithole_css::PseudoElement::Highlight(rabbithole_css::selector::highlight_atom(name));
+        let elements = originating(&mut ranges.iter().copied());
+        let st = se.highlight_styles(doc, &opts, styles, &elements, which);
+        out.custom.push((ranges, st));
+    }
+    Some(out)
 }
 
 fn resolve_url(base: &str, raw: &str) -> Option<String> {

@@ -6,14 +6,14 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rabbithole_engine::dom::{ControlDirection, NodeId};
+use rabbithole_engine::dom::{BoundaryPoint, ControlDirection, Document, NodeId};
 use rabbithole_engine::gfx::{Canvas, Color, Rect};
 use rabbithole_engine::layout::LayoutBox;
 use rabbithole_engine::net::{Request, Url};
 use rabbithole_engine::script::EventInit;
 use rabbithole_engine::scripting::{input_event_init, input_init, key_init, mouse_init, plain_init};
 use rabbithole_engine::consent::{ConsentDriver, ConsentReport, ConsentStep};
-use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page, ScriptOutcome, Selection};
+use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page, ScriptOutcome, SelectStart};
 
 use super::frame::{Frame, Pixels};
 use super::{now_ms, ContentConfig, ContentSettings, DomRow, FromContent, Inbox, KeyInput, NodeDetails, PageState, Sink, ToContent, ViewSize};
@@ -58,8 +58,12 @@ struct Press {
     button: u8,
     /// Viewport position of the press (CSS px).
     start: (f32, f32),
-    /// Document point where a drag selection starts (None: no selection).
-    anchor: Option<(f32, f32)>,
+    /// Dragging extends the document selection.
+    selecting: bool,
+    /// `user-select: contain` element the selection must stay inside.
+    contain: Option<NodeId>,
+    /// Text control whose caret / selection a drag moves.
+    control: Option<NodeId>,
     dragged: bool,
     double: bool,
 }
@@ -148,7 +152,6 @@ struct Worker {
     view: ViewSize,
     active: bool,
     scroll: (f32, f32),
-    selection: Option<Selection>,
     edit: Option<ControlEdit>,
     /// Inside `end_edit`: don't let script focus sync restart the edit.
     ending_edit: bool,
@@ -210,7 +213,6 @@ impl Worker {
             view,
             active: false,
             scroll: (0.0, 0.0),
-            selection: None,
             edit: None,
             ending_edit: false,
             focus: None,
@@ -397,7 +399,7 @@ impl Worker {
         if !lines.is_empty() {
             self.send(FromContent::Console(lines));
         }
-        let state = PageState { editing: self.edit.is_some(), key_listeners, focused: self.focus.is_some(), has_selection: self.selection.is_some(), wheel_listeners, wheel_blocking };
+        let state = PageState { editing: self.edit.is_some(), key_listeners, focused: self.focus.is_some(), has_selection: self.has_selection(), wheel_listeners, wheel_blocking };
         if state != self.sent_state {
             self.sent_state = state;
             self.send(FromContent::State(state));
@@ -525,7 +527,7 @@ impl Worker {
                 self.dispatch_to(node, "change", plain_init(false));
             }
             ToContent::CopySelection => {
-                if let Some(text) = self.selection.as_ref().map(|s| s.text.clone()) {
+                if let Some(text) = self.selection_text() {
                     self.send(FromContent::Clipboard(text));
                 }
             }
@@ -858,7 +860,6 @@ impl Worker {
 
     /// A new document replaces the old one.
     fn install(&mut self, page: Page, push_history: bool) {
-        self.selection = None;
         self.running_scripts = None;
         self.edit = None;
         self.focus = None;
@@ -1236,9 +1237,14 @@ impl Worker {
             canvas.fill_rect(r, rabbithole_engine::gfx::Color::rgba(0x6f, 0xa8, 0xdc, 110));
             canvas.stroke_rect(r, [1.0; 4], [rabbithole_engine::gfx::Color::rgb(0x1a, 0x73, 0xe8); 4], [0; 4], 0.0);
         }
-        if let Some(sel) = &self.selection {
-            for r in &sel.rects {
-                canvas.fill_rect(map(*r), SELECTION);
+        // The selection inside the text control being edited (document
+        // selections are painted with the page).
+        if let Some((edit, (a, b))) = self.edit.as_ref().and_then(|e| e.buf.selection().map(|r| (e, r))) {
+            if let Some(screen) = page.rect_of(edit.node).map(map) {
+                let x0 = page.caret_x(&page.fonts, edit.node, a).unwrap_or(0.0);
+                let x1 = page.caret_x(&page.fonts, edit.node, b).unwrap_or(x0);
+                let pad = (3.0 * s).min(screen.h / 4.0);
+                canvas.fill_rect(Rect::new(screen.x + x0 * s, screen.y + pad, ((x1 - x0) * s).max(1.0), (screen.h - 2.0 * pad).max(2.0)), SELECTION);
             }
         }
         if !self.find.query.is_empty() {
@@ -1357,11 +1363,27 @@ impl Worker {
                 if dist > DRAG_THRESHOLD {
                     p.dragged = true;
                 }
-                if p.dragged {
-                    if let (Some(anchor), Some(page)) = (p.anchor, self.page.as_ref()) {
-                        let sel = page.select_between(&page.fonts, anchor, doc);
-                        self.selection = if sel.rects.is_empty() { None } else { Some(sel) };
-                        self.dirty = true;
+                if let Some(c) = p.control.filter(|_| p.dragged) {
+                    // Selecting inside the text control being edited.
+                    if self.edit.as_ref().is_some_and(|e| e.node == c) {
+                        self.place_caret_from_click(c, doc, true);
+                    }
+                    self.page_op(|engine, page| ((), engine.pointer_move(page, x, y, mods)));
+                    return;
+                }
+                if p.dragged && p.selecting {
+                    let contain = p.contain;
+                    if let Some(page) = self.page.as_ref() {
+                        let focus = page.position_at(&page.fonts, doc.0, doc.1).map(|mut focus| {
+                            if let Some(root) = contain.filter(|r| *r != focus.node && !page.doc.is_ancestor(*r, focus.node)) {
+                                let start = BoundaryPoint { node: root, offset: 0 };
+                                focus = if page.doc.compare_points(focus, start) == std::cmp::Ordering::Less { start } else { BoundaryPoint { node: root, offset: page.doc.node_length(root) } };
+                            }
+                            focus
+                        });
+                        if let Some(focus) = focus.filter(|f| page.doc.selection().map(|s| s.focus()) != Some(*f)) {
+                            self.change_selection(|page| page.doc.extend_selection(focus));
+                        }
                         // Scripts still see the moves of a selecting drag
                         // (drag-to-pan maps and timelines, sliders, sortable
                         // lists listen for pointermove / mousemove).
@@ -1381,6 +1403,84 @@ impl Worker {
         if (cursor, &link) != (self.sent_hover.0, &self.sent_hover.1) {
             self.sent_hover = (cursor, link.clone());
             self.send(FromContent::Hover { cursor, link });
+        }
+    }
+
+    // ----------------------------------------------------------- selection
+
+    /// Whether the document has a non-collapsed selection.
+    fn has_selection(&self) -> bool {
+        self.page.as_ref().and_then(|p| p.doc.selection()).is_some_and(|s| !s.is_collapsed())
+    }
+
+    /// The selected text (for copying).
+    fn selection_text(&self) -> Option<String> {
+        if !self.has_selection() {
+            return None;
+        }
+        let page = self.page.as_ref()?;
+        let text = page.selection_text(&page.fonts);
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Change the document selection; when it changed, repaint and fire
+    /// `selectionchange`.
+    fn change_selection(&mut self, f: impl FnOnce(&mut Page)) {
+        let Some(page) = self.page.as_mut() else { return };
+        let before = (page.doc.selection(), page.doc.selection_generation());
+        f(page);
+        if (page.doc.selection(), page.doc.selection_generation()) == before {
+            return;
+        }
+        if self.engine.sync_selection(page) {
+            self.dirty = true;
+        }
+        self.dispatch_to(Document::ROOT, "selectionchange", plain_init(false));
+    }
+
+    /// Start selecting for a primary press at a document point (CSS UI 4
+    /// `user-select`; click counts pick the granularity). Returns whether
+    /// dragging extends the selection, and the element it must stay in.
+    fn start_selection(&mut self, at: (f32, f32), target: Option<NodeId>, shift: bool, clicks: u8) -> (bool, Option<NodeId>) {
+        let Some(page) = self.page.as_ref() else { return (false, None) };
+        let fonts = page.fonts.clone();
+        if shift {
+            if let (Some(sel), Some(p)) = (page.doc.selection(), page.position_at(&fonts, at.0, at.1)) {
+                let contain = page.select_contain_root(sel.anchor().node);
+                self.change_selection(|page| page.doc.extend_selection(p));
+                return (true, contain);
+            }
+        }
+        if clicks >= 2 {
+            let range = if clicks >= 3 { page.block_range_at(&fonts, at.0, at.1) } else { page.word_range_at(&fonts, at.0, at.1) };
+            if let Some((a, b)) = range {
+                self.change_selection(|page| page.doc.set_selection(a, b));
+            }
+            return (false, None);
+        }
+        let start = page.selection_start_at(&fonts, at.0, at.1, target);
+        if !matches!(start, SelectStart::None) {
+            if let Some(t) = target {
+                if self.dispatch_to(t, "selectstart", plain_init(true)).0 {
+                    self.change_selection(|page| page.doc.clear_selection());
+                    return (false, None);
+                }
+            }
+        }
+        match start {
+            SelectStart::None => {
+                self.change_selection(|page| page.doc.clear_selection());
+                (false, None)
+            }
+            SelectStart::All(a, b) => {
+                self.change_selection(|page| page.doc.set_selection(a, b));
+                (false, None)
+            }
+            SelectStart::At(p) => {
+                let contain = self.page.as_ref().and_then(|page| page.select_contain_root(p.node));
+                self.change_selection(|page| page.doc.set_selection(p, p));
+                (true, contain)
+            }
         }
     }
 
@@ -1417,13 +1517,14 @@ impl Worker {
             }
             if !prevented {
                 let image = node.and_then(|n| self.page.as_ref().and_then(|p| image_of(p, n)));
-                self.send(FromContent::ContextMenu { link, image, has_selection: self.selection.is_some() });
+                let has_selection = self.has_selection();
+                self.send(FromContent::ContextMenu { link, image, has_selection });
             }
             return;
         }
         if button == 1 {
             // auxclick (and opening the link in a new tab) on release.
-            self.press = Some(Press { button, start: (x, y), anchor: None, dragged: false, double: false });
+            self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, control: None, dragged: false, double: false });
             return;
         }
         if button != 0 {
@@ -1438,10 +1539,24 @@ impl Worker {
             match kind {
                 ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other => {
                     if !down.prevented {
+                        let editing_already = self.edit.as_ref().is_some_and(|e| e.node == c);
                         self.begin_edit(c);
-                        self.place_caret_from_click(c, doc);
+                        self.place_caret_from_click(c, doc, mods.shift && editing_already);
+                        if let Some(edit) = self.edit.as_mut() {
+                            if click_count >= 3 {
+                                edit.buf.select_all();
+                            } else if click_count == 2 {
+                                // The word around the caret.
+                                edit.buf.move_left(false, true);
+                                edit.buf.move_right(true, true);
+                            }
+                        }
+                        if click_count >= 2 {
+                            self.publish_edit_selection();
+                        }
                     }
-                    self.press = Some(Press { button, start: (x, y), anchor: None, dragged: false, double: false });
+                    let control = (!down.prevented && click_count < 2).then_some(c);
+                    self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, control, dragged: false, double: false });
                     return;
                 }
                 ControlKind::Select => {
@@ -1449,7 +1564,7 @@ impl Worker {
                     if !down.prevented {
                         self.open_select_dropdown(c);
                     }
-                    self.press = Some(Press { button, start: (x, y), anchor: None, dragged: false, double: false });
+                    self.press = Some(Press { button, start: (x, y), selecting: false, contain: None, control: None, dragged: false, double: false });
                     return;
                 }
                 ControlKind::File => self.send(FromContent::Status("File uploads are not supported yet".into())),
@@ -1460,13 +1575,8 @@ impl Worker {
         if self.focus.take().is_some() {
             self.dirty = true;
         }
-        if double {
-            let sel = self.page.as_ref().map(|p| p.select_word_at(&p.fonts, doc.0, doc.1));
-            self.selection = sel.filter(|s| !s.rects.is_empty());
-            self.dirty = true;
-        }
-        let anchor = if down.prevented { None } else { Some(doc) };
-        self.press = Some(Press { button, start: (x, y), anchor, dragged: false, double });
+        let (selecting, contain) = if down.prevented { (false, None) } else { self.start_selection(doc, node, mods.shift, click_count) };
+        self.press = Some(Press { button, start: (x, y), selecting, contain, control: None, dragged: false, double });
     }
 
     fn pointer_up(&mut self, x: f32, y: f32, button: u8, mods: Modifiers, inside: bool) {
@@ -1479,8 +1589,6 @@ impl Worker {
             if let Some(page) = self.page.as_mut() {
                 page.pointer.down = None;
             }
-        } else if !p.double && self.selection.take().is_some() {
-            self.dirty = true;
         }
         if !inside {
             if let Some(page) = self.page.as_mut() {
@@ -1563,7 +1671,6 @@ impl Worker {
         let out = self.engine.focus_element(page, Some(node));
         self.edit = Some(ControlEdit { node, buf: TextBuffer::new(&text), max_len, initial: text });
         self.focus = Some(node);
-        self.selection = None;
         self.dirty = true;
         self.apply_outcome(out);
     }
@@ -1622,8 +1729,7 @@ impl Worker {
                 e.buf.set_caret(len, false);
             }
             self.focus = Some(n);
-            self.selection = None;
-            self.dirty = true;
+                self.dirty = true;
         }
     }
 
@@ -1708,7 +1814,7 @@ impl Worker {
         self.page.as_ref().map(|page| page.doc.attr(node, "readonly").is_none() && page.doc.attr(node, "disabled").is_none()).unwrap_or(false)
     }
 
-    fn place_caret_from_click(&mut self, control: NodeId, doc: (f32, f32)) {
+    fn place_caret_from_click(&mut self, control: NodeId, doc: (f32, f32), extend: bool) {
         let Some(page) = self.page.as_ref() else { return };
         let Some(rect) = page.rect_of(control) else { return };
         let text = page.control_text(control);
@@ -1725,7 +1831,7 @@ impl Worker {
             }
         }
         if let Some(edit) = self.edit.as_mut() {
-            edit.buf.set_caret(best, false);
+            edit.buf.set_caret(best, extend);
         }
         self.publish_edit_selection();
         self.dirty = true;
@@ -1779,8 +1885,7 @@ impl Worker {
             self.begin_edit(next);
         } else {
             self.focus = Some(next);
-            self.selection = None;
-            self.page_op(|engine, page| ((), engine.focus_element(page, Some(next))));
+                self.page_op(|engine, page| ((), engine.focus_element(page, Some(next))));
         }
         if let Some(r) = rect {
             self.scroll_into_view(r);
@@ -1892,6 +1997,17 @@ impl Worker {
         let shift = k.mods.shift;
         let vh = self.view.viewport.height;
         let page_step = (vh - LINE_SCROLL).max(LINE_SCROLL);
+        // Shift+arrows extend the document selection by characters (or
+        // words with Ctrl), like caret browsing.
+        if shift && matches!(k.key.as_str(), "ArrowLeft" | "ArrowRight") {
+            let focus = self.page.as_ref().and_then(|p| p.doc.selection()).map(|s| s.focus());
+            if let Some(focus) = focus {
+                let forward = k.key == "ArrowRight";
+                let to = self.page.as_ref().map(|p| p.moved_position(focus, forward, ctrl)).unwrap_or(focus);
+                self.change_selection(|page| page.doc.extend_selection(to));
+                return;
+            }
+        }
         match k.key.as_str() {
             "ArrowDown" => self.scroll_by(0.0, LINE_SCROLL),
             "ArrowUp" => self.scroll_by(0.0, -LINE_SCROLL),
@@ -1926,19 +2042,19 @@ impl Worker {
                 }
             }
             "Escape" => {
-                self.selection = None;
+                if self.has_selection() {
+                    self.change_selection(|page| page.doc.clear_selection());
+                }
                 self.focus = None;
                 self.dirty = true;
             }
             key if ctrl && key.eq_ignore_ascii_case("c") => {
-                if let Some(text) = self.selection.as_ref().map(|s| s.text.clone()) {
+                if let Some(text) = self.selection_text() {
                     self.send(FromContent::Clipboard(text));
                 }
             }
             key if ctrl && key.eq_ignore_ascii_case("a") => {
-                let sel = self.page.as_ref().map(|p| p.select_between(&p.fonts, (0.0, 0.0), (p.content_width(), p.content_height())));
-                self.selection = sel.filter(|s| !s.rects.is_empty());
-                self.dirty = true;
+                self.change_selection(|page| page.select_all());
             }
             _ => {}
         }

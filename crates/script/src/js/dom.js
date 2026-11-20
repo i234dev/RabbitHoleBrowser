@@ -372,6 +372,7 @@
     get eo() { return this.b.offset; }
     set eo(v) { this.b.offset = v; }
   }
+  let rangeMoved = () => {};
   class Range extends AbstractRange {
     constructor() {
       const r = Object.create(new.target ? new.target.prototype : Range.prototype);
@@ -385,9 +386,9 @@
     setStartAfter(node) { const p = parentOrThrow(node); this.setStart(p, index(node) + 1); }
     setEndBefore(node) { const p = parentOrThrow(node); this.setEnd(p, index(node)); }
     setEndAfter(node) { const p = parentOrThrow(node); this.setEnd(p, index(node) + 1); }
-    collapse(toStart = false) { const s = this[S]; if (toStart) { s.ec = s.sc; s.eo = s.so; } else { s.sc = s.ec; s.so = s.eo; } }
-    selectNode(node) { const p = parentOrThrow(node); const i = index(node); const s = this[S]; s.sc = p; s.so = i; s.ec = p; s.eo = i + 1; }
-    selectNodeContents(node) { if (node.nodeType === 10) throw domError("Failed to execute 'selectNodeContents' on 'Range': The node provided is of type 'DocumentType'.", 'InvalidNodeTypeError'); const s = this[S]; s.sc = node; s.so = 0; s.ec = node; s.eo = nodeLength(node); }
+    collapse(toStart = false) { const s = this[S]; if (toStart) { s.ec = s.sc; s.eo = s.so; } else { s.sc = s.ec; s.so = s.eo; } rangeMoved(this); }
+    selectNode(node) { const p = parentOrThrow(node); const i = index(node); const s = this[S]; s.sc = p; s.so = i; s.ec = p; s.eo = i + 1; rangeMoved(this); }
+    selectNodeContents(node) { if (node.nodeType === 10) throw domError("Failed to execute 'selectNodeContents' on 'Range': The node provided is of type 'DocumentType'.", 'InvalidNodeTypeError'); const s = this[S]; s.sc = node; s.so = 0; s.ec = node; s.eo = nodeLength(node); rangeMoved(this); }
     compareBoundaryPoints(how, src) {
       rangeArguments(arguments, 2, 'compareBoundaryPoints');
       how = rangeUnsignedLong(how) & 0xFFFF;
@@ -522,6 +523,7 @@
       s.ec = node; s.eo = offset;
       if (rootOf(s.sc) !== rootOf(node) || comparePoints(node, offset, s.sc, s.so) < 0) { s.sc = node; s.so = offset; }
     }
+    rangeMoved(range);
   }
   function contained(range, n) {
     const s = range[S];
@@ -634,17 +636,25 @@
   define('Range', Range);
   N.registerProto('Range', Range.prototype);
   method(g.Document, 'createRange', function () { const r = Object.create(Range.prototype); hidden(r, S, new RangeState(this)); return r; }, true);
-  method(g.Document, 'caretRangeFromPoint', function (x, y) {
-    const el = this.elementFromPoint(x, y);
+  // The caret position at a viewport point: in the text under it when the
+  // layout has some there, else at the start of the element hit.
+  function caretAt(doc, x, y) {
+    const el = doc.elementFromPoint(x, y);
     if (!el) return null;
-    const r = new Range();
-    r.setStart(el, 0);
+    const p = doc === document && N.caretPositionFromPoint ? N.caretPositionFromPoint(+x, +y) : null;
+    if (p && el.contains(p[0])) return p;
+    return [el, 0];
+  }
+  method(g.Document, 'caretRangeFromPoint', function (x, y) {
+    const p = caretAt(this, x, y);
+    if (!p) return null;
+    const r = this.createRange();
+    r.setStart(p[0], p[1]);
     return r;
   }, true);
   method(g.Document, 'caretPositionFromPoint', function (x, y) {
-    const el = this.elementFromPoint(x, y);
-    if (!el) return null;
-    return makeCaretPosition(el, 0);
+    const p = caretAt(this, x, y);
+    return p ? makeCaretPosition(p[0], p[1]) : null;
   }, true);
   class CaretPosition {
     constructor() { ILLEGAL(); }
@@ -657,63 +667,397 @@
   function makeCaretPosition(node, offset) { const c = Object.create(CaretPosition.prototype); hidden(c, S, { node, offset }); return c; }
 
   // ------------------------------------------------------------ Selection
+  // The selection's range lives in the document (natively), so the user
+  // agent (mouse, keyboard) and painting share it; this object caches the
+  // `Range` wrapping it while the document's selection generation is
+  // unchanged (Selection API §2).
+  // One selection per document with a browsing context (this realm's and
+  // its same-origin frames'): { doc, range, backward, gen }.
+  const selStates = new Set();
+  function syncSel(SEL) {
+    const st = N.selectionSync(SEL.doc, SEL.gen);
+    if (st === null) return;
+    SEL.gen = st[0];
+    if (st.length === 1) { SEL.range = null; SEL.backward = false; return; }
+    const r = Object.create(Range.prototype);
+    const rs = Object.create(RangeState.prototype);
+    hidden(rs, 'a', st[1]); hidden(rs, 'b', st[2]);
+    hidden(r, S, rs);
+    SEL.range = r; SEL.backward = st[3];
+  }
+  function selRange(SEL) { syncSel(SEL); return SEL.range; }
+  // Make `range` (or nothing) the selection's range.
+  function setSel(SEL, range, backward) {
+    if (range) { const st = range[S]; SEL.gen = N.selectionSet(SEL.doc, st.a, st.b, !!backward); }
+    else SEL.gen = N.selectionSet(SEL.doc, null);
+    SEL.range = range || null; SEL.backward = !!backward;
+    changed(SEL);
+  }
+  // In the selection's document, shadow trees included.
+  const inDoc = (SEL, node) => node.getRootNode && node.getRootNode({ composed: true }) === SEL.doc;
+  function selCheckOffset(node, offset, method) {
+    if (node.nodeType === 10) throw domError(`Failed to execute '${method}' on 'Selection': The node provided is of type 'DocumentType'.`, 'InvalidNodeTypeError');
+    if (offset > nodeLength(node)) throw domError(`Failed to execute '${method}' on 'Selection': There is no child at offset ${offset}.`, 'IndexSizeError');
+  }
+  function selNode(node, method, pos) {
+    if (!(node instanceof g.Node)) throw new TypeError(`Failed to execute '${method}' on 'Selection': parameter ${pos} is not of type 'Node'.`);
+    return node;
+  }
+  function selArgs(args, required, method) {
+    if (args.length < required) throw new TypeError(`Failed to execute '${method}' on 'Selection': ${required} argument${required > 1 ? 's' : ''} required, but only ${args.length} present.`);
+  }
+  function collapsedRange(doc, node, offset) { const r = doc.createRange(); const s = r[S]; s.sc = node; s.so = offset; s.ec = node; s.eo = offset; return r; }
+
+  // Caret movement for `modify` over the document's text, in tree order.
+  const SKIP_TEXT = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'HEAD', 'TITLE', 'NOSCRIPT']);
+  function textNodes(doc) {
+    const out = [];
+    const root = doc.body || doc.documentElement;
+    if (!root) return out;
+    const w = doc.createTreeWalker(root, 4);
+    let n;
+    while ((n = w.nextNode())) {
+      let p = n.parentNode, skip = false;
+      while (p && p !== root) { if (SKIP_TEXT.has(p.nodeName)) { skip = true; break; } p = p.parentNode; }
+      if (!skip && n.data.length) out.push(n);
+    }
+    return out;
+  }
+  // (text node index, offset) of a boundary point: the first text position
+  // at or after it.
+  function textPos(texts, node, offset) {
+    if (node.nodeType === 3) { const i = texts.indexOf(node); if (i >= 0) return [i, offset]; }
+    for (let i = 0; i < texts.length; i++) if (comparePoints(texts[i], texts[i].data.length, node, offset) >= 0) return [i, 0];
+    return texts.length ? [texts.length - 1, texts[texts.length - 1].data.length] : null;
+  }
+  const isWordChar = (c) => /[\p{L}\p{N}_']/u.test(c);
+  function charAt(texts, p, forward) {
+    let [i, o] = p;
+    if (forward) { while (i < texts.length && o >= texts[i].data.length) { i++; o = 0; } return i < texts.length ? [texts[i].data[o], [i, o + 1]] : null; }
+    while (i >= 0 && o <= 0) { i--; o = i >= 0 ? texts[i].data.length : 0; }
+    return i >= 0 ? [texts[i].data[o - 1], [i, o - 1]] : null;
+  }
+  function blockOf(n) {
+    for (let e = n.parentNode; e; e = e.parentNode) {
+      if (e.nodeType !== 1) continue;
+      const d = g.getComputedStyle ? g.getComputedStyle(e).display : 'block';
+      if (d && !d.startsWith('inline') && d !== 'contents') return e;
+    }
+    return n.ownerDocument.documentElement;
+  }
+  function movePos(texts, p, forward, granularity) {
+    switch (granularity) {
+      case 'character': {
+        const c = charAt(texts, p, forward);
+        if (!c) return p;
+        let q = c[1];
+        // Keep surrogate pairs together.
+        const d = texts[q[0]].data, code = d.charCodeAt(forward ? q[1] - 1 : q[1]);
+        if (forward && code >= 0xD800 && code <= 0xDBFF && q[1] < d.length) q = [q[0], q[1] + 1];
+        if (!forward && code >= 0xDC00 && code <= 0xDFFF && q[1] > 0) q = [q[0], q[1] - 1];
+        return q;
+      }
+      case 'word': {
+        let q = p, c;
+        // Skip separators, then the word.
+        while ((c = charAt(texts, q, forward)) && !isWordChar(c[0])) q = c[1];
+        while ((c = charAt(texts, q, forward)) && isWordChar(c[0])) q = c[1];
+        return q;
+      }
+      case 'documentboundary':
+        return forward ? [texts.length - 1, texts[texts.length - 1].data.length] : [0, 0];
+      default: {
+        // line, sentence and paragraph (and their boundaries): the edges of
+        // the enclosing block.
+        const block = blockOf(texts[Math.min(p[0], texts.length - 1)]);
+        let i = p[0];
+        if (forward) { while (i + 1 < texts.length && block.contains(texts[i + 1])) i++; const end = [i, texts[i].data.length]; if (end[0] === p[0] && end[1] === p[1] && !granularity.endsWith('boundary') && i + 1 < texts.length) return movePos(texts, [i + 1, 0], true, granularity); return end; }
+        while (i > 0 && block.contains(texts[i - 1])) i--;
+        if (i === p[0] && p[1] === 0 && !granularity.endsWith('boundary') && i > 0) return movePos(texts, [i - 1, texts[i - 1].data.length], false, granularity);
+        return [i, 0];
+      }
+    }
+  }
+
   class Selection {
     constructor() { ILLEGAL(); }
-    get anchorNode() { const r = this[S].range; return r ? (this[S].backward ? r.endContainer : r.startContainer) : null; }
-    get anchorOffset() { const r = this[S].range; return r ? (this[S].backward ? r.endOffset : r.startOffset) : 0; }
-    get focusNode() { const r = this[S].range; return r ? (this[S].backward ? r.startContainer : r.endContainer) : null; }
-    get focusOffset() { const r = this[S].range; return r ? (this[S].backward ? r.startOffset : r.endOffset) : 0; }
-    get isCollapsed() { const r = this[S].range; return !r || r.collapsed; }
-    get rangeCount() { return this[S].range ? 1 : 0; }
-    get type() { const r = this[S].range; return !r ? 'None' : r.collapsed ? 'Caret' : 'Range'; }
-    get direction() { const r = this[S].range; return !r || r.collapsed ? 'none' : this[S].backward ? 'backward' : 'forward'; }
-    getRangeAt(i) { if (i !== 0 || !this[S].range) throw domError(`Failed to execute 'getRangeAt' on 'Selection': ${i} is not a valid index.`, 'IndexSizeError'); return this[S].range; }
-    addRange(r) { if (!this[S].range) { this[S].range = r; this[S].backward = false; changed(); } }
-    removeRange(r) { if (this[S].range !== r) throw domError("Failed to execute 'removeRange' on 'Selection': The given range isn't in document.", 'NotFoundError'); this[S].range = null; changed(); }
-    removeAllRanges() { if (this[S].range) { this[S].range = null; changed(); } }
+    get anchorNode() { const r = selRange(this[S]); return r ? (this[S].backward ? r.endContainer : r.startContainer) : null; }
+    get anchorOffset() { const r = selRange(this[S]); return r ? (this[S].backward ? r.endOffset : r.startOffset) : 0; }
+    get focusNode() { const r = selRange(this[S]); return r ? (this[S].backward ? r.startContainer : r.endContainer) : null; }
+    get focusOffset() { const r = selRange(this[S]); return r ? (this[S].backward ? r.startOffset : r.endOffset) : 0; }
+    get isCollapsed() { const r = selRange(this[S]); return !r || r.collapsed; }
+    get rangeCount() { return selRange(this[S]) ? 1 : 0; }
+    get type() { const r = selRange(this[S]); return !r ? 'None' : r.collapsed ? 'Caret' : 'Range'; }
+    get direction() { const r = selRange(this[S]); return !r || r.collapsed ? 'none' : this[S].backward ? 'backward' : 'forward'; }
+    getRangeAt(i) {
+      selArgs(arguments, 1, 'getRangeAt');
+      i = +i >>> 0;
+      const r = selRange(this[S]);
+      if (i !== 0 || !r) throw domError(`Failed to execute 'getRangeAt' on 'Selection': ${i} is not a valid index.`, 'IndexSizeError');
+      return r;
+    }
+    addRange(range) {
+      selArgs(arguments, 1, 'addRange');
+      if (!(range instanceof Range)) throw new TypeError("Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'.");
+      if (!inDoc(this[S], range.startContainer) || selRange(this[S])) return;
+      setSel(this[S], range, false);
+    }
+    removeRange(range) {
+      selArgs(arguments, 1, 'removeRange');
+      if (!(range instanceof Range)) throw new TypeError("Failed to execute 'removeRange' on 'Selection': parameter 1 is not of type 'Range'.");
+      if (selRange(this[S]) !== range) throw domError("Failed to execute 'removeRange' on 'Selection': The given range isn't in document.", 'NotFoundError');
+      setSel(this[S], null);
+    }
+    removeAllRanges() { if (selRange(this[S])) setSel(this[S], null); }
     empty() { this.removeAllRanges(); }
-    getComposedRanges() { const r = this[S].range; return r ? [new StaticRange({ startContainer: r.startContainer, startOffset: r.startOffset, endContainer: r.endContainer, endOffset: r.endOffset })] : []; }
-    collapse(node, offset = 0) { if (node === null) { this.removeAllRanges(); return; } const r = new Range(); r.setStart(node, offset); this[S].range = r; this[S].backward = false; changed(); }
-    setPosition(node, offset) { this.collapse(node, offset); }
-    collapseToStart() { const r = this[S].range; if (!r) throw domError("Failed to execute 'collapseToStart' on 'Selection': there is no selection.", 'InvalidStateError'); this.collapse(r.startContainer, r.startOffset); }
-    collapseToEnd() { const r = this[S].range; if (!r) throw domError("Failed to execute 'collapseToEnd' on 'Selection': there is no selection.", 'InvalidStateError'); this.collapse(r.endContainer, r.endOffset); }
+    getComposedRanges() { const r = selRange(this[S]); return r ? [new StaticRange({ startContainer: r.startContainer, startOffset: r.startOffset, endContainer: r.endContainer, endOffset: r.endOffset })] : []; }
+    collapse(node, offset = 0) {
+      selArgs(arguments, 1, 'collapse');
+      if (node === null) { this.removeAllRanges(); return; }
+      selNode(node, 'collapse', 1);
+      offset = +offset >>> 0;
+      selCheckOffset(node, offset, 'collapse');
+      if (!inDoc(this[S], node)) return;
+      setSel(this[S], collapsedRange(this[S].doc, node, offset), false);
+    }
+    setPosition(node, offset = 0) { selArgs(arguments, 1, 'setPosition'); if (node === null) { this.removeAllRanges(); return; } this.collapse(node, offset); }
+    collapseToStart() { const r = selRange(this[S]); if (!r) throw domError("Failed to execute 'collapseToStart' on 'Selection': there is no selection.", 'InvalidStateError'); setSel(this[S], collapsedRange(this[S].doc, r.startContainer, r.startOffset), false); }
+    collapseToEnd() { const r = selRange(this[S]); if (!r) throw domError("Failed to execute 'collapseToEnd' on 'Selection': there is no selection.", 'InvalidStateError'); setSel(this[S], collapsedRange(this[S].doc, r.endContainer, r.endOffset), false); }
     extend(node, offset = 0) {
-      const r = this[S].range;
+      selArgs(arguments, 1, 'extend');
+      selNode(node, 'extend', 1);
+      offset = +offset >>> 0;
+      if (!inDoc(this[S], node)) return;
+      const r = selRange(this[S]);
       if (!r) throw domError("Failed to execute 'extend' on 'Selection': This Selection object doesn't have any Ranges.", 'InvalidStateError');
+      selCheckOffset(node, offset, 'extend');
       const an = this.anchorNode, ao = this.anchorOffset;
-      const nr = new Range();
-      if (comparePoints(node, offset, an, ao) < 0) { nr.setStart(node, offset); nr.setEnd(an, ao); this[S].backward = true; }
-      else { nr.setStart(an, ao); nr.setEnd(node, offset); this[S].backward = false; }
-      this[S].range = nr; changed();
+      const nr = this[S].doc.createRange(), s = nr[S];
+      let backward = false;
+      if (rootOf(an) !== rootOf(node)) { s.sc = s.ec = node; s.so = s.eo = offset; }
+      else if (comparePoints(an, ao, node, offset) <= 0) { s.sc = an; s.so = ao; s.ec = node; s.eo = offset; }
+      else { s.sc = node; s.so = offset; s.ec = an; s.eo = ao; backward = true; }
+      setSel(this[S], nr, backward);
     }
-    setBaseAndExtent(an, ao, fn, fo) { this.collapse(an, ao); this.extend(fn, fo); }
-    selectAllChildren(node) { const r = new Range(); r.selectNodeContents(node); this[S].range = r; this[S].backward = false; changed(); }
-    modify() {}
-    deleteFromDocument() { if (this[S].range) this[S].range.deleteContents(); }
+    setBaseAndExtent(an, ao, fn, fo) {
+      selArgs(arguments, 4, 'setBaseAndExtent');
+      selNode(an, 'setBaseAndExtent', 1); selNode(fn, 'setBaseAndExtent', 3);
+      ao = +ao >>> 0; fo = +fo >>> 0;
+      if (ao > nodeLength(an) || fo > nodeLength(fn)) throw domError("Failed to execute 'setBaseAndExtent' on 'Selection': The offset is larger than the node's length.", 'IndexSizeError');
+      if (an.nodeType === 10 || fn.nodeType === 10) throw domError("Failed to execute 'setBaseAndExtent' on 'Selection': The node provided is of type 'DocumentType'.", 'InvalidNodeTypeError');
+      if (!inDoc(this[S], an) || !inDoc(this[S], fn)) return;
+      const nr = this[S].doc.createRange(), s = nr[S];
+      let backward = false;
+      // A range cannot span trees: collapsed at the focus then.
+      if (rootOf(an) !== rootOf(fn)) { s.sc = s.ec = fn; s.so = s.eo = fo; }
+      else if (comparePoints(an, ao, fn, fo) <= 0) { s.sc = an; s.so = ao; s.ec = fn; s.eo = fo; }
+      else { s.sc = fn; s.so = fo; s.ec = an; s.eo = ao; backward = true; }
+      setSel(this[S], nr, backward);
+    }
+    selectAllChildren(node) {
+      selArgs(arguments, 1, 'selectAllChildren');
+      selNode(node, 'selectAllChildren', 1);
+      if (node.nodeType === 10) throw domError("Failed to execute 'selectAllChildren' on 'Selection': The node provided is of type 'DocumentType'.", 'InvalidNodeTypeError');
+      if (!inDoc(this[S], node)) return;
+      const nr = this[S].doc.createRange(), s = nr[S];
+      s.sc = node; s.so = 0; s.ec = node; s.eo = node.childNodes.length;
+      setSel(this[S], nr, false);
+    }
+    modify(alter, direction, granularity) {
+      alter = String(alter).toLowerCase(); direction = String(direction).toLowerCase(); granularity = String(granularity).toLowerCase();
+      if (alter !== 'move' && alter !== 'extend') return;
+      let fwd = direction === 'forward' || direction === 'right' ? true : direction === 'backward' || direction === 'left' ? false : null;
+      if (fwd === null) return;
+      if (!['character', 'word', 'sentence', 'line', 'paragraph', 'lineboundary', 'sentenceboundary', 'paragraphboundary', 'documentboundary'].includes(granularity)) return;
+      const r = selRange(this[S]);
+      if (!r) return;
+      // Nothing to do outside the focused editing host.
+      const host = this[S].doc.activeElement;
+      if (host && host.isContentEditable && !host.contains(this.focusNode)) return;
+      // Left and right are visual: in right-to-left text they go backward
+      // and forward. Characters and words follow the text's own direction
+      // around the focus, line edges the paragraph's.
+      if (direction === 'left' || direction === 'right') {
+        const fnode = this.focusNode, fo = this.focusOffset;
+        let rtl = null;
+        if ((granularity === 'character' || granularity === 'word') && fnode.nodeType === 3) {
+          const around = fnode.data.slice(Math.max(0, fo - 1), fo + 1);
+          if (/[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(around)) rtl = true;
+          else if (/[A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF]/.test(around)) rtl = false;
+        }
+        if (rtl === null) {
+          const el = fnode.nodeType === 1 ? fnode : fnode.parentElement;
+          rtl = !!(el && g.getComputedStyle && g.getComputedStyle(el).direction === 'rtl');
+        }
+        if (rtl) fwd = !fwd;
+      }
+      const texts = textNodes(this[S].doc);
+      if (!texts.length) return;
+      let from;
+      if (alter === 'move' && !r.collapsed && granularity === 'character') {
+        // Moving a range selection collapses it at its edge.
+        const p = fwd ? textPos(texts, r.endContainer, r.endOffset) : textPos(texts, r.startContainer, r.startOffset);
+        if (p) this.collapse(texts[p[0]], p[1]);
+        return;
+      }
+      from = textPos(texts, this.focusNode, this.focusOffset);
+      if (!from) return;
+      const to = movePos(texts, from, fwd, granularity);
+      if (alter === 'move') this.collapse(texts[to[0]], to[1]);
+      else this.extend(texts[to[0]], to[1]);
+    }
+    deleteFromDocument() { const r = selRange(this[S]); if (r) { r.deleteContents(); changed(this[S]); } }
     containsNode(node, allowPartial = false) {
-      const r = this[S].range;
-      if (!r || rootOf(node) !== rootOf(r.startContainer)) return false;
-      if (allowPartial) return r.intersectsNode(node);
-      const p = node.parentNode;
-      if (!p) return false;
-      const i = index(node);
-      return comparePoints(p, i, r.startContainer, r.startOffset) >= 0 && comparePoints(p, i + 1, r.endContainer, r.endOffset) <= 0;
+      selArgs(arguments, 1, 'containsNode');
+      selNode(node, 'containsNode', 1);
+      const r = selRange(this[S]);
+      if (!r || !inDoc(this[S], node) || rootOf(node) !== rootOf(r.startContainer)) return false;
+      const len = nodeLength(node);
+      if (allowPartial) return comparePoints(r.startContainer, r.startOffset, node, len) <= 0 && comparePoints(r.endContainer, r.endOffset, node, 0) >= 0;
+      return comparePoints(r.startContainer, r.startOffset, node, 0) <= 0 && comparePoints(r.endContainer, r.endOffset, node, len) >= 0;
     }
-    toString() { return this[S].range ? this[S].range.toString() : ''; }
+    toString() {
+      const r = selRange(this[S]);
+      if (!r || r.collapsed) return '';
+      // As rendered (line breaks, collapsed white space), like innerText.
+      const t = N.selectionText(this[S].doc);
+      return t === null ? r.toString() : t;
+    }
   }
   tag(Selection, 'Selection');
   define('Selection', Selection);
-  const selection = Object.create(Selection.prototype);
-  hidden(selection, S, { range: null, backward: false });
-  let selChangeQueued = false;
-  function changed() {
-    if (selChangeQueued) return;
-    selChangeQueued = true;
-    setTimeout(() => { selChangeQueued = false; document.dispatchEvent(new Event('selectionchange')); }, 0);
+  function selectionFor(doc) {
+    for (const st of selStates) if (st.doc === doc) return st.obj;
+    const obj = Object.create(Selection.prototype);
+    const st = { doc, range: null, backward: false, gen: -1, obj, queued: false };
+    hidden(obj, S, st);
+    selStates.add(st);
+    return obj;
   }
-  method(g.Document, 'getSelection', function () { return this === document ? selection : null; }, true);
+  const selection = selectionFor(document);
+  // selectionchange is queued once per task (Selection API §3).
+  function changed(SEL) {
+    if (SEL.queued) return;
+    SEL.queued = true;
+    setTimeout(() => { SEL.queued = false; SEL.doc.dispatchEvent(new Event('selectionchange')); }, 0);
+  }
+  // Range methods that move a selection's own range.
+  rangeMoved = (range) => { for (const st of selStates) if (range === st.range) changed(st); };
+  // Documents without a browsing context have no selection.
+  method(g.Document, 'getSelection', function () { return this === document ? selection : this.defaultView ? selectionFor(this) : null; }, true);
   hidden(g, 'getSelection', function getSelection() { return selection; });
-  if (g.ShadowRoot) method(g.ShadowRoot, 'getSelection', function () { return selection; }, true);
+  if (g.ShadowRoot) method(g.ShadowRoot, 'getSelection', function () { const d = this.ownerDocument; return d === document ? selection : d.getSelection(); }, true);
+
+  // ------------------------------------------- CSS Custom Highlight API
+  // Highlight (setlike<AbstractRange>) and CSS.highlights
+  // (maplike<DOMString, Highlight>). Their contents are mirrored to the
+  // document for painting `::highlight()` after each change (batched in a
+  // microtask). The built-in Set / Map methods are captured so pages that
+  // patch their prototypes don't break them.
+  const SetP = { add: Set.prototype.add, del: Set.prototype.delete, has: Set.prototype.has, clear: Set.prototype.clear, values: Set.prototype.values, size: Object.getOwnPropertyDescriptor(Set.prototype, 'size').get };
+  const MapP = { get: Map.prototype.get, set: Map.prototype.set, del: Map.prototype.delete, has: Map.prototype.has, clear: Map.prototype.clear, entries: Map.prototype.entries, keys: Map.prototype.keys, values: Map.prototype.values, size: Object.getOwnPropertyDescriptor(Map.prototype, 'size').get };
+  const HL = Symbol('highlight');
+  let highlightSyncQueued = false;
+  function highlightsChanged() {
+    if (highlightSyncQueued) return;
+    highlightSyncQueued = true;
+    queueMicrotask(() => {
+      highlightSyncQueued = false;
+      const flat = [];
+      for (const [name, h] of MapP.entries.call(highlightRegistry[HL])) {
+        const ranges = [];
+        for (const r of SetP.values.call(h[HL].set)) {
+          const st = r[S];
+          if (st instanceof RangeState) ranges.push(0, st.a, null, st.b, null);
+          else if (st) ranges.push(1, st.sc, st.so, st.ec, st.eo);
+        }
+        flat.push(name, h[HL].priority, ranges.length / 5, ...ranges);
+      }
+      try { N.setHighlights(flat); } catch (e) { /* nodes of other documents */ }
+    });
+  }
+  const HIGHLIGHT_TYPES = ['highlight', 'spelling-error', 'grammar-error'];
+  function checkRange(r, method) {
+    if (!(r instanceof AbstractRange)) throw new TypeError(`Failed to execute '${method}' on 'Highlight': parameter 1 is not of type 'AbstractRange'.`);
+  }
+  // Whether a highlight is in the registry (its changes need painting).
+  function registered(h) { for (const v of MapP.values.call(highlightRegistry[HL])) if (v === h) return true; return false; }
+  class Highlight {
+    constructor(...ranges) {
+      const set = new Set();
+      for (const r of ranges) { checkRange(r, 'constructor'); SetP.add.call(set, r); }
+      hidden(this, HL, { set, priority: 0, type: 'highlight' });
+    }
+    get size() { return SetP.size.call(this[HL].set); }
+    get priority() { return this[HL].priority; }
+    set priority(v) { this[HL].priority = Number(v) | 0; if (registered(this)) highlightsChanged(); }
+    get type() { return this[HL].type; }
+    set type(v) { v = String(v); if (HIGHLIGHT_TYPES.includes(v)) this[HL].type = v; }
+    add(r) { checkRange(r, 'add'); SetP.add.call(this[HL].set, r); if (registered(this)) highlightsChanged(); return this; }
+    delete(r) { const d = SetP.del.call(this[HL].set, r); if (d && registered(this)) highlightsChanged(); return d; }
+    has(r) { return SetP.has.call(this[HL].set, r); }
+    clear() { SetP.clear.call(this[HL].set); if (registered(this)) highlightsChanged(); }
+    forEach(cb, thisArg) {
+      if (typeof cb !== 'function') throw new TypeError("Failed to execute 'forEach' on 'Highlight': The callback provided as parameter 1 is not a function.");
+      for (const v of SetP.values.call(this[HL].set)) cb.call(thisArg, v, v, this);
+    }
+    values() { return SetP.values.call(this[HL].set); }
+    keys() { return SetP.values.call(this[HL].set); }
+    entries() { const it = SetP.values.call(this[HL].set); return { next() { const n = it.next(); return n.done ? n : { value: [n.value, n.value], done: false }; }, [Symbol.iterator]() { return this; } }; }
+  }
+  Object.defineProperty(Highlight.prototype, Symbol.iterator, { value: Highlight.prototype.values, writable: true, configurable: true });
+  tag(Highlight, 'Highlight');
+  define('Highlight', Highlight);
+  class HighlightRegistry {
+    constructor() { ILLEGAL(); }
+    get size() { return MapP.size.call(this[HL]); }
+    get(name) { return MapP.get.call(this[HL], String(name)); }
+    has(name) { return MapP.has.call(this[HL], String(name)); }
+    set(name, h) {
+      if (!(h instanceof Highlight)) throw new TypeError("Failed to execute 'set' on 'HighlightRegistry': parameter 2 is not of type 'Highlight'.");
+      MapP.set.call(this[HL], String(name), h); highlightsChanged(); return this;
+    }
+    delete(name) { const d = MapP.del.call(this[HL], String(name)); if (d) highlightsChanged(); return d; }
+    clear() { MapP.clear.call(this[HL]); highlightsChanged(); }
+    forEach(cb, thisArg) {
+      if (typeof cb !== 'function') throw new TypeError("Failed to execute 'forEach' on 'HighlightRegistry': The callback provided as parameter 1 is not a function.");
+      for (const [k, v] of MapP.entries.call(this[HL])) cb.call(thisArg, v, k, this);
+    }
+    entries() { return MapP.entries.call(this[HL]); }
+    keys() { return MapP.keys.call(this[HL]); }
+    values() { return MapP.values.call(this[HL]); }
+    highlightsFromPoint(x, y, options) {
+      if (arguments.length < 2) throw new TypeError("Failed to execute 'highlightsFromPoint' on 'HighlightRegistry': 2 arguments required.");
+      x = Number(x); y = Number(y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) throw new TypeError("Failed to execute 'highlightsFromPoint' on 'HighlightRegistry': The provided float value is non-finite.");
+      void options;
+      const pos = N.caretPositionFromPoint ? N.caretPositionFromPoint(x, y) : null;
+      if (!pos) return [];
+      const [node, offset] = pos;
+      const len = nodeLength(node);
+      const out = [];
+      for (const h of MapP.values.call(this[HL])) {
+        const ranges = [];
+        for (const r of SetP.values.call(h[HL].set)) {
+          const st = r[S];
+          try {
+            if (rootOf(st.sc) !== rootOf(node)) continue;
+            // The character after the point lies in the range.
+            if (comparePoints(st.sc, st.so, node, offset) <= 0 && comparePoints(node, Math.min(offset + 1, len), st.ec, st.eo) <= 0) ranges.push(r);
+          } catch (e) { /* invalid static range */ }
+        }
+        if (ranges.length) out.push({ highlight: h, ranges });
+      }
+      out.sort((a, b) => b.highlight.priority - a.highlight.priority);
+      return out;
+    }
+  }
+  Object.defineProperty(HighlightRegistry.prototype, Symbol.iterator, { value: HighlightRegistry.prototype.entries, writable: true, configurable: true });
+  tag(HighlightRegistry, 'HighlightRegistry');
+  define('HighlightRegistry', HighlightRegistry);
+  const highlightRegistry = Object.create(HighlightRegistry.prototype);
+  hidden(highlightRegistry, HL, new Map());
+  if (g.CSS) Object.defineProperty(g.CSS, 'highlights', { get() { return highlightRegistry; }, enumerable: true, configurable: true });
 
   // ------------------------------------------------ TreeWalker / NodeIterator
   const SHOW_BIT = (n) => 1 << (n.nodeType - 1);

@@ -17,6 +17,7 @@ mod feeds;
 mod focus;
 mod font_scopes;
 mod popups;
+mod selection;
 mod service_workers;
 mod sso;
 mod scroll_events;

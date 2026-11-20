@@ -30,6 +30,16 @@ pub trait HostEnv {
     fn mark_dom_dirty(&mut self);
     /// Force restyle + layout now (before geometry queries).
     fn ensure_layout(&mut self);
+    /// The document selection as rendered text (`Selection.toString()`),
+    /// when the embedder lays the document out.
+    fn selection_text(&mut self) -> Option<String> {
+        None
+    }
+    /// The caret position (text node, UTF-16 offset) nearest to a viewport
+    /// point in laid out text (`caretPositionFromPoint`).
+    fn caret_position(&mut self, _x: f32, _y: f32) -> Option<(NodeId, usize)> {
+        None
+    }
     /// Border box of a node in document coordinates (after `ensure_layout`).
     fn node_rect(&mut self, node: NodeId) -> Option<Rect>;
     /// `getClientRects()` boxes of a node (document coordinates): by

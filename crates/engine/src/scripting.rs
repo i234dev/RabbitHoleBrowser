@@ -259,6 +259,17 @@ impl HostEnv for EngineEnv<'_> {
             self.page.script.dom_dirty = true;
         }
     }
+    fn caret_position(&mut self, x: f32, y: f32) -> Option<(NodeId, usize)> {
+        self.ensure_layout();
+        let fonts = self.page.fonts.clone();
+        let (sx, sy) = self.page.page_scroll;
+        self.page.position_at(&fonts, x + sx, y + sy).map(|p| (p.node, p.offset))
+    }
+    fn selection_text(&mut self) -> Option<String> {
+        self.ensure_layout();
+        let fonts = self.page.fonts.clone();
+        Some(self.page.selection_text(&fonts))
+    }
     fn ensure_layout(&mut self) {
         if self.page.anim.script.is_some() && self.engine.sync_script_animations(self.page) {
             self.page.script.dom_dirty = true;
@@ -1247,6 +1258,9 @@ impl Engine {
             out.relayout = true;
         }
         if !page.frames.children.is_empty() && self.sync_dirty_frames(page) {
+            out.relayout = true;
+        }
+        if self.sync_selection(page) {
             out.relayout = true;
         }
         out.navigation = page.script.pending_navigation.take();

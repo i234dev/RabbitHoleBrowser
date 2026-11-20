@@ -153,6 +153,34 @@ pub enum PseudoElement {
     ProgressValue,
     /// `::file-selector-button` / `::-webkit-file-upload-button`.
     FileSelectorButton,
+    /// `::highlight(name)` (CSS Custom Highlight API), by name atom (see
+    /// [`highlight_atom`]).
+    Highlight(u16),
+    SpellingError,
+    GrammarError,
+    TargetText,
+}
+
+static HIGHLIGHT_NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The atom of a custom highlight name (`::highlight(name)`,
+/// `CSS.highlights` keys): equal names get equal atoms.
+pub fn highlight_atom(name: &str) -> u16 {
+    let mut names = HIGHLIGHT_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    match names.iter().position(|n| n == name) {
+        Some(i) => i as u16,
+        // (Past the table's capacity, names share the last atom.)
+        None if names.len() >= u16::MAX as usize => u16::MAX,
+        None => {
+            names.push(name.to_string());
+            (names.len() - 1) as u16
+        }
+    }
+}
+
+/// The name of a highlight atom.
+pub fn highlight_name(atom: u16) -> Option<String> {
+    HIGHLIGHT_NAMES.lock().unwrap_or_else(|e| e.into_inner()).get(atom as usize).cloned()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -564,6 +592,9 @@ impl<'a> SelectorParser<'a> {
                     "-webkit-slider-thumb" | "-moz-range-thumb" => Some(PseudoElement::SliderThumb),
                     "-webkit-progress-value" | "-moz-progress-bar" => Some(PseudoElement::ProgressValue),
                     "file-selector-button" | "-webkit-file-upload-button" => Some(PseudoElement::FileSelectorButton),
+                    "spelling-error" if pseudo_element => Some(PseudoElement::SpellingError),
+                    "grammar-error" if pseudo_element => Some(PseudoElement::GrammarError),
+                    "target-text" if pseudo_element => Some(PseudoElement::TargetText),
                     _ => None,
                 };
                 if let Some(e) = element {
@@ -640,6 +671,13 @@ impl<'a> SelectorParser<'a> {
                     self.pos += 1;
                 }
                 if pseudo_element {
+                    if lname == "highlight" {
+                        let toks: Vec<&Token> = inner.iter().filter(|t| !matches!(t, Token::Whitespace)).collect();
+                        return match toks.as_slice() {
+                            [Token::Ident(n)] => Some(PseudoParse::Element(PseudoElement::Highlight(highlight_atom(n)))),
+                            _ => None,
+                        };
+                    }
                     if lname == "slotted" {
                         let mut sub = self.subparser(inner);
                         return Some(PseudoParse::Class(Pseudo::Slotted(sub.parse_list_forgiving())));

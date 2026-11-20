@@ -5,6 +5,7 @@
 pub mod display_list;
 pub mod paint;
 pub mod tree;
+pub mod selection;
 
 mod background;
 mod border_image;
@@ -84,7 +85,14 @@ pub fn layout(ctx: &LayoutContext) -> LayoutTree {
 
 /// Build a display list from a laid out tree.
 pub fn build_display_list(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
-    display_list::build(tree, ctx)
+    display_list::build(tree, ctx, None)
+}
+
+/// [`build_display_list`] with the highlight pseudo-element styles of the
+/// selection and of the custom highlights (see
+/// `StyleEngine::highlight_styles`).
+pub fn build_display_list_with_highlights(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbithole_style::highlight::PaintHighlights>) -> DisplayList {
+    display_list::build(tree, ctx, highlights)
 }
 
 /// Rasterize a display list. `scroll_x/scroll_y` are subtracted from every

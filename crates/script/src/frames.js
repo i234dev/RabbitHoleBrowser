@@ -161,6 +161,8 @@
       get document() { return info(id, 'document', 0); },
       // Same-origin frames: style queries of the frame's document.
       getComputedStyle(el, pseudo) { return g.getComputedStyle(el, pseudo); },
+      // Same-origin frames: the frame document's selection.
+      getSelection() { const d = info(id, 'document', 0); return d ? d.getSelection() : null; },
       set location(v) { info(id, 'navigate', String(v)); },
     };
     Object.defineProperty(target, Symbol.toStringTag, { value: 'Window' });

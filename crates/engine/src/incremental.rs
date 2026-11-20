@@ -91,6 +91,11 @@ pub struct IncrementalState {
 }
 
 impl IncrementalState {
+    /// The style engine of the current styles (after a style flush).
+    pub(crate) fn style_engine(&self) -> Option<&StyleEngine> {
+        self.style.as_ref()
+    }
+
     pub(crate) fn fonts_changed(&self, fonts: &rabbithole_gfx::FontContext) -> bool {
         self.fonts_seen != Some(fonts.selection_generation())
     }
