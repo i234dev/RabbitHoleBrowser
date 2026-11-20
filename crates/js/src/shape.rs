@@ -624,6 +624,19 @@ impl PropertyMap {
         }
     }
 
+    /// Start loading the property storage (collector look-ahead).
+    #[inline(always)]
+    pub(crate) fn prefetch(&self) {
+        match &self.repr {
+            Repr::Shaped(_) => {
+                if self.values.capacity() != 0 {
+                    crate::alloc::prefetch(self.values.as_ptr());
+                }
+            }
+            Repr::Dict(d) => crate::alloc::prefetch(&**d),
+        }
+    }
+
     pub fn values_mut(&mut self) -> Box<dyn Iterator<Item = &mut Property> + '_> {
         match &mut self.repr {
             Repr::Shaped(_) => Box::new(self.values.iter_mut()),
