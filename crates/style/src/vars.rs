@@ -23,8 +23,13 @@ pub(crate) struct Vars {
 }
 
 impl Vars {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// The shared empty map (the root's inherited custom properties): a
+    /// stable address lets per-element memos hit across restyles.
+    pub(crate) fn empty() -> Rc<Vars> {
+        thread_local! {
+            static EMPTY: Rc<Vars> = Rc::new(Vars::default());
+        }
+        EMPTY.with(|e| e.clone())
     }
 
     /// An empty layer over `parent`.
@@ -87,14 +92,35 @@ impl Vars {
     }
 }
 
+fn same_own(a: &Vars, b: &Vars) -> bool {
+    a.own.len() == b.own.len() && a.own.iter().all(|(k, v)| b.own.get(k).map(|o| o.as_deref() == v.as_deref()).unwrap_or(false))
+}
+
+/// The same entries layered the same way (layers compared by address
+/// first): the usual case when a restyle recomputes an unchanged map.
+fn same_layers(a: &Vars, b: &Vars) -> bool {
+    let (mut a, mut b) = (a, b);
+    loop {
+        if std::ptr::eq(a, b) {
+            return true;
+        }
+        if !same_own(a, b) {
+            return false;
+        }
+        match (&a.parent, &b.parent) {
+            (None, None) => return true,
+            (Some(x), Some(y)) => {
+                a = x;
+                b = y;
+            }
+            _ => return false,
+        }
+    }
+}
+
 impl PartialEq for Vars {
     fn eq(&self, other: &Self) -> bool {
-        let same_parent = match (&self.parent, &other.parent) {
-            (None, None) => true,
-            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
-            _ => false,
-        };
-        if same_parent && self.own.len() == other.own.len() && self.own.iter().all(|(k, v)| other.own.get(k).map(|o| o.as_deref() == v.as_deref()).unwrap_or(false)) {
+        if same_layers(self, other) {
             return true;
         }
         let (a, b) = (self.flatten(), other.flatten());
@@ -118,7 +144,7 @@ mod tests {
 
     #[test]
     fn layers_shadow_and_remove() {
-        let mut root = Vars::new();
+        let mut root = Vars::default();
         root.insert("--a", val("1"));
         root.insert("--b", val("2"));
         let root = Rc::new(root);
@@ -132,7 +158,7 @@ mod tests {
         let grand = Vars::child_of(&child);
         assert_eq!(grand.get("--a"), Some(&val("3")[..]));
         // Same contents through different layerings compare equal.
-        let mut flat = Vars::new();
+        let mut flat = Vars::default();
         flat.insert("--a", val("3"));
         assert!(grand == flat);
         flat.insert("--c", val("4"));
@@ -141,7 +167,7 @@ mod tests {
 
     #[test]
     fn deep_chains_flatten() {
-        let mut cur = Rc::new(Vars::new());
+        let mut cur = Rc::new(Vars::default());
         for i in 0..100 {
             let mut v = Vars::child_of(&cur);
             v.insert(&format!("--v{i}"), val(&i.to_string()));
