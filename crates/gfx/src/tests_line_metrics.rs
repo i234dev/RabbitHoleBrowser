@@ -9,17 +9,27 @@ fn approx(a: f32, b: f32) -> bool {
     (a - b).abs() < 1e-3
 }
 
-/// DejaVu Sans (2048 units per em) with the OS/2 `USE_TYPO_METRICS` bit set.
+/// DejaVu Sans (2048 units per em) with an OS/2 table of version 4 (the
+/// flag needs one) that sets `USE_TYPO_METRICS`: the table is copied to
+/// the end of the file, extended to the version 4 size.
 fn sans_with_typo_metrics() -> Vec<u8> {
     let mut data = SANS.to_vec();
     let n = u16::from_be_bytes([data[4], data[5]]) as usize;
-    let os2 = (0..n)
-        .map(|i| 12 + 16 * i)
-        .find(|&r| &data[r..r + 4] == b"OS/2")
-        .map(|r| u32::from_be_bytes([data[r + 8], data[r + 9], data[r + 10], data[r + 11]]) as usize)
-        .expect("OS/2 table");
+    let rec = (0..n).map(|i| 12 + 16 * i).find(|&r| &data[r..r + 4] == b"OS/2").expect("OS/2 table");
+    let be32 = |d: &[u8], at: usize| u32::from_be_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]]) as usize;
+    let (off, len) = (be32(&data, rec + 8), be32(&data, rec + 12));
+    let mut os2 = data[off..off + len].to_vec();
+    os2.resize(96, 0);
+    os2[0..2].copy_from_slice(&4u16.to_be_bytes());
     // fsSelection, bit 7.
-    data[os2 + 63] |= 0x80;
+    os2[63] |= 0x80;
+    while data.len() % 4 != 0 {
+        data.push(0);
+    }
+    let new_off = data.len() as u32;
+    data.extend_from_slice(&os2);
+    data[rec + 8..rec + 12].copy_from_slice(&new_off.to_be_bytes());
+    data[rec + 12..rec + 16].copy_from_slice(&96u32.to_be_bytes());
     data
 }
 
