@@ -2836,8 +2836,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                         kind: FragmentKind::Text {
                             src: match self.items.get(item) {
-                                Some(InlineItem::Text { node, .. }) if item != MARKER_ITEM => *node,
-                                _ => None,
+                                Some(InlineItem::Text { node: Some(n), .. }) if item != MARKER_ITEM && *n < crate::tree::NO_SRC as NodeId => *n as u32,
+                                _ => crate::tree::NO_SRC,
                             },
                             text: paint_text(&text),
                             font: tm.font,

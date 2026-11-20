@@ -25,9 +25,9 @@ fn is_space(c: char) -> bool {
 fn collect<'a>(b: &'a LayoutBox, want: &dyn Fn(NodeId) -> bool, out: &mut HashMap<NodeId, Vec<&'a Fragment>>) {
     for line in &b.lines {
         for f in &line.fragments {
-            if let FragmentKind::Text { src: Some(n), .. } = &f.kind {
-                if want(*n) {
-                    out.entry(*n).or_default().push(f);
+            if let FragmentKind::Text { src, .. } = &f.kind {
+                if let Some(n) = crate::tree::text_src(*src).filter(|&n| want(n)) {
+                    out.entry(n).or_default().push(f);
                 }
             }
         }

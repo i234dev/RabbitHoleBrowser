@@ -210,13 +210,14 @@ fn adopt_point(realm: &mut Realm, doc: u32, slot: usize) -> Value {
 /// `[generation, startHandle, endHandle, backward]`: handles owning the
 /// selection's boundary points, for a new `Range` object.
 fn selection_sync(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    purge();
     let doc = node_arg(realm, &arg(args, 0))?.doc;
     let known = realm.to_number(arg(args, 1))?;
-    let (generation, sel) = with_doc(doc, |d| (d.selection_generation(), d.selection_slots()));
+    let generation = with_doc(doc, |d| d.selection_generation());
     if known == generation as f64 {
         return Ok(Value::Null);
     }
+    purge();
+    let (generation, sel) = with_doc(doc, |d| (d.selection_generation(), d.selection_slots()));
     let Some(sel) = sel else {
         return Ok(array(realm, vec![Value::Number(generation as f64)]));
     };

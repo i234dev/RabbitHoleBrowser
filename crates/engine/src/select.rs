@@ -41,7 +41,7 @@ fn collect_runs(b: &LayoutBox, out: &mut Vec<TextRun>) {
                     size: *size,
                     letter_spacing: *letter_spacing,
                     word_spacing: *word_spacing,
-                    src: *src,
+                    src: rabbithole_layout::tree::text_src(*src),
                     frag: f as *const rabbithole_layout::tree::Fragment as usize,
                 });
             }

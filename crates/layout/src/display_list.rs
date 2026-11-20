@@ -2077,7 +2077,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         };
                         match self.sel.as_ref().and_then(|s| s.frags.get(&(f as *const Fragment as usize)).cloned()) {
                             None => self.list.push(item),
-                            Some(ranges) => self.paint_highlighted_text(f, item, &ranges, *src, decoration_info),
+                            Some(ranges) => self.paint_highlighted_text(f, item, &ranges, crate::tree::text_src(*src), decoration_info),
                         }
                         if decoration_info.any() {
                             self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, true, None);

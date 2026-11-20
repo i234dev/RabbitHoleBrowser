@@ -165,8 +165,9 @@ pub enum FragmentKind {
         oblique: bool,
         /// `text-emphasis` marks.
         emphasis: Option<Emphasis>,
-        /// The DOM text node the fragment shows (for selections).
-        src: Option<NodeId>,
+        /// The DOM text node the fragment shows, for selections
+        /// ([`NO_SRC`]: generated text). A `u32` keeps fragments small.
+        src: u32,
     },
     /// Background / border segment of an inline element.
     InlineBox {
@@ -177,6 +178,14 @@ pub enum FragmentKind {
     },
     /// Index into the container's `children`.
     Box(usize),
+}
+
+/// `FragmentKind::Text::src` of text that shows no DOM text node.
+pub const NO_SRC: u32 = u32::MAX;
+
+/// The text node of a text fragment's `src`.
+pub fn text_src(src: u32) -> Option<NodeId> {
+    (src != NO_SRC).then_some(src as NodeId)
 }
 
 #[derive(Debug, Clone)]
