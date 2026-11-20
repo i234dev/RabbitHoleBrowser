@@ -39,3 +39,39 @@ fn every_unicode_range_subset_of_a_weight_is_used() {
     assert_eq!(w, span_width(whole));
     assert_ne!(w, span_width(mono));
 }
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len() * 4 / 3 + 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// `document.fonts` lists the document's @font-face rules (CSS-connected
+/// faces) with their load status; they cannot be deleted from the set.
+#[test]
+fn document_fonts_lists_css_connected_faces() {
+    let mut engine = Engine::new_bundled_fonts_only();
+    engine.loader.load_images = false;
+    let url = format!("data:font/ttf;base64,{}", base64(SANS_BOLD));
+    let html = format!(
+        "<!doctype html><style>@font-face{{font-family:'Subset Web';src:url({url}) format('truetype');font-weight:700;unicode-range:U+0-FF,U+131}}\
+         @font-face{{font-family:'Subset Web';src:url({url}) format('truetype');font-weight:700;unicode-range:U+400-45F}}</style>\
+         <span style=\"font:700 20px 'Subset Web'\">italia</span>"
+    );
+    let loaded = engine.loader.load_html(&html, Url::parse("https://example.test/fonts").unwrap(), VIEWPORT);
+    let mut page = engine.build_page_unscripted(loaded, VIEWPORT);
+    let faces = engine.eval_in_page(&mut page, "[...document.fonts].map(f=>[f.family,f.weight,f.style,f.unicodeRange,f.status].join(' ')).join('|')");
+    assert_eq!(faces, "'Subset Web 700 normal U+0-FF, U+131 loaded|Subset Web 700 normal U+400-45F unloaded'");
+    let rest = engine.eval_in_page(&mut page, "[document.fonts.size, document.fonts.check(\"700 20px 'Subset Web'\"), document.fonts.check(\"700 20px 'Subset Web'\", 'Ж'), document.fonts.delete([...document.fonts][0]), (document.fonts.clear(), document.fonts.size)].join(' ')");
+    assert_eq!(rest, "'2 true false false 2'");
+}

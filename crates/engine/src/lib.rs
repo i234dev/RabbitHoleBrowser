@@ -152,6 +152,29 @@ pub struct LoadedFont {
     pub data: Arc<Vec<u8>>,
 }
 
+/// The document's `@font-face` rules as CSS-connected `FontFace`s for
+/// `document.fonts`: loaded when the face was fetched and decoded, else
+/// unloaded (faces no text uses are not fetched).
+fn css_font_faces(faces: &[FontFace], loaded: &[LoadedFont]) -> Vec<rabbithole_dom::CssFontFace> {
+    let percent = |(lo, hi): (u16, u16)| if lo == hi { format!("{lo}%") } else { format!("{lo}% {hi}%") };
+    faces
+        .iter()
+        .map(|f| rabbithole_dom::CssFontFace {
+            family: f.family.clone(),
+            style: if f.italic { "italic" } else { "normal" }.into(),
+            weight: if f.weight.0 == f.weight.1 { f.weight.0.to_string() } else { format!("{} {}", f.weight.0, f.weight.1) },
+            stretch: if f.stretch == (100, 100) { "normal".into() } else { percent(f.stretch) },
+            unicode_range: match &f.unicode_range {
+                None => "U+0-10FFFF".into(),
+                Some(r) => r.iter().map(|&(lo, hi)| if lo == hi { format!("U+{lo:X}") } else { format!("U+{lo:X}-{hi:X}") }).collect::<Vec<_>>().join(", "),
+            },
+            display: f.display.clone(),
+            url: f.sources.first().map(|s| s.url.clone()).unwrap_or_default(),
+            status: if loaded.iter().any(|l| l.face == *f) { "loaded" } else { "unloaded" },
+        })
+        .collect()
+}
+
 /// The policy of the last valid `<meta name="referrer">` (HTML §4.2.5.3,
 /// with the legacy keywords).
 fn document_referrer_policy(doc: &Document) -> Option<rabbithole_net::ReferrerPolicy> {
@@ -410,7 +433,10 @@ impl Loader {
         if debug {
             eprintln!("[load] scripts {:?}", t.elapsed());
         }
+        let css_font_faces = css_font_faces(&styles.font_faces, &fonts);
         drop(styles);
+        let mut doc = doc;
+        doc.css_font_faces = css_font_faces;
 
         LoadedPage {
             url,

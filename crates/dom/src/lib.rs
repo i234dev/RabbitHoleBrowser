@@ -245,6 +245,9 @@ pub struct Document {
     /// Texts of constructed stylesheets adopted by the document (key
     /// `Document::ROOT`) or by a shadow root (`adoptedStyleSheets`).
     pub adopted_styles: Tracked<HashMap<NodeId, Vec<String>>>,
+    /// CSS-connected font faces (the document's `@font-face` rules) that
+    /// `document.fonts` lists (CSS Font Loading §2.1).
+    pub css_font_faces: Vec<CssFontFace>,
     /// CSSOM-modified sheets of `<style>` / `<link>` elements:
     /// element → (element source text when modified, sheet text to render).
     /// Ignored once the element's own text changes.
@@ -317,6 +320,21 @@ pub struct Document {
     pub top_layer: Vec<NodeId>,
 }
 
+/// A CSS-connected `FontFace`: its descriptors serialized as CSS and its
+/// load status (`"unloaded"`, `"loaded"` or `"error"`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CssFontFace {
+    pub family: String,
+    pub style: String,
+    pub weight: String,
+    pub stretch: String,
+    pub unicode_range: String,
+    pub display: String,
+    /// The first `url()` source (resolved), for `load()`.
+    pub url: String,
+    pub status: &'static str,
+}
+
 /// What the native media controls show.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MediaUi {
@@ -360,6 +378,7 @@ impl Document {
             shadow_roots: HashMap::new(),
             shadow_hosts: HashMap::new(),
             adopted_styles: Tracked::default(),
+            css_font_faces: Vec::new(),
             sheet_overrides: Tracked::default(),
             defined_custom: std::collections::HashSet::new(),
             template_contents: HashMap::new(),

@@ -90,8 +90,10 @@
     get status() { return this[S].status; }
     get ready() { return this[S].ready; }
     add(f) { if (!(f instanceof FontFace)) throw new TypeError("Failed to execute 'add' on 'FontFaceSet': parameter 1 is not of type 'FontFace'."); this[S].faces.add(f); if (f[S].status === 'loading') setLoading(); syncFaces(); return this; }
-    delete(f) { const r = this[S].faces.delete(f); syncFaces(); return r; }
-    clear() { this[S].faces.clear(); syncFaces(); }
+    // CSS-connected faces belong to their @font-face rules (CSS Font
+    // Loading §2.2): delete() and clear() leave them in place.
+    delete(f) { if (f instanceof FontFace && f[S].css) return false; const r = this[S].faces.delete(f); syncFaces(); return r; }
+    clear() { for (const f of Array.from(this[S].faces)) if (!f[S].css) this[S].faces.delete(f); syncFaces(); }
     has(f) { return this[S].faces.has(f); }
     forEach(cb, t) { for (const f of this[S].faces) cb.call(t, f, f, this); }
     entries() { return Array.from(this[S].faces, (f) => [f, f])[Symbol.iterator](); }
@@ -101,19 +103,57 @@
     load(font, text = ' ') {
       const families = parseFontFamilies(font);
       if (!families) return Promise.reject(new SyntaxError(`Failed to execute 'load' on 'FontFaceSet': Could not resolve '${font}' as a font.`));
-      const matches = Array.from(this[S].faces).filter((f) => families.includes(f.family.replace(/^['"]|['"]$/g, '').toLowerCase()));
-      void text;
+      const matches = matching(this, families, text);
       return Promise.all(matches.map((f) => f.load())).then(() => matches);
     }
     check(font, text = ' ') {
       const families = parseFontFamilies(font);
       if (!families) throw new SyntaxError(`Failed to execute 'check' on 'FontFaceSet': Could not resolve '${font}' as a font.`);
-      void text;
-      return Array.from(this[S].faces).filter((f) => families.includes(f.family.replace(/^['"]|['"]$/g, '').toLowerCase())).every((f) => f.status === 'loaded');
+      return matching(this, families, text).every((f) => f.status === 'loaded');
     }
   }
   tag(FontFaceSet, 'FontFaceSet');
   N.installHandlers(FontFaceSet.prototype, ['loading', 'loadingdone', 'loadingerror']);
+  // Faces of the listed families whose unicode-range includes a character
+  // of `text` (CSS Font Loading §2.5.1 "find the matching font faces").
+  function matching(set, families, text) {
+    const cps = Array.from(String(text), (c) => c.codePointAt(0));
+    return Array.from(set[S].faces).filter((f) => {
+      if (!families.includes(f.family.replace(/^['"]|['"]$/g, '').toLowerCase())) return false;
+      const ranges = parseRanges(f.unicodeRange);
+      return !ranges || cps.some((c) => ranges.some(([lo, hi]) => c >= lo && c <= hi));
+    });
+  }
+  function parseRanges(text) {
+    const out = [];
+    for (const part of String(text).split(',')) {
+      const m = /^\s*u\+([0-9a-f?]{1,6})(?:-([0-9a-f]{1,6}))?\s*$/i.exec(part);
+      if (!m) return null;
+      const lo = parseInt(m[1].replace(/\?/g, '0'), 16);
+      const hi = m[2] ? parseInt(m[2], 16) : parseInt(m[1].replace(/\?/g, 'f'), 16);
+      out.push([lo, hi]);
+    }
+    return out;
+  }
+  // The document's @font-face rules as CSS-connected faces, listed first.
+  let cssAdded = false;
+  function addCssFaces() {
+    if (cssAdded || !fontSet || !N.cssFontFaces) return;
+    cssAdded = true;
+    const st = fontSet[S];
+    const own = Array.from(st.faces);
+    st.faces.clear();
+    for (const d of N.cssFontFaces()) {
+      const f = Object.create(FontFace.prototype);
+      const fs = Object.assign({}, DESCRIPTORS, { family: d.family, style: d.style, weight: d.weight, stretch: d.stretch, width: d.stretch, unicodeRange: d.unicodeRange, display: d.display, status: d.status, source: null, binary: null, cssUrl: d.url || null, css: true });
+      hidden(f, S, fs);
+      fs.loaded = new Promise((res, rej) => { fs.resolve = res; fs.reject = rej; });
+      fs.loaded.catch(() => {});
+      if (d.status === 'loaded') fs.resolve(f);
+      st.faces.add(f);
+    }
+    for (const f of own) st.faces.add(f);
+  }
   function parseFontFamilies(font) {
     const m = /(?:^|\s)(\d+(?:\.\d+)?(?:px|pt|em|rem|%|vw|vh)|xx-small|x-small|small|medium|large|x-large|xx-large|smaller|larger)(?:\/[^\s]+)?\s+(.+)$/i.exec(String(font).trim());
     if (!m) return null;
@@ -147,7 +187,7 @@
     const rules = [];
     for (const f of fontSet[S].faces) {
       const st = f[S];
-      if (!st.cssUrl) continue;
+      if (!st.cssUrl || st.css) continue;
       rules.push(`@font-face { font-family: ${JSON.stringify(st.family)}; src: url(${JSON.stringify(st.cssUrl)}); font-style: ${st.style}; font-weight: ${st.weight}; font-display: ${st.display}; }`);
     }
     N.setScriptFontFaces(rules.join('\n'));
@@ -155,7 +195,7 @@
   fontSet = Object.create(FontFaceSet.prototype);
   hidden(fontSet, S, { faces: new Set(), status: 'loaded', loading: new Set(), loadedFaces: [], failedFaces: [], ready: Promise.resolve(null) });
   fontSet[S].ready = Promise.resolve(fontSet);
-  Object.defineProperty(g.Document.prototype, 'fonts', { get() { return fontSet; }, configurable: true, enumerable: true });
+  Object.defineProperty(g.Document.prototype, 'fonts', { get() { addCssFaces(); return fontSet; }, configurable: true, enumerable: true });
   define('FontFace', FontFace);
   define('FontFaceSet', FontFaceSet);
   define('FontFaceSetLoadEvent', FontFaceSetLoadEvent);
