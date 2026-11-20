@@ -340,11 +340,12 @@ fn tokens_of(n: NodeRef, attr: &str) -> Vec<String> {
 }
 
 fn token_list_ref(realm: &mut Realm, this: &Value) -> JsResult<TokenListRef> {
-    // `this` is usually the Proxy that adds the indexed getter (see
-    // `token_list`); the host data lives on its target.
-    match crate::host::host_obj(realm, this).and_then(|o| realm.host_data::<TokenListRef>(o)) {
-        Some(r) => Ok(TokenListRef { node: r.node, attr: r.attr }),
-        None => Err(realm.throw_type_error("Illegal invocation")),
+    match this.v() {
+        V::Object(o) => match realm.host_data::<TokenListRef>(o) {
+            Some(r) => Ok(TokenListRef { node: r.node, attr: r.attr }),
+            None => Err(realm.throw_type_error("Illegal invocation")),
+        },
+        _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
 
@@ -508,20 +509,21 @@ pub(crate) fn token_list(realm: &mut Realm, wrapper: ObjectId, n: NodeRef, attr:
     }
     let p = proto("DOMTokenList");
     let o = realm.new_object_with_proto(Some(p));
-    realm.set_host_data(o, Box::new(TokenListRef { node: n, attr }));
+    // DOMTokenList supports indexed properties: `list[i]` is the i-th
+    // token of the current attribute value (read-only, live).
+    realm.set_indexed_host_data(o, Box::new(TokenListRef { node: n, attr }), tl_index, tl_count);
     realm.set_class_name(o, "DOMTokenList");
-    // DOMTokenList supports indexed properties (`list[0]`): the prelude's
-    // factory wraps the list in a Proxy that serves them live.
-    let factory = state().borrow().factories.get("tokenList").cloned();
-    let list = match factory {
-        Some(f) => match realm.call(f, Value::Undefined, &[Value::Object(o)]) {
-            Ok(v) if v.is_object() => v,
-            _ => Value::Object(o),
-        },
-        None => Value::Object(o),
-    };
-    set_hidden(realm, wrapper, &key, list.clone());
-    list
+    set_hidden(realm, wrapper, &key, Value::Object(o));
+    Value::Object(o)
+}
+
+fn tl_index(data: &dyn std::any::Any, i: u32) -> Option<Value> {
+    let r = data.downcast_ref::<TokenListRef>()?;
+    tokens_of(r.node, r.attr).get(i as usize).map(|t| Value::str(t))
+}
+
+fn tl_count(data: &dyn std::any::Any) -> u32 {
+    data.downcast_ref::<TokenListRef>().map(|r| tokens_of(r.node, r.attr).len() as u32).unwrap_or(0)
 }
 
 fn e_class_list(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {

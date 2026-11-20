@@ -278,68 +278,6 @@
   g.__rhNative.setFactory('rectList', (rects) => makeRectList(Array.from(rects)));
 })();
 
-// ------------------------------------------- DOMTokenList indexed access
-// DOMTokenList has an indexed property getter (DOM §7.1): list[i] is the
-// i-th token, live, and the indices are own enumerable properties. The
-// native list is wrapped in a Proxy that answers index keys from the
-// current attribute value; the natives unwrap the Proxy to reach their
-// host data, and every other key goes to the native object unchanged.
-(function () {
-  'use strict';
-  const g = globalThis;
-  const TL = g.DOMTokenList && g.DOMTokenList.prototype;
-  if (!TL) return;
-  const item = TL.item;
-  const lengthGet = Object.getOwnPropertyDescriptor(TL, 'length').get;
-  const { apply, get, set, has, ownKeys, getOwnPropertyDescriptor, defineProperty, deleteProperty } = Reflect;
-  // An array index (canonical, below 2^32 - 1), or -1.
-  const index = (k) => {
-    if (typeof k !== 'string') return -1;
-    const c = k.charCodeAt(0);
-    if (!(c >= 48 && c <= 57) || (c === 48 && k.length > 1) || k.length > 10) return -1;
-    for (let i = 1; i < k.length; i++) {
-      const d = k.charCodeAt(i);
-      if (d < 48 || d > 57) return -1;
-    }
-    const n = +k;
-    return n < 4294967295 ? n : -1;
-  };
-  const token = (t, i) => apply(item, t, [i]);
-  const handler = {
-    get(t, k) {
-      const i = index(k);
-      if (i < 0) return get(t, k, t);
-      const v = token(t, i);
-      return v === null ? undefined : v;
-    },
-    has(t, k) {
-      const i = index(k);
-      return i < 0 ? has(t, k) : token(t, i) !== null;
-    },
-    getOwnPropertyDescriptor(t, k) {
-      const i = index(k);
-      if (i < 0) return getOwnPropertyDescriptor(t, k);
-      const v = token(t, i);
-      return v === null ? undefined : { value: v, writable: false, enumerable: true, configurable: true };
-    },
-    ownKeys(t) {
-      const n = apply(lengthGet, t, []);
-      const keys = [];
-      for (let i = 0; i < n; i++) keys.push(String(i));
-      return keys.concat(ownKeys(t));
-    },
-    // No indexed setter: index writes and definitions are rejected
-    // (a TypeError in strict code, ignored otherwise).
-    set(t, k, v) { return index(k) < 0 ? set(t, k, v, t) : false; },
-    defineProperty(t, k, d) { return index(k) < 0 ? defineProperty(t, k, d) : false; },
-    deleteProperty(t, k) {
-      const i = index(k);
-      return i < 0 ? deleteProperty(t, k) : token(t, i) === null;
-    },
-  };
-  g.__rhNative.setFactory('tokenList', (list) => new Proxy(list, handler));
-})();
-
 // ------------------------------------------------- HTML table DOM API
 // (HTML §4.9: caption/tHead/tFoot, create*/delete*, rows in header /
 // body / footer order, insertRow/deleteRow, sectionRowIndex...)

@@ -214,6 +214,7 @@ impl Realm {
         match &self.obj(id).kind {
             ObjectKind::Proxy { .. } => return self.proxy_define_desc(id, key, desc),
             ObjectKind::ModuleNamespace => return self.namespace_define(id, key, desc),
+            ObjectKind::IndexedHost(_) if key.as_array_index().is_some() => return Ok(false),
             ObjectKind::MappedArguments(_) => {
                 if let Some(r) = self.mapped_args_define(id, key.clone(), desc.clone())? {
                     return Ok(r);

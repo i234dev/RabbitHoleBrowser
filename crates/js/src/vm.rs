@@ -5393,7 +5393,7 @@ impl Realm {
     fn own_enumerable(&mut self, c: ObjectId, k: &PropertyKey) -> JsResult<bool> {
         let obj = self.obj(c);
         match &obj.kind {
-            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) | ObjectKind::ModuleNamespace | ObjectKind::MappedArguments(_) => {
+            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) | ObjectKind::ModuleNamespace | ObjectKind::MappedArguments(_) | ObjectKind::IndexedHost(_) => {
                 Ok(self.get_own_property_any(c, k)?.map(|p| p.enumerable()).unwrap_or(false))
             }
             _ => Ok(obj.props.get(k).map(|p| p.enumerable()).unwrap_or(false)),

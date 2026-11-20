@@ -81,6 +81,13 @@ impl Realm {
                     return Some(p);
                 }
             }
+            ObjectKind::IndexedHost(h) => {
+                // Index keys are never stored: in range, the item; otherwise
+                // no own property.
+                if let Some(i) = key.as_array_index() {
+                    return h.item(i).map(|v| Property::data(v, ENUMERABLE | CONFIGURABLE));
+                }
+            }
             _ => {}
         }
         obj.props.get(key).cloned()
@@ -175,6 +182,21 @@ impl Realm {
                             };
                         }
                         return Ok(p.value);
+                    }
+                }
+                ObjectKind::IndexedHost(h) if matches!(key, PropertyKey::String(_)) => {
+                    if let Some(i) = key.as_array_index() {
+                        if let Some(v) = h.item(i) {
+                            return Ok(v);
+                        }
+                    } else if let Some(p) = obj.props.get(key) {
+                        if p.flags & ACCESSOR == 0 {
+                            return Ok(p.value.clone());
+                        }
+                        return match p.getter_cloned() {
+                            Some(g) => self.call(g, receiver, &[]),
+                            None => Ok(Value::Undefined),
+                        };
                     }
                 }
                 _ => {
@@ -429,6 +451,8 @@ impl Realm {
     /// Create or replace an own property; returns false if not allowed.
     pub fn define_own(&mut self, id: ObjectId, key: PropertyKey, prop: Property) -> JsResult<bool> {
         match &self.obj(id).kind {
+            // No indexed setter: index keys cannot be defined.
+            ObjectKind::IndexedHost(_) if key.as_array_index().is_some() => return Ok(false),
             ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::TypedArray(_) | ObjectKind::MappedArguments(_) | ObjectKind::ModuleNamespace => {
                 return self.define_own_desc(id, key, crate::descriptor::PropDesc::from_property(&prop));
             }
@@ -477,6 +501,11 @@ impl Realm {
         if let ObjectKind::TypedArray(t) = &self.obj(id).kind {
             if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(key) {
                 return Ok(crate::builtins::typed_array::ta_valid_index(self, t, n).is_none());
+            }
+        }
+        if let ObjectKind::IndexedHost(h) = &self.obj(id).kind {
+            if let Some(i) = key.as_array_index() {
+                return Ok(h.item(i).is_none());
             }
         }
         let obj = self.obj_mut(id);
@@ -564,6 +593,11 @@ impl Realm {
             ObjectKind::TypedArray(t) => {
                 for i in 0..crate::builtins::typed_array::typed_array_length(self, t) {
                     out.push(PropertyKey::index(i as u32));
+                }
+            }
+            ObjectKind::IndexedHost(h) => {
+                for i in 0..h.length() {
+                    out.push(PropertyKey::index(i));
                 }
             }
             _ => {}
