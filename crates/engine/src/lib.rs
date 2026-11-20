@@ -1292,11 +1292,13 @@ impl Engine {
         for f in &loaded.fonts {
             // Faces that differ only in unicode-range (the subsets of a
             // hosted font) are all needed: each covers its own characters.
-            let key = (f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic, f.face.stretch, f.face.unicode_range.clone());
+            let key = (f.face.family.to_ascii_lowercase(), f.face.weight, f.face.italic, f.face.stretch, f.face.unicode_range.clone());
             if registered.insert(key) {
-                let id = fonts.add_font_data_ranged(&f.face.family, f.face.weight.0, f.face.italic, f.face.stretch, f.face.unicode_range.as_deref(), &f.data);
-                if let (Some(id), false) = (id, f.face.feature_settings.is_empty()) {
-                    fonts.set_face_features(id, &f.face.feature_settings);
+                let ids = fonts.add_font_face(&f.face.family, f.face.weight, f.face.italic, f.face.stretch, f.face.unicode_range.as_deref(), &f.data);
+                if !f.face.feature_settings.is_empty() {
+                    for id in ids {
+                        fonts.set_face_features(id, &f.face.feature_settings);
+                    }
                 }
             }
         }

@@ -113,3 +113,25 @@ fn variable_faces_use_their_descriptor_weight() {
     };
     assert!(width(bold) > width(regular) + 1);
 }
+
+/// A variable face declared for a weight range is drawn at each requested
+/// weight of the range (clamped to it), not at the range's minimum.
+#[test]
+fn variable_weight_ranges_follow_the_requested_weight() {
+    let font = crate::font_ext::instance::variable_bar_font();
+    let fc = FontContext::new();
+    let ids = fc.add_font_face("Range", (300, 900), false, (100, 100), None, &font);
+    assert_eq!(ids.len(), 7);
+    let advance = |w| {
+        let id = fc.select_family(&["Range".into()], Family::Sans, w, false);
+        fc.measure(id, 1000.0, "I")
+    };
+    assert_eq!(advance(400), 300.0);
+    assert_eq!(advance(700), 420.0);
+    assert_eq!(advance(900), 500.0);
+    // Below the range: its minimum (300 is lighter than the default).
+    assert_eq!(advance(100), 300.0);
+    // A static font registers once for the whole range.
+    let sans = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+    assert_eq!(fc.add_font_face("Static", (100, 900), false, (100, 100), None, sans).len(), 1);
+}

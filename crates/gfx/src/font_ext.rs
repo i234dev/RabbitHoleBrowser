@@ -84,33 +84,63 @@ impl FontContext {
     /// a composite font (CSS Fonts 4 §4.5): each character uses the face
     /// whose range includes it, later registrations first.
     pub fn add_font_data_ranged(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, data: &[u8]) -> Option<FontId> {
+        self.add_font_face(family, (weight, weight), italic, stretch, unicode_range, data).into_iter().next()
+    }
+
+    /// Register an `@font-face` with its weight range (min, max). A
+    /// variable font is drawn at the axis values the descriptors select
+    /// (CSS Fonts 4 §5.1: they clamp the variations): one static instance
+    /// per hundred of weight in the range, so each requested weight finds
+    /// its own. Other fonts register once, at the range's minimum.
+    /// Returns the registered faces (empty when the data cannot be used).
+    pub fn add_font_face(&self, family: &str, weight: (u16, u16), italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, data: &[u8]) -> Vec<FontId> {
+        // Raw SFNT can be compared against the store without first copying it.
+        let sfnt = match data.get(..4) {
+            Some([0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true") => std::borrow::Cow::Borrowed(data),
+            _ => match decode_font_container(data) {
+                Some(d) => std::borrow::Cow::Owned(d),
+                None => return Vec::new(),
+            },
+        };
+        let lo = weight.0.clamp(1, 1000);
+        let hi = weight.1.clamp(lo, 1000);
+        let mut weights = vec![lo];
+        if hi > lo {
+            weights.extend((1..=9).map(|n| n * 100).filter(|&w| w > lo && w < hi));
+            weights.push(hi);
+        }
+        let mut out = Vec::new();
+        for (i, &w) in weights.iter().enumerate() {
+            let mut axes = vec![(*b"wght", w as f32)];
+            if stretch.0 == stretch.1 {
+                axes.push((*b"wdth", stretch.0 as f32));
+            }
+            if italic {
+                axes.push((*b"ital", 1.0));
+            }
+            let face = match instance::instantiate(sfnt.as_ref(), &axes) {
+                Some(static_font) => self.register_sfnt(family, w, italic, stretch, unicode_range, std::borrow::Cow::Owned(static_font)),
+                // Not variable: one face for the whole range.
+                None if i == 0 => {
+                    out.extend(self.register_sfnt(family, w, italic, stretch, unicode_range, sfnt));
+                    return out;
+                }
+                None => None,
+            };
+            out.extend(face);
+        }
+        out
+    }
+
+    fn register_sfnt(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, sfnt: std::borrow::Cow<[u8]>) -> Option<FontId> {
         // An empty or full range is no restriction.
         let unicode_range: Option<Rc<[(u32, u32)]>> = unicode_range
             .filter(|r| !r.iter().any(|&(lo, hi)| lo == 0 && hi >= 0x10FFFF))
             .map(Rc::from);
-        // Raw SFNT can be compared against the store without first copying it.
-        let sfnt = match data.get(..4) {
-            Some([0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true") => std::borrow::Cow::Borrowed(data),
-            _ => std::borrow::Cow::Owned(decode_font_container(data)?),
-        };
         let family = family.trim().trim_matches('"').trim_matches('\'').to_string();
         if family.is_empty() {
             return None;
         }
-        let weight = weight.clamp(1, 1000);
-        // A variable font is drawn at the axis values its descriptors
-        // select (CSS Fonts 4 §5.1: the descriptors clamp the variations).
-        let mut axes = vec![(*b"wght", weight as f32)];
-        if stretch.0 == stretch.1 {
-            axes.push((*b"wdth", stretch.0 as f32));
-        }
-        if italic {
-            axes.push((*b"ital", 1.0));
-        }
-        let sfnt = match instance::instantiate(sfnt.as_ref(), &axes) {
-            Some(static_font) => std::borrow::Cow::Owned(static_font),
-            None => sfnt,
-        };
         let family_lower = family.to_ascii_lowercase();
         let (existing_binding, existing_data) = {
             let faces = self.faces.borrow();
