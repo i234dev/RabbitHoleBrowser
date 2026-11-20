@@ -32,6 +32,19 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.1.37 raises the WPT CSS reftests to 82.1 % (16,122 / 19,627,
+[measurement](docs/benchmarks/wpt-css-2026-11-19-v0.1.37.md)):
+- vertical writing modes (writing-modes 45 % → 79.5 %);
+- 3D transforms with `perspective`, `preserve-3d`, `backface-visibility` and
+  the individual `translate`/`rotate`/`scale` properties (transforms 47 % → 92.6 %);
+- container queries and container units, wide-gamut colour interpolation,
+  `revert-layer`, typed `attr()`, CSS math functions, `:dir()`/`:lang()`.
+
+Cookies follow RFC 6265bis more closely: quoted values are kept, SameSite is
+persisted, windows merge rather than overwrite the cookie file, and documents
+honour their referrer policy (single sign-on flows). Speedometer 3.1 is
+unchanged against 0.1.36 (0.9993×, [record](docs/benchmarks/speedometer-2026-11-20-v0.1.37.md)).
+
 Version 0.1.36 raises the WPT CSS reftests to 76.4 % (14,996 / 19,627,
 [measurement](docs/benchmarks/wpt-css-2026-11-19-v0.1.36.md); from this run on,
 a reftest with several match references passes when any of them matches, as
@@ -132,7 +145,7 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 |---|---|---|
 | **test262** (ECMAScript) | **99.90 %** (46,017 / 46,064 run) | 2026-11-18, 0.1.34 JavaScript code `fe3d71e`, JIT on, 8 workers, profile ci; **99.93 % excluding Intl**, ECMA-402 98.6 %; multi-agent `Atomics` and `Intl.NumberFormat` v3 tests included; [measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md) and `crates/js/tests/test262_baseline.txt` |
 | **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **76.4 %** (14,996 / 19,627) | 2026-11-19, 0.1.36 CSS/layout code `89d437d`; CSS2 91.0 %, css-ui 90.4 %, images 86.1 %, flexbox 84.8 %, backgrounds 81.6 %, grid 77.4 %, text 76.2 %; any-match rule for multiple references since this run; [measurement](docs/benchmarks/wpt-css-2026-11-19-v0.1.36.md) and `crates/engine/tests/wpt-css-baseline.txt` |
+| **WPT CSS reftests** (pixel comparison) | **82.1 %** (16,122 / 19,627) | 2026-11-19, 0.1.37 CSS/layout code `a9055e5`; color 92.9 %, transforms 92.6 %, CSS2 91.3 %, css-ui 90.6 %, images 90.0 %, flexbox 85.2 %, writing-modes 79.5 %, grid 78.7 %, text 76.8 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-19-v0.1.37.md) and `crates/engine/tests/wpt-css-baseline.txt` |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
