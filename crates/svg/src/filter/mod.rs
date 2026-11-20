@@ -266,10 +266,33 @@ impl FilterDef {
             linear: bool,
             tainted: bool,
         }
+        // The last primitive reading each result: buffers are freed after it.
+        let mut last_use: Vec<usize> = vec![0; self.primitives.len()];
+        {
+            let mut names: HashMap<&str, usize> = HashMap::new();
+            for (i, p) in self.primitives.iter().enumerate() {
+                for inp in &p.inputs {
+                    let k = match inp {
+                        Input::Named(n) => names.get(n.as_str()).copied().or(i.checked_sub(1)),
+                        Input::Previous => i.checked_sub(1),
+                        _ => None,
+                    };
+                    if let Some(k) = k {
+                        last_use[k] = i;
+                    }
+                }
+                if let Some(n) = &p.result {
+                    names.insert(n.as_str(), i);
+                }
+            }
+            if let Some(l) = last_use.last_mut() {
+                *l = usize::MAX;
+            }
+        }
         let mut results: Vec<Res> = Vec::new();
         let mut names: HashMap<&str, usize> = HashMap::new();
         let mut source_alpha: Option<Pixels> = None;
-        for p in &self.primitives {
+        for (pi, p) in self.primitives.iter().enumerate() {
             // Resolve inputs to result indices (`None`: a standard input).
             let resolve = |i: &Input| -> Result<usize, Input> {
                 match i {
@@ -502,6 +525,11 @@ impl FilterDef {
                 names.insert(n.as_str(), results.len());
             }
             results.push(Res { px: out, sub, linear, tainted });
+            for (k, r) in results.iter_mut().enumerate() {
+                if last_use[k] <= pi && !r.px.px.is_empty() {
+                    r.px = Pixels { w, h, px: Vec::new() };
+                }
+            }
         }
         let Some(last) = results.pop() else { return Pixels::new(w, h) };
         let mut out = last.px;
