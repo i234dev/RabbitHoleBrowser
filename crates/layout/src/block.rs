@@ -136,6 +136,10 @@ pub(crate) struct Layouter<'a> {
     /// Bounds only the new recursive subgrid contribution/transport work.
     pub(crate) grid_work: crate::grid::subgrid::WorkBudget,
     pub(crate) grid_publication: crate::grid::resolved::Publication,
+    /// Grid containers laid out, plus layouts reused from entries made
+    /// while grid tracks were not published: a layout that saw neither
+    /// publishes nothing, so its cache entry serves both modes.
+    pub(crate) grid_layouts: u64,
 }
 
 pub(crate) fn resolve_edges(e: &Edges<Length>, base: f32) -> Edges<f32> {
@@ -406,6 +410,7 @@ impl<'a> Layouter<'a> {
             clamp: None,
             grid_work: Default::default(),
             grid_publication: Default::default(),
+            grid_layouts: 0,
         }
     }
 
@@ -845,6 +850,9 @@ impl<'a> Layouter<'a> {
         crate::incremental::count(reuse.is_some(), had_cache);
         b.reused_layout = reuse.is_some();
         let (content_h, float_extent) = if let Some(c) = reuse {
+            if !c.grid_publication {
+                self.grid_layouts += 1;
+            }
             // Same constraints as last time: move the old contents.
             // The contents follow their origin: their relative geometry (and
             // its memoized fingerprint) is unchanged.
@@ -860,6 +868,7 @@ impl<'a> Layouter<'a> {
             out
         } else {
             let floats_before = bfc.len();
+            let grid_layouts = self.grid_layouts;
             b.contents_fp.set(None);
             self.flex_limits = flex_limits;
             let content_h = if b.bfc_root {
@@ -881,7 +890,7 @@ impl<'a> Layouter<'a> {
                 .then_some(h)
             });
             b.layout_cache = cacheable.then(|| crate::incremental::LayoutCache {
-                grid_publication: self.grid_publication.enabled(),
+                grid_publication: self.grid_publication.enabled() || self.grid_layouts == grid_layouts,
                 inner_w: inner_cb.width,
                 inner_h: inner_cb.height,
                 top_collapsible,

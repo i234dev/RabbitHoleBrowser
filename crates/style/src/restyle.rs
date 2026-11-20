@@ -839,13 +839,23 @@ impl StyleEngine {
         // Children logged more than once (moved): their old position is
         // unknown.
         let mut moved: HashMap<NodeId, u32> = HashMap::new();
-        if inval.first | inval.last | inval.nth_fwd | inval.nth_back | inval.sibling_follow != 0 {
+        // Child list changes per parent: past a few, all the children are
+        // marked once instead of sweeping the siblings of each change.
+        let mut per_parent: HashMap<NodeId, u32> = HashMap::new();
+        let structural = inval.first | inval.last | inval.nth_fwd | inval.nth_back | inval.sibling_follow;
+        if structural != 0 {
             for mu in &log.entries {
-                if let Mutation::Children { child, .. } = mu {
+                if let Mutation::Children { parent, child } = mu {
                     *moved.entry(*child).or_default() += 1;
+                    *per_parent.entry(*parent).or_default() += 1;
                 }
             }
         }
+        // Parents already handled for the parts of a child list change that
+        // depend on the parent alone (marking is idempotent).
+        let mut swept: HashSet<NodeId> = HashSet::new();
+        let mut has_done: HashSet<NodeId> = HashSet::new();
+        let mut parent_done: HashSet<NodeId> = HashSet::new();
         let has_slot = |n: NodeId| doc.element(n).is_some() && doc.descendants(n).any(|d| doc.is_element(d, "slot"));
         let host_of_tree = |n: NodeId| doc.containing_shadow_root(n).and_then(|r| doc.shadow_host(r));
         for mu in &log.entries {
@@ -927,30 +937,36 @@ impl StyleEngine {
                     if !doc.is_connected(parent) {
                         continue;
                     }
-                    if inval.has_has && inval.may_affect_has(doc, child) {
+                    if inval.has_has && !has_done.contains(&parent) && inval.may_affect_has(doc, child) {
                         // The inserted/removed subtree may satisfy or stop
                         // satisfying a `:has()` of the parent chain.
+                        has_done.insert(parent);
                         m.has_scope(parent);
                         m.children(parent, R_SELF);
                     }
-                    if doc.element(child).is_some() {
-                        if doc.parent(child) == Some(parent) && moved.get(&child).is_none_or(|&c| c < 2) {
+                    if doc.element(child).is_some() && structural != 0 && !swept.contains(&parent) {
+                        let many = per_parent.get(&parent).is_some_and(|&c| c > 4);
+                        if !many && doc.parent(child) == Some(parent) && moved.get(&child).is_none_or(|&c| c < 2) {
                             // Inserted: only siblings after it change their
                             // index, only those before it their index from
                             // the end.
                             m.siblings(child, true, inval.nth_fwd | inval.sibling_follow, inval.first);
                             m.siblings(child, false, inval.nth_back, inval.last);
                         } else {
-                            m.children(parent, inval.first | inval.last | inval.nth_fwd | inval.nth_back | inval.sibling_follow);
+                            // (Marks a superset of what the sweeps above do.)
+                            swept.insert(parent);
+                            m.children(parent, structural);
                         }
                     }
-                    if inval.empty != 0 {
-                        m.apply(parent, inval.empty);
-                    }
-                    if inval.dir_auto != 0 {
-                        // Content of a `dir=auto` element: its direction.
-                        if let Some(a) = auto_dir_ancestor(doc, parent) {
-                            m.apply(a, inval.dir_auto);
+                    if parent_done.insert(parent) {
+                        if inval.empty != 0 {
+                            m.apply(parent, inval.empty);
+                        }
+                        if inval.dir_auto != 0 {
+                            // Content of a `dir=auto` element: its direction.
+                            if let Some(a) = auto_dir_ancestor(doc, parent) {
+                                m.apply(a, inval.dir_auto);
+                            }
                         }
                     }
                     if doc.element(child).is_none() && doc.element(parent).is_some() {

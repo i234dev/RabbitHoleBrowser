@@ -208,6 +208,7 @@ fn restartable(s: State) -> bool {
 /// whether the input ended with a CR (a LF starting the next piece
 /// belongs to it).
 fn preprocess(input: &str, out: &mut Vec<char>) -> bool {
+    out.reserve(input.len());
     let mut it = input.chars().peekable();
     let mut trailing_cr = false;
     while let Some(c) = it.next() {

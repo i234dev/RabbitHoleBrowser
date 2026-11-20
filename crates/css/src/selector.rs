@@ -1142,6 +1142,19 @@ fn child_index(doc: &Document, node: NodeId, of_type: bool, from_end: bool) -> i
     i
 }
 
+/// Compare an attribute value `v` with a selector's `want` by `op`.
+fn attr_op_matches(op: &AttrOp, v: &str, want: &str) -> bool {
+    match op {
+        AttrOp::Exists => true,
+        AttrOp::Equals => v == want,
+        AttrOp::Includes => v.split_ascii_whitespace().any(|x| x == want),
+        AttrOp::DashMatch => v == want || (v.starts_with(want) && v[want.len()..].starts_with('-')),
+        AttrOp::Prefix => !want.is_empty() && v.starts_with(want),
+        AttrOp::Suffix => !want.is_empty() && v.ends_with(want),
+        AttrOp::Substring => !want.is_empty() && v.contains(want),
+    }
+}
+
 pub fn match_compound(c: &Compound, doc: &Document, node: NodeId) -> bool {
     match_compound_with(c, doc, node, &MatchState::default())
 }
@@ -1183,19 +1196,12 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
             Some(v) => v,
             None => return false,
         };
-        let (v, want) = if a.case_insensitive {
-            (v.to_ascii_lowercase(), a.value.to_ascii_lowercase())
+        let ok = if a.op == AttrOp::Exists {
+            true
+        } else if a.case_insensitive {
+            attr_op_matches(&a.op, &v.to_ascii_lowercase(), &a.value.to_ascii_lowercase())
         } else {
-            (v.to_string(), a.value.clone())
-        };
-        let ok = match a.op {
-            AttrOp::Exists => true,
-            AttrOp::Equals => v == want,
-            AttrOp::Includes => v.split_ascii_whitespace().any(|x| x == want),
-            AttrOp::DashMatch => v == want || v.starts_with(&format!("{want}-")),
-            AttrOp::Prefix => !want.is_empty() && v.starts_with(&want),
-            AttrOp::Suffix => !want.is_empty() && v.ends_with(&want),
-            AttrOp::Substring => !want.is_empty() && v.contains(&want),
+            attr_op_matches(&a.op, v, &a.value)
         };
         if !ok {
             return false;

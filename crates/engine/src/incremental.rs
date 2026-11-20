@@ -501,11 +501,10 @@ impl Engine {
         let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, .. } = page;
         // Inputs changed outside the style system: images, background
         // images, scroll offsets, viewport.
-        let mut images_now = HashMap::with_capacity(images.len());
-        for (n, img) in images.iter() {
-            images_now.insert(*n, Arc::as_ptr(img) as *const u8 as usize);
-        }
-        if images_now != incr.images_seen {
+        let img_ptr = |v: &Arc<rabbithole_gfx::Image>| Arc::as_ptr(v) as *const u8 as usize;
+        let images_same = images.len() == incr.images_seen.len() && images.iter().all(|(n, img)| incr.images_seen.get(n) == Some(&img_ptr(img)));
+        if !images_same {
+            let images_now: HashMap<NodeId, usize> = images.iter().map(|(n, img)| (*n, img_ptr(img))).collect();
             for (n, p) in &images_now {
                 if incr.images_seen.get(n) != Some(p) {
                     incr.box_dirty.insert(*n);
@@ -519,12 +518,26 @@ impl Engine {
             incr.images_seen = images_now;
             incr.layout_dirty = true;
         }
-        let mut bg_now: Vec<(String, usize)> = background_images.iter().map(|(k, v)| (k.clone(), Arc::as_ptr(v) as *const u8 as usize)).collect();
-        bg_now.sort();
-        if bg_now != incr.bg_seen {
+        let bg_same = background_images.len() == incr.bg_seen.len() && incr.bg_seen.iter().all(|(k, p)| background_images.get(k).is_some_and(|v| img_ptr(v) == *p));
+        if !bg_same {
+            let mut bg_now: Vec<(String, usize)> = background_images.iter().map(|(k, v)| (k.clone(), img_ptr(v))).collect();
+            bg_now.sort();
+            // Background images reach layout only as generated `content:
+            // url()` images; any other use (backgrounds, border images) is
+            // painted from the display list.
+            let changed: HashSet<&str> = bg_now
+                .iter()
+                .filter(|e| incr.bg_seen.binary_search(e).is_err())
+                .chain(incr.bg_seen.iter().filter(|e| bg_now.binary_search(e).is_err()))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            if generated_content_uses(styles, &changed) {
+                incr.layout_full = true;
+                incr.layout_dirty = true;
+            } else {
+                incr.dl_dirty = true;
+            }
             incr.bg_seen = bg_now;
-            incr.layout_full = true;
-            incr.layout_dirty = true;
         }
         if *scroll_offsets != incr.scroll_seen {
             for (n, o) in scroll_offsets.iter() {
@@ -756,6 +769,16 @@ impl Engine {
     }
 }
 
+/// Some generated content (`::before`, `::after`, `::marker`) shows one of
+/// the images `urls` names.
+fn generated_content_uses(styles: &rabbithole_style::StyledTree, urls: &HashSet<&str>) -> bool {
+    use rabbithole_style::{Content, ContentItem};
+    [&styles.before, &styles.after, &styles.marker].into_iter().flatten().flatten().any(|s| match &s.content {
+        Content::Items(items) => items.iter().any(|i| matches!(i, ContentItem::Url(u) if urls.contains(u.as_str()))),
+        _ => false,
+    })
+}
+
 fn se_state_differs(se: &StyleEngine, state: &rabbithole_css::MatchState) -> bool {
     se.state() != state
 }
@@ -817,6 +840,7 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
             dirty.extend(doc.descendants(root).filter(|&d| doc.is_element(d, "slot")));
         }
     };
+    let mut parents_done: HashSet<NodeId> = HashSet::new();
     for m in &log.entries {
         match m {
             Mutation::Attr { node, name, .. } => {
@@ -847,12 +871,15 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
                 let p = boxed(*parent);
                 dirty.insert(p);
                 dirty.insert(*child);
-                // List markers count their `li` siblings; other children
-                // keep their boxes (the parent's box is rebuilt around them).
-                dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li")));
-                if shadow && p == *parent {
-                    // A light child of a host is laid out in its slot.
-                    host_slots(p, dirty);
+                // (What depends on the parent alone, once per parent.)
+                if parents_done.insert(*parent) {
+                    // List markers count their `li` siblings; other children
+                    // keep their boxes (the parent's box is rebuilt around them).
+                    dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li")));
+                    if shadow && p == *parent {
+                        // A light child of a host is laid out in its slot.
+                        host_slots(p, dirty);
+                    }
                 }
                 if shadow && doc.element(*child).is_some() && doc.descendants(*child).any(|d| doc.is_element(d, "slot")) {
                     if let Some(h) = doc.containing_shadow_root(*parent).and_then(|r| doc.shadow_host(r)) {

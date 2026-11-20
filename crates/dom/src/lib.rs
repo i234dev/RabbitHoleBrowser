@@ -168,7 +168,10 @@ pub struct MutationLog {
 
 impl MutationLog {
     /// Beyond this many entries the log degrades to "everything changed".
-    pub const CAP: usize = 20_000;
+    /// (Entries of one parent are handled once past a few, so a list
+    /// re-rendered on every added item stays cheaper to apply than a full
+    /// restyle and relayout of a large page.)
+    pub const CAP: usize = 100_000;
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && !self.overflow
@@ -428,6 +431,18 @@ impl Document {
     fn record(&mut self, m: Mutation) {
         self.epoch += 1;
         if !self.tracking || self.log.overflow {
+            return;
+        }
+        // Changes inside disconnected subtrees render nothing: inserting
+        // such a subtree is logged (and restyles and relays out all of it)
+        // when it is connected. Building one (an `innerHTML` fragment, a
+        // framework's detached tree) must not fill the log.
+        let connected = match &m {
+            Mutation::Children { parent, .. } => self.is_connected(*parent),
+            Mutation::Attr { node, .. } | Mutation::Text { node } => self.is_connected(*node),
+            Mutation::Node { .. } => true,
+        };
+        if !connected {
             return;
         }
         if self.log.entries.len() >= MutationLog::CAP {
@@ -753,6 +768,40 @@ impl Document {
             let target = self.template_content(copy);
             for c in other.children(content) {
                 let cc = self.import_subtree(other, c);
+                self.append_child(target, cc);
+            }
+        }
+        copy
+    }
+
+    /// [`Document::import_subtree`] from a document that is dropped
+    /// afterwards: node data is moved out of `other` instead of copied.
+    pub fn import_subtree_taking(&mut self, other: &mut Document, root: NodeId) -> NodeId {
+        let copy = self.create(NodeData::Comment(String::new()));
+        self.copy_attr_namespaces_from(Some(other), root, copy);
+        self.copy_node_kind(Some(other), root, copy);
+        self.nodes[copy].data = std::mem::replace(&mut other.nodes[root].data, NodeData::Comment(String::new()));
+        if let Some(state) = other.option_states.get(&root).copied() {
+            self.option_states.insert(copy, state);
+        }
+        if let Some(v) = other.control_values.get(&root) {
+            self.control_values.insert(copy, v.clone());
+        }
+        if let Some(&c) = other.checkedness.get(&root) {
+            self.checkedness.insert(copy, c);
+        }
+        let mut cur = other.nodes[root].first_child;
+        while let Some(c) = cur {
+            cur = other.nodes[c].next_sibling;
+            let cc = self.import_subtree_taking(other, c);
+            self.append_child(copy, cc);
+        }
+        if let Some(&content) = other.template_contents.get(&root) {
+            let target = self.template_content(copy);
+            let mut cur = other.nodes[content].first_child;
+            while let Some(c) = cur {
+                cur = other.nodes[c].next_sibling;
+                let cc = self.import_subtree_taking(other, c);
                 self.append_child(target, cc);
             }
         }
