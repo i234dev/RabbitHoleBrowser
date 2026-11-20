@@ -288,3 +288,24 @@ fn caret_position_from_point_finds_text_offsets() {
         const r = document.caretRangeFromPoint(70, 10); eq(r.collapsed, true, 'collapsed'); eq(r.startOffset > 3 && r.startOffset < 12, true, 'inside');
     "#);
 }
+
+#[test]
+fn frames_have_their_own_selection() {
+    let mut engine = Engine::new_bundled_fonts_only();
+    let mut page = load(&mut engine, "<!doctype html><p id=a>Top text</p><iframe id=f srcdoc='<p id=i>Inner text</p>'></iframe>");
+    engine.settle_for_snapshot(&mut page, std::time::Duration::from_millis(500));
+    check(&engine, &mut page, r#"
+        const f = document.getElementById('f');
+        const w = f.contentWindow, d = f.contentDocument;
+        const s = w.getSelection();
+        eq(d.getSelection(), s, 'document and window agree');
+        eq(s === getSelection(), false, 'not the top selection');
+        s.selectAllChildren(d.getElementById('i'));
+        eq(s.toString(), 'Inner text', 'frame selection text');
+        eq(getSelection().rangeCount, 0, 'top selection untouched');
+        eq(document.implementation.createHTMLDocument('x').getSelection(), null, 'no browsing context');
+    "#);
+    // The frame paints its selection.
+    let f = page.rect_of(page.doc.element_by_id("f").unwrap()).unwrap();
+    assert!(count(&engine, &page, HIGHLIGHT, (f.x as u32, f.y as u32, f.w as u32, f.h as u32)) > 50);
+}

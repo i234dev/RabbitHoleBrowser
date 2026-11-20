@@ -671,9 +671,11 @@
   // agent (mouse, keyboard) and painting share it; this object caches the
   // `Range` wrapping it while the document's selection generation is
   // unchanged (Selection API §2).
-  const SEL = { range: null, backward: false, gen: -1 };
-  function syncSel() {
-    const st = N.selectionSync(SEL.gen);
+  // One selection per document with a browsing context (this realm's and
+  // its same-origin frames'): { doc, range, backward, gen }.
+  const selStates = new Set();
+  function syncSel(SEL) {
+    const st = N.selectionSync(SEL.doc, SEL.gen);
     if (st === null) return;
     SEL.gen = st[0];
     if (st.length === 1) { SEL.range = null; SEL.backward = false; return; }
@@ -683,16 +685,16 @@
     hidden(r, S, rs);
     SEL.range = r; SEL.backward = st[3];
   }
-  function selRange() { syncSel(); return SEL.range; }
+  function selRange(SEL) { syncSel(SEL); return SEL.range; }
   // Make `range` (or nothing) the selection's range.
-  function setSel(range, backward) {
-    if (range) { const st = range[S]; SEL.gen = N.selectionSet(st.a, st.b, !!backward); }
-    else SEL.gen = N.selectionSet(null);
+  function setSel(SEL, range, backward) {
+    if (range) { const st = range[S]; SEL.gen = N.selectionSet(SEL.doc, st.a, st.b, !!backward); }
+    else SEL.gen = N.selectionSet(SEL.doc, null);
     SEL.range = range || null; SEL.backward = !!backward;
-    changed();
+    changed(SEL);
   }
-  // In the document, shadow trees included.
-  const inDocument = (node) => node.getRootNode && node.getRootNode({ composed: true }) === document;
+  // In the selection's document, shadow trees included.
+  const inDoc = (SEL, node) => node.getRootNode && node.getRootNode({ composed: true }) === SEL.doc;
   function selCheckOffset(node, offset, method) {
     if (node.nodeType === 10) throw domError(`Failed to execute '${method}' on 'Selection': The node provided is of type 'DocumentType'.`, 'InvalidNodeTypeError');
     if (offset > nodeLength(node)) throw domError(`Failed to execute '${method}' on 'Selection': There is no child at offset ${offset}.`, 'IndexSizeError');
@@ -704,15 +706,15 @@
   function selArgs(args, required, method) {
     if (args.length < required) throw new TypeError(`Failed to execute '${method}' on 'Selection': ${required} argument${required > 1 ? 's' : ''} required, but only ${args.length} present.`);
   }
-  function collapsedRange(node, offset) { const r = document.createRange(); const s = r[S]; s.sc = node; s.so = offset; s.ec = node; s.eo = offset; return r; }
+  function collapsedRange(doc, node, offset) { const r = doc.createRange(); const s = r[S]; s.sc = node; s.so = offset; s.ec = node; s.eo = offset; return r; }
 
   // Caret movement for `modify` over the document's text, in tree order.
   const SKIP_TEXT = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'HEAD', 'TITLE', 'NOSCRIPT']);
-  function textNodes() {
+  function textNodes(doc) {
     const out = [];
-    const root = document.body || document.documentElement;
+    const root = doc.body || doc.documentElement;
     if (!root) return out;
-    const w = document.createTreeWalker(root, 4);
+    const w = doc.createTreeWalker(root, 4);
     let n;
     while ((n = w.nextNode())) {
       let p = n.parentNode, skip = false;
@@ -741,7 +743,7 @@
       const d = g.getComputedStyle ? g.getComputedStyle(e).display : 'block';
       if (d && !d.startsWith('inline') && d !== 'contents') return e;
     }
-    return document.documentElement;
+    return n.ownerDocument.documentElement;
   }
   function movePos(texts, p, forward, granularity) {
     switch (granularity) {
@@ -779,63 +781,63 @@
 
   class Selection {
     constructor() { ILLEGAL(); }
-    get anchorNode() { const r = selRange(); return r ? (SEL.backward ? r.endContainer : r.startContainer) : null; }
-    get anchorOffset() { const r = selRange(); return r ? (SEL.backward ? r.endOffset : r.startOffset) : 0; }
-    get focusNode() { const r = selRange(); return r ? (SEL.backward ? r.startContainer : r.endContainer) : null; }
-    get focusOffset() { const r = selRange(); return r ? (SEL.backward ? r.startOffset : r.endOffset) : 0; }
-    get isCollapsed() { const r = selRange(); return !r || r.collapsed; }
-    get rangeCount() { return selRange() ? 1 : 0; }
-    get type() { const r = selRange(); return !r ? 'None' : r.collapsed ? 'Caret' : 'Range'; }
-    get direction() { const r = selRange(); return !r || r.collapsed ? 'none' : SEL.backward ? 'backward' : 'forward'; }
+    get anchorNode() { const r = selRange(this[S]); return r ? (this[S].backward ? r.endContainer : r.startContainer) : null; }
+    get anchorOffset() { const r = selRange(this[S]); return r ? (this[S].backward ? r.endOffset : r.startOffset) : 0; }
+    get focusNode() { const r = selRange(this[S]); return r ? (this[S].backward ? r.startContainer : r.endContainer) : null; }
+    get focusOffset() { const r = selRange(this[S]); return r ? (this[S].backward ? r.startOffset : r.endOffset) : 0; }
+    get isCollapsed() { const r = selRange(this[S]); return !r || r.collapsed; }
+    get rangeCount() { return selRange(this[S]) ? 1 : 0; }
+    get type() { const r = selRange(this[S]); return !r ? 'None' : r.collapsed ? 'Caret' : 'Range'; }
+    get direction() { const r = selRange(this[S]); return !r || r.collapsed ? 'none' : this[S].backward ? 'backward' : 'forward'; }
     getRangeAt(i) {
       selArgs(arguments, 1, 'getRangeAt');
       i = +i >>> 0;
-      const r = selRange();
+      const r = selRange(this[S]);
       if (i !== 0 || !r) throw domError(`Failed to execute 'getRangeAt' on 'Selection': ${i} is not a valid index.`, 'IndexSizeError');
       return r;
     }
     addRange(range) {
       selArgs(arguments, 1, 'addRange');
       if (!(range instanceof Range)) throw new TypeError("Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'.");
-      if (!inDocument(range.startContainer) || selRange()) return;
-      setSel(range, false);
+      if (!inDoc(this[S], range.startContainer) || selRange(this[S])) return;
+      setSel(this[S], range, false);
     }
     removeRange(range) {
       selArgs(arguments, 1, 'removeRange');
       if (!(range instanceof Range)) throw new TypeError("Failed to execute 'removeRange' on 'Selection': parameter 1 is not of type 'Range'.");
-      if (selRange() !== range) throw domError("Failed to execute 'removeRange' on 'Selection': The given range isn't in document.", 'NotFoundError');
-      setSel(null);
+      if (selRange(this[S]) !== range) throw domError("Failed to execute 'removeRange' on 'Selection': The given range isn't in document.", 'NotFoundError');
+      setSel(this[S], null);
     }
-    removeAllRanges() { if (selRange()) setSel(null); }
+    removeAllRanges() { if (selRange(this[S])) setSel(this[S], null); }
     empty() { this.removeAllRanges(); }
-    getComposedRanges() { const r = selRange(); return r ? [new StaticRange({ startContainer: r.startContainer, startOffset: r.startOffset, endContainer: r.endContainer, endOffset: r.endOffset })] : []; }
+    getComposedRanges() { const r = selRange(this[S]); return r ? [new StaticRange({ startContainer: r.startContainer, startOffset: r.startOffset, endContainer: r.endContainer, endOffset: r.endOffset })] : []; }
     collapse(node, offset = 0) {
       selArgs(arguments, 1, 'collapse');
       if (node === null) { this.removeAllRanges(); return; }
       selNode(node, 'collapse', 1);
       offset = +offset >>> 0;
       selCheckOffset(node, offset, 'collapse');
-      if (!inDocument(node)) return;
-      setSel(collapsedRange(node, offset), false);
+      if (!inDoc(this[S], node)) return;
+      setSel(this[S], collapsedRange(this[S].doc, node, offset), false);
     }
     setPosition(node, offset = 0) { selArgs(arguments, 1, 'setPosition'); if (node === null) { this.removeAllRanges(); return; } this.collapse(node, offset); }
-    collapseToStart() { const r = selRange(); if (!r) throw domError("Failed to execute 'collapseToStart' on 'Selection': there is no selection.", 'InvalidStateError'); setSel(collapsedRange(r.startContainer, r.startOffset), false); }
-    collapseToEnd() { const r = selRange(); if (!r) throw domError("Failed to execute 'collapseToEnd' on 'Selection': there is no selection.", 'InvalidStateError'); setSel(collapsedRange(r.endContainer, r.endOffset), false); }
+    collapseToStart() { const r = selRange(this[S]); if (!r) throw domError("Failed to execute 'collapseToStart' on 'Selection': there is no selection.", 'InvalidStateError'); setSel(this[S], collapsedRange(this[S].doc, r.startContainer, r.startOffset), false); }
+    collapseToEnd() { const r = selRange(this[S]); if (!r) throw domError("Failed to execute 'collapseToEnd' on 'Selection': there is no selection.", 'InvalidStateError'); setSel(this[S], collapsedRange(this[S].doc, r.endContainer, r.endOffset), false); }
     extend(node, offset = 0) {
       selArgs(arguments, 1, 'extend');
       selNode(node, 'extend', 1);
       offset = +offset >>> 0;
-      if (!inDocument(node)) return;
-      const r = selRange();
+      if (!inDoc(this[S], node)) return;
+      const r = selRange(this[S]);
       if (!r) throw domError("Failed to execute 'extend' on 'Selection': This Selection object doesn't have any Ranges.", 'InvalidStateError');
       selCheckOffset(node, offset, 'extend');
       const an = this.anchorNode, ao = this.anchorOffset;
-      const nr = document.createRange(), s = nr[S];
+      const nr = this[S].doc.createRange(), s = nr[S];
       let backward = false;
       if (rootOf(an) !== rootOf(node)) { s.sc = s.ec = node; s.so = s.eo = offset; }
       else if (comparePoints(an, ao, node, offset) <= 0) { s.sc = an; s.so = ao; s.ec = node; s.eo = offset; }
       else { s.sc = node; s.so = offset; s.ec = an; s.eo = ao; backward = true; }
-      setSel(nr, backward);
+      setSel(this[S], nr, backward);
     }
     setBaseAndExtent(an, ao, fn, fo) {
       selArgs(arguments, 4, 'setBaseAndExtent');
@@ -843,23 +845,23 @@
       ao = +ao >>> 0; fo = +fo >>> 0;
       if (ao > nodeLength(an) || fo > nodeLength(fn)) throw domError("Failed to execute 'setBaseAndExtent' on 'Selection': The offset is larger than the node's length.", 'IndexSizeError');
       if (an.nodeType === 10 || fn.nodeType === 10) throw domError("Failed to execute 'setBaseAndExtent' on 'Selection': The node provided is of type 'DocumentType'.", 'InvalidNodeTypeError');
-      if (!inDocument(an) || !inDocument(fn)) return;
-      const nr = document.createRange(), s = nr[S];
+      if (!inDoc(this[S], an) || !inDoc(this[S], fn)) return;
+      const nr = this[S].doc.createRange(), s = nr[S];
       let backward = false;
       // A range cannot span trees: collapsed at the focus then.
       if (rootOf(an) !== rootOf(fn)) { s.sc = s.ec = fn; s.so = s.eo = fo; }
       else if (comparePoints(an, ao, fn, fo) <= 0) { s.sc = an; s.so = ao; s.ec = fn; s.eo = fo; }
       else { s.sc = fn; s.so = fo; s.ec = an; s.eo = ao; backward = true; }
-      setSel(nr, backward);
+      setSel(this[S], nr, backward);
     }
     selectAllChildren(node) {
       selArgs(arguments, 1, 'selectAllChildren');
       selNode(node, 'selectAllChildren', 1);
       if (node.nodeType === 10) throw domError("Failed to execute 'selectAllChildren' on 'Selection': The node provided is of type 'DocumentType'.", 'InvalidNodeTypeError');
-      if (!inDocument(node)) return;
-      const nr = document.createRange(), s = nr[S];
+      if (!inDoc(this[S], node)) return;
+      const nr = this[S].doc.createRange(), s = nr[S];
       s.sc = node; s.so = 0; s.ec = node; s.eo = node.childNodes.length;
-      setSel(nr, false);
+      setSel(this[S], nr, false);
     }
     modify(alter, direction, granularity) {
       alter = String(alter).toLowerCase(); direction = String(direction).toLowerCase(); granularity = String(granularity).toLowerCase();
@@ -867,10 +869,10 @@
       let fwd = direction === 'forward' || direction === 'right' ? true : direction === 'backward' || direction === 'left' ? false : null;
       if (fwd === null) return;
       if (!['character', 'word', 'sentence', 'line', 'paragraph', 'lineboundary', 'sentenceboundary', 'paragraphboundary', 'documentboundary'].includes(granularity)) return;
-      const r = selRange();
+      const r = selRange(this[S]);
       if (!r) return;
       // Nothing to do outside the focused editing host.
-      const host = document.activeElement;
+      const host = this[S].doc.activeElement;
       if (host && host.isContentEditable && !host.contains(this.focusNode)) return;
       // Left and right are visual: in right-to-left text they go backward
       // and forward. Characters and words follow the text's own direction
@@ -889,7 +891,7 @@
         }
         if (rtl) fwd = !fwd;
       }
-      const texts = textNodes();
+      const texts = textNodes(this[S].doc);
       if (!texts.length) return;
       let from;
       if (alter === 'move' && !r.collapsed && granularity === 'character') {
@@ -904,38 +906,47 @@
       if (alter === 'move') this.collapse(texts[to[0]], to[1]);
       else this.extend(texts[to[0]], to[1]);
     }
-    deleteFromDocument() { const r = selRange(); if (r) { r.deleteContents(); changed(); } }
+    deleteFromDocument() { const r = selRange(this[S]); if (r) { r.deleteContents(); changed(this[S]); } }
     containsNode(node, allowPartial = false) {
       selArgs(arguments, 1, 'containsNode');
       selNode(node, 'containsNode', 1);
-      const r = selRange();
-      if (!r || !inDocument(node) || rootOf(node) !== rootOf(r.startContainer)) return false;
+      const r = selRange(this[S]);
+      if (!r || !inDoc(this[S], node) || rootOf(node) !== rootOf(r.startContainer)) return false;
       const len = nodeLength(node);
       if (allowPartial) return comparePoints(r.startContainer, r.startOffset, node, len) <= 0 && comparePoints(r.endContainer, r.endOffset, node, 0) >= 0;
       return comparePoints(r.startContainer, r.startOffset, node, 0) <= 0 && comparePoints(r.endContainer, r.endOffset, node, len) >= 0;
     }
     toString() {
-      const r = selRange();
+      const r = selRange(this[S]);
       if (!r || r.collapsed) return '';
       // As rendered (line breaks, collapsed white space), like innerText.
-      const t = N.selectionText();
+      const t = N.selectionText(this[S].doc);
       return t === null ? r.toString() : t;
     }
   }
   tag(Selection, 'Selection');
   define('Selection', Selection);
-  const selection = Object.create(Selection.prototype);
-  let selChangeQueued = false;
-  function changed() {
-    if (selChangeQueued) return;
-    selChangeQueued = true;
-    setTimeout(() => { selChangeQueued = false; document.dispatchEvent(new Event('selectionchange')); }, 0);
+  function selectionFor(doc) {
+    for (const st of selStates) if (st.doc === doc) return st.obj;
+    const obj = Object.create(Selection.prototype);
+    const st = { doc, range: null, backward: false, gen: -1, obj, queued: false };
+    hidden(obj, S, st);
+    selStates.add(st);
+    return obj;
   }
-  // Range methods that move the selection's own range.
-  rangeMoved = (range) => { if (range === SEL.range) changed(); };
-  method(g.Document, 'getSelection', function () { return this === document ? selection : null; }, true);
+  const selection = selectionFor(document);
+  // selectionchange is queued once per task (Selection API §3).
+  function changed(SEL) {
+    if (SEL.queued) return;
+    SEL.queued = true;
+    setTimeout(() => { SEL.queued = false; SEL.doc.dispatchEvent(new Event('selectionchange')); }, 0);
+  }
+  // Range methods that move a selection's own range.
+  rangeMoved = (range) => { for (const st of selStates) if (range === st.range) changed(st); };
+  // Documents without a browsing context have no selection.
+  method(g.Document, 'getSelection', function () { return this === document ? selection : this.defaultView ? selectionFor(this) : null; }, true);
   hidden(g, 'getSelection', function getSelection() { return selection; });
-  if (g.ShadowRoot) method(g.ShadowRoot, 'getSelection', function () { return selection; }, true);
+  if (g.ShadowRoot) method(g.ShadowRoot, 'getSelection', function () { const d = this.ownerDocument; return d === document ? selection : d.getSelection(); }, true);
 
   // ------------------------------------------- CSS Custom Highlight API
   // Highlight (setlike<AbstractRange>) and CSS.highlights

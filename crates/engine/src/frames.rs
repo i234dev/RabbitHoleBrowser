@@ -717,6 +717,10 @@ impl Engine {
                 self.restyle(p);
                 changed = true;
             }
+            // A selection changed by a script of another realm.
+            if self.sync_selection(p) {
+                changed = true;
+            }
             if changed {
                 c.dirty = true;
                 any = true;
