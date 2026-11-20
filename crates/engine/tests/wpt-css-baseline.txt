@@ -1,5 +1,5 @@
 # WPT reftest baseline: per-directory pass/total, then failing tests.
-dir css/CSS2 5690 6232
+dir css/CSS2 5689 6232
 dir css/compositing 37 60
 dir css/css-align 37 64
 dir css/css-backgrounds 596 718
@@ -11,7 +11,7 @@ dir css/css-conditional 148 172
 dir css/css-contain 302 435
 dir css/css-display 178 223
 dir css/css-flexbox 875 1027
-dir css/css-fonts 252 387
+dir css/css-fonts 257 387
 dir css/css-grid 1388 1763
 dir css/css-images 434 482
 dir css/css-masking 268 384
@@ -24,7 +24,7 @@ dir css/css-text-decor 281 339
 dir css/css-transforms 735 794
 dir css/css-ui 877 962
 dir css/css-values 115 192
-dir css/css-writing-modes 924 1162
+dir css/css-writing-modes 931 1162
 dir css/filter-effects 281 370
 dir css/selectors 201 229
 fail css/CSS2/abspos/abspos-containing-block-initial-004a.xht
@@ -559,6 +559,7 @@ fail css/CSS2/visudet/inline-block-baseline-004.xht
 fail css/CSS2/visudet/inline-block-baseline-005.xht
 fail css/CSS2/visudet/inline-block-baseline-006.xht
 fail css/CSS2/visudet/line-height-205.html
+fail css/CSS2/visudet/line-height-206.html
 fail css/CSS2/visudet/replaced-elements-all-auto.html
 fail css/CSS2/visudet/replaced-elements-max-height-20.html
 fail css/CSS2/visudet/replaced-elements-max-width-40.html
@@ -1219,7 +1220,6 @@ fail css/css-fonts/font-default-04.html
 fail css/css-fonts/font-display/font-display-feature-policy-02.tentative.html
 fail css/css-fonts/font-display/font-display-preload.html
 fail css/css-fonts/font-display/font-display.html
-fail css/css-fonts/font-face-unicode-range-2.html
 fail css/css-fonts/font-face-unicode-range-nbsp.html
 fail css/css-fonts/font-family-name-000.xht
 fail css/css-fonts/font-family-name-001.xht
@@ -1256,12 +1256,9 @@ fail css/css-fonts/font-palette-6.html
 fail css/css-fonts/font-palette-7.html
 fail css/css-fonts/font-palette-8.html
 fail css/css-fonts/font-palette-9.html
-fail css/css-fonts/font-palette-add-2.html
 fail css/css-fonts/font-palette-add.html
 fail css/css-fonts/font-palette-empty-font-family.html
-fail css/css-fonts/font-palette-modify-2.html
 fail css/css-fonts/font-palette-modify.html
-fail css/css-fonts/font-palette-remove-2.html
 fail css/css-fonts/font-palette-remove.html
 fail css/css-fonts/font-size-adjust-012.html
 fail css/css-fonts/font-size-adjust-013.html
@@ -1336,7 +1333,6 @@ fail css/css-fonts/test-synthetic-italic-2.html
 fail css/css-fonts/test-synthetic-italic-3.html
 fail css/css-fonts/variation-sequences.html
 fail css/css-fonts/variations/font-slant-3.html
-fail css/css-fonts/variations/font-weight-metrics.html
 fail css/css-fonts/variations/variable-avar2-rvrn.html
 fail css/css-fonts/variations/variable-avar2-warp.html
 fail css/css-fonts/variations/variable-box-font.html
@@ -3195,13 +3191,6 @@ fail css/css-writing-modes/ortho-htb-alongside-vrl-floats-002.xht
 fail css/css-writing-modes/ortho-htb-alongside-vrl-floats-006.xht
 fail css/css-writing-modes/ortho-htb-alongside-vrl-floats-010.xht
 fail css/css-writing-modes/ortho-htb-alongside-vrl-floats-014.xht
-fail css/css-writing-modes/orthogonal-root-resize-icb-001.html
-fail css/css-writing-modes/orthogonal-root-resize-icb-002.html
-fail css/css-writing-modes/orthogonal-root-resize-icb-003.html
-fail css/css-writing-modes/orthogonal-root-resize-icb-004.html
-fail css/css-writing-modes/orthogonal-root-resize-icb-005.html
-fail css/css-writing-modes/orthogonal-root-resize-icb-006.html
-fail css/css-writing-modes/orthogonal-root-resize-icb-007.html
 fail css/css-writing-modes/overconstrained-rel-pos-rtl-top-bottom-vlr-007.xht
 fail css/css-writing-modes/overconstrained-rel-pos-rtl-top-bottom-vrl-006.xht
 fail css/css-writing-modes/percent-padding-vlr-003.xht
