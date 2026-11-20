@@ -1293,11 +1293,41 @@ impl Heap {
         if self.phase != GcPhase::Marking {
             return true;
         }
+        // Objects taken from the grey stack wait in a short queue before
+        // being scanned: their slot is prefetched when they enter it and
+        // their parts (property storage, boxed kind) half-way through, so
+        // that the scan finds them loaded instead of missing the cache on
+        // each in turn.
+        const QUEUE: usize = 16;
+        const QUEUE_PARTS: usize = 8;
+        let mut queue = [0u32; QUEUE];
         loop {
             {
                 let Heap { objects, marks, grey, weak, ephemerons, .. } = self;
-                while let Some(i) = grey.pop() {
-                    let i = i as usize;
+                let (mut head, mut len) = (0usize, 0usize);
+                loop {
+                    while len < QUEUE {
+                        let Some(j) = grey.pop() else { break };
+                        if marks[j as usize] != GREY {
+                            continue;
+                        }
+                        let slot: *const Option<Object> = &objects[j as usize];
+                        crate::alloc::prefetch(slot);
+                        crate::alloc::prefetch((slot as *const u8).wrapping_add(64));
+                        queue[(head + len) % QUEUE] = j;
+                        len += 1;
+                    }
+                    if len == 0 {
+                        break;
+                    }
+                    if len > QUEUE_PARTS {
+                        if let Some(o) = &objects[queue[(head + QUEUE_PARTS) % QUEUE] as usize] {
+                            o.prefetch_parts();
+                        }
+                    }
+                    let i = queue[head] as usize;
+                    head = (head + 1) % QUEUE;
+                    len -= 1;
                     if marks[i] != GREY {
                         continue;
                     }
@@ -1324,6 +1354,10 @@ impl Heap {
                         marks[i] = BLACK;
                     }
                     if budget.spend(1 + n / 16) {
+                        // The queued objects are still grey: back to the stack.
+                        for k in 0..len {
+                            grey.push(queue[(head + k) % QUEUE]);
+                        }
                         return false;
                     }
                 }
