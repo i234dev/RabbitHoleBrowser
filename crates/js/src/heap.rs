@@ -684,31 +684,6 @@ pub struct RegExpData {
     pub realm: u16,
 }
 
-/// Host data of a platform object that supports indexed properties
-/// (WebIDL legacy platform object with an indexed getter and no indexed
-/// setter, e.g. `DOMTokenList`). Array-index keys are answered by `get`
-/// at every access (live), as read-only, enumerable, configurable own
-/// properties, and cannot be defined, written or deleted; `len` bounds
-/// them for key enumeration. Every other key behaves as on an ordinary
-/// object, so named lookups cost nothing extra.
-pub struct IndexedHost {
-    pub data: Box<dyn Any>,
-    pub get: fn(&dyn Any, u32) -> Option<Value>,
-    pub len: fn(&dyn Any) -> u32,
-}
-
-impl IndexedHost {
-    #[inline]
-    pub fn item(&self, i: u32) -> Option<Value> {
-        (self.get)(&*self.data, i)
-    }
-
-    #[inline]
-    pub fn length(&self) -> u32 {
-        (self.len)(&*self.data)
-    }
-}
-
 /// The internal shape of an object.
 pub enum ObjectKind {
     Ordinary,
@@ -754,8 +729,6 @@ pub enum ObjectKind {
     ForInIterator(Box<ForInState>),
     /// Host-defined (DOM nodes etc.)
     Host(Box<dyn Any>),
-    /// Host-defined with an indexed property getter (see `IndexedHost`).
-    IndexedHost(Box<IndexedHost>),
     /// Reference to a module's top-level binding (an import resolved at
     /// link time). Never exposed to scripts: it lives in import slots and
     /// in namespace getters, and is dereferenced on every read so imports
@@ -819,7 +792,7 @@ impl ObjectKind {
             ObjectKind::StringIterator { .. } => "String Iterator",
             ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
             ObjectKind::ForInIterator(_) => "ForIn Iterator",
-            ObjectKind::Host(_) | ObjectKind::IndexedHost(_) => "Object",
+            ObjectKind::Host(_) => "Object",
             ObjectKind::ModuleBinding { .. } => "ModuleBinding",
             ObjectKind::ModuleNamespace => "Module",
             ObjectKind::Slots(_) => "Object",
@@ -842,11 +815,54 @@ pub struct Object {
     /// [[IsHTMLDDA]] (`document.all`): falsy, `typeof` "undefined", loosely
     /// equal to null and undefined (see [`crate::Realm::make_htmldda`]).
     pub htmldda: bool,
+    /// A host object that supports indexed properties (see
+    /// [`IndexedHostHook`]); only consulted for array-index keys.
+    pub indexed: bool,
+}
+
+/// Indexed property getter for host objects (WebIDL legacy platform
+/// objects with an indexed getter and no indexed setter, e.g.
+/// `DOMTokenList`), installed once by the embedder. For a `Host` object
+/// whose `indexed` flag is set, array-index keys are answered by `get`
+/// at every access (live), as read-only, enumerable, configurable own
+/// properties that cannot be defined, written or deleted; `len` bounds
+/// them for key enumeration. Every other key, and every other object,
+/// takes the ordinary paths.
+#[derive(Clone, Copy)]
+pub struct IndexedHostHook {
+    pub get: fn(&dyn Any, u32) -> Option<Value>,
+    pub len: fn(&dyn Any) -> u32,
+}
+
+static INDEXED_HOST_HOOK: std::sync::OnceLock<IndexedHostHook> = std::sync::OnceLock::new();
+
+/// Install the indexed host hook (the first call wins).
+pub fn set_indexed_host_hook(hook: IndexedHostHook) {
+    let _ = INDEXED_HOST_HOOK.set(hook);
+}
+
+impl Object {
+    /// Item `i` of an indexed host object (None: no such own property).
+    #[cold]
+    pub fn indexed_item(&self, i: u32) -> Option<Value> {
+        match (&self.kind, INDEXED_HOST_HOOK.get()) {
+            (ObjectKind::Host(d), Some(h)) if self.indexed => (h.get)(&**d, i),
+            _ => None,
+        }
+    }
+    /// Number of indexed properties of an indexed host object.
+    #[cold]
+    pub fn indexed_len(&self) -> u32 {
+        match (&self.kind, INDEXED_HOST_HOOK.get()) {
+            (ObjectKind::Host(d), Some(h)) if self.indexed => (h.len)(&**d),
+            _ => 0,
+        }
+    }
 }
 
 impl Object {
     pub fn new(proto: Option<ObjectId>, kind: ObjectKind) -> Object {
-        Object { proto, props: PropertyMap::new(), extensible: true, kind, class_tag: 0, htmldda: false }
+        Object { proto, props: PropertyMap::new(), extensible: true, kind, class_tag: 0, htmldda: false, indexed: false }
     }
     /// `Object.prototype.toString` tag override for host objects.
     pub fn class_name(&self) -> Option<&'static str> {
