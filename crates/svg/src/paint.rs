@@ -210,7 +210,7 @@ impl<'a> Painter<'a> {
         drop((black, white));
         let (fonts, viewport) = (self.fonts, self.viewport);
         let element = |id: &str, m: &rabbithole_gfx::Matrix, w: usize, h: usize| render_element(tree, fonts, viewport, id, m, w, h);
-        let env = FilterEnv { m, bbox, viewport: self.viewport, element: Some(&element) };
+        let env = FilterEnv { m, bbox, viewport: self.viewport, element: Some(&element), fonts: Some(fonts) };
         let out = crate::filter::apply_chain(items, &defs, src, &env, scale);
         FILTER_DEPTH.with(|d| d.set(depth));
         let Some(out) = out else { return };

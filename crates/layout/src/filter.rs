@@ -45,7 +45,7 @@ impl UrlFilters {
         let items = items(ops);
         let um = rabbithole_style::multiply_matrix(*m, [1.0, 0.0, 0.0, 1.0, self.rect.x, self.rect.y]);
         let element = |id: &str, mm: &rabbithole_gfx::Matrix, w: usize, h: usize| self.defs.iter().find_map(|d| d.2.render_element(fonts, id, mm, w, h));
-        let env = rabbithole_svg::filter::FilterEnv { m: um, bbox: Rect::new(0.0, 0.0, self.rect.w, self.rect.h), viewport: self.viewport, element: Some(&element) };
+        let env = rabbithole_svg::filter::FilterEnv { m: um, bbox: Rect::new(0.0, 0.0, self.rect.w, self.rect.h), viewport: self.viewport, element: Some(&element), fonts: Some(fonts) };
         let (w, h) = (src.w, src.h);
         rabbithole_svg::filter::apply_chain(&items, &|id| self.def(id), src, &env, scale).unwrap_or_else(|| Pixels::new(w, h))
     }

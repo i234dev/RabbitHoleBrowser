@@ -885,6 +885,16 @@ pub fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<PathSeg> {
 }
 
 /// Decode a `data:` URL image (base64 or percent-encoded).
+/// The media type and bytes of a `data:` URL.
+pub(crate) fn data_url_bytes(href: &str) -> Option<(String, Vec<u8>)> {
+    let rest = href.strip_prefix("data:")?;
+    let comma = rest.find(',')?;
+    let meta = rest[..comma].to_ascii_lowercase();
+    let data = &rest[comma + 1..];
+    let bytes = if meta.contains(";base64") { base64_decode(data)? } else { percent_decode(data) };
+    Some((meta, bytes))
+}
+
 fn decode_data_url(href: &str) -> Option<Image> {
     let rest = href.strip_prefix("data:")?;
     let comma = rest.find(',')?;

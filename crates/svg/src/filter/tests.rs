@@ -8,7 +8,7 @@ fn doc_filter(markup: &str) -> FilterDef {
 }
 
 fn env(w: f32, h: f32) -> FilterEnv<'static> {
-    FilterEnv { m: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], bbox: Rect::new(10.0, 10.0, w, h), viewport: (100.0, 100.0), element: None }
+    FilterEnv { m: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], bbox: Rect::new(10.0, 10.0, w, h), viewport: (100.0, 100.0), element: None, fonts: None }
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn filter_values_parse() {
 fn empty_filter_renders_nothing_and_missing_refs_are_ignored() {
     let f = doc_filter("<filter id=f></filter>");
     let src = Pixels { w: 4, h: 4, px: vec![[1.0; 4]; 16] };
-    let e = FilterEnv { m: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], bbox: Rect::new(0.0, 0.0, 4.0, 4.0), viewport: (4.0, 4.0), element: None };
+    let e = FilterEnv { m: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], bbox: Rect::new(0.0, 0.0, 4.0, 4.0), viewport: (4.0, 4.0), element: None, fonts: None };
     assert!(f.apply(&src, &e).px.iter().all(|c| c[3] == 0.0));
     let none = |_: &str| None;
     assert!(apply_chain(&[FilterItem::Url("x".into())], &none, src, &e, 1.0).is_none());

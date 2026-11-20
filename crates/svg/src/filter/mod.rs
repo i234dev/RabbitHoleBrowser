@@ -100,6 +100,37 @@ impl PartialEq for ImageRef {
     }
 }
 
+/// An SVG document shown by feImage (compared by identity).
+#[derive(Debug, Clone)]
+pub struct SvgRef(pub Arc<crate::SvgTree>);
+
+impl PartialEq for SvgRef {
+    fn eq(&self, o: &SvgRef) -> bool {
+        Arc::ptr_eq(&self.0, &o.0)
+    }
+}
+
+/// Parse an SVG `data:` URL (with an optional `#fragment`: a `<view>` id
+/// or `svgView(viewBox(…))`).
+fn svg_data_image(href: &str) -> Option<SvgRef> {
+    let (url, frag) = match href.rfind('#') {
+        Some(i) if !href[i..].contains(['<', '>', '\'']) => (&href[..i], Some(&href[i + 1..])),
+        _ => (href, None),
+    };
+    let (meta, bytes) = crate::parse::data_url_bytes(url)?;
+    if !meta.contains("svg") {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let view_box = frag.and_then(|f| f.strip_prefix("svgView(viewBox(")).and_then(|r| r.split(')').next()).map(|v| parse_number_list(&v.replace(',', " ")));
+    let view_id = frag.filter(|f| !f.starts_with("svgView("));
+    let mut tree = crate::SvgTree::parse_view(&text, None, view_id)?;
+    if let Some(v) = view_box.filter(|v| v.len() == 4 && v[2] > 0.0 && v[3] > 0.0) {
+        tree.built.viewbox = Some(crate::units::ViewBox { x: v[0], y: v[1], w: v[2], h: v[3] });
+    }
+    Some(SvgRef(Arc::new(tree)))
+}
+
 /// A light source in user space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LightSpec {
@@ -126,7 +157,7 @@ pub enum PrimKind {
     Convolve { order: (usize, usize), kernel: Vec<f32>, divisor: f32, bias: f32, target: (usize, usize), edge: EdgeMode, preserve_alpha: bool },
     DropShadow { dx: f32, dy: f32, sx: f32, sy: f32, color: [f32; 4] },
     /// `href` (an element id) or a decoded image.
-    Image { href: Option<String>, image: Option<ImageRef>, par: AspectRatio },
+    Image { href: Option<String>, image: Option<ImageRef>, svg: Option<SvgRef>, par: AspectRatio },
     Lighting { surface_scale: f32, kd: f32, specular: Option<(f32, f32)>, color: [f32; 3], light: Option<LightSpec> },
     /// Passes its input through unchanged.
     PassThrough,
@@ -173,6 +204,8 @@ pub struct FilterEnv<'a> {
     /// Renders the element `id` (feImage) in user space mapped by the
     /// given matrix into a buffer of the given size.
     pub element: Option<&'a dyn Fn(&str, &Matrix, usize, usize) -> Option<Pixels>>,
+    /// Fonts for SVG images (feImage).
+    pub fonts: Option<&'a rabbithole_gfx::FontContext>,
 }
 
 fn frac(l: Length) -> f32 {
@@ -380,9 +413,21 @@ impl FilterDef {
                     ops::over(&mut sh, &i, sub);
                     sh
                 }
-                PrimKind::Image { href, image, par } => {
+                PrimKind::Image { href, image, svg, par } => {
                     let mut out = Pixels::new(w, h);
-                    if let Some(img) = image {
+                    if let (Some(svg), Some(fonts)) = (svg, env.fonts) {
+                        let (iw, ih) = match svg.0.intrinsic_size() {
+                            (_, _, Some(vb)) => (vb.w, vb.h),
+                            (Some(a), Some(b), None) => (a, b),
+                            _ => (sub_user.w, sub_user.h),
+                        };
+                        let dest = crate::paint::fit_image(iw, ih, sub_user, *par);
+                        let scale = (sx * sy).sqrt().max(1e-3);
+                        if dest.w > 0.0 && dest.h > 0.0 && dest.w * dest.h * scale * scale < 1.6e7 {
+                            let img = svg.0.rasterize_viewport(fonts, dest.w, dest.h, scale);
+                            draw_image(&mut out, &img, dest, AspectRatio { align: None, slice: false }, &env.m, if par.slice { sub.intersect(&to_irect(transform_rect_bounds(&env.m, sub_user))) } else { sub });
+                        }
+                    } else if let Some(img) = image {
                         draw_image(&mut out, &img.0, sub_user, *par, &env.m, sub);
                     } else if let (Some(id), Some(render)) = (href, env.element) {
                         if let Some(px) = render(id, &env.m, w, h) {
@@ -567,7 +612,11 @@ pub(crate) fn build_filter(doc: &Document, n: NodeId, attr: &dyn Fn(NodeId, &str
         cur = t;
     }
     let first = |name: &str| chain.iter().find_map(|&c| attr(c, name));
-    let len = |name: &str| first(name).and_then(|v| crate::units::parse_length(&v));
+    let font_size = match spec(n).font_size {
+        Some(Length::Px(v)) => v,
+        _ => 16.0,
+    };
+    let len = |name: &str| first(name).and_then(|v| region_length(&v, font_size));
     let units_bbox = first("filterunits").map(|u| !u.trim().eq_ignore_ascii_case("userSpaceOnUse")).unwrap_or(true);
     let prim_bbox = first("primitiveunits").is_some_and(|u| u.trim().eq_ignore_ascii_case("objectBoundingBox"));
     let holder = chain.iter().copied().find(|&c| doc.child_elements(c).next().is_some()).unwrap_or(n);
@@ -749,7 +798,11 @@ pub(crate) fn build_filter(doc: &Document, n: NodeId, attr: &dyn Fn(NodeId, &str
             }
             "fetile" => (PrimKind::Tile, vec![input("in")]),
             "feturbulence" => {
-                let (bx, by) = pair("basefrequency", 0.0);
+                // Negative frequencies are an error: the default (0) is used.
+                let (bx, by) = match pair("basefrequency", 0.0) {
+                    (x, y) if x < 0.0 || y < 0.0 => (0.0, 0.0),
+                    p => p,
+                };
                 let octaves = a("numoctaves").and_then(|v| parse_number(&v)).unwrap_or(1.0);
                 let kind = PrimKind::Turbulence {
                     bx,
@@ -780,9 +833,11 @@ pub(crate) fn build_filter(doc: &Document, n: NodeId, attr: &dyn Fn(NodeId, &str
                 let href = a("href").or_else(|| a("xlink:href")).map(|h| h.trim().to_string()).unwrap_or_default();
                 let par = crate::units::parse_aspect_ratio(a("preserveaspectratio").as_deref());
                 let kind = if let Some(id) = href.strip_prefix('#') {
-                    PrimKind::Image { href: Some(id.to_string()), image: None, par }
+                    PrimKind::Image { href: Some(id.to_string()), image: None, svg: None, par }
+                } else if let Some(svg) = svg_data_image(&href) {
+                    PrimKind::Image { href: None, image: None, svg: Some(svg), par }
                 } else {
-                    PrimKind::Image { href: None, image: decode(&href).map(|i| ImageRef(Arc::new(i))), par }
+                    PrimKind::Image { href: None, image: decode(&href).map(|i| ImageRef(Arc::new(i))), svg: None, par }
                 };
                 (kind, vec![])
             }
@@ -834,6 +889,39 @@ pub(crate) fn build_filter(doc: &Document, n: NodeId, attr: &dyn Fn(NodeId, &str
         });
     }
     FilterDef { units_bbox, prim_bbox, x: len("x"), y: len("y"), width: len("width"), height: len("height"), primitives }
+}
+
+/// A filter region length: `em` against the filter's font size and
+/// simple `calc()` sums (percentages and numbers both count as fractions
+/// of the box in objectBoundingBox units).
+fn region_length(v: &str, font_size: f32) -> Option<Length> {
+    let t = v.trim();
+    let lower = t.to_ascii_lowercase();
+    if let Some(inner) = lower.strip_prefix("calc(").and_then(|r| r.strip_suffix(')')) {
+        let (mut px, mut pct) = (0.0f32, 0.0f32);
+        let mut sign = 1.0;
+        for tok in inner.split_whitespace() {
+            match tok {
+                "+" => sign = 1.0,
+                "-" => sign = -1.0,
+                _ => match region_length(tok, font_size)? {
+                    Length::Px(x) => px += sign * x,
+                    Length::Percent(p) => pct += sign * p,
+                },
+            }
+        }
+        return Some(if pct == 0.0 {
+            Length::Px(px)
+        } else if px == 0.0 {
+            Length::Percent(pct)
+        } else {
+            Length::Px(px + pct / 100.0)
+        });
+    }
+    if let Some(n) = lower.strip_suffix("em").filter(|n| !n.ends_with('r')) {
+        return parse_number(n).map(|x| Length::Px(x * font_size));
+    }
+    crate::units::parse_length(t)
 }
 
 fn convolve_kind(a: &dyn Fn(&str) -> Option<String>) -> PrimKind {

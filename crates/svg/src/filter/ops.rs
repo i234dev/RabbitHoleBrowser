@@ -606,7 +606,7 @@ pub fn convolve(src: &Pixels, r: IRect, edges: IRect, order: (usize, usize), ker
             } else {
                 let a = (acc[3] / divisor + bias).clamp(0.0, 1.0);
                 for k in 0..3 {
-                    o[k] = (acc[k] / divisor + bias * a).clamp(0.0, a);
+                    o[k] = (acc[k] / divisor + bias).clamp(0.0, a);
                 }
                 o[3] = a;
             }
