@@ -1424,7 +1424,7 @@ fn consecutive_floats_add_up_in_a_shrink_to_fit_container() {
     // max-content the items sit side by side, so the inline-block is as
     // wide as all of them and they stay on one line.
     let fx = Fixture::new(
-        "<div style='display:inline-block'><ul style='float:left'><li id=a>a</li><li id=b>b</li><li id=c>c</li></ul></div>\
+        "<div style='display:inline-block'><ul style='float:left'><li id=a></li><li id=b></li><li id=c></li></ul></div>\
          <div style='clear:both;display:inline-block'><p style='float:left'><span id=l1>l</span><span id=r1>r</span><span id=l2>l</span></p></div>",
         "html,body,ul,p{margin:0;padding:0} ul{list-style:none} li{float:left;width:40px;height:10px;margin-right:4px} \
          span{display:block;width:30px;height:10px} #l1,#l2{float:left} #r1{float:right} #l2{clear:left}",
