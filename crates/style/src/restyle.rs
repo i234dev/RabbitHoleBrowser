@@ -1368,17 +1368,22 @@ fn collect_font_faces(author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions
 }
 
 impl StyleEngine {
-    /// Whether any rule styles `::selection`.
-    pub fn has_selection_rules(&self) -> bool {
-        crate::cascade::index_has_pseudo(&self.index, rabbithole_css::PseudoElement::Selection)
+    /// Whether any rule styles the pseudo-element `which`.
+    pub fn has_pseudo_rules(&self, which: rabbithole_css::PseudoElement) -> bool {
+        crate::cascade::index_has_pseudo(&self.index, which)
     }
 
-    /// `::selection` styles of `elements` (originating elements of
-    /// selected text) and their ancestors, from the styles this engine
-    /// computed (`tree`).
+    /// `::selection` styles of `elements` (see [`Self::highlight_styles`]).
     pub fn selection_styles(&self, doc: &Document, opts: &StyleOptions, tree: &StyledTree, elements: &[NodeId]) -> crate::highlight::SelectionStyles {
+        self.highlight_styles(doc, opts, tree, elements, rabbithole_css::PseudoElement::Selection)
+    }
+
+    /// Highlight pseudo-element (`::selection`, `::highlight(name)`)
+    /// styles of `elements` (originating elements of highlighted text) and
+    /// their ancestors, from the styles this engine computed (`tree`).
+    pub fn highlight_styles(&self, doc: &Document, opts: &StyleOptions, tree: &StyledTree, elements: &[NodeId], which: rabbithole_css::PseudoElement) -> crate::highlight::SelectionStyles {
         let mut out = crate::highlight::SelectionStyles::default();
-        if !self.has_selection_rules() {
+        if !self.has_pseudo_rules(which) {
             return out;
         }
         out.any = true;
@@ -1412,7 +1417,7 @@ impl StyleEngine {
                 };
                 let vars = self.vars.get(n).cloned().flatten().unwrap_or_else(|| empty_vars.clone());
                 let root_fs = tree.root_font_size;
-                let own = crate::cascade::highlight_pseudo_style(doc, n, base, &vars, root_fs, &cx, rabbithole_css::PseudoElement::Selection).map(Rc::new);
+                let own = crate::cascade::highlight_pseudo_style(doc, n, base, &vars, root_fs, &cx, which).map(Rc::new);
                 // Inherited computed values pass through elements without rules.
                 let own_or_inherited = own.clone().or(parent_raw);
                 let resolved = crate::highlight::resolve(own.as_deref(), parent_resolved.as_deref());

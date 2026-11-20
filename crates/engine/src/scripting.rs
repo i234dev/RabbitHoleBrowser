@@ -259,6 +259,12 @@ impl HostEnv for EngineEnv<'_> {
             self.page.script.dom_dirty = true;
         }
     }
+    fn caret_position(&mut self, x: f32, y: f32) -> Option<(NodeId, usize)> {
+        self.ensure_layout();
+        let fonts = self.page.fonts.clone();
+        let (sx, sy) = self.page.page_scroll;
+        self.page.position_at(&fonts, x + sx, y + sy).map(|p| (p.node, p.offset))
+    }
     fn selection_text(&mut self) -> Option<String> {
         self.ensure_layout();
         let fonts = self.page.fonts.clone();

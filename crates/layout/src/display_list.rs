@@ -195,6 +195,8 @@ pub struct DisplayList {
     pub fixed_bounds: Vec<Rect>,
     /// The (non-collapsed) document selection this list paints.
     pub selection: Option<rabbithole_dom::SelectionRange>,
+    /// [`rabbithole_dom::Document::custom_highlights_key`] when built.
+    pub highlights_key: u64,
 }
 
 /// Where a sticky box's displacement lives in the list.
@@ -342,11 +344,13 @@ impl DisplayList {
     }
 }
 
-pub fn build(tree: &LayoutTree, ctx: &LayoutContext, selection_styles: Option<&rabbithole_style::highlight::SelectionStyles>) -> DisplayList {
+pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbithole_style::highlight::PaintHighlights>) -> DisplayList {
     let mut list = DisplayList::default();
-    // The selection (nothing to do, and no per-fragment cost, without one).
-    let sel = crate::selection::selection_paint(&tree.root, ctx.doc, ctx.styles, selection_styles);
+    // The selection and custom highlights (nothing to do, and no
+    // per-fragment cost, without them).
+    let sel = crate::selection::highlight_paint(&tree.root, ctx.doc, ctx.styles, highlights);
     list.selection = ctx.doc.selection().filter(|s| !s.is_collapsed());
+    list.highlights_key = ctx.doc.custom_highlights_key();
     let bounds = Rect::new(0.0, 0.0, tree.width, tree.height);
     // Canvas background: the root's background propagates to the viewport,
     // falling back to the body's.
@@ -425,7 +429,7 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, selection_styles: Option<&r
 struct Painter<'l, 't, 'a> {
     list: &'l mut DisplayList,
     /// The selected parts of text fragments (`None`: nothing selected).
-    sel: Option<crate::selection::SelectionPaint<'l>>,
+    sel: Option<crate::selection::HighlightPaint<'l>>,
     ctx: &'l LayoutContext<'a>,
     bounds: Rect,
     root: &'t LayoutBox,
@@ -2071,9 +2075,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             small_caps: *small_caps,
                             oblique: *oblique,
                         };
-                        match self.sel.as_ref().and_then(|s| s.frags.get(&(f as *const Fragment as usize)).copied()) {
+                        match self.sel.as_ref().and_then(|s| s.frags.get(&(f as *const Fragment as usize)).cloned()) {
                             None => self.list.push(item),
-                            Some(range) => self.paint_selected_text(f, item, range, *src, decoration_info),
+                            Some(ranges) => self.paint_highlighted_text(f, item, &ranges, *src, decoration_info),
                         }
                         if decoration_info.any() {
                             self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, true, None);
@@ -2096,65 +2100,124 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
     }
 
-    /// Paint a text fragment whose bytes `range` are selected: the
-    /// highlight background under the selected part, then the text, the
-    /// selected part in the `::selection` colors (CSS Pseudo-Elements 4
-    /// §3.6: highlight overlays over the originating text, backgrounds
-    /// below their text).
-    fn paint_selected_text(&mut self, f: &Fragment, item: DisplayItem, range: (usize, usize), src: Option<NodeId>, decorations: &DecorationInfo) {
-        let DisplayItem::Text { font, size, color, ref text, letter_spacing, word_spacing, ref shadows, .. } = item else {
+    /// Paint a text fragment with highlighted parts (the selection, custom
+    /// highlights): `ranges` are (start byte, end byte, overlay) in
+    /// overlay order. Highlight backgrounds go under the text; each part
+    /// of the text takes the colors of the topmost highlight that sets
+    /// them (CSS Pseudo-Elements 4 §3.6, CSS Custom Highlight API §5).
+    fn paint_highlighted_text(&mut self, f: &Fragment, item: DisplayItem, ranges: &[(usize, usize, usize)], src: Option<NodeId>, decorations: &DecorationInfo) {
+        use rabbithole_style::highlight::HighlightStyle;
+        let DisplayItem::Text { font, size, ref text, letter_spacing, word_spacing, .. } = item else {
             self.list.push(item);
             return;
         };
         let fonts = self.ctx.fonts;
         let x_at = |b: usize| -> f32 {
-            let prefix = &text[..b.min(text.len())];
+            let b = b.min(text.len());
+            if b >= text.len() && b > 0 {
+                return f.rect.w.max(fonts.measure(font, size, text) + letter_spacing * text.chars().count() as f32 + crate::tree::word_spacing_before(text, text.len(), word_spacing));
+            }
+            let prefix = &text[..b];
             if prefix.is_empty() {
                 return 0.0;
             }
             fonts.measure(font, size, prefix) + letter_spacing * prefix.chars().count() as f32 + crate::tree::word_spacing_before(prefix, prefix.len(), word_spacing)
         };
-        let x0 = f.rect.x + x_at(range.0);
-        let x1 = if range.1 >= text.len() { f.rect.right().max(f.rect.x + x_at(range.1)) } else { f.rect.x + x_at(range.1) };
-        let styles = self.sel.as_ref().and_then(|s| s.styles);
         let originating = src.and_then(|t| self.ctx.doc.flat_parent(t).or_else(|| self.ctx.doc.parent(t)));
-        let hs = originating.and_then(|e| styles.and_then(|s| s.get(e)));
-        let (bg, fg, sel_shadows) = match hs {
-            Some(h) => (h.background.unwrap_or(Color::TRANSPARENT), h.text_fill.or(h.color).unwrap_or(color), h.shadows.clone().unwrap_or_else(|| shadows.clone())),
-            None => {
-                let (bg, fg) = rabbithole_style::highlight::default_selection_colors();
-                (bg, fg, shadows.clone())
+        // Resolved colors per overlay: (background, text color, shadows,
+        // decoration); None when the overlay paints nothing here.
+        let defaults = rabbithole_style::highlight::default_selection_colors();
+        let resolve = |oi: usize| -> Option<HighlightStyle> {
+            let o = &self.sel.as_ref()?.overlays[oi];
+            match (originating.and_then(|e| o.styles.and_then(|s| s.get(e))), o.is_selection) {
+                (Some(h), _) => Some(h.clone()),
+                (None, true) => Some(HighlightStyle { background: Some(defaults.0), color: Some(defaults.1), ..Default::default() }),
+                (None, false) => None,
             }
         };
+        let styles: Vec<Option<HighlightStyle>> = ranges.iter().map(|r| resolve(r.2)).collect();
         // Clips extend well past the glyph box (ascenders, italics).
         let pad = f.rect.h.max(size) * 2.0 + 64.0;
         let (top, height) = (f.rect.y - pad, f.rect.h + 2.0 * pad);
-        let left = Rect::new(f.rect.x - pad, top, (x0 - (f.rect.x - pad)).max(0.0), height);
-        let mid = Rect::new(x0, top, (x1 - x0).max(0.0), height);
-        let right = Rect::new(x1, top, (f.rect.right() + pad - x1).max(0.0), height);
-        if !bg.is_transparent() && x1 > x0 {
-            self.list.push(DisplayItem::Rect { rect: Rect::new(x0, f.rect.y, x1 - x0, f.rect.h), color: bg, radius: 0.0 });
-            if decorations.any() {
-                // The originating underlines stay visible over the highlight.
-                self.list.push(DisplayItem::PushClip(mid));
-                self.paint_decorations(f.rect, f.baseline, font, size, (text, letter_spacing, word_spacing), decorations, false, None);
+        let span = |b0: usize, b1: usize| -> (f32, f32) {
+            let x0 = if b0 == 0 { f.rect.x - pad } else { f.rect.x + x_at(b0) };
+            let x1 = if b1 >= text.len() { f.rect.right() + pad } else { f.rect.x + x_at(b1) };
+            (x0, x1)
+        };
+        // Backgrounds, lowest highlight first.
+        for (&(b0, b1, _), st) in ranges.iter().zip(&styles) {
+            let Some(bg) = st.as_ref().and_then(|s| s.background).filter(|c| !c.is_transparent()) else { continue };
+            let (x0, x1) = (f.rect.x + x_at(b0), f.rect.x + x_at(b1));
+            if x1 > x0 {
+                self.list.push(DisplayItem::Rect { rect: Rect::new(x0, f.rect.y, x1 - x0, f.rect.h), color: bg, radius: 0.0 });
+                if decorations.any() {
+                    // The originating underlines stay visible over it.
+                    self.list.push(DisplayItem::PushClip(Rect::new(x0, top, x1 - x0, height)));
+                    self.paint_decorations(f.rect, f.baseline, font, size, (text, letter_spacing, word_spacing), decorations, false, None);
+                    self.list.push(DisplayItem::PopClip);
+                }
+            }
+        }
+        // Text, in parts colored by the topmost highlight that sets a color
+        // or shadows there (None: the originating text).
+        let mut cuts: Vec<usize> = vec![0, text.len()];
+        for &(b0, b1, _) in ranges {
+            cuts.push(b0);
+            cuts.push(b1);
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut parts: Vec<(usize, usize, Option<usize>)> = Vec::new();
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if a >= b {
+                continue;
+            }
+            let top_style = ranges.iter().enumerate().rev().find(|(i, r)| r.0 <= a && b <= r.1 && styles[*i].as_ref().is_some_and(|s| s.color.is_some() || s.text_fill.is_some() || s.shadows.is_some())).map(|(i, _)| i);
+            match parts.last_mut() {
+                Some(last) if last.1 == a && last.2.map(|i| &styles[i]) == top_style.map(|i| &styles[i]) => last.1 = b,
+                _ => parts.push((a, b, top_style)),
+            }
+        }
+        for &(a, b, st) in &parts {
+            let whole = a == 0 && b >= text.len();
+            let piece = match st.and_then(|i| styles[i].as_ref()) {
+                None => item.clone(),
+                Some(h) => match &item {
+                    DisplayItem::Text { x, y, font, size, color, text, letter_spacing, word_spacing, shadows, small_caps, oblique } => DisplayItem::Text {
+                        x: *x,
+                        y: *y,
+                        font: *font,
+                        size: *size,
+                        color: h.text_fill.or(h.color).unwrap_or(*color),
+                        text: text.clone(),
+                        letter_spacing: *letter_spacing,
+                        word_spacing: *word_spacing,
+                        shadows: h.shadows.clone().unwrap_or_else(|| shadows.clone()),
+                        small_caps: *small_caps,
+                        oblique: *oblique,
+                    },
+                    other => other.clone(),
+                },
+            };
+            if whole {
+                self.list.push(piece);
+            } else {
+                let (x0, x1) = span(a, b);
+                self.list.push(DisplayItem::PushClip(Rect::new(x0, top, (x1 - x0).max(0.0), height)));
+                self.list.push(piece);
                 self.list.push(DisplayItem::PopClip);
             }
         }
-        if range.0 > 0 {
-            self.list.push(DisplayItem::PushClip(left));
-            self.list.push(item.clone());
-            self.list.push(DisplayItem::PopClip);
-        }
-        if range.1 < text.len() {
-            self.list.push(DisplayItem::PushClip(right));
-            self.list.push(item.clone());
-            self.list.push(DisplayItem::PopClip);
-        }
-        self.list.push(DisplayItem::PushClip(mid));
-        if let Some((lines, dcolor, style)) = hs.and_then(|h| h.decoration) {
-            // The highlight's own text decorations (simple metrics).
-            let dc = dcolor.unwrap_or(fg);
+        // The highlights' own text decorations (simple metrics).
+        for (&(b0, b1, _), st) in ranges.iter().zip(&styles) {
+            let Some(h) = st else { continue };
+            let Some((lines, dcolor, style)) = h.decoration else { continue };
+            if !lines.any() {
+                continue;
+            }
+            let dc = dcolor.or(h.color).unwrap_or(Color::BLACK);
+            let (x0, x1) = (f.rect.x + x_at(b0), f.rect.x + x_at(b1));
             let m = fonts.metrics(font, size);
             let w = (size / 14.0).max(1.0);
             let mut line = |y: f32| self.list.push(DisplayItem::Line { x0, y0: y, x1, y1: y, width: w, color: dc, style });
@@ -2168,10 +2231,6 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 line(f.baseline - m.ascent * 0.3);
             }
         }
-        if let DisplayItem::Text { x, y, font, size, text, letter_spacing, word_spacing, small_caps, oblique, .. } = item {
-            self.list.push(DisplayItem::Text { x, y, font, size, color: fg, text, letter_spacing, word_spacing, shadows: sel_shadows, small_caps, oblique });
-        }
-        self.list.push(DisplayItem::PopClip);
     }
 
     /// Paint emphasis marks centered over (or under) each character of a

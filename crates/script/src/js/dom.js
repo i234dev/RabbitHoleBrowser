@@ -636,17 +636,25 @@
   define('Range', Range);
   N.registerProto('Range', Range.prototype);
   method(g.Document, 'createRange', function () { const r = Object.create(Range.prototype); hidden(r, S, new RangeState(this)); return r; }, true);
-  method(g.Document, 'caretRangeFromPoint', function (x, y) {
-    const el = this.elementFromPoint(x, y);
+  // The caret position at a viewport point: in the text under it when the
+  // layout has some there, else at the start of the element hit.
+  function caretAt(doc, x, y) {
+    const el = doc.elementFromPoint(x, y);
     if (!el) return null;
-    const r = new Range();
-    r.setStart(el, 0);
+    const p = doc === document && N.caretPositionFromPoint ? N.caretPositionFromPoint(+x, +y) : null;
+    if (p && el.contains(p[0])) return p;
+    return [el, 0];
+  }
+  method(g.Document, 'caretRangeFromPoint', function (x, y) {
+    const p = caretAt(this, x, y);
+    if (!p) return null;
+    const r = this.createRange();
+    r.setStart(p[0], p[1]);
     return r;
   }, true);
   method(g.Document, 'caretPositionFromPoint', function (x, y) {
-    const el = this.elementFromPoint(x, y);
-    if (!el) return null;
-    return makeCaretPosition(el, 0);
+    const p = caretAt(this, x, y);
+    return p ? makeCaretPosition(p[0], p[1]) : null;
   }, true);
   class CaretPosition {
     constructor() { ILLEGAL(); }
@@ -905,6 +913,117 @@
   method(g.Document, 'getSelection', function () { return this === document ? selection : null; }, true);
   hidden(g, 'getSelection', function getSelection() { return selection; });
   if (g.ShadowRoot) method(g.ShadowRoot, 'getSelection', function () { return selection; }, true);
+
+  // ------------------------------------------- CSS Custom Highlight API
+  // Highlight (setlike<AbstractRange>) and CSS.highlights
+  // (maplike<DOMString, Highlight>). Their contents are mirrored to the
+  // document for painting `::highlight()` after each change (batched in a
+  // microtask). The built-in Set / Map methods are captured so pages that
+  // patch their prototypes don't break them.
+  const SetP = { add: Set.prototype.add, del: Set.prototype.delete, has: Set.prototype.has, clear: Set.prototype.clear, values: Set.prototype.values, size: Object.getOwnPropertyDescriptor(Set.prototype, 'size').get };
+  const MapP = { get: Map.prototype.get, set: Map.prototype.set, del: Map.prototype.delete, has: Map.prototype.has, clear: Map.prototype.clear, entries: Map.prototype.entries, keys: Map.prototype.keys, values: Map.prototype.values, size: Object.getOwnPropertyDescriptor(Map.prototype, 'size').get };
+  const HL = Symbol('highlight');
+  let highlightSyncQueued = false;
+  function highlightsChanged() {
+    if (highlightSyncQueued) return;
+    highlightSyncQueued = true;
+    queueMicrotask(() => {
+      highlightSyncQueued = false;
+      const flat = [];
+      for (const [name, h] of MapP.entries.call(highlightRegistry[HL])) {
+        const ranges = [];
+        for (const r of SetP.values.call(h[HL].set)) {
+          const st = r[S];
+          if (st instanceof RangeState) ranges.push(0, st.a, null, st.b, null);
+          else if (st) ranges.push(1, st.sc, st.so, st.ec, st.eo);
+        }
+        flat.push(name, h[HL].priority, ranges.length / 5, ...ranges);
+      }
+      try { N.setHighlights(flat); } catch (e) { /* nodes of other documents */ }
+    });
+  }
+  const HIGHLIGHT_TYPES = ['highlight', 'spelling-error', 'grammar-error'];
+  function checkRange(r, method) {
+    if (!(r instanceof AbstractRange)) throw new TypeError(`Failed to execute '${method}' on 'Highlight': parameter 1 is not of type 'AbstractRange'.`);
+  }
+  // Whether a highlight is in the registry (its changes need painting).
+  function registered(h) { for (const v of MapP.values.call(highlightRegistry[HL])) if (v === h) return true; return false; }
+  class Highlight {
+    constructor(...ranges) {
+      const set = new Set();
+      for (const r of ranges) { checkRange(r, 'constructor'); SetP.add.call(set, r); }
+      hidden(this, HL, { set, priority: 0, type: 'highlight' });
+    }
+    get size() { return SetP.size.call(this[HL].set); }
+    get priority() { return this[HL].priority; }
+    set priority(v) { this[HL].priority = Number(v) | 0; if (registered(this)) highlightsChanged(); }
+    get type() { return this[HL].type; }
+    set type(v) { v = String(v); if (HIGHLIGHT_TYPES.includes(v)) this[HL].type = v; }
+    add(r) { checkRange(r, 'add'); SetP.add.call(this[HL].set, r); if (registered(this)) highlightsChanged(); return this; }
+    delete(r) { const d = SetP.del.call(this[HL].set, r); if (d && registered(this)) highlightsChanged(); return d; }
+    has(r) { return SetP.has.call(this[HL].set, r); }
+    clear() { SetP.clear.call(this[HL].set); if (registered(this)) highlightsChanged(); }
+    forEach(cb, thisArg) {
+      if (typeof cb !== 'function') throw new TypeError("Failed to execute 'forEach' on 'Highlight': The callback provided as parameter 1 is not a function.");
+      for (const v of SetP.values.call(this[HL].set)) cb.call(thisArg, v, v, this);
+    }
+    values() { return SetP.values.call(this[HL].set); }
+    keys() { return SetP.values.call(this[HL].set); }
+    entries() { const it = SetP.values.call(this[HL].set); return { next() { const n = it.next(); return n.done ? n : { value: [n.value, n.value], done: false }; }, [Symbol.iterator]() { return this; } }; }
+  }
+  Object.defineProperty(Highlight.prototype, Symbol.iterator, { value: Highlight.prototype.values, writable: true, configurable: true });
+  tag(Highlight, 'Highlight');
+  define('Highlight', Highlight);
+  class HighlightRegistry {
+    constructor() { ILLEGAL(); }
+    get size() { return MapP.size.call(this[HL]); }
+    get(name) { return MapP.get.call(this[HL], String(name)); }
+    has(name) { return MapP.has.call(this[HL], String(name)); }
+    set(name, h) {
+      if (!(h instanceof Highlight)) throw new TypeError("Failed to execute 'set' on 'HighlightRegistry': parameter 2 is not of type 'Highlight'.");
+      MapP.set.call(this[HL], String(name), h); highlightsChanged(); return this;
+    }
+    delete(name) { const d = MapP.del.call(this[HL], String(name)); if (d) highlightsChanged(); return d; }
+    clear() { MapP.clear.call(this[HL]); highlightsChanged(); }
+    forEach(cb, thisArg) {
+      if (typeof cb !== 'function') throw new TypeError("Failed to execute 'forEach' on 'HighlightRegistry': The callback provided as parameter 1 is not a function.");
+      for (const [k, v] of MapP.entries.call(this[HL])) cb.call(thisArg, v, k, this);
+    }
+    entries() { return MapP.entries.call(this[HL]); }
+    keys() { return MapP.keys.call(this[HL]); }
+    values() { return MapP.values.call(this[HL]); }
+    highlightsFromPoint(x, y, options) {
+      if (arguments.length < 2) throw new TypeError("Failed to execute 'highlightsFromPoint' on 'HighlightRegistry': 2 arguments required.");
+      x = Number(x); y = Number(y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) throw new TypeError("Failed to execute 'highlightsFromPoint' on 'HighlightRegistry': The provided float value is non-finite.");
+      void options;
+      const pos = N.caretPositionFromPoint ? N.caretPositionFromPoint(x, y) : null;
+      if (!pos) return [];
+      const [node, offset] = pos;
+      const len = nodeLength(node);
+      const out = [];
+      for (const h of MapP.values.call(this[HL])) {
+        const ranges = [];
+        for (const r of SetP.values.call(h[HL].set)) {
+          const st = r[S];
+          try {
+            if (rootOf(st.sc) !== rootOf(node)) continue;
+            // The character after the point lies in the range.
+            if (comparePoints(st.sc, st.so, node, offset) <= 0 && comparePoints(node, Math.min(offset + 1, len), st.ec, st.eo) <= 0) ranges.push(r);
+          } catch (e) { /* invalid static range */ }
+        }
+        if (ranges.length) out.push({ highlight: h, ranges });
+      }
+      out.sort((a, b) => b.highlight.priority - a.highlight.priority);
+      return out;
+    }
+  }
+  Object.defineProperty(HighlightRegistry.prototype, Symbol.iterator, { value: HighlightRegistry.prototype.entries, writable: true, configurable: true });
+  tag(HighlightRegistry, 'HighlightRegistry');
+  define('HighlightRegistry', HighlightRegistry);
+  const highlightRegistry = Object.create(HighlightRegistry.prototype);
+  hidden(highlightRegistry, HL, new Map());
+  if (g.CSS) Object.defineProperty(g.CSS, 'highlights', { get() { return highlightRegistry; }, enumerable: true, configurable: true });
 
   // ------------------------------------------------ TreeWalker / NodeIterator
   const SHOW_BIT = (n) => 1 << (n.nodeType - 1);

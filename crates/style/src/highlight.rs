@@ -46,6 +46,15 @@ impl SelectionStyles {
     }
 }
 
+/// Everything highlighted for painting: the selection's `::selection`
+/// styles and the custom highlights (`CSS.highlights`) in painting order
+/// (lowest first), each with its ranges and `::highlight()` styles.
+#[derive(Debug, Clone, Default)]
+pub struct PaintHighlights {
+    pub selection: Option<SelectionStyles>,
+    pub custom: Vec<(Vec<(rabbithole_dom::BoundaryPoint, rabbithole_dom::BoundaryPoint)>, SelectionStyles)>,
+}
+
 /// Default selection colors (the `Highlight` / `HighlightText` system
 /// colors).
 pub fn default_selection_colors() -> (Color, Color) {

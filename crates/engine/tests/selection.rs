@@ -232,3 +232,60 @@ fn selection_pseudo_element_colors_and_inheritance() {
     let z_top = page.rect_of(page.doc.element_by_id("z").unwrap()).unwrap().y as u32;
     assert!(count(&engine, &page, HIGHLIGHT, (0, z_top, 400, 22)) > 100);
 }
+
+#[test]
+fn custom_highlights_api_and_painting() {
+    let mut engine = Engine::new_bundled_fonts_only();
+    let mut page = load(&mut engine, "<!doctype html><style>body{margin:0;font:20px sans-serif}p{margin:0 0 10px}\
+        ::highlight(hot){background-color:rgb(255,0,0);color:rgb(0,0,255)} ::highlight(cold){background-color:rgb(0,255,0)}</style>\
+        <p id=a>Hello brave world</p><p id=b>Second line</p>");
+    let red = (255, 0, 0);
+    let line = (0, 0, 400, 25);
+    check(&engine, &mut page, r#"
+        const t = document.getElementById('a').firstChild;
+        const r = new Range(); r.setStart(t, 6); r.setEnd(t, 11);
+        const h = new Highlight(r);
+        eq(h.size, 1, 'size'); eq(h.has(r), true, 'has'); eq(h.priority, 0, 'priority'); eq(h.type, 'highlight', 'type');
+        h.type = 'spelling-error'; eq(h.type, 'spelling-error', 'type set'); h.type = 'bogus'; eq(h.type, 'spelling-error', 'invalid type ignored'); h.type = 'highlight';
+        let threw = ''; try { h.add({}); } catch (e) { threw = e.name; } eq(threw, 'TypeError', 'add non-range');
+        threw = ''; try { CSS.highlights.set('x', {}); } catch (e) { threw = e.name; } eq(threw, 'TypeError', 'set non-highlight');
+        threw = ''; try { new HighlightRegistry(); } catch (e) { threw = e.name; } eq(threw, 'TypeError', 'registry constructor');
+        eq(CSS.highlights.set('hot', h), CSS.highlights, 'set returns the registry');
+        eq(CSS.highlights.size, 1, 'registry size'); eq(CSS.highlights.get('hot'), h, 'get');
+        eq([...CSS.highlights].map(([k]) => k).join(), 'hot', 'iteration'); eq([...h].length, 1, 'highlight iteration');
+        const seen = []; h.forEach((v, k, s) => seen.push(v === r && k === r && s === h)); eq(seen.join(), 'true', 'forEach');
+        Set.prototype.add = () => { throw new Error('tampered'); };
+        h.add(r); eq(h.size, 1, 'tampered Set prototype is not used');
+        window.r = r; window.h = h; window.t = t;
+    "#);
+    let lit = count(&engine, &page, red, line);
+    assert!(lit > 200, "custom highlight painted: {lit}");
+    // Live ranges: moving the range repaints.
+    check(&engine, &mut page, "r.setEnd(t, 17);");
+    assert!(count(&engine, &page, red, line) > lit + 100);
+    // Priority and order: the later 'cold' highlight paints over 'hot'
+    // unless 'hot' has a higher priority.
+    check(&engine, &mut page, "CSS.highlights.set('cold', new Highlight(r));");
+    assert_eq!(count(&engine, &page, red, line), 0);
+    check(&engine, &mut page, "h.priority = 1;");
+    assert!(count(&engine, &page, red, line) > 200);
+    check(&engine, &mut page, "CSS.highlights.clear();");
+    assert_eq!(count(&engine, &page, red, line), 0);
+    assert_eq!(count(&engine, &page, (0, 255, 0), line), 0);
+    // Static ranges.
+    check(&engine, &mut page, "CSS.highlights.set('hot', new Highlight(new StaticRange({ startContainer: t, startOffset: 0, endContainer: t, endOffset: 5 })));");
+    assert!(count(&engine, &page, red, line) > 200);
+    check(&engine, &mut page, "const hits = CSS.highlights.highlightsFromPoint(10, 10); eq(hits.length, 1, 'highlightsFromPoint'); eq(hits[0].ranges.length, 1, 'hit ranges'); eq(CSS.highlights.highlightsFromPoint(300, 10).length, 0, 'no hit');");
+}
+
+#[test]
+fn caret_position_from_point_finds_text_offsets() {
+    let mut engine = Engine::new_bundled_fonts_only();
+    let mut page = load(&mut engine, PAGE);
+    check(&engine, &mut page, r#"
+        const p = document.caretPositionFromPoint(1, 10);
+        eq(p.offsetNode, document.getElementById('a').firstChild, 'node'); eq(p.offset, 0, 'start');
+        const e = document.caretPositionFromPoint(399, 10); eq(e.offset, 17, 'end of line');
+        const r = document.caretRangeFromPoint(70, 10); eq(r.collapsed, true, 'collapsed'); eq(r.startOffset > 3 && r.startOffset < 12, true, 'inside');
+    "#);
+}

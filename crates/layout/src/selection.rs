@@ -7,7 +7,7 @@
 
 use crate::tree::{Fragment, FragmentKind, LayoutBox};
 use rabbithole_dom::{Document, NodeId};
-use rabbithole_style::highlight::SelectionStyles;
+use rabbithole_style::highlight::{PaintHighlights, SelectionStyles};
 use rabbithole_style::{StyledTree, UserSelect};
 use std::collections::HashMap;
 
@@ -104,28 +104,64 @@ pub fn fragment_sources(root: &LayoutBox, doc: &Document, want: &dyn Fn(NodeId) 
     out
 }
 
-/// The selected part of each text fragment, for painting.
-pub(crate) struct SelectionPaint<'s> {
-    /// Selected byte range of the fragment's text, by fragment address.
-    pub frags: HashMap<usize, (usize, usize)>,
+/// One highlight overlay: the selection or a custom highlight.
+pub(crate) struct Overlay<'s> {
     pub styles: Option<&'s SelectionStyles>,
+    /// The selection: unstyled text gets the default highlight colors.
+    pub is_selection: bool,
 }
 
-/// What the current (non-collapsed) selection covers, if anything.
-pub(crate) fn selection_paint<'s>(root: &LayoutBox, doc: &Document, tree: &StyledTree, styles: Option<&'s SelectionStyles>) -> Option<SelectionPaint<'s>> {
-    let sel = doc.selection().filter(|s| !s.is_collapsed())?;
-    // `user-select: none` text is never shown selected.
-    let selectable = |t: NodeId| doc.parent(t).and_then(|p| tree.get(p)).is_none_or(|s| s.user_select != UserSelect::None);
-    let texts: HashMap<NodeId, (usize, usize)> = doc.text_in_range(sel.start, sel.end).into_iter().filter(|(n, _, _)| selectable(*n)).map(|(n, s, e)| (n, (s, e))).collect();
-    if texts.is_empty() {
+/// The highlighted parts of text fragments, for painting.
+pub(crate) struct HighlightPaint<'s> {
+    /// Overlays in painting order (lowest first; the selection last).
+    pub overlays: Vec<Overlay<'s>>,
+    /// Highlighted byte ranges of each fragment's text (by fragment
+    /// address): (start, end, overlay index), in overlay order.
+    pub frags: HashMap<usize, Vec<(usize, usize, usize)>>,
+}
+
+/// What the selection and the custom highlights cover, if anything.
+pub(crate) fn highlight_paint<'s>(root: &LayoutBox, doc: &Document, tree: &StyledTree, highlights: Option<&'s PaintHighlights>) -> Option<HighlightPaint<'s>> {
+    let sel = doc.selection().filter(|s| !s.is_collapsed());
+    let custom = highlights.map(|h| &h.custom[..]).unwrap_or(&[]);
+    if sel.is_none() && custom.is_empty() {
+        return None;
+    }
+    let mut overlays = Vec::new();
+    // Per overlay: text node -> highlighted UTF-16 ranges.
+    let mut covered: Vec<HashMap<NodeId, Vec<(usize, usize)>>> = Vec::new();
+    let add = |ranges: &mut dyn Iterator<Item = (rabbithole_dom::BoundaryPoint, rabbithole_dom::BoundaryPoint)>, filter: &dyn Fn(NodeId) -> bool| {
+        let mut map: HashMap<NodeId, Vec<(usize, usize)>> = HashMap::new();
+        for (a, b) in ranges {
+            for (n, s, e) in doc.text_in_range(a, b) {
+                if filter(n) {
+                    map.entry(n).or_default().push((s, e));
+                }
+            }
+        }
+        map
+    };
+    for (ranges, styles) in custom {
+        if !styles.any {
+            continue; // no ::highlight() rule: nothing to paint
+        }
+        overlays.push(Overlay { styles: Some(styles), is_selection: false });
+        covered.push(add(&mut ranges.iter().copied(), &|_| true));
+    }
+    if let Some(sel) = sel {
+        // `user-select: none` text is never shown selected.
+        let selectable = |t: NodeId| doc.parent(t).and_then(|p| tree.get(p)).is_none_or(|s| s.user_select != UserSelect::None);
+        overlays.push(Overlay { styles: highlights.and_then(|h| h.selection.as_ref()), is_selection: true });
+        covered.push(add(&mut std::iter::once((sel.start, sel.end)), &selectable));
+    }
+    if covered.iter().all(|m| m.is_empty()) {
         return None;
     }
     let mut per_node: HashMap<NodeId, Vec<&Fragment>> = HashMap::new();
-    collect(root, &|n| texts.contains_key(&n), &mut per_node);
-    let mut frags = HashMap::new();
+    collect(root, &|n| covered.iter().any(|m| m.contains_key(&n)), &mut per_node);
+    let mut frags: HashMap<usize, Vec<(usize, usize, usize)>> = HashMap::new();
     for (node, list) in per_node {
         let Some(data) = doc.text(node) else { continue };
-        let (s, e) = texts[&node];
         let shown: Vec<&str> = list
             .iter()
             .map(|f| match &f.kind {
@@ -134,12 +170,16 @@ pub(crate) fn selection_paint<'s>(root: &LayoutBox, doc: &Document, tree: &Style
             })
             .collect();
         for ((f, text), offs) in list.iter().zip(shown.iter()).zip(align_fragments(data, &shown)) {
-            if let Some(r) = selected_bytes(text, &offs, s as u32, e as u32) {
-                frags.insert(*f as *const Fragment as usize, r);
+            for (oi, map) in covered.iter().enumerate() {
+                for &(s, e) in map.get(&node).map(|v| &v[..]).unwrap_or(&[]) {
+                    if let Some((b0, b1)) = selected_bytes(text, &offs, s as u32, e as u32) {
+                        frags.entry(*f as *const Fragment as usize).or_default().push((b0, b1, oi));
+                    }
+                }
             }
         }
     }
-    Some(SelectionPaint { frags, styles })
+    Some(HighlightPaint { overlays, frags })
 }
 
 /// Byte range of `text` whose characters start inside `[s, e)` of the

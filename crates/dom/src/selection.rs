@@ -53,6 +53,22 @@ impl SelectionRange {
     }
 }
 
+/// A range of a registered custom highlight (CSS Custom Highlight API):
+/// a live `Range`'s boundary point slots, or a `StaticRange`'s points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HighlightRange {
+    Live(usize, usize),
+    Static(BoundaryPoint, BoundaryPoint),
+}
+
+/// A highlight registered in `CSS.highlights`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomHighlight {
+    pub name: String,
+    pub priority: i32,
+    pub ranges: Vec<HighlightRange>,
+}
+
 impl Document {
     /// The selection's range, if the selection is not empty.
     pub fn selection(&self) -> Option<SelectionRange> {
@@ -144,6 +160,53 @@ impl Document {
             self.selection = None;
             self.selection_generation += 1;
         }
+    }
+
+    /// Replace the registered custom highlights (in registration order).
+    pub fn set_custom_highlights(&mut self, highlights: Vec<CustomHighlight>) {
+        self.custom_highlights = highlights;
+    }
+
+    pub fn custom_highlights(&self) -> &[CustomHighlight] {
+        &self.custom_highlights
+    }
+
+    /// The custom highlights' current ranges (valid, non-collapsed, start
+    /// before end), in registration order: (name, priority, ranges).
+    pub fn custom_highlight_ranges(&self) -> Vec<(&str, i32, Vec<(BoundaryPoint, BoundaryPoint)>)> {
+        let valid = |p: BoundaryPoint| p.node < self.nodes.len() && p.offset <= self.node_length(p.node);
+        self.custom_highlights
+            .iter()
+            .map(|h| {
+                let ranges = h
+                    .ranges
+                    .iter()
+                    .filter_map(|r| match *r {
+                        HighlightRange::Live(a, b) => Some((self.live_point(a)?, self.live_point(b)?)),
+                        HighlightRange::Static(a, b) => Some((a, b)),
+                    })
+                    .filter(|&(a, b)| valid(a) && valid(b) && self.tree_root(a.node) == self.tree_root(b.node) && self.compare_points(a, b) == Ordering::Less)
+                    .collect();
+                (h.name.as_str(), h.priority, ranges)
+            })
+            .collect()
+    }
+
+    /// Changes whenever what the custom highlights cover may have changed
+    /// (0 without highlights).
+    pub fn custom_highlights_key(&self) -> u64 {
+        if self.custom_highlights.is_empty() {
+            return 0;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (name, priority, ranges) in self.custom_highlight_ranges() {
+            (name, priority).hash(&mut h);
+            for (a, b) in ranges {
+                (a.node, a.offset, b.node, b.offset).hash(&mut h);
+            }
+        }
+        h.finish() | 1
     }
 
     /// Length of a node for boundary points: UTF-16 length of character

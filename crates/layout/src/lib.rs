@@ -88,10 +88,11 @@ pub fn build_display_list(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList
     display_list::build(tree, ctx, None)
 }
 
-/// [`build_display_list`] with the `::selection` styles of the elements
-/// that own selected text (see `StyleEngine::selection_styles`).
-pub fn build_display_list_with_selection(tree: &LayoutTree, ctx: &LayoutContext, selection_styles: Option<&rabbithole_style::highlight::SelectionStyles>) -> DisplayList {
-    display_list::build(tree, ctx, selection_styles)
+/// [`build_display_list`] with the highlight pseudo-element styles of the
+/// selection and of the custom highlights (see
+/// `StyleEngine::highlight_styles`).
+pub fn build_display_list_with_highlights(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbithole_style::highlight::PaintHighlights>) -> DisplayList {
+    display_list::build(tree, ctx, highlights)
 }
 
 /// Rasterize a display list. `scroll_x/scroll_y` are subtracted from every

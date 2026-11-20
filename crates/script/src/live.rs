@@ -268,6 +268,65 @@ fn selection_text(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult
     }
 }
 
+/// `caretPositionFromPoint(x, y)`: `[textNode, offset]` nearest to a
+/// viewport point, or `null`.
+fn caret_position_from_point(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let x = realm.to_number(arg(args, 0))? as f32;
+    let y = realm.to_number(arg(args, 1))? as f32;
+    match crate::env::with_env(|env| env.caret_position(x, y)) {
+        Some((node, offset)) => {
+            let n = wrap(realm, NodeRef { doc: 0, node });
+            Ok(array(realm, vec![n, Value::Number(offset as f64)]))
+        }
+        None => Ok(Value::Null),
+    }
+}
+
+/// `setHighlights(flat)`: the registered custom highlights for painting,
+/// flattened as `name, priority, count` followed by `count` ranges of five
+/// values: `0, startHandle, _, endHandle, _` for a live `Range` or
+/// `1, startNode, startOffset, endNode, endOffset` for a `StaticRange`.
+fn set_highlights(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    use rabbithole_dom::{CustomHighlight, HighlightRange};
+    let flat = arg(args, 0);
+    let len_v = realm.get_str(flat.clone(), "length")?;
+    let len = realm.to_number(len_v)?.max(0.0) as usize;
+    let mut items = Vec::with_capacity(len);
+    for i in 0..len {
+        items.push(realm.get_str(flat.clone(), &i.to_string())?);
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 <= items.len() {
+        let name = realm.to_rust_string(items[i].clone())?;
+        let priority = realm.to_number(items[i + 1].clone())? as i32;
+        let count = realm.to_number(items[i + 2].clone())? as usize;
+        i += 3;
+        let mut ranges = Vec::new();
+        for _ in 0..count {
+            if i + 5 > items.len() {
+                break;
+            }
+            let kind = realm.to_number(items[i].clone())?;
+            if kind == 0.0 {
+                if let (Ok((_, 0, a, _)), Ok((_, 0, b, _))) = (point(realm, &items[i + 1]), point(realm, &items[i + 3])) {
+                    ranges.push(HighlightRange::Live(a, b));
+                }
+            } else if let (Some(a), Some(b)) = (node_of(realm, &items[i + 1]), node_of(realm, &items[i + 3])) {
+                if a.doc == 0 && b.doc == 0 {
+                    let so = realm.to_number(items[i + 2].clone())? as usize;
+                    let eo = realm.to_number(items[i + 4].clone())? as usize;
+                    ranges.push(HighlightRange::Static(BoundaryPoint { node: a.node, offset: so }, BoundaryPoint { node: b.node, offset: eo }));
+                }
+            }
+            i += 5;
+        }
+        out.push(CustomHighlight { name, priority, ranges });
+    }
+    with_doc(0, |d| d.set_custom_highlights(out));
+    Ok(Value::Undefined)
+}
+
 /// `selectionSetBackward(backward)`: change the selection's direction.
 fn selection_set_backward(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let backward = realm.to_boolean(&arg(args, 0));
@@ -294,4 +353,6 @@ pub(crate) fn install(realm: &mut Realm, natives: rabbithole_js::ObjectId) {
     realm.define_method(natives, "selectionSet", 3, selection_set);
     realm.define_method(natives, "selectionSetBackward", 1, selection_set_backward);
     realm.define_method(natives, "selectionText", 0, selection_text);
+    realm.define_method(natives, "caretPositionFromPoint", 2, caret_position_from_point);
+    realm.define_method(natives, "setHighlights", 1, set_highlights);
 }
