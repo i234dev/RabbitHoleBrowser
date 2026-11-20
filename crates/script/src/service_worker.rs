@@ -147,6 +147,10 @@ struct CacheRecord {
 struct Client {
     execution_ready: bool,
     url: Url,
+    /// "window", "worker" or "sharedworker".
+    kind: &'static str,
+    /// "top-level", "nested" or "none" (workers).
+    frame: &'static str,
     controller: Option<u64>,
     events: Vec<Notice>,
 }
@@ -168,6 +172,14 @@ struct Worker {
     skip_waiting: bool,
     event_result: Option<bool>,
     claim: bool,
+    /// Serialized messages waiting to be dispatched in the worker realm.
+    inbox: Vec<Message>,
+}
+/// A structured clone (and bridged MessagePort ids) crossing realms as JSON.
+struct Message {
+    source_kind: &'static str,
+    source: u64,
+    text: String,
 }
 struct Runtime {
     host: ScriptHost,
@@ -240,7 +252,8 @@ impl Store {
     }
 }
 
-pub(crate) fn new_context(env: &mut dyn HostEnv) -> (Context, Option<ServiceWorkerRegistry>) {
+/// `worker`: `Some(shared)` for dedicated/shared worker realms.
+pub(crate) fn new_context(env: &mut dyn HostEnv, worker: Option<bool>) -> (Context, Option<ServiceWorkerRegistry>) {
     if let Some(scope) = env.service_worker_scope() {
         return (Context { registry: scope.registry, client: None, worker: Some(scope.worker) }, None);
     }
@@ -259,7 +272,13 @@ pub(crate) fn new_context(env: &mut dyn HostEnv) -> (Context, Option<ServiceWork
         let mut s = registry.0.borrow_mut();
         let controller = s.matching(&url).and_then(|id| s.registrations[&id].active).filter(|id| s.workers[id].state == "activated");
         let id = s.id();
-        s.clients.insert(id, Client { execution_ready: true, url, controller, events: Vec::new() });
+        let (kind, frame) = match worker {
+            Some(true) => ("sharedworker", "none"),
+            Some(false) => ("worker", "none"),
+            None if env.frame_parent(env.frame_id()).is_some() => ("window", "nested"),
+            None => ("window", "top-level"),
+        };
+        s.clients.insert(id, Client { execution_ready: true, url, kind, frame, controller, events: Vec::new() });
         id
     };
     (Context { registry: Rc::downgrade(&registry.0), client: Some(id), worker: None }, Some(registry))
@@ -377,7 +396,7 @@ fn snapshot(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
     let registrations = realm.new_array_value(registrations); realm.native_root(registrations.clone());
     let workers = realm.new_array_value(workers); realm.native_root(workers.clone());
     let worker_reg = c.worker.and_then(|id| s.workers.get(&id)).map(|w| w.registration);
-    Ok(object(realm, &[("registrations", registrations), ("workers", workers), ("controller", id_value(controller)), ("ready", id_value(ready)), ("worker", id_value(c.worker)), ("registration", id_value(worker_reg))]))
+    Ok(object(realm, &[("registrations", registrations), ("workers", workers), ("controller", id_value(controller)), ("ready", id_value(ready)), ("worker", id_value(c.worker)), ("client", id_value(c.client)), ("registration", id_value(worker_reg))]))
 }
 fn take_events(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
     let store = registry(realm)?;
@@ -402,6 +421,88 @@ pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
     realm.define_method(n, "swEventDone", 1, event_done);
     realm.define_method(n, "swSkipWaiting", 0, skip_waiting);
     realm.define_method(n, "swClaim", 0, claim);
+    realm.define_method(n, "swPostMessage", 3, post_message);
+    realm.define_method(n, "swClients", 3, list_clients);
+}
+
+/// `N.swPostMessage(kind, id, json)`: queue a serialized message for the
+/// service worker `id` (kind "worker", from any same-origin realm) or for
+/// the client `id` (kind "client", from a service worker realm). Returns
+/// whether it was queued; redundant workers and discarded clients drop it.
+fn post_message(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let kind = arg_str(realm, args, 0)?;
+    let id = realm.to_number(arg(args, 1))? as u64;
+    let text = arg_str(realm, args, 2)?;
+    let c = context();
+    let (source_kind, source) = match (c.worker, c.client) {
+        (Some(w), _) => ("worker", w),
+        (None, Some(client)) => ("client", client),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let origin = with_env(|e| e.document_url().origin());
+    let store = registry(realm)?;
+    let mut s = store.borrow_mut();
+    let queued = match kind.as_str() {
+        "worker" => match s.workers.get_mut(&id) {
+            Some(w) if w.script.origin() == origin && w.state != "redundant" => { w.inbox.push(Message { source_kind, source, text }); true }
+            _ => false,
+        },
+        "client" if source_kind == "worker" => match s.clients.get_mut(&id) {
+            Some(client) if client.url.origin() == origin => {
+                client.events.push(Notice { kind: "message", id: source, value: 0, name: source_kind.into(), message: text });
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    Ok(Value::Bool(queued))
+}
+/// `N.swClients(type, includeUncontrolled, id)` in a service worker realm:
+/// same-origin execution-ready clients as `{id, url, type, frameType}`.
+/// A non-empty `id` selects that client whatever its type or controller.
+fn list_clients(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let ty = arg_str(realm, args, 0)?;
+    let uncontrolled = realm.to_boolean(&arg(args, 1));
+    let wanted = arg_str(realm, args, 2)?;
+    let worker = context().worker.ok_or_else(|| exception(realm, "InvalidStateError", "Not a service worker"))?;
+    let store = registry(realm)?;
+    let rows: Vec<(u64, String, &'static str, &'static str)> = {
+        let s = store.borrow();
+        let origin = s.workers.get(&worker).map(|w| w.script.origin()).unwrap_or_default();
+        s.clients.iter().filter(|(id, c)| {
+            c.execution_ready && c.url.origin() == origin && if wanted.is_empty() {
+                (ty == "all" || ty == c.kind) && (uncontrolled || c.controller == Some(worker))
+            } else { id.to_string() == wanted }
+        }).map(|(&id, c)| (id, c.url.to_string(), c.kind, c.frame)).collect()
+    };
+    let mut out = Vec::new();
+    for (id, url, kind, frame) in rows {
+        out.push(object(realm, &[("id", Value::str(&id.to_string())), ("url", Value::str(&url)), ("type", Value::str(kind)), ("frameType", Value::str(frame))]));
+    }
+    Ok(realm.new_array_value(out))
+}
+/// Dispatch queued messages in a worker realm, one task each.
+fn deliver_messages(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Runtime, env: &mut dyn HostEnv) -> bool {
+    let inbox = match registry.0.borrow_mut().workers.get_mut(&worker) {
+        Some(w) if w.state != "redundant" => std::mem::take(&mut w.inbox),
+        Some(w) => { w.inbox.clear(); return false; }
+        None => return false,
+    };
+    if inbox.is_empty() { return false; }
+    let mut wenv = WorkerEnv { outer: env, doc: &mut runtime.doc, url: runtime.url.clone(), errors: runtime.errors.clone(), service_worker: None };
+    for message in inbox {
+        runtime.host.enter(&mut wenv, |realm| {
+            realm.begin_task();
+            let hook = state().borrow().protos.get("__sw_message").copied();
+            if let Some(hook) = hook {
+                let args = [Value::str(&message.text), Value::str(message.source_kind), Value::Number(message.source as f64)];
+                if let Err(e) = realm.call(Value::Object(hook), Value::Undefined, &args) { crate::host::report_error(realm, &e, "service worker message event"); }
+                realm.run_jobs();
+            }
+        });
+    }
+    true
 }
 
 /// Only controlled window clients are intercepted. Worker-initiated fetches
@@ -770,7 +871,7 @@ fn process_job(registry: &ServiceWorkerRegistry, env: &mut dyn HostEnv, job: Job
     };
     let worker = {
         let mut s = registry.0.borrow_mut(); let id = s.id();
-        s.workers.insert(id, Worker { registration, script: job.script.clone(), source: source.clone(), state: "parsed", skip_waiting: false, event_result: None, claim: false });
+        s.workers.insert(id, Worker { registration, script: job.script.clone(), source: source.clone(), state: "parsed", skip_waiting: false, event_result: None, claim: false, inbox: Vec::new() });
         id
     };
     let mut doc = Document::new();
@@ -868,6 +969,7 @@ fn pump_runtimes(registry: &ServiceWorkerRegistry, env: &mut dyn HostEnv, now: f
 
             ran |= !matches!(runtime.phase, Phase::Active);
             let keep = advance(registry, env, id, &mut runtime, now);
+            ran |= deliver_messages(registry, id, &mut runtime, env);
             pump_fetches(registry, id, &mut runtime, env);
             if keep && (registry.0.borrow().workers[&id].state != "redundant" || fetch_work(&registry.0.borrow(), id)) { registry.0.borrow_mut().runtimes.insert(id, runtime); }
         }
@@ -888,7 +990,7 @@ impl ServiceWorkerRegistry {
         let deadline = std::time::Instant::now().checked_add(timeout).ok_or("Invalid navigation timeout")?;
         let client = {
             let mut s = self.0.borrow_mut(); let id = s.id();
-            s.clients.insert(id, Client { execution_ready: false, url: request.url.clone(), controller: None, events: Vec::new() });
+            s.clients.insert(id, Client { execution_ready: false, url: request.url.clone(), kind: "window", frame: "top-level", controller: None, events: Vec::new() });
             ServiceWorkerClient(Rc::new(ReservedClient { registry: Rc::downgrade(&self.0), id }))
         };
         Ok(Some(ServiceWorkerNavigationHandle { registry: self.clone(), client: Some(client), target: request.url.clone(), request, deadline, pending: None, redirects: 0, complete: false }))
@@ -1032,6 +1134,7 @@ impl ScriptHost {
         let c = context_of(self);
         if !s.jobs.is_empty() || c.client.is_some_and(|id| s.clients.get(&id).is_some_and(|c| !c.events.is_empty())) { return Some(0.0); }
         if s.fetches.values().any(|f| (f.cancelled.get() && !f.abort_notified) || (!f.dispatched && matches!(s.workers[&f.worker].state, "activated" | "redundant")) || f.result.is_some() || f.fallback) { return Some(0.0); }
+        if s.runtimes.keys().any(|id| !s.workers[id].inbox.is_empty()) { return Some(0.0); }
         let mut due: Option<f64> = if s.fetches.values().any(|f| f.network.is_some()) { Some(s.last_poll + 10.0) } else { None };
         for (&id, r) in &s.runtimes {
             let immediate = match r.phase {

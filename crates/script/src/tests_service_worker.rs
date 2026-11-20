@@ -493,3 +493,124 @@ fn storage_manager_rejects_opaque_and_untrustworthy_origins_through_promises() {
         assert_eq!(output,["TypeError:false,TypeError:false"],"{input}");
     }
 }
+
+/// Like `tick`, but the clock keeps moving forward from the current time.
+fn advance(env: &mut MockEnv, host: &mut ScriptHost, turns: usize) {
+    for _ in 0..turns {
+        env.now = env.now.max(1000.0) + 10.0;
+        let now = env.now;
+        host.run_timers(env, now);
+        host.run_jobs(env);
+    }
+}
+
+const ECHO_WORKER: &str = r#"
+    self.addEventListener('install', e => e.waitUntil(skipWaiting()));
+    self.addEventListener('activate', e => e.waitUntil(clients.claim()));
+    self.addEventListener('message', e => {
+        console.log('sw-message', e instanceof ExtendableMessageEvent, e.source instanceof WindowClient, e.source.type, e.source.frameType, e.origin, JSON.stringify(e.data), e.ports.length);
+        if (e.data && e.data.cmd === 'port') { e.ports[0].postMessage({ echo: e.data.value, bytes: e.data.bytes.length }); return; }
+        if (e.data && e.data.cmd === 'reply') {
+            e.waitUntil(clients.matchAll().then(list => {
+                console.log('sw-clients', list.length, list[0].id === e.source.id, list[0].url === e.source.url);
+                for (const c of list) c.postMessage({ hello: c.id === e.source.id }, []);
+            }));
+        }
+        if (e.data && e.data.cmd === 'source') e.source.postMessage('direct');
+    });
+"#;
+
+#[test]
+fn service_worker_messages_reach_worker_realm_and_reply_through_transferred_port() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), ECHO_WORKER.into()));
+    run(&mut env, &mut host, r#"
+        var reply = null;
+        navigator.serviceWorker.register('sw.js').then(r => {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = e => { reply = e.data; console.log('port-reply', JSON.stringify(e.data), e.ports.length); };
+            r.installing.postMessage({ cmd: 'port', value: 'ping', bytes: new Uint8Array([1, 2, 3]) }, [ch.port2]);
+        });
+    "#);
+    advance(&mut env, &mut host, 30);
+    let output = logs(&env);
+    assert!(output.iter().any(|s| s.ends_with(r#"sw-message true true window top-level https://example.test {"cmd":"port","value":"ping","bytes":{"0":1,"1":2,"2":3}} 1"#)), "{output:?}");
+    assert!(output.iter().any(|s| s == r#"port-reply {"echo":"ping","bytes":3} 0"#), "{output:?}");
+}
+
+#[test]
+fn service_worker_client_messages_wait_for_the_client_message_queue() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), ECHO_WORKER.into()));
+    run(&mut env, &mut host, r#"
+        var got = [], changes = 0;
+        navigator.serviceWorker.addEventListener('controllerchange', () => changes++);
+        navigator.serviceWorker.addEventListener('message', e => got.push([JSON.stringify(e.data), e.source === navigator.serviceWorker.controller, e.origin, e instanceof MessageEvent, e.lastEventId].join('|')));
+        navigator.serviceWorker.register('sw.js');
+    "#);
+    advance(&mut env, &mut host, 30);
+    assert_eq!(run(&mut env, &mut host, "console.log(changes, navigator.serviceWorker.controller.state, document.readyState);"), ["1 activated loading"]);
+    run(&mut env, &mut host, "navigator.serviceWorker.controller.postMessage({ cmd: 'reply' });");
+    advance(&mut env, &mut host, 10);
+    assert!(logs(&env).iter().any(|s| s.ends_with("] sw-clients 1 true true")), "{:?}", logs(&env));
+    // The document is still parsing and nothing enabled the queue.
+    assert_eq!(run(&mut env, &mut host, "console.log(got.length);"), ["0"]);
+    run(&mut env, &mut host, "navigator.serviceWorker.startMessages();");
+    advance(&mut env, &mut host, 5);
+    assert_eq!(run(&mut env, &mut host, "console.log(got.join(';'));"), [r#"{"hello":true}|true|https://example.test|true|"#]);
+    // Setting onmessage also starts the queue; e.source.postMessage reaches the same client.
+    run(&mut env, &mut host, "navigator.serviceWorker.onmessage = e => console.log('onmessage', e.data); navigator.serviceWorker.controller.postMessage({ cmd: 'source' });");
+    advance(&mut env, &mut host, 10);
+    assert!(logs(&env).iter().any(|s| s == "onmessage direct"), "{:?}", logs(&env));
+}
+
+#[test]
+fn service_worker_queued_client_messages_flush_at_dom_content_loaded() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), ECHO_WORKER.into()));
+    run(&mut env, &mut host, "var got = []; navigator.serviceWorker.addEventListener('message', e => got.push(e.data.hello)); navigator.serviceWorker.register('sw.js');");
+    advance(&mut env, &mut host, 30);
+    run(&mut env, &mut host, "navigator.serviceWorker.controller.postMessage({ cmd: 'reply' });");
+    advance(&mut env, &mut host, 10);
+    assert_eq!(run(&mut env, &mut host, "console.log(got.length);"), ["0"]);
+    host.document_ready(&mut env);
+    advance(&mut env, &mut host, 5);
+    assert_eq!(run(&mut env, &mut host, "console.log(got.join(','));"), ["true"]);
+}
+
+#[test]
+fn service_worker_messaging_validates_clones_clients_queries_and_redundant_targets() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), r#"
+        self.onmessage = e => {
+            if (e.data === 'query') e.waitUntil((async () => {
+                const controlled = await clients.matchAll();
+                const all = await clients.matchAll({ includeUncontrolled: true, type: 'all' });
+                const workers = await clients.matchAll({ type: 'worker', includeUncontrolled: true });
+                const byId = await clients.get(e.source.id), missing = await clients.get('nope');
+                let bad = 'none';
+                try { await clients.matchAll({ type: 'tab' }); } catch (err) { bad = err.name; }
+                let ctor = 'none';
+                try { new Client(); } catch (err) { ctor = err.name; }
+                const ev = new ExtendableMessageEvent('message', { data: 1, ports: [] });
+                console.log('query', controlled.length, all.length, workers.length, byId instanceof WindowClient, missing, bad, ctor, ev.data, ev.source, Object.isFrozen(ev.ports), typeof clients.openWindow);
+            })());
+        };
+    "#.into()));
+    run(&mut env, &mut host, "var reg; navigator.serviceWorker.register('sw.js').then(r => reg = r);");
+    advance(&mut env, &mut host, 30);
+    let output = run(&mut env, &mut host, r#"
+        try { reg.active.postMessage(() => 1); } catch (e) { console.log('clone', e.name); }
+        try { reg.active.postMessage(); } catch (e) { console.log('arity', e.name); }
+        reg.active.postMessage('query');
+    "#);
+    assert_eq!(output[..2], ["clone DataCloneError", "arity TypeError"]);
+    advance(&mut env, &mut host, 10);
+    assert!(logs(&env).iter().any(|s| s.ends_with("] query 0 1 0 true undefined TypeError TypeError 1 null true function")), "{:?}", logs(&env));
+    // No controller: messaging APIs stay inert rather than throwing.
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.serviceWorker.controller, typeof navigator.serviceWorker.startMessages());"), ["null undefined"]);
+    run(&mut env, &mut host, "var old = reg.active; reg.unregister().then(() => { old.postMessage('query'); console.log('posted', old.state); });");
+    advance(&mut env, &mut host, 10);
+    let output = logs(&env);
+    assert_eq!(output.iter().filter(|s| s.contains("] query ")).count(), 1, "{output:?}");
+}

@@ -510,3 +510,51 @@ fn controlled_html_without_scripts_is_execution_ready_for_later_clients_claim() 
     // miss the claim performed while this script-free document was already live.
     assert_eq!(engine.eval_in_page(&mut plain,"navigator.serviceWorker.controller.scriptURL.endsWith('/app/new.js')"),"true");
 }
+
+#[test]
+fn service_worker_messaging_round_trips_between_real_pages_and_worker_realm() {
+    let index = r#"<!doctype html><script>
+      var changes = 0, reply = null, broadcast = [], controlledAtChange = null;
+      navigator.serviceWorker.addEventListener('controllerchange', () => { changes++; controlledAtChange = navigator.serviceWorker.controller && navigator.serviceWorker.controller.state; });
+      navigator.serviceWorker.onmessage = e => broadcast.push(e.data.to + ':' + (e.source === navigator.serviceWorker.controller));
+      navigator.serviceWorker.register('sw.js');
+      navigator.serviceWorker.ready.then(r => {
+        const ch = new MessageChannel();
+        ch.port1.onmessage = e => reply = e.data;
+        r.active.postMessage({ cmd: 'ask', n: 20 }, { transfer: [ch.port2] });
+      });
+    </script>"#;
+    let other = r#"<!doctype html><script>
+      var broadcast = [];
+      navigator.serviceWorker.addEventListener('message', e => broadcast.push(e.data.to));
+      navigator.serviceWorker.startMessages();
+    </script>"#;
+    let worker = r#"self.addEventListener('activate', e => e.waitUntil(clients.claim()));
+    self.addEventListener('message', e => {
+      if (e.data.cmd === 'ask') { e.ports[0].postMessage({ answer: e.data.n + 22, from: e.source.url.split('/').pop() }); return; }
+      if (e.data.cmd === 'broadcast') e.waitUntil(clients.matchAll({ includeUncontrolled: true }).then(list => {
+        for (const c of list) c.postMessage({ to: c.url.split('/').pop() });
+      }));
+    });"#;
+    let server = Server::new(&[
+        ("/app/index.html", "text/html", index, &[]),
+        ("/app/other.html", "text/html", other, &[]),
+        ("/app/sw.js", "text/javascript", worker, &[]),
+    ]);
+    let mut engine = engine();
+    let vp = Viewport { width: 640.0, height: 480.0 };
+    let mut page = engine.load(&format!("{}/app/index.html", server.origin), vp).unwrap();
+    wait(&engine, &mut page, "reply !== null && changes === 1");
+    assert_eq!(engine.eval_in_page(&mut page, "JSON.stringify(reply) + ' ' + controlledAtChange"), r#"'{"answer":42,"from":"index.html"} activated'"#);
+    let mut second = engine.load(&format!("{}/app/other.html", server.origin), vp).unwrap();
+    assert_eq!(engine.eval_in_page(&mut second, "navigator.serviceWorker.controller !== null"), "true");
+    engine.eval_in_page(&mut page, "navigator.serviceWorker.controller.postMessage({ cmd: 'broadcast' })");
+    let end = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < end {
+        engine.tick(&mut page); engine.tick(&mut second);
+        if engine.eval_in_page(&mut page, "broadcast.length") == "1" && engine.eval_in_page(&mut second, "broadcast.length") == "1" { break; }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(engine.eval_in_page(&mut page, "broadcast.join()"), "'index.html:true'");
+    assert_eq!(engine.eval_in_page(&mut second, "broadcast.join()"), "'other.html'");
+}

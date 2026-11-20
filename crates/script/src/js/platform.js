@@ -648,11 +648,52 @@
   const swWorkerData = (id) => swSnapshot().workers.find(w => w.id === id);
   const swBase = () => g.document ? g.document.baseURI : g.location.href;
   const swError = (name, message) => name === 'TypeError' ? new TypeError(message) : domError(message, name);
+  // Messages between clients and service worker realms are structured
+  // clones serialized to JSON (service_worker.rs routes them). Transferred
+  // MessagePorts are bridged by id: each bridge links a local port to one
+  // peer realm, ('worker', id) or ('client', id), which relays the other end.
+  const swClone = g.__rhClone, swBridges = new Map();
+  let swBridgeNext = 0, swBridgePrefix = null;
+  const swTransferPorts = transfer => {
+    if (transfer === undefined || transfer === null) return [];
+    const list = typeof transfer === 'object' && !(Symbol.iterator in transfer) ? transfer.transfer : transfer;
+    if (list === undefined || list === null) return [];
+    if (typeof list !== 'object' || !(Symbol.iterator in list)) throw new TypeError("The transfer list must be a sequence.");
+    const ports = Array.from(list).filter(t => t instanceof g.MessagePort);
+    if (new Set(ports).size !== ports.length) throw domError('A MessagePort was transferred twice.', 'DataCloneError');
+    return ports;
+  };
+  const swPost = (kind, id, msg) => N.swPostMessage(kind, id, JSON.stringify(msg));
+  function swBridge(port, b, kind, id) {
+    swBridges.set(b, port);
+    port.onmessage = ev => swPost(kind, id, { t: 'port', b, d: swClone.serialize(ev.data), ports: swOutgoing(kind, id, ev.ports) });
+  }
+  function swOutgoing(kind, id, ports) {
+    if (swBridgePrefix === null) { const s = swSnapshot(); swBridgePrefix = s.worker !== null ? `w${s.worker}` : `c${s.client}`; }
+    return Array.from(ports || []).map(p => { const b = `${swBridgePrefix}.${swBridgeNext++}`; swBridge(p, b, kind, id); return b; });
+  }
+  function swIncoming(kind, id, bridges) {
+    return (bridges || []).map(b => { const ch = new g.MessageChannel(); swBridge(ch.port2, b, kind, id); return ch.port1; });
+  }
+  // Serialize before any side effect: DataCloneError leaves ports untouched.
+  function swSend(kind, id, message, transfer) {
+    const ports = swTransferPorts(transfer);
+    const d = swClone.serialize(message);
+    return swPost(kind, id, { t: 'msg', d, ports: swOutgoing(kind, id, ports) });
+  }
+  function swPortMessage(m, kind, id) {
+    const p = swBridges.get(m.b);
+    if (p) p.postMessage(swClone.deserialize(m.d), swIncoming(kind, id, m.ports));
+  }
   class ServiceWorker extends g.EventTarget {
     constructor() { super(); ILLEGAL(); }
     get scriptURL() { const w = swWorkerData(this[S].id); return w ? w.script : ''; }
     get state() { const w = swWorkerData(this[S].id); return w ? w.state : 'redundant'; }
-    postMessage(message) { throw domError('Service worker messaging is not implemented yet.', 'NotSupportedError'); }
+    postMessage(message, transfer = undefined) {
+      if (!arguments.length) throw new TypeError("Failed to execute 'postMessage' on 'ServiceWorker': 1 argument required, but only 0 present.");
+      // A redundant worker cannot be started: the message is dropped after cloning.
+      swSend('worker', this[S].id, message, transfer);
+    }
   }
   tag(ServiceWorker, 'ServiceWorker');
   N.installHandlers(ServiceWorker.prototype, ['statechange', 'error']);
@@ -726,13 +767,36 @@
       });
     }
     getRegistrations() { return Promise.resolve(swSnapshot().registrations.filter(r => r.registered).map(r => swRegistration(r.id))); }
-    startMessages() {}
+    startMessages() { this[S].enabled = true; swFlushMessages(); }
   }
   tag(ServiceWorkerContainer, 'ServiceWorkerContainer');
   N.installHandlers(ServiceWorkerContainer.prototype, ['controllerchange', 'message', 'messageerror']);
+  // Setting onmessage enables the client message queue, like startMessages().
+  const swOnMessage = Object.getOwnPropertyDescriptor(ServiceWorkerContainer.prototype, 'onmessage');
+  Object.defineProperty(ServiceWorkerContainer.prototype, 'onmessage', { get: swOnMessage.get, set(v) { swOnMessage.set.call(this, v); this.startMessages(); }, configurable: true, enumerable: true });
   for (const [n, C] of [['ServiceWorker', ServiceWorker], ['ServiceWorkerRegistration', ServiceWorkerRegistration], ['ServiceWorkerContainer', ServiceWorkerContainer], ['NavigationPreloadManager', NavigationPreloadManager]]) define(n, C);
   let readyResolve;
-  const swContainer = make(ServiceWorkerContainer, { ready: new Promise(resolve => { readyResolve = resolve; }), settled: false });
+  const swContainer = make(ServiceWorkerContainer, { ready: new Promise(resolve => { readyResolve = resolve; }), settled: false, enabled: false, queue: [], scheduled: false });
+  // The client message queue is enabled by startMessages(), by setting
+  // onmessage, or once the document has finished parsing (worker clients
+  // have no document and start enabled).
+  const swMessagesEnabled = () => swContainer[S].enabled || !g.document || g.document.readyState !== 'loading';
+  function swFlushMessages() {
+    const st = swContainer[S];
+    if (st.scheduled || !st.queue.length || !swMessagesEnabled()) return;
+    st.scheduled = true;
+    setTimeout(() => {
+      st.scheduled = false;
+      while (st.queue.length && swMessagesEnabled()) {
+        const { m, source } = st.queue.shift();
+        const worker = swWorker(source), origin = new URL(worker.scriptURL || swBase()).origin;
+        let data;
+        try { data = swClone.deserialize(m.d); } catch (e) { swContainer.dispatchEvent(new g.MessageEvent('messageerror', { origin, source: worker })); continue; }
+        swContainer.dispatchEvent(new g.MessageEvent('message', { data, origin, lastEventId: '', source: worker, ports: Object.freeze(swIncoming('worker', source, m.ports)) }));
+      }
+    }, 0);
+  }
+  if (g.document && typeof g.document.addEventListener === 'function') g.document.addEventListener('DOMContentLoaded', swFlushMessages);
   function swReady() {
     if (swContainer[S].settled) return;
     const id = swSnapshot().ready;
@@ -751,6 +815,13 @@
       } else if (e.kind === 'state') {
         const w = swWorkers.get(e.id); if (w) w.dispatchEvent(new Event('statechange'));
       } else if (e.kind === 'controller') swContainer.dispatchEvent(new Event('controllerchange'));
+      else if (e.kind === 'message') {
+        let m;
+        try { m = JSON.parse(e.message); } catch (_) { continue; }
+        // Port traffic is not gated by the client message queue.
+        if (m.t === 'port') swPortMessage(m, 'worker', e.id);
+        else { swContainer[S].queue.push({ m, source: e.id }); swFlushMessages(); }
+      }
     }
     swReady();
   });
@@ -759,7 +830,7 @@
     for (const task of tasks) task();
   });
   setNav('serviceWorker', swContainer);
-  hidden(g, '__rhSW', { registration: swRegistration, worker: swWorker });
+  hidden(g, '__rhSW', { registration: swRegistration, worker: swWorker, send: swSend, incoming: swIncoming, portMessage: swPortMessage, clone: swClone });
 
   // Cache Storage shares byte records by origin with this Engine's workers.
   const cacheOp = (op, id = 0, key = '', value = '') => N.cacheOperation(op, id, key, value);
