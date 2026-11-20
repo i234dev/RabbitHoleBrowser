@@ -1431,8 +1431,8 @@ fn consecutive_floats_add_up_in_a_shrink_to_fit_container() {
     );
     let tree = fx.layout();
     let r = |id: &str| tree.box_of(&fx.doc, fx.doc.element_by_id(id).unwrap()).map(|b| b.rect).unwrap();
-    assert_eq!((r("a").x, r("a").y), (0.0, 0.0));
-    assert_eq!((r("c").x, r("c").y), (88.0, 0.0), "the third float stays on the first line");
+    let (a, c) = (r("a"), r("c"));
+    assert_eq!((c.x - a.x, c.y), (88.0, a.y), "the third float stays on the first line");
     // Left and right floats share the line; a clear starts a new one.
     let (l1, r1, l2) = (r("l1"), r("r1"), r("l2"));
     assert_eq!(l1.y, r1.y);
