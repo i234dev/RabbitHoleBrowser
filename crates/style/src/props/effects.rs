@@ -55,11 +55,13 @@ pub fn parse_filter_list(comps: &[&[Token]], current: Color, ctx: &LengthContext
                 let parts = args.first()?;
                 let mut lens = Vec::new();
                 let mut col = None;
+                let mut uses_current = false;
                 for p in parts {
                     if let Some(v) = super::px(p, ctx) {
                         lens.push(v);
                     } else if let Some(cc) = color(p, current) {
                         col = Some(cc);
+                        uses_current = p.iter().any(|t| matches!(t, Token::Ident(i) if i.eq_ignore_ascii_case("currentcolor")));
                     } else {
                         return None;
                     }
@@ -67,7 +69,7 @@ pub fn parse_filter_list(comps: &[&[Token]], current: Color, ctx: &LengthContext
                 if lens.len() < 2 || lens.len() > 3 {
                     return None;
                 }
-                FilterOp::DropShadow { x: lens[0], y: lens[1], blur: lens.get(2).copied().unwrap_or(0.0).max(0.0), color: col.unwrap_or(current) }
+                FilterOp::DropShadow { x: lens[0], y: lens[1], blur: lens.get(2).copied().unwrap_or(0.0).max(0.0), color: col.unwrap_or(current), current: col.is_none() || uses_current }
             }
             _ => return None,
         };

@@ -1202,7 +1202,9 @@ pub enum FilterOp {
     HueRotate(f32),
     Invert(f32),
     Opacity(f32),
-    DropShadow { x: f32, y: f32, blur: f32, color: Color },
+    /// `current`: the colour depends on `currentcolor` (it taints SVG
+    /// filters that follow).
+    DropShadow { x: f32, y: f32, blur: f32, color: Color, current: bool },
     /// `url(#id)`: an SVG `<filter>` (the id; empty when the URL has no
     /// fragment).
     Url(String),

@@ -685,7 +685,7 @@ fn filter_identity(op: &FilterOp) -> FilterOp {
         FilterOp::HueRotate(_) => FilterOp::HueRotate(0.0),
         FilterOp::Invert(_) => FilterOp::Invert(0.0),
         FilterOp::Opacity(_) => FilterOp::Opacity(1.0),
-        FilterOp::DropShadow { color, .. } => FilterOp::DropShadow { x: 0.0, y: 0.0, blur: 0.0, color: Color { a: 0, ..*color } },
+        FilterOp::DropShadow { color, current, .. } => FilterOp::DropShadow { x: 0.0, y: 0.0, blur: 0.0, color: Color { a: 0, ..*color }, current: *current },
         FilterOp::Url(id) => FilterOp::Url(id.clone()),
     }
 }
@@ -702,9 +702,9 @@ fn lerp_filter(a: &FilterOp, b: &FilterOp, t: f32) -> Option<FilterOp> {
         (HueRotate(x), HueRotate(y)) => HueRotate(lerp(*x, *y, t)),
         (Invert(x), Invert(y)) => Invert(lerp(*x, *y, t)),
         (Opacity(x), Opacity(y)) => Opacity(lerp(*x, *y, t)),
-        (DropShadow { x: ax, y: ay, blur: ab, color: ac }, DropShadow { x: bx, y: by, blur: bb, color: bc }) => {
+        (DropShadow { x: ax, y: ay, blur: ab, color: ac, current: cur_a }, DropShadow { x: bx, y: by, blur: bb, color: bc, current: cur_b }) => {
             let ch = |p: u8, q: u8| lerp(p as f32, q as f32, t).round().clamp(0.0, 255.0) as u8;
-            DropShadow { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), blur: lerp(*ab, *bb, t), color: Color { r: ch(ac.r, bc.r), g: ch(ac.g, bc.g), b: ch(ac.b, bc.b), a: ch(ac.a, bc.a) } }
+            DropShadow { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), blur: lerp(*ab, *bb, t), color: Color { r: ch(ac.r, bc.r), g: ch(ac.g, bc.g), b: ch(ac.b, bc.b), a: ch(ac.a, bc.a) }, current: *cur_a || *cur_b }
         }
         _ => return None,
     })

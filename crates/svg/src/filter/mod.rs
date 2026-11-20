@@ -240,6 +240,12 @@ impl FilterDef {
     /// Run the filter on `source` (premultiplied sRGB, the buffer's whole
     /// size). The result is sRGB, clipped to the filter region.
     pub fn apply(&self, source: &Pixels, env: &FilterEnv) -> Pixels {
+        self.apply_tainted(source, env, false)
+    }
+
+    /// [`FilterDef::apply`] with a source that may be tainted (an earlier
+    /// `drop-shadow()` used `currentcolor`).
+    pub fn apply_tainted(&self, source: &Pixels, env: &FilterEnv, source_tainted: bool) -> Pixels {
         let (w, h) = (source.w, source.h);
         let buf = IRect::new(0, 0, w as i32, h as i32);
         let Some(region_user) = self.region(env.bbox, env.viewport) else { return Pixels::new(w, h) };
@@ -295,7 +301,7 @@ impl FilterDef {
             }
             .intersect(&region);
             let linear = p.linear;
-            let tainted = p.tainted || ins.iter().any(|i| matches!(i, Ok(k) if results[*k].tainted));
+            let tainted = p.tainted || ins.iter().any(|i| matches!(i, Ok(k) if results[*k].tainted) || source_tainted && matches!(i, Err(Input::SourceGraphic | Input::SourceAlpha)));
             let mut fetch = |i: &Result<usize, Input>| -> (Pixels, IRect) {
                 let (mut px, sub, lin) = match i {
                     Ok(k) => (results[*k].px.clone(), results[*k].sub, results[*k].linear),
@@ -384,7 +390,7 @@ impl FilterDef {
                     ops::tile(&i, s, sub)
                 }
                 PrimKind::Turbulence { bx, by, octaves, seed, stitch, fractal } => turbulence(w, h, sub, &env.m, sub_user, (*bx, *by), *octaves, *seed, *stitch, *fractal),
-                PrimKind::Displacement { .. } if matches!(input(1), Ok(k) if results[k].tainted) => {
+                PrimKind::Displacement { .. } if matches!(input(1), Ok(k) if results[k].tainted) || source_tainted && matches!(input(1), Err(Input::SourceGraphic | Input::SourceAlpha)) => {
                     // A tainted displacement map is not used.
                     fetch(&input(0)).0
                 }
@@ -992,10 +998,14 @@ pub fn apply_chain(items: &[FilterItem], defs: &dyn Fn(&str) -> Option<Arc<Filte
         }
     }
     let mut cur = source;
+    let mut tainted = false;
     for s in stages {
         match s {
-            Ok(op) => css::apply(&mut cur, std::slice::from_ref(op), scale),
-            Err(def) => cur = def.apply(&cur, env),
+            Ok(op) => {
+                tainted |= matches!(op, rabbithole_style::FilterOp::DropShadow { current: true, .. });
+                css::apply(&mut cur, std::slice::from_ref(op), scale)
+            }
+            Err(def) => cur = def.apply_tainted(&cur, env, tainted),
         }
     }
     Some(cur)

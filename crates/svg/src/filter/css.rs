@@ -145,7 +145,7 @@ pub fn apply(p: &mut Pixels, ops: &[FilterOp], scale: f32) {
                 color_matrix(p, &m, 0.0);
             }
             FilterOp::Url(_) => {}
-            FilterOp::DropShadow { x, y, blur: b, color } => {
+            FilterOp::DropShadow { x, y, blur: b, color, .. } => {
                 let (w, h) = (p.w, p.h);
                 let (ox, oy) = ((x * scale).round() as i64, (y * scale).round() as i64);
                 let ca = color.a as f32 / 255.0;

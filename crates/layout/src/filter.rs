@@ -63,7 +63,7 @@ fn items(ops: &[FilterOp]) -> Vec<FilterItem> {
 /// Resolve the `url()` entries of a box's filter list: `None` without
 /// any, `Some(None)` when one does not name a `<filter>` element (the
 /// whole list is then ignored).
-pub(crate) fn resolve_urls(b: &crate::tree::LayoutBox, ops: &[FilterOp], ctx: &crate::LayoutContext) -> Option<Option<Arc<UrlFilters>>> {
+pub(crate) fn resolve_urls(b: &crate::tree::LayoutBox, ops: &[FilterOp], ctx: &crate::LayoutContext, items: &[crate::display_list::DisplayItem]) -> Option<Option<Arc<UrlFilters>>> {
     if !ops.iter().any(|o| matches!(o, FilterOp::Url(_))) {
         return None;
     }
@@ -98,6 +98,42 @@ pub(crate) fn resolve_urls(b: &crate::tree::LayoutBox, ops: &[FilterOp], ctx: &c
             None => return Some(None),
         }
     }
-    let rect = b.rect;
+    let rect = match transformed_extent(items) {
+        Some(x) => b.rect.union(&x),
+        None => b.rect,
+    };
     Some(Some(Arc::new(UrlFilters { defs, rect, viewport: (ctx.viewport_width, ctx.viewport_height) })))
+}
+
+/// Bounds (layout coordinates) of the transformed descendants among
+/// `items`: with them, a box's filter reference box covers its
+/// transformed content as well.
+pub(crate) fn transformed_extent(items: &[crate::display_list::DisplayItem]) -> Option<Rect> {
+    use crate::display_list::DisplayItem as D;
+    let mut stack: Vec<rabbithole_gfx::Matrix> = Vec::new();
+    let mut out: Option<Rect> = None;
+    for it in items {
+        match it {
+            D::PushTransform(m) => {
+                let top = stack.last().copied().unwrap_or(rabbithole_gfx::IDENTITY);
+                stack.push(rabbithole_style::multiply_matrix(top, *m));
+            }
+            D::PopTransform => {
+                stack.pop();
+            }
+            _ => {
+                let Some(&top) = stack.last() else { continue };
+                let b = match it {
+                    D::Filtered { bounds, .. } | D::Isolated { bounds, .. } | D::Blended { bounds, .. } => Some(*bounds),
+                    D::Text { .. } => None,
+                    other => crate::damage::item_bounds(other),
+                };
+                if let Some(b) = b {
+                    let r = rabbithole_gfx::path::transform_rect_bounds(&top, b);
+                    out = Some(out.map_or(r, |o| o.union(&r)));
+                }
+            }
+        }
+    }
+    out
 }

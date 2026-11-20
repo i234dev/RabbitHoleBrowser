@@ -804,7 +804,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // `filter`: the painted items move into a filtered group (not
         // around sticky descendants, whose items are patched in place).
         // A `url()` that names no `<filter>` disables the whole list.
-        let url_filters = crate::filter::resolve_urls(root, &root.style.filters, self.ctx);
+        let url_filters = crate::filter::resolve_urls(root, &root.style.filters, self.ctx, &self.list.items[filter_start.0..]);
         if !root.style.filters.is_empty() && self.list.sticky.len() == filter_start.1 && !matches!(url_filters, Some(None)) {
             let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
             let e = crate::filter::spread(&root.style.filters);
