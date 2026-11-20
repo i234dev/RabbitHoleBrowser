@@ -1758,7 +1758,7 @@ impl<'a> Layouter<'a> {
     /// contribute at the corresponding parent lines (Grid2 §12.1).
     #[allow(clippy::too_many_arguments)]
     fn projected_columns(&mut self,b:&mut LayoutBox,items:&[GridItem],cols:&TrackList,rows:Option<&TrackList>,col_gap:f32,row_gap:f32,cbw:f32,geometry:GridGeometry,phase:MeasurePhase)->Vec<Contribution> {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         let style=b.style.clone();
         let mut out=Vec::new();
         for it in items {
@@ -1833,7 +1833,7 @@ impl<'a> Layouter<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn projected_rows(&mut self,b:&mut LayoutBox,items:&[GridItem],rows:&TrackList,cols:&TrackList,col_pos:&[f32],col_gap:f32,row_gap:f32,cbw:f32,cbh:Option<f32>,phase:MeasurePhase)->Vec<Contribution> {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         let align=b.style.align_content;
         let ordinary:Vec<GridItem>=items.iter().copied().filter(|it|!subgrid::requests(&b.children[it.idx]).1).collect();
         let mut out=self.row_contributions(b,&ordinary,cols,col_pos,col_gap,cbw,rows,row_gap);
@@ -1865,7 +1865,7 @@ impl<'a> Layouter<'a> {
     /// Row contributions: the item's height when laid out at its column width.
     #[allow(clippy::too_many_arguments)]
     fn row_contributions(&mut self, b: &mut LayoutBox, items: &[GridItem], cols: &TrackList, col_pos: &[f32], col_gap: f32, cbw: f32, rows: &TrackList, row_gap: f32) -> Vec<Contribution> {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         let mut out = Vec::with_capacity(items.len());
         // (contribution, row, baseline offset) of baseline-aligned items.
         let mut baselines: Vec<(usize, i32, f32)> = Vec::new();
@@ -2071,7 +2071,7 @@ impl<'a> Layouter<'a> {
 
     /// Intrinsic (min-content, max-content) widths of a grid container.
     pub(crate) fn grid_intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         if b.style.grid_lanes || subgrid::inherits_stacking(b) {
             return self.grid_lanes_intrinsic(b);
         }

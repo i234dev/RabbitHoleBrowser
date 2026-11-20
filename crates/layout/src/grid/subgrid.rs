@@ -558,7 +558,7 @@ impl<'a> Layouter<'a> {
     /// The caller has supplied only placement geometry for that axis. Its
     /// descendants, rather than the subgrid's preferred size, size the parent.
     pub(super) fn subgrid_axis_contributions(&mut self,b:&mut LayoutBox,rows:bool,inline_size:Option<f32>,phase:MeasurePhase)->Vec<Contribution> {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         let _depth=self.grid_work.enter(b.children.len().saturating_add(1));
         if b.wm_wrapper {
             let reverse=if rows {b.wm_kind==WmKind::Ccw} else {b.wm_kind==WmKind::Cw};

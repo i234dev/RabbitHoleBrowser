@@ -40,7 +40,7 @@ pub(super) fn supports_ordinary_item(mut child:&LayoutBox)->bool {
 impl<'a> Layouter<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn measure_ordinary_item(&mut self,child:&mut LayoutBox,item:&GridItem,axis:GridAxis,kind:OperationKind,space:ItemSpace,old_reference:f32)->OrdinaryItemMeasurement {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         assert!(supports_ordinary_item(child),"Grid ordinary adapter requires a supported non-inherited item");
         self.grid_work.charge(1);
         let (start,end)=match axis {GridAxis::Columns=>item.area.col,GridAxis::Rows=>item.area.row};

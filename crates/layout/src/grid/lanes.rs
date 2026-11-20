@@ -483,7 +483,7 @@ impl<'a> Layouter<'a> {
 
     /// Outer height of a row-lane item laid out `inner_w` wide.
     fn lane_item_height(&mut self, child: &mut LayoutBox, it: &LaneItem, inner_w: f32, cbw: f32) -> f32 {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         let bb = child.style.box_sizing == BoxSizing::BorderBox;
         let mv = it.edges.margin_sum(Axis::Column);
         if let Some(h) = resolve_size(child.style.height, None, bb, it.edges.pb_v) {
@@ -500,7 +500,7 @@ impl<'a> Layouter<'a> {
     /// inline contribution. Unresolved row tracks wait for the row pass.
     #[allow(clippy::too_many_arguments)]
     fn row_lane_widths(&mut self,b:&mut LayoutBox,tl:&TrackList,items:&[LaneItem],row_gap:f32,row_available:Option<f32>,cbw:f32,available:Option<f32>,phase:MeasurePhase)->Vec<f32> {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         let align=b.style.align_content;
         items.iter().map(|it| {
             let child=&mut b.children[it.idx];
@@ -523,7 +523,7 @@ impl<'a> Layouter<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn lane_row_contributions(&mut self,b:&mut LayoutBox,tl:&TrackList,items:&[LaneItem],widths:&[f32],gap:f32,row_available:Option<f32>,cbw:f32,phase:MeasurePhase)->Vec<Contribution> {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         let align=b.style.align_content;
         let mut contribs = Vec::new();
         for (it, &w) in items.iter().zip(widths) {
@@ -804,7 +804,7 @@ impl<'a> Layouter<'a> {
 
     /// Intrinsic (min-content, max-content) widths of a grid lanes container.
     pub(crate) fn grid_lanes_intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
-        let _probe = self.grid_publication.probe();
+        let _probe = self.grid_publication.probe_grid();
         let style = b.style.clone();
         if let Some(axis)=subgrid::shared(b,false) {
             let width=(axis.extent()-axis.inset_start-axis.inset_end).max(0.);

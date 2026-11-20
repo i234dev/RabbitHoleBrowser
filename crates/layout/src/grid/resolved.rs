@@ -5,18 +5,34 @@ use crate::tree::LayoutBox;
 use super::{GridSpace, TrackList, subgrid};
 
 #[derive(Default)]
-pub(crate) struct Publication { depth: Option<Rc<Cell<usize>>> }
-pub(crate) struct Probe { depth: Rc<Cell<usize>> }
+pub(crate) struct Publication { depth: Option<Rc<Cell<usize>>>, grid_depth: Option<Rc<Cell<usize>>> }
+pub(crate) struct Probe { depth: Rc<Cell<usize>>, grid: Option<Rc<Cell<usize>>> }
 impl Publication {
     pub(crate) fn enabled(&self) -> bool { self.depth.as_ref().is_none_or(|d| d.get() == 0) }
+    /// A grid container is measuring its items (layouts made now depend on
+    /// grid sizing state that layout caches do not record).
+    pub(crate) fn in_grid_probe(&self) -> bool { self.grid_depth.as_ref().is_some_and(|d| d.get() != 0) }
     pub(crate) fn probe(&mut self) -> Probe {
         let depth = self.depth.get_or_insert_with(|| Rc::new(Cell::new(0)));
         let previous = depth.get();
         depth.set(previous.checked_add(1).expect("Grid probe depth overflow"));
-        Probe { depth: depth.clone() }
+        Probe { depth: depth.clone(), grid: None }
+    }
+    /// [`Publication::probe`] opened by grid layout itself.
+    pub(crate) fn probe_grid(&mut self) -> Probe {
+        let mut p = self.probe();
+        let g = self.grid_depth.get_or_insert_with(|| Rc::new(Cell::new(0)));
+        g.set(g.get() + 1);
+        p.grid = Some(g.clone());
+        p
     }
 }
-impl Drop for Probe { fn drop(&mut self) { self.depth.set(self.depth.get()-1); } }
+impl Drop for Probe {
+    fn drop(&mut self) {
+        self.depth.set(self.depth.get()-1);
+        if let Some(g) = &self.grid { g.set(g.get() - 1); }
+    }
+}
 
 pub(super) fn capture(node: &LayoutBox, rows: bool, list: &TrackList, space: GridSpace, budget: &mut subgrid::WorkBudget) -> Option<Rc<UsedGridTrackList>> {
     if space == GridSpace::LegacyIndefinite { return None; }

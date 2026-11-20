@@ -890,7 +890,7 @@ impl<'a> Layouter<'a> {
                 .then_some(h)
             });
             b.layout_cache = cacheable.then(|| crate::incremental::LayoutCache {
-                grid_publication: self.grid_publication.enabled() || self.grid_layouts == grid_layouts,
+                grid_publication: self.grid_publication.enabled() || (self.grid_layouts == grid_layouts && !self.grid_publication.in_grid_probe()),
                 inner_w: inner_cb.width,
                 inner_h: inner_cb.height,
                 top_collapsible,
