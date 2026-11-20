@@ -793,6 +793,7 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
             dirty.extend(doc.descendants(root).filter(|&d| doc.is_element(d, "slot")));
         }
     };
+    let mut parents_done: HashSet<NodeId> = HashSet::new();
     for m in &log.entries {
         match m {
             Mutation::Attr { node, name, .. } => {
@@ -823,12 +824,15 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
                 let p = boxed(*parent);
                 dirty.insert(p);
                 dirty.insert(*child);
-                // List markers count their `li` siblings; other children
-                // keep their boxes (the parent's box is rebuilt around them).
-                dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li")));
-                if shadow && p == *parent {
-                    // A light child of a host is laid out in its slot.
-                    host_slots(p, dirty);
+                // (What depends on the parent alone, once per parent.)
+                if parents_done.insert(*parent) {
+                    // List markers count their `li` siblings; other children
+                    // keep their boxes (the parent's box is rebuilt around them).
+                    dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li")));
+                    if shadow && p == *parent {
+                        // A light child of a host is laid out in its slot.
+                        host_slots(p, dirty);
+                    }
                 }
                 if shadow && doc.element(*child).is_some() && doc.descendants(*child).any(|d| doc.is_element(d, "slot")) {
                     if let Some(h) = doc.containing_shadow_root(*parent).and_then(|r| doc.shadow_host(r)) {
