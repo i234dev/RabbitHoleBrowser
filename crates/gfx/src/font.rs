@@ -567,13 +567,46 @@ impl FontContext {
             let s = &faces[primary];
             (s.family_lower.clone(), s.generic, s.italic, s.weight, s.stretch.0)
         };
-        // 1. Same family: first the other unicode-range subsets of the same
-        //    style (later @font-face rules first), then the closest styles.
+        // 1. The other unicode-range subsets of the same style (later
+        //    @font-face rules first).
+        let composite = |family: &str, idx: usize| -> Vec<usize> {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(idx) else { return Vec::new() };
+            let (w, it, st) = (s.weight, s.italic, s.stretch);
+            let mut ids: Vec<usize> = self.family_faces(family).unwrap_or_default();
+            ids.retain(|&i| i != idx && faces.get(i).is_some_and(|f| f.weight == w && f.italic == it && f.stretch == st));
+            ids.sort_by_key(|&i| std::cmp::Reverse(i));
+            ids
+        };
+        for idx in composite(&family_lower, primary) {
+            if has(idx) {
+                return Some(idx);
+            }
+        }
+        // 2. The later families of the `font-family` list, when the
+        //    family's unicode-ranges leave the character out.
+        let chain = self.shaping.chains.borrow().get(&primary).cloned();
+        if let Some(chain) = chain {
+            for &c in chain.iter() {
+                if has(c) {
+                    return Some(c);
+                }
+                let fam = self.faces.borrow().get(c).map(|s| s.family_lower.clone()).unwrap_or_default();
+                for idx in composite(&fam, c) {
+                    if has(idx) {
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        // 3. Same family, other styles (closest first), except
+        //    unicode-range subsets: they only serve their own style.
         let mut same_family: Vec<usize> = self.family_faces(&family_lower).unwrap_or_default();
         {
             let faces = self.faces.borrow();
+            same_family.retain(|&i| faces.get(i).is_some_and(|f| f.unicode_range.is_none()));
             let score = |idx: usize| faces.get(idx).map(|s| match_score(s, prim_weight, prim_italic, prim_stretch)).unwrap_or(i32::MAX);
-            same_family.sort_by_key(|&idx| (score(idx), std::cmp::Reverse(idx)));
+            same_family.sort_by_key(|&idx| (score(idx), idx));
         }
         for idx in same_family {
             if idx != primary && has(idx) {

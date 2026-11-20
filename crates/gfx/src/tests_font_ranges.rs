@@ -28,14 +28,20 @@ fn unicode_range_subsets_form_one_composite_face() {
     assert_ne!(cyrillic, ext);
     assert_ne!(ext, latin);
 
-    // The first available face is the subset covering U+0020.
+    // The first available face is the subset covering U+0020 (a copy of
+    // it that falls back to the rest of the family list).
     let primary = fc.select_family(&["Subset Web".into()], Family::Sans, 700, false);
-    assert_eq!(primary, latin);
+    assert_eq!(fc.measure(primary, 20.0, " "), fc.measure(latin, 20.0, " "));
+    assert_eq!(fonts_of(&fc, primary, "W")[0], primary);
     // Mono maps Latin letters too, but its range excludes them.
     assert_eq!(fonts_of(&fc, cyrillic, "WiЖ"), vec![latin, latin, cyrillic]);
-    assert_eq!(fonts_of(&fc, primary, "Wi Жŝ"), vec![latin, latin, latin, cyrillic, ext]);
+    assert_eq!(fonts_of(&fc, primary, "Wi Жŝ"), vec![primary, primary, primary, cyrillic, ext]);
     // The regular weight keeps its own subset.
-    assert_eq!(fc.select_family(&["Subset Web".into()], Family::Sans, 400, false), regular);
+    let regular_pick = fc.select_family(&["Subset Web".into()], Family::Sans, 400, false);
+    assert_eq!(fc.measure(regular_pick, 20.0, "W"), fc.measure(regular, 20.0, "W"));
+    // No 400 Latin Extended subset: the next family serves 'ŝ', not the
+    // 700 subset.
+    assert_ne!(fonts_of(&fc, regular_pick, "Wŝ")[1], ext);
     // Bold text is not synthesized over a real bold subset.
     assert!(!fc.needs_synthetic_bold(primary, 700));
     // Shaped text measures as the bold Latin face.
@@ -44,17 +50,23 @@ fn unicode_range_subsets_form_one_composite_face() {
     assert_eq!(fc.measure(primary, 20.0, "ITALIA"), direct.measure(bold, 20.0, "ITALIA"));
 }
 
-/// A character outside every subset of the matched style uses the closest
-/// style of the family before other families.
+/// A character outside every subset of the matched style uses the next
+/// family of the list, not another style of the family (CSS Fonts 4 §5.2).
 #[test]
-fn subset_fallback_prefers_the_closest_style() {
+fn characters_outside_the_ranges_use_the_next_family() {
     let fc = FontContext::new();
-    fc.add_font_data_ranged("Styles", 400, false, (100, 100), Some(CYRILLIC), SERIF).unwrap();
     let bold_cyr = fc.add_font_data_ranged("Styles", 800, false, (100, 100), Some(CYRILLIC), MONO).unwrap();
     let latin = fc.add_font_data_ranged("Styles", 700, false, (100, 100), Some(LATIN), SANS_BOLD).unwrap();
-    let primary = fc.select_family(&["Styles".into()], Family::Sans, 700, false);
-    assert_eq!(primary, latin);
-    assert_eq!(fonts_of(&fc, primary, "AЖ"), vec![latin, bold_cyr]);
+    let next = fc.add_font_data("Next", 700, false, SERIF).unwrap();
+    let primary = fc.select_family(&["Styles".into(), "Next".into()], Family::Sans, 700, false);
+    assert_eq!(fc.measure(primary, 20.0, "A"), fc.measure(latin, 20.0, "A"));
+    let fonts = fonts_of(&fc, primary, "AЖ");
+    assert_eq!(fonts[1], next);
+    assert_ne!(fonts[1], bold_cyr);
+    // Without a later family, the bundled fallback serves it.
+    let alone = fc.select_family(&["Styles".into()], Family::Sans, 700, false);
+    let f = fonts_of(&fc, alone, "AЖ")[1];
+    assert!(f != bold_cyr && f != next);
 }
 
 /// Same bytes, same descriptors and a different range are distinct faces;
@@ -104,7 +116,8 @@ fn variable_faces_use_their_descriptor_weight() {
     assert_ne!(regular, bold);
     assert_eq!(fc.measure(regular, 1000.0, "I"), 300.0);
     assert_eq!(fc.measure(bold, 1000.0, "I"), 420.0);
-    assert_eq!(fc.select_family(&["Var".into()], Family::Sans, 700, false), bold);
+    let pick = fc.select_family(&["Var".into()], Family::Sans, 700, false);
+    assert_eq!(fc.measure(pick, 1000.0, "I"), 420.0);
     assert!(!fc.needs_synthetic_bold(bold, 700));
     // The bar is drawn wider: the instance's outline, not the default one.
     let width = |id| {

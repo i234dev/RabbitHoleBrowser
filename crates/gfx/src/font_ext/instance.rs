@@ -28,6 +28,22 @@ impl Contours {
                 c.pop();
             }
         }
+        // On-curve points midway between two off-curve points are implied
+        // in TrueType outlines: keep them implied, as in the source font.
+        let n = c.len();
+        if n > 2 {
+            let keep: Vec<bool> = (0..n)
+                .map(|i| {
+                    let (p, a, b) = (c[i], c[(i + n - 1) % n], c[(i + 1) % n]);
+                    !(p.2 && !a.2 && !b.2 && ((a.0 + b.0) / 2.0 - p.0).abs() < 1e-3 && ((a.1 + b.1) / 2.0 - p.1).abs() < 1e-3)
+                })
+                .collect();
+            let mut i = 0;
+            c.retain(|_| {
+                i += 1;
+                keep[i - 1]
+            });
+        }
         if !c.is_empty() {
             self.contours.push(c);
         }
@@ -93,9 +109,19 @@ pub(crate) fn encode_glyph(contours: &[Vec<(i16, i16, bool)>]) -> (Vec<u8>, [i16
     (out, bbox)
 }
 
+/// Is `sfnt` a variable `glyf` font with the axis `tag`?
+pub fn has_axis(sfnt: &[u8], tag: &[u8; 4]) -> bool {
+    let Some(dir) = table_directory(sfnt, 0) else { return false };
+    if find_table(&dir, b"fvar").is_none() || find_table(&dir, b"glyf").is_none() {
+        return false;
+    }
+    ttf_parser::Face::parse(sfnt, 0).is_ok_and(|f| f.variation_axes().into_iter().any(|a| a.tag == Tag::from_bytes(tag)))
+}
+
 /// A static TrueType font from variable font `sfnt` with `axes` set (tag,
 /// user-space value; axes the font lacks are ignored). `None` when the font
-/// is not a variable `glyf` font, or when no given axis applies.
+/// is not a variable `glyf` font, or when the axes select its default
+/// instance.
 pub fn instantiate(sfnt: &[u8], axes: &[([u8; 4], f32)]) -> Option<Vec<u8>> {
     let dir = table_directory(sfnt, 0)?;
     find_table(&dir, b"fvar")?;
@@ -109,7 +135,8 @@ pub fn instantiate(sfnt: &[u8], axes: &[([u8; 4], f32)]) -> Option<Vec<u8>> {
             applied |= face.set_variation(tag, *value).is_some();
         }
     }
-    if !applied {
+    // The default instance needs no change.
+    if !applied || face.variation_coordinates().iter().all(|c| c.get() == 0) {
         return None;
     }
     let num_glyphs = face.number_of_glyphs();
