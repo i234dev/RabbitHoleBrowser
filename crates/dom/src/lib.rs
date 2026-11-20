@@ -166,7 +166,10 @@ pub struct MutationLog {
 
 impl MutationLog {
     /// Beyond this many entries the log degrades to "everything changed".
-    pub const CAP: usize = 20_000;
+    /// (Entries of one parent are handled once past a few, so a list
+    /// re-rendered on every added item stays cheaper to apply than a full
+    /// restyle and relayout of a large page.)
+    pub const CAP: usize = 100_000;
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && !self.overflow
