@@ -101,6 +101,16 @@ pub enum Kind {
     ClipPath {
         units_bbox: bool,
     },
+    /// `<mask>` (its content is the node's children): `maskUnits` /
+    /// `maskContentUnits` are objectBoundingBox, and the mask region.
+    Mask {
+        units_bbox: bool,
+        content_bbox: bool,
+        x: Option<Length>,
+        y: Option<Length>,
+        width: Option<Length>,
+        height: Option<Length>,
+    },
     /// `<pattern>` (its content is the node's children).
     Pattern(Pattern),
 }
@@ -542,6 +552,14 @@ impl<'a> Builder<'a> {
                 let children = self.build_children(n, depth);
                 mk(Kind::ClipPath { units_bbox }, children)
             }
+            "mask" => {
+                let units_bbox = !self.attr(n, "maskunits").is_some_and(|u| u.trim().eq_ignore_ascii_case("userSpaceOnUse"));
+                let content_bbox = self.attr(n, "maskcontentunits").is_some_and(|u| u.trim().eq_ignore_ascii_case("objectBoundingBox"));
+                let l = |name: &str| self.attr(n, name).and_then(parse_length);
+                let (x, y, width, height) = (l("x"), l("y"), l("width"), l("height"));
+                let children = self.build_children(n, depth);
+                mk(Kind::Mask { units_bbox, content_bbox, x, y, width, height }, children)
+            }
             "pattern" => {
                 let l = |name: &str| self.attr(n, name).and_then(parse_length);
                 let pat = Pattern {
@@ -569,7 +587,7 @@ impl<'a> Builder<'a> {
                 return None;
             }
             // Never rendered / unsupported.
-            "title" | "desc" | "metadata" | "style" | "script" | "mask" | "marker" | "foreignobject"
+            "title" | "desc" | "metadata" | "style" | "script" | "marker" | "foreignobject"
             | "font" | "font-face" | "animate" | "animatetransform" | "animatemotion" | "set" | "view" | "cursor" => {
                 return None;
             }
@@ -1032,13 +1050,13 @@ fn compute_bboxes(b: &mut Built) {
                 };
                 inner.map(|r| r.translate(*x, *y))
             }
-            Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_) | Kind::Defs => None,
+            Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Mask { .. } | Kind::Pattern(_) | Kind::Defs => None,
             Kind::Root | Kind::Group | Kind::Symbol { .. } => None,
         };
         let mut acc = own;
-        if !matches!(node.kind, Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_)) {
+        if !matches!(node.kind, Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Mask { .. } | Kind::Pattern(_)) {
             for &c in &node.children {
-                if matches!(b.nodes[c].kind, Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_) | Kind::Symbol { .. }) {
+                if matches!(b.nodes[c].kind, Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Mask { .. } | Kind::Pattern(_) | Kind::Symbol { .. }) {
                     continue;
                 }
                 if let Some(r) = bbox_of(b, c, depth + 1, memo) {

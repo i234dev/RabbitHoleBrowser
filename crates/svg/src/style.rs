@@ -60,6 +60,8 @@ pub struct Specified {
     pub stop_color: Option<ColorSpec>,
     pub stop_opacity: Option<f32>,
     pub overflow_visible: Option<bool>,
+    /// `mask: url(#id)` (the id).
+    pub mask: Option<String>,
     /// `filter` (`Some(empty)`: `none`).
     pub filter: Option<Vec<crate::filter::FilterItem>>,
     pub flood_color: Option<ColorSpec>,
@@ -418,6 +420,19 @@ impl Specified {
                     }
                 }
             }
+            "mask" => {
+                let t = v.trim();
+                if t.eq_ignore_ascii_case("none") {
+                    self.mask = None;
+                } else if let Some(rest) = t.strip_prefix("url(").or_else(|| t.strip_prefix("URL(")) {
+                    if let Some(close) = rest.find(')') {
+                        let id = rest[..close].trim().trim_matches(|c| c == '"' || c == '\'');
+                        if let Some((_, frag)) = id.rsplit_once('#') {
+                            self.mask = Some(frag.to_string());
+                        }
+                    }
+                }
+            }
             "filter" => {
                 if let Some(f) = crate::filter::parse_filter_value(v) {
                     self.filter = Some(f);
@@ -457,7 +472,7 @@ pub const PRESENTATION_ATTRS: &[&str] = &[
     "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap",
     "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "color", "opacity",
     "font-size", "font-family", "font-weight", "font-style", "text-anchor", "visibility", "display",
-    "paint-order", "vector-effect", "clip-path", "stop-color", "stop-opacity", "overflow", "clip-rule", "filter",
+    "paint-order", "vector-effect", "clip-path", "stop-color", "stop-opacity", "overflow", "clip-rule", "filter", "mask",
     "flood-color", "flood-opacity", "lighting-color", "color-interpolation-filters",
 ];
 

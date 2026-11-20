@@ -121,3 +121,35 @@ fn empty_filter_renders_nothing_and_missing_refs_are_ignored() {
     let none = |_: &str| None;
     assert!(apply_chain(&[FilterItem::Url("x".into())], &none, src, &e, 1.0).is_none());
 }
+
+#[test]
+fn mask_scales_by_luminance() {
+    let doc = rabbithole_html::parse(
+        "<!doctype html><body><svg width=20 height=10><mask id=m maskUnits=userSpaceOnUse x=0 y=0 width=10 height=10><rect width=20 height=10 fill=white /></mask>\
+         <rect width=20 height=10 fill=blue mask='url(#m)' /></svg>",
+    );
+    let svg = doc.find_element("svg").unwrap();
+    let tree = crate::SvgTree::from_dom(&doc, svg, &|_, _| None).unwrap();
+    let fonts = rabbithole_gfx::FontContext::new();
+    let img = tree.rasterize(&fonts, 20, 10);
+    let px = |x: usize| &img.rgba[(5 * 20 + x) * 4..(5 * 20 + x) * 4 + 4];
+    // Inside the mask region: blue; outside: transparent.
+    assert_eq!(px(2), &[0, 0, 255, 255]);
+    assert_eq!(px(15)[3], 0);
+}
+
+#[test]
+fn svg_element_filter_floods_its_region() {
+    let doc = rabbithole_html::parse(
+        "<!doctype html><body><svg width=20 height=20><filter id=f x=0 y=0 width=1 height=1 color-interpolation-filters=sRGB><feFlood flood-color=lime /></filter>\
+         <rect x=5 y=5 width=10 height=10 fill=red filter='url(#f)' /></svg>",
+    );
+    let svg = doc.find_element("svg").unwrap();
+    let tree = crate::SvgTree::from_dom(&doc, svg, &|_, _| None).unwrap();
+    assert!(tree.has_filters());
+    let fonts = rabbithole_gfx::FontContext::new();
+    let img = tree.rasterize(&fonts, 20, 20);
+    let px = |x: usize, y: usize| &img.rgba[(y * 20 + x) * 4..(y * 20 + x) * 4 + 4];
+    assert_eq!(px(10, 10), &[0, 255, 0, 255]);
+    assert_eq!(px(2, 2)[3], 0);
+}
