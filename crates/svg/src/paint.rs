@@ -7,6 +7,31 @@ use rabbithole_gfx::{Canvas, Color, ColorStop, FillRule, FontContext, Paint, Pat
 
 const MAX_USE_DEPTH: usize = 16;
 
+thread_local! {
+    /// Nesting of filtered painting (feImage can reach filtered content).
+    static FILTER_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Render the element `id` of `tree` (feImage) through `m` into a
+/// transparent `w`×`h` buffer.
+pub(crate) fn render_element(tree: &Built, fonts: &FontContext, viewport: (f32, f32), id: &str, m: &rabbithole_gfx::Matrix, w: usize, h: usize) -> Option<crate::filter::Pixels> {
+    let &target = tree.ids.get(id)?;
+    let render = |bg: Color| {
+        let mut c = Canvas::new(w as u32, h as u32);
+        c.clear(bg);
+        c.push_transform(*m);
+        {
+            let mut p = Painter::new(tree, &mut c, fonts, viewport);
+            let props = Props::default();
+            p.paint_node(target, &props);
+        }
+        c.data
+    };
+    let black = render(Color::BLACK);
+    let white = render(Color::WHITE);
+    Some(crate::filter::css::from_black_white(&black, &white, w, h))
+}
+
 pub struct Painter<'a> {
     pub tree: &'a Built,
     pub canvas: &'a mut Canvas,
@@ -62,6 +87,30 @@ impl<'a> Painter<'a> {
             None => false,
         };
 
+        match node.spec.filter.as_deref() {
+            Some(items) if !items.is_empty() => {
+                let items = items.to_vec();
+                self.paint_filtered(idx, &items, &props);
+            }
+            _ => self.paint_content(idx, &props),
+        }
+
+        if clipped {
+            self.canvas.pop_clip();
+        }
+        if layered {
+            self.canvas.end_layer(opacity);
+        }
+        if pushed_transform {
+            self.canvas.pop_transform();
+        }
+    }
+
+    /// Paint what the element `idx` itself draws (no transform, opacity,
+    /// clip or filter).
+    fn paint_content(&mut self, idx: usize, props: &Props) {
+        let node: &Node = &self.tree.nodes[idx];
+        let props = props.clone();
         match &node.kind {
             Kind::Root | Kind::Group => {
                 let children = node.children.clone();
@@ -112,13 +161,69 @@ impl<'a> Painter<'a> {
             Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_) | Kind::Symbol { .. } => {}
         }
 
-        if clipped {
-            self.canvas.pop_clip();
+    }
+
+    /// `filter`: paint the element offscreen (over black and over white to
+    /// recover its alpha), run the filter chain and draw the result.
+    fn paint_filtered(&mut self, idx: usize, items: &[crate::filter::FilterItem], props: &Props) {
+        use crate::filter::{FilterEnv, FilterItem};
+        let tree = self.tree;
+        let node = &tree.nodes[idx];
+        // A missing `url()` target: the filter is ignored. Deep nesting
+        // (feImage cycles) paints unfiltered.
+        let missing = items.iter().any(|i| matches!(i, FilterItem::Url(id) if !tree.filters.contains_key(id)));
+        let depth = FILTER_DEPTH.with(|d| d.get());
+        if missing || depth > 6 {
+            self.paint_content(idx, props);
+            return;
         }
-        if layered {
-            self.canvas.end_layer(opacity);
+        let bbox = node.bbox.unwrap_or_default();
+        let defs = |id: &str| tree.filters.get(id).cloned();
+        let t = self.canvas.transform();
+        let scale = scale_factor(&t);
+        let painted = self.layer_bounds(node, props);
+        let area = crate::filter::chain_bounds(items, &defs, bbox, painted, self.viewport);
+        let (cw, ch) = (self.canvas.width as f32, self.canvas.height as f32);
+        let dev = crate::units::transform_rect_bounds(&t, area).intersect(&Rect::new(-cw, -ch, 3.0 * cw, 3.0 * ch));
+        if dev.w <= 0.0 || dev.h <= 0.0 {
+            return;
         }
-        if pushed_transform {
+        let (x0, y0) = (dev.x.floor() as i32, dev.y.floor() as i32);
+        let (w, h) = (((dev.x + dev.w).ceil() as i32 - x0) as usize, ((dev.y + dev.h).ceil() as i32 - y0) as usize);
+        if w == 0 || h == 0 || w * h > 1 << 24 {
+            return;
+        }
+        let m = multiply(&translate(-(x0 as f32), -(y0 as f32)), &t);
+        FILTER_DEPTH.with(|d| d.set(depth + 1));
+        let mut render = |bg: Color| {
+            let mut c = Canvas::new(w as u32, h as u32);
+            c.clear(bg);
+            c.push_transform(m);
+            std::mem::swap(self.canvas, &mut c);
+            self.paint_content(idx, props);
+            std::mem::swap(self.canvas, &mut c);
+            c.data
+        };
+        let black = render(Color::BLACK);
+        let white = render(Color::WHITE);
+        let src = crate::filter::css::from_black_white(&black, &white, w, h);
+        drop((black, white));
+        let (fonts, viewport) = (self.fonts, self.viewport);
+        let element = |id: &str, m: &rabbithole_gfx::Matrix, w: usize, h: usize| render_element(tree, fonts, viewport, id, m, w, h);
+        let env = FilterEnv { m, bbox, viewport: self.viewport, element: Some(&element) };
+        let out = crate::filter::apply_chain(items, &defs, src, &env, scale);
+        FILTER_DEPTH.with(|d| d.set(depth));
+        let Some(out) = out else { return };
+        let img = rabbithole_gfx::Image::new(w as u32, h as u32, crate::filter::css::to_rgba(&out));
+        let inv = crate::units::invert(&t);
+        if let Some(inv) = inv {
+            self.canvas.push_transform(inv);
+        }
+        let smooth = self.canvas.image_smoothing;
+        self.canvas.image_smoothing = false;
+        self.canvas.draw_image(&img, Rect::new(x0 as f32, y0 as f32, w as f32, h as f32), 1.0);
+        self.canvas.image_smoothing = smooth;
+        if inv.is_some() {
             self.canvas.pop_transform();
         }
     }

@@ -119,6 +119,8 @@ pub enum DisplayItem {
         bounds: Rect,
         filters: Vec<rabbithole_style::FilterOp>,
         items: Vec<DisplayItem>,
+        /// The `<filter>` elements of `url()` entries.
+        svg: Option<std::sync::Arc<crate::filter::UrlFilters>>,
     },
     /// `backdrop-filter`: what is already painted inside `rect` (clipped to
     /// `radii`) is filtered in place.
@@ -800,7 +802,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         self.paint_stacking_context_inner(root);
         // `filter`: the painted items move into a filtered group (not
         // around sticky descendants, whose items are patched in place).
-        if !root.style.filters.is_empty() && self.list.sticky.len() == filter_start.1 {
+        // A `url()` that names no `<filter>` disables the whole list.
+        let url_filters = crate::filter::resolve_urls(root, &root.style.filters, self.ctx);
+        if !root.style.filters.is_empty() && self.list.sticky.len() == filter_start.1 && !matches!(url_filters, Some(None)) {
             let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
             let e = crate::filter::spread(&root.style.filters);
             let mut b = root.subtree_bounds();
@@ -811,8 +815,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                     b = b.union(&Rect::new(x.x - 2.0, x.y - 2.0, x.w + 4.0, x.h + 4.0));
                 }
             }
-            let bounds = Rect::new(b.x - e, b.y - e, b.w + 2.0 * e, b.h + 2.0 * e);
-            self.list.push(DisplayItem::Filtered { bounds, filters: root.style.filters.clone(), items });
+            let svg = url_filters.flatten();
+            let bounds = match &svg {
+                Some(u) => u.bounds(&root.style.filters, b),
+                None => Rect::new(b.x - e, b.y - e, b.w + 2.0 * e, b.h + 2.0 * e),
+            };
+            self.list.push(DisplayItem::Filtered { bounds, filters: root.style.filters.clone(), items, svg });
         }
         // Blended descendants mix with this group only: isolate it (the
         // root element's group too, unless the page background painted

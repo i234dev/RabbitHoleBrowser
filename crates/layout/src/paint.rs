@@ -335,7 +335,8 @@ fn device_scale(m: &Matrix) -> f32 {
 
 /// `filter`: render the group over black and over white offscreen,
 /// recover its RGBA, filter it and composite the result.
-fn paint_filtered(bounds: Rect, filters: &[rabbithole_style::FilterOp], items: &[DisplayItem], canvas: &mut Canvas, fonts: &FontContext, st: &mut State, view: Rect) {
+#[allow(clippy::too_many_arguments)]
+fn paint_filtered(bounds: Rect, filters: &[rabbithole_style::FilterOp], svg: Option<&crate::filter::UrlFilters>, items: &[DisplayItem], canvas: &mut Canvas, fonts: &FontContext, st: &mut State, view: Rect) {
     let local = bounds.translate(st.dx, st.dy);
     if !st.ext || local.intersect(&view).is_empty() && rabbithole_gfx::path::transform_rect_bounds(&canvas.transform(), local).intersect(&Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32)).is_empty() {
         if !st.ext {
@@ -368,7 +369,14 @@ fn paint_filtered(bounds: Rect, filters: &[rabbithole_style::FilterOp], items: &
     let black = render(Color::BLACK);
     let white = render(Color::WHITE);
     let mut px = crate::filter::from_black_white(&black, &white, w, h);
-    crate::filter::apply(&mut px, filters, device_scale(&canvas.transform()));
+    match svg {
+        Some(u) => {
+            // Layout coordinates → buffer pixels.
+            let lm = rabbithole_style::multiply_matrix(m, [1.0, 0.0, 0.0, 1.0, st.dx, st.dy]);
+            px = u.apply(filters, px, &lm, device_scale(&canvas.transform()), fonts);
+        }
+        None => crate::filter::apply(&mut px, filters, device_scale(&canvas.transform())),
+    }
     draw_device_pixels(canvas, crate::filter::to_rgba(&px), x0, y0, w, h);
 }
 
@@ -711,8 +719,8 @@ pub(crate) fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontCo
                 }
             }
         }
-        DisplayItem::Filtered { bounds, filters, items } => {
-            paint_filtered(*bounds, filters, items, canvas, fonts, st, view);
+        DisplayItem::Filtered { bounds, filters, items, svg } => {
+            paint_filtered(*bounds, filters, svg.as_deref(), items, canvas, fonts, st, view);
         }
         DisplayItem::BackdropFilter { rect, radii, filters } => {
             paint_backdrop(*rect, *radii, filters, canvas, st, view);

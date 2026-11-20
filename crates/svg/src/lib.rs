@@ -7,6 +7,7 @@
 //! opacity, transforms, `viewBox`/`preserveAspectRatio`.
 
 mod color;
+pub mod filter;
 mod paint;
 mod parse;
 mod style;
@@ -143,6 +144,22 @@ impl SvgTree {
         let (path, rule, units_bbox) = paint::clip_outline(&self.built, id, transform)?;
         let m = if units_bbox { [bbox.w, 0.0, 0.0, bbox.h, bbox.x, bbox.y] } else { [1.0, 0.0, 0.0, 1.0, bbox.x, bbox.y] };
         Some((paint::transform_path(&path, &m), rule))
+    }
+
+    /// The `<filter>` element with this `id` (for `filter: url(#id)` on
+    /// CSS boxes).
+    pub fn filter(&self, id: &str) -> Option<std::sync::Arc<filter::FilterDef>> {
+        self.built.filters.get(id).cloned()
+    }
+
+    /// Render the element `id` through `m` into a transparent `w`×`h`
+    /// buffer (feImage references).
+    pub fn render_element(&self, fonts: &FontContext, id: &str, m: &rabbithole_gfx::Matrix, w: usize, h: usize) -> Option<filter::Pixels> {
+        let vp = match self.built.viewbox {
+            Some(v) => (v.w, v.h),
+            None => (self.built.width.unwrap_or(300.0), self.built.height.unwrap_or(150.0)),
+        };
+        paint::render_element(&self.built, fonts, vp, id, m, w, h)
     }
 
     /// Draw into `canvas` filling `dest` (applies viewBox + preserveAspectRatio).

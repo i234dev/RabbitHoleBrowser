@@ -162,6 +162,8 @@ pub struct Built {
     pub viewbox: Option<ViewBox>,
     pub par: AspectRatio,
     pub overflow_visible: bool,
+    /// `<filter>` elements by id.
+    pub filters: HashMap<String, std::sync::Arc<crate::filter::FilterDef>>,
 }
 
 const MAX_DEPTH: usize = 64;
@@ -175,6 +177,7 @@ struct Builder<'a> {
     /// DOM node → tree node (so `use` can reference anything built).
     built: HashMap<NodeId, usize>,
     viewport: (f32, f32),
+    filters: HashMap<String, std::sync::Arc<crate::filter::FilterDef>>,
 }
 
 /// Build the tree for the `<svg>` element `root`.
@@ -219,12 +222,13 @@ pub fn build_in(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) ->
     let vw = viewbox.map(|v| v.w).or(both.map(|b| b.0)).or(viewport.map(|v| v.0)).or(width).unwrap_or(300.0);
     let vh = viewbox.map(|v| v.h).or(both.map(|b| b.1)).or(viewport.map(|v| v.1)).or(height).unwrap_or(150.0);
 
-    let mut b = Builder { doc, style_of, rules, nodes: Vec::new(), ids: HashMap::new(), built: HashMap::new(), viewport: (vw, vh) };
+    let mut b = Builder { doc, style_of, rules, nodes: Vec::new(), ids: HashMap::new(), built: HashMap::new(), viewport: (vw, vh), filters: HashMap::new() };
     let root_idx = b.build_node(root, 0, true)?;
+    b.resolve_filters();
     b.resolve_gradients();
     b.resolve_patterns();
     let overflow_visible = b.nodes[root_idx].spec.overflow_visible.unwrap_or(false);
-    let mut built = Built { nodes: b.nodes, root: root_idx, ids: b.ids, width, height, viewbox, par, overflow_visible };
+    let mut built = Built { nodes: b.nodes, root: root_idx, ids: b.ids, width, height, viewbox, par, overflow_visible, filters: b.filters };
     compute_bboxes(&mut built);
     if built.nodes.iter().any(|n| n.xform.is_some()) {
         for i in 0..built.nodes.len() {
@@ -555,14 +559,50 @@ impl<'a> Builder<'a> {
                 let children = self.build_children(n, depth);
                 mk(Kind::Pattern(pat), children)
             }
+            "filter" => {
+                if let Some(id) = &id {
+                    if !self.filters.contains_key(id) {
+                        let f = self.build_filter(n);
+                        self.filters.insert(id.clone(), std::sync::Arc::new(f));
+                    }
+                }
+                return None;
+            }
             // Never rendered / unsupported.
-            "title" | "desc" | "metadata" | "style" | "script" | "filter" | "mask" | "marker" | "foreignobject"
+            "title" | "desc" | "metadata" | "style" | "script" | "mask" | "marker" | "foreignobject"
             | "font" | "font-face" | "animate" | "animatetransform" | "animatemotion" | "set" | "view" | "cursor" => {
                 return None;
             }
             _ => return None,
         };
         Some(self.push(n, node))
+    }
+
+    fn build_filter(&self, n: NodeId) -> crate::filter::FilterDef {
+        let attr = |x: NodeId, name: &str| self.attr(x, name).map(str::to_string);
+        let spec = |x: NodeId| self.specified(x);
+        crate::filter::build_filter(self.doc, n, &attr, &spec, &decode_data_url)
+    }
+
+    /// Build the `<filter>` elements referenced from outside this `<svg>`.
+    fn resolve_filters(&mut self) {
+        let mut wanted: Vec<String> = Vec::new();
+        for node in &self.nodes {
+            for it in node.spec.filter.iter().flatten() {
+                if let crate::filter::FilterItem::Url(id) = it {
+                    if !self.filters.contains_key(id) && !wanted.contains(id) {
+                        wanted.push(id.clone());
+                    }
+                }
+            }
+        }
+        for id in wanted {
+            let Some(el) = self.doc.element_by_id(&id) else { continue };
+            if self.doc.tag(el).is_some_and(|t| t.eq_ignore_ascii_case("filter")) {
+                let f = self.build_filter(el);
+                self.filters.insert(id, std::sync::Arc::new(f));
+            }
+        }
     }
 
     fn build_gradient(&mut self, n: NodeId, linear: bool) -> Gradient {

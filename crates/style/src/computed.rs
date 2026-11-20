@@ -1203,6 +1203,9 @@ pub enum FilterOp {
     Invert(f32),
     Opacity(f32),
     DropShadow { x: f32, y: f32, blur: f32, color: Color },
+    /// `url(#id)`: an SVG `<filter>` (the id; empty when the URL has no
+    /// fragment).
+    Url(String),
 }
 
 /// Reference box of a `clip-path` shape (`<geometry-box>`). For boxes

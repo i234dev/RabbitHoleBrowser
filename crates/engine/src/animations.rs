@@ -686,6 +686,7 @@ fn filter_identity(op: &FilterOp) -> FilterOp {
         FilterOp::Invert(_) => FilterOp::Invert(0.0),
         FilterOp::Opacity(_) => FilterOp::Opacity(1.0),
         FilterOp::DropShadow { color, .. } => FilterOp::DropShadow { x: 0.0, y: 0.0, blur: 0.0, color: Color { a: 0, ..*color } },
+        FilterOp::Url(id) => FilterOp::Url(id.clone()),
     }
 }
 

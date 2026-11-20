@@ -60,6 +60,13 @@ pub struct Specified {
     pub stop_color: Option<ColorSpec>,
     pub stop_opacity: Option<f32>,
     pub overflow_visible: Option<bool>,
+    /// `filter` (`Some(empty)`: `none`).
+    pub filter: Option<Vec<crate::filter::FilterItem>>,
+    pub flood_color: Option<ColorSpec>,
+    pub flood_opacity: Option<f32>,
+    pub lighting_color: Option<ColorSpec>,
+    /// `color-interpolation-filters` is linearRGB (`auto` and sRGB: false).
+    pub cif_linear: Option<bool>,
 }
 
 /// Fully resolved (inherited) properties used while painting.
@@ -217,6 +224,16 @@ pub fn parse_paint(s: &str) -> Option<PaintSpec> {
         ColorSpec::Color(c) => Some(PaintSpec::Color(c)),
         ColorSpec::CurrentColor => Some(PaintSpec::CurrentColor),
     }
+}
+
+/// `flood-color` / `lighting-color`: colours depending on `currentcolor`
+/// (e.g. through `color-mix()`) count as `currentcolor` (they taint the
+/// primitive).
+fn parse_filter_color(v: &str) -> Option<ColorSpec> {
+    if v.to_ascii_lowercase().contains("currentcolor") {
+        return Some(ColorSpec::CurrentColor);
+    }
+    parse_color(v)
 }
 
 fn parse_opacity(s: &str) -> Option<f32> {
@@ -401,6 +418,31 @@ impl Specified {
                     }
                 }
             }
+            "filter" => {
+                if let Some(f) = crate::filter::parse_filter_value(v) {
+                    self.filter = Some(f);
+                }
+            }
+            "flood-color" => {
+                if let Some(c) = parse_filter_color(v) {
+                    self.flood_color = Some(c);
+                }
+            }
+            "flood-opacity" => {
+                if let Some(o) = parse_opacity(v) {
+                    self.flood_opacity = Some(o);
+                }
+            }
+            "lighting-color" => {
+                if let Some(c) = parse_filter_color(v) {
+                    self.lighting_color = Some(c);
+                }
+            }
+            "color-interpolation-filters" => match v.trim().to_ascii_lowercase().as_str() {
+                "linearrgb" => self.cif_linear = Some(true),
+                "srgb" | "auto" => self.cif_linear = Some(false),
+                _ => {}
+            },
             "stop-color" => self.stop_color = parse_color(v),
             "stop-opacity" => self.stop_opacity = parse_opacity(v),
             "overflow" => self.overflow_visible = Some(matches!(v.to_ascii_lowercase().as_str(), "visible" | "auto")),
@@ -415,7 +457,8 @@ pub const PRESENTATION_ATTRS: &[&str] = &[
     "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap",
     "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "color", "opacity",
     "font-size", "font-family", "font-weight", "font-style", "text-anchor", "visibility", "display",
-    "paint-order", "vector-effect", "clip-path", "stop-color", "stop-opacity", "overflow", "clip-rule",
+    "paint-order", "vector-effect", "clip-path", "stop-color", "stop-opacity", "overflow", "clip-rule", "filter",
+    "flood-color", "flood-opacity", "lighting-color", "color-interpolation-filters",
 ];
 
 /// Serialize CSS tokens back to text (so declaration values can reuse the
