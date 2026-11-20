@@ -57,8 +57,27 @@ pub(crate) struct ShapingState {
     pub(crate) chains: RefCell<HashMap<usize, Rc<[usize]>>>,
     /// Default features of a face (`@font-face { font-feature-settings }`).
     pub(crate) face_features: RefCell<HashMap<usize, Rc<[FontFeature]>>>,
+    /// Face → the printable ASCII characters it renders itself (bit per
+    /// code point), for [`FontContext::fallback_faces`].
+    pub(crate) ascii_cover: RefCell<HashMap<usize, u128>>,
     /// (face, tag) → does the face's GSUB have that feature?
     gsub_features: RefCell<HashMap<(usize, [u8; 4]), bool>>,
+}
+
+/// The `ascent-override`, `descent-override` and `line-gap-override`
+/// descriptors of an `@font-face` rule (CSS Fonts 4 §4.11), as fractions
+/// of the used font size; `None` keeps the font's own metric.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MetricOverrides {
+    pub ascent: Option<f32>,
+    pub descent: Option<f32>,
+    pub line_gap: Option<f32>,
+}
+
+impl MetricOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.ascent.is_none() && self.descent.is_none() && self.line_gap.is_none()
+    }
 }
 
 /// An OpenType feature setting: tag and value (0 = off, 1 = on, or an
@@ -121,6 +140,14 @@ impl FontContext {
         self.shaping.face_features.borrow_mut().insert(font.0, Rc::from(features));
     }
 
+    /// The `@font-face` metric overrides of a face (of its base face for
+    /// a feature variant).
+    pub(crate) fn metric_overrides(&self, idx: usize) -> Option<MetricOverrides> {
+        let base = self.variant_base(idx);
+        let faces = self.faces.borrow();
+        faces.get(base).map(|s| s.metric_overrides).filter(|o| !o.is_empty())
+    }
+
     /// `font` shaped with OpenType `features` (an unbound copy of the
     /// face; the same id for the same request). Features apply to the runs
     /// this face renders, not to fallback faces.
@@ -171,6 +198,7 @@ impl FontContext {
                 stretch: slot.stretch,
                 generic: slot.generic,
                 unicode_range: slot.unicode_range.clone(),
+                metric_overrides: slot.metric_overrides,
                 source: match &slot.source {
                     crate::font::FaceSource::Bytes(b) => crate::font::FaceSource::Bytes(Rc::clone(b)),
                     crate::font::FaceSource::Path(p, i) => crate::font::FaceSource::Path(p.clone(), *i),
@@ -254,19 +282,7 @@ impl FontContext {
     /// family list, in em (CSS Values 4 §6.1.1; 0.5em when unknown).
     /// Also `ic` (advance of U+6C34), 1em when the font lacks it.
     pub fn unit_metrics(&self, families: &[String], generic: crate::Family, weight: u16, italic: bool) -> (f32, f32, f32) {
-        // The first available font: one that has a space glyph.
-        let mut font = self.select(generic, weight, italic);
-        for i in 0..families.len() {
-            let f = self.select_family(&families[i..], generic, weight, italic);
-            let has_space = self
-                .face_bytes(f.0)
-                .and_then(|b| rustybuzz::ttf_parser::Face::parse(&b, 0).ok().map(|face| face.glyph_index(' ').is_some()))
-                .unwrap_or(true);
-            if has_space {
-                font = f;
-                break;
-            }
-        }
+        let font = self.first_available(families, generic, weight, italic);
         let Some(b) = self.face_bytes(font.0) else { return (0.5, 0.5, 1.0) };
         let Ok(face) = rustybuzz::ttf_parser::Face::parse(&b, 0) else { return (0.5, 0.5, 1.0) };
         let upem = face.units_per_em() as f32;
@@ -288,6 +304,30 @@ impl FontContext {
             .map(|xh| xh / upem)
             .unwrap_or(0.5);
         (ch, ex, ic)
+    }
+
+    /// The first available font of a `font-family` list: the first one
+    /// that has a space glyph.
+    pub fn first_available(&self, families: &[String], generic: crate::Family, weight: u16, italic: bool) -> FontId {
+        for i in 0..families.len() {
+            let f = self.select_family(&families[i..], generic, weight, italic);
+            let has_space = self
+                .face_bytes(f.0)
+                .and_then(|b| rustybuzz::ttf_parser::Face::parse(&b, 0).ok().map(|face| face.glyph_index(' ').is_some()))
+                .unwrap_or(true);
+            if has_space {
+                return f;
+            }
+        }
+        self.select(generic, weight, italic)
+    }
+
+    /// The ascent, descent and line gap (in em) of the first available
+    /// font of a `font-family` list (for `line-height: normal` in style
+    /// computations: the `lh` unit, percentages of the line height).
+    pub fn unit_line_metrics(&self, families: &[String], generic: crate::Family, weight: u16, italic: bool) -> crate::LineMetrics {
+        let font = if families.is_empty() { self.select(generic, weight, italic) } else { self.select_family(families, generic, weight, italic) };
+        self.line_metrics(font, 1.0)
     }
 
     /// Cap height of the primary face in em (OS/2 sCapHeight, else the

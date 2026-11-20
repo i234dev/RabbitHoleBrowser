@@ -425,11 +425,27 @@ fn justify_between(p: char, c: char, mode: u8) -> bool {
 }
 
 impl<'a> Layouter<'a> {
+    /// The used line height of `style`: `normal` from its first available
+    /// font's metrics.
+    pub(crate) fn used_line_height(&mut self, style: &ComputedStyle) -> f32 {
+        match style.line_height {
+            Some(lh) => lh,
+            None => {
+                let font = self.font_for(style);
+                self.ctx.fonts.normal_line_height(font, style.font_size)
+            }
+        }
+    }
+
     pub(crate) fn text_metrics(&mut self, style: &ComputedStyle) -> TextMetrics {
         let font = self.font_for(style);
         let size = style.font_size;
-        let m = self.ctx.fonts.metrics(font, size);
-        let lh = if style.line_height_tight { m.ascent + m.descent } else { style.line_height_px() };
+        let m = self.ctx.fonts.line_metrics(font, size);
+        let lh = if style.line_height_tight {
+            m.ascent + m.descent
+        } else {
+            style.line_height.unwrap_or_else(|| rabbithole_gfx::font::normal_line_height(m))
+        };
         let half = (lh - (m.ascent + m.descent)) / 2.0;
         TextMetrics {
             asc: m.ascent,
@@ -2691,6 +2707,20 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             };
             if let PFKind::Text { item, .. } = &f.kind {
                 last_text = Some((*item, fm));
+            }
+            // With `line-height: normal`, the fonts that fallback uses for
+            // the text count too, each with its own half-leading (CSS
+            // Inline 3 §5.1; Blink's used fonts).
+            if let (PFKind::Text { text, item }, Some(tm), 0, false) = (&f.kind, fm.tm, fm.mode, central) {
+                let st = self.style(*item);
+                if st.line_height.is_none() && !st.line_height_tight {
+                    for ff in self.lay.ctx.fonts.fallback_faces(tm.font, text) {
+                        let m = self.lay.ctx.fonts.metrics(ff, tm.size);
+                        let half = (rabbithole_gfx::font::normal_line_height(m) - (m.ascent + m.descent)) / 2.0;
+                        a = a.max(m.ascent + half + fm.shift);
+                        d = d.max(m.descent + half - fm.shift);
+                    }
+                }
             }
             if fm.mode == 0 {
                 a = a.max(fm.above);

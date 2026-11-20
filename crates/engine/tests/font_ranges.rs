@@ -11,7 +11,7 @@ const VIEWPORT: Viewport = Viewport { width: 500.0, height: 200.0 };
 const HTML: &str = "<!doctype html><style>body{margin:0}span{font:700 20px 'Subset Web';text-transform:uppercase}</style><span id=s>italia</span>";
 
 fn face(range: Option<Vec<(u32, u32)>>) -> FontFace {
-    FontFace { family: "Subset Web".into(), sources: vec![], weight: (700, 700), italic: false, stretch: (100, 100), display: "swap".into(), unicode_range: range, feature_settings: vec![] }
+    FontFace { family: "Subset Web".into(), sources: vec![], weight: (700, 700), italic: false, stretch: (100, 100), display: "swap".into(), unicode_range: range, feature_settings: vec![], metric_overrides: Default::default() }
 }
 
 fn span_width(fonts: Vec<LoadedFont>) -> f32 {

@@ -60,6 +60,8 @@ pub struct FontFace {
     /// The `font-feature-settings` descriptor (default features of the
     /// face, before the element's own).
     pub feature_settings: Vec<rabbithole_gfx::FontFeature>,
+    /// `ascent-override`, `descent-override` and `line-gap-override`.
+    pub metric_overrides: rabbithole_gfx::MetricOverrides,
 }
 
 /// Styles indexed by `NodeId`. Non-element nodes and `display: none`

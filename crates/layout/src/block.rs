@@ -930,7 +930,7 @@ impl<'a> Layouter<'a> {
             // Empty text fields, buttons and menus are one line tall.
             if b.pseudo.is_none() && h < 0.5 && self.is_line_control(b) {
                 let font = self.font_for(&style);
-                h = style.line_height.unwrap_or_else(|| self.ctx.fonts.metrics(font, style.font_size).height());
+                h = style.line_height.unwrap_or_else(|| self.ctx.fonts.normal_line_height(font, style.font_size));
             }
         }
         h = self.clamp_height(&style, h, cb.height, pb_v);
@@ -1070,8 +1070,8 @@ impl<'a> Layouter<'a> {
         // An empty one-line control has the baseline its text would have.
         if control_baseline && b.lines.iter().all(|l| l.fragments.is_empty()) && self.is_line_control(b) {
             let font = self.font_for(style);
-            let m = self.ctx.fonts.metrics(font, style.font_size);
-            let lh = style.line_height.unwrap_or_else(|| m.height());
+            let m = self.ctx.fonts.line_metrics(font, style.font_size);
+            let lh = style.line_height.unwrap_or_else(|| rabbithole_gfx::font::normal_line_height(m));
             let half_leading = (lh - (m.ascent + m.descent)) / 2.0;
             let top = b.content_rect.y + (b.content_rect.h - lh) / 2.0;
             b.baseline = Some(top + half_leading + m.ascent - b.rect.y);
@@ -1082,10 +1082,10 @@ impl<'a> Layouter<'a> {
     /// lines (2 by default), whatever its value.
     #[cold]
     #[inline(never)]
-    fn textarea_height(&self, b: &LayoutBox, style: &ComputedStyle) -> Option<f32> {
+    fn textarea_height(&mut self, b: &LayoutBox, style: &ComputedStyle) -> Option<f32> {
         let n = b.node?;
         let rows = self.ctx.doc.attr(n, "rows").and_then(|r| r.trim().parse::<f32>().ok()).filter(|r| *r >= 1.0).unwrap_or(2.0);
-        Some(rows.floor() * style.line_height_px())
+        Some(rows.floor() * self.used_line_height(style))
     }
 
     /// Record the scrollable content size of clipping boxes and apply the
@@ -1707,7 +1707,8 @@ impl<'a> Layouter<'a> {
         let fallback = if let Some(text) = b.text.as_deref().filter(|_| b.image.is_none()) {
             let font = self.ctx.fonts.select_family_stretch(&style.font_family_list, style.font_family, style.font_weight, style.is_italic(), style.font_stretch);
             let width = self.ctx.fonts.shape(font, style.font_size, text, style.letter_spacing).last().map(|g| g.x + g.advance).unwrap_or(0.0);
-            (width, style.line_height_px())
+            let lh = style.line_height.unwrap_or_else(|| self.ctx.fonts.normal_line_height(font, style.font_size));
+            (width, lh)
         } else {
             (0.0, 0.0)
         };
@@ -2212,8 +2213,8 @@ impl<'a> Layouter<'a> {
         let size = style.font_size;
         let width = self.measurer.width(font, size, &text);
         let baseline = b.first_baseline().unwrap_or_else(|| {
-            let m = self.ctx.fonts.metrics(font, size);
-            let lh = style.line_height_px();
+            let m = self.ctx.fonts.line_metrics(font, size);
+            let lh = style.line_height.unwrap_or_else(|| rabbithole_gfx::font::normal_line_height(m));
             b.content_rect.y + (lh - (m.ascent + m.descent)) / 2.0 + m.ascent
         });
         let gap = size * 0.45;

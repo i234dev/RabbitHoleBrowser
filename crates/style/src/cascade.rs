@@ -1020,7 +1020,7 @@ fn apply_declarations(
         ch: pch,
         ex: pex,
         ic: pic,
-        lh: parent.line_height.unwrap_or(parent.font_size * 1.2),
+        lh: parent.line_height_px(),
     };
     // (Whether a font size is declared, and the size of an absolute
     // keyword: both depend on the final family, see below.)
@@ -1082,7 +1082,7 @@ fn apply_declarations(
         }
         match font_probe.line_height_number {
             Some(n) => n * style.font_size,
-            None => font_probe.line_height.unwrap_or(style.font_size * 1.2),
+            None => font_probe.line_height_px(),
         }
     };
     drop(font_probe);
@@ -1288,7 +1288,7 @@ pub fn apply_decorations(style: &mut ComputedStyle, parent: &ComputedStyle) {
 pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declaration], root_font_size: f32, viewport: (f32, f32)) -> ComputedStyle {
     let mut style = base.clone();
     let (ch, ex, ic) = crate::values::font_units(base);
-    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch, ex, ic, lh: base.line_height.unwrap_or(base.font_size * 1.2) };
+    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch, ex, ic, lh: base.line_height_px() };
     let keep = |_: &str, raw: &str| Some(raw.to_string());
     let ctx = ApplyCtx { len, pseudo: false, base: None, document_base: "", resolve: &keep };
     for d in decls {
@@ -1297,7 +1297,7 @@ pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declara
         }
         if d.name == "font-size" {
             let (pch, pex, pic) = crate::values::font_units(parent);
-            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch: pch, ex: pex, ic: pic, lh: parent.line_height.unwrap_or(parent.font_size * 1.2) };
+            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch: pch, ex: pex, ic: pic, lh: parent.line_height_px() };
             apply_font_size(&d.value, &mut style, parent, &pctx);
             continue;
         }
@@ -1337,6 +1337,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
     let mut display = "auto".to_string();
     let mut unicode_range = None;
     let mut feature_settings = Vec::new();
+    let mut metric_overrides = rabbithole_gfx::MetricOverrides::default();
     for d in decls {
         let comps = values::components(&d.value);
         match d.name.as_str() {
@@ -1446,10 +1447,26 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
                     feature_settings = f;
                 }
             }
+            // CSS Fonts 4 §4.11: `normal | <percentage [0,∞]>`, of the
+            // used font size.
+            name @ ("ascent-override" | "descent-override" | "line-gap-override") => {
+                let value = match d.value.iter().filter(|t| !matches!(t, Token::Whitespace)).collect::<Vec<_>>()[..] {
+                    [Token::Ident(k)] if k.eq_ignore_ascii_case("normal") => Some(None),
+                    [Token::Percentage(p)] if *p >= 0.0 => Some(Some(*p / 100.0)),
+                    _ => None,
+                };
+                if let Some(v) = value {
+                    match name {
+                        "ascent-override" => metric_overrides.ascent = v,
+                        "descent-override" => metric_overrides.descent = v,
+                        _ => metric_overrides.line_gap = v,
+                    }
+                }
+            }
             _ => {}
         }
     }
-    Some(FontFace { family: family?, sources, weight, italic, stretch, display, unicode_range, feature_settings })
+    Some(FontFace { family: family?, sources, weight, italic, stretch, display, unicode_range, feature_settings, metric_overrides })
 }
 
 /// `U+0025-00FF`, `U+4??`, `U+20AC` (also tolerates a missing `+`, which

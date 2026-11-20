@@ -34,6 +34,13 @@ impl LineMetrics {
     }
 }
 
+/// `line-height: normal` from a font's metrics (see
+/// [`FontContext::normal_line_height`]): Blink's line spacing, the sum of
+/// the rounded ascent, descent and line gap.
+pub fn normal_line_height(m: LineMetrics) -> f32 {
+    m.ascent.round() + m.descent.round() + m.line_gap.round()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShapedGlyph {
     /// Font actually used (after fallback).
@@ -107,6 +114,8 @@ pub(crate) struct FaceSlot {
     /// `unicode-range` of a web font as inclusive code point ranges; `None`
     /// covers every character. The face is only used for characters in it.
     pub unicode_range: Option<Rc<[(u32, u32)]>>,
+    /// `@font-face` metric override descriptors.
+    pub metric_overrides: crate::MetricOverrides,
     pub source: FaceSource,
     pub font: RefCell<Option<Rc<fontdue::Font>>>,
     pub failed: Cell<bool>,
@@ -294,6 +303,7 @@ impl FontContext {
                 stretch: (100, 100),
                 generic: Some(generic),
                 unicode_range: None,
+                metric_overrides: Default::default(),
                 source: FaceSource::Bytes(Rc::new(bytes.to_vec())),
                 font: RefCell::new(None),
                 failed: Cell::new(false),
@@ -470,8 +480,13 @@ impl FontContext {
         }
     }
 
+    /// The ascent, descent and line gap of `font` at `size`: the OS/2
+    /// typographic metrics when its `USE_TYPO_METRICS` flag is set, else
+    /// the `hhea` ones (the typographic, then Windows, metrics when those
+    /// are zero), as Chrome reads them on Linux; then the face's
+    /// `@font-face` metric overrides.
     pub fn metrics(&self, font: FontId, size: f32) -> LineMetrics {
-        match self.face(font.0).horizontal_line_metrics(size) {
+        let mut m = match self.face(font.0).horizontal_line_metrics(size) {
             Some(m) => LineMetrics {
                 ascent: m.ascent.max(0.0),
                 descent: m.descent.abs(),
@@ -482,7 +497,85 @@ impl FontContext {
                 descent: size * 0.25,
                 line_gap: 0.0,
             },
+        };
+        if let Some(o) = self.metric_overrides(font.0) {
+            if let Some(a) = o.ascent {
+                m.ascent = a * size;
+            }
+            if let Some(d) = o.descent {
+                m.descent = d * size;
+            }
+            if let Some(g) = o.line_gap {
+                m.line_gap = g * size;
+            }
         }
+        m
+    }
+
+    /// The used `line-height: normal` of `font` at `size` (CSS Inline 3
+    /// §5.1): its ascent, descent and line gap, each rounded to whole
+    /// pixels as Chrome does.
+    pub fn normal_line_height(&self, font: FontId, size: f32) -> f32 {
+        normal_line_height(self.line_metrics(font, size))
+    }
+
+    /// The face whose metrics `font` uses for its lines: the first
+    /// available font (CSS Fonts 4 §5.3): a face whose `unicode-range`
+    /// excludes U+0020 passes to the one that renders the space.
+    pub fn first_available_face(&self, font: FontId) -> FontId {
+        let primary = self.resolve_index(font.0);
+        if self.covers(primary, 0x20) {
+            return font;
+        }
+        match self.fallback_for_char(' ', FontId(primary)) {
+            Some(f) => f,
+            None => font,
+        }
+    }
+
+    /// Vertical metrics of the first available face of `font`.
+    pub fn line_metrics(&self, font: FontId, size: f32) -> LineMetrics {
+        self.metrics(self.first_available_face(font), size)
+    }
+
+    /// The faces other than `font` itself that render characters of
+    /// `text` (font fallback): with `line-height: normal` their metrics
+    /// also count in the line box (CSS Inline 3 §5.1, as in browsers).
+    pub fn fallback_faces(&self, font: FontId, text: &str) -> Vec<FontId> {
+        let primary = self.resolve_index(font.0);
+        if text.is_ascii() {
+            let cover = self.ascii_cover(primary);
+            if text.bytes().all(|b| b <= b' ' || b == 0x7F || cover & (1u128 << b) != 0) {
+                return Vec::new();
+            }
+        }
+        let mut out: Vec<FontId> = Vec::new();
+        for ch in text.chars() {
+            if ch.is_whitespace() || ch.is_control() || is_zero_width(ch) || is_mark_like(ch) {
+                continue;
+            }
+            let (f, g) = self.lookup(primary, ch);
+            if f != primary && g != 0 && !out.contains(&FontId(f)) {
+                out.push(FontId(f));
+            }
+        }
+        out
+    }
+
+    /// The printable ASCII characters face `idx` renders itself.
+    fn ascii_cover(&self, idx: usize) -> u128 {
+        if let Some(&c) = self.shaping.ascii_cover.borrow().get(&idx) {
+            return c;
+        }
+        let face = self.face(idx);
+        let mut cover = 0u128;
+        for b in 0x21u8..0x7F {
+            if self.covers(idx, b as u32) && face.lookup_glyph_index(b as char) != 0 {
+                cover |= 1u128 << b;
+            }
+        }
+        self.shaping.ascii_cover.borrow_mut().insert(idx, cover);
+        cover
     }
 
     /// Width of `text` at `size`, including kerning and fallback.

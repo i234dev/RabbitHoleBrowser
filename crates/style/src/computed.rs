@@ -2438,9 +2438,13 @@ impl ComputedStyle {
             || self.position == Position::Fixed
     }
 
-    /// Line height in px: explicit value or `normal` ≈ 1.2 × font-size.
+    /// Line height in px: the explicit value, or `normal` from the first
+    /// available font's metrics.
     pub fn line_height_px(&self) -> f32 {
-        self.line_height.unwrap_or(self.font_size * 1.2)
+        match self.line_height {
+            Some(lh) => lh,
+            None => crate::values::normal_line_height(self),
+        }
     }
 
     pub fn is_bold(&self) -> bool {
