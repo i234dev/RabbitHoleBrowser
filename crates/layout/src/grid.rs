@@ -1185,6 +1185,7 @@ impl<'a> Layouter<'a> {
 
     /// Lay out the grid items of `b`; returns the content height.
     pub(crate) fn layout_grid(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
+        self.grid_layouts += 1;
         if self.grid_publication.enabled() { b.used_grid_tracks = [None, None]; }
         if b.style.grid_lanes || subgrid::inherits_stacking(b) {
             return self.layout_grid_lanes(b, cb);

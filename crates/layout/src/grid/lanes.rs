@@ -568,6 +568,7 @@ impl<'a> Layouter<'a> {
 
     /// Lay out a grid lanes container's items; returns the content height.
     pub(crate) fn layout_grid_lanes(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
+        self.grid_layouts += 1;
         if self.grid_publication.enabled() { b.used_grid_tracks = [None, None]; }
         let style = b.style.clone();
         let rows = row_lanes(b);
