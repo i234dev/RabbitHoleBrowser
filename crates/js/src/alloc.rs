@@ -178,6 +178,19 @@ pub fn enable_for_this_thread() {
     CACHE.with(|c| unsafe { (*c.get()).enabled = true });
 }
 
+/// Ask the CPU to start loading the cache line at `p` (a hint: never
+/// faults, also for null or dangling pointers).
+#[inline(always)]
+pub(crate) fn prefetch<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch is only a hint; it never faults.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(p as *const i8)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = p;
+}
+
 #[inline(always)]
 unsafe fn next_of(p: *mut u8) -> *mut u8 {
     *(p as *mut *mut u8)
@@ -292,7 +305,12 @@ unsafe impl GlobalAlloc for RhAlloc {
                     return null_mut();
                 }
                 let p = c.lists[k];
-                c.lists[k] = next_of(p);
+                let next = next_of(p);
+                c.lists[k] = next;
+                // Freed blocks are usually cold: start loading the one the
+                // next request of this class will take, whose first word
+                // that request reads.
+                prefetch(next);
                 c.net += layout.size() as isize;
                 p
             });
