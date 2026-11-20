@@ -1264,9 +1264,11 @@ impl Engine {
         let fonts = Rc::new(self.fonts.document_scope());
         let mut registered = HashSet::new();
         for f in &loaded.fonts {
-            let key = (f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic, f.face.stretch);
+            // Faces that differ only in unicode-range (the subsets of a
+            // hosted font) are all needed: each covers its own characters.
+            let key = (f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic, f.face.stretch, f.face.unicode_range.clone());
             if registered.insert(key) {
-                let id = fonts.add_font_data_stretch(&f.face.family, f.face.weight.0, f.face.italic, f.face.stretch, &f.data);
+                let id = fonts.add_font_data_ranged(&f.face.family, f.face.weight.0, f.face.italic, f.face.stretch, f.face.unicode_range.as_deref(), &f.data);
                 if let (Some(id), false) = (id, f.face.feature_settings.is_empty()) {
                     fonts.set_face_features(id, &f.face.feature_settings);
                 }

@@ -147,6 +147,7 @@ impl FontContext {
                 italic: slot.italic,
                 stretch: slot.stretch,
                 generic: slot.generic,
+                unicode_range: slot.unicode_range.clone(),
                 source: match &slot.source {
                     crate::font::FaceSource::Bytes(b) => crate::font::FaceSource::Bytes(Rc::clone(b)),
                     crate::font::FaceSource::Path(p, i) => crate::font::FaceSource::Path(p.clone(), *i),

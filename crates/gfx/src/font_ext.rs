@@ -74,6 +74,19 @@ impl FontContext {
     /// [`FontContext::add_font_data`] with the face's `font-stretch` range
     /// in percent (min, max).
     pub fn add_font_data_stretch(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), data: &[u8]) -> Option<FontId> {
+        self.add_font_data_ranged(family, weight, italic, stretch, None, data)
+    }
+
+    /// [`FontContext::add_font_data_stretch`] with the face's
+    /// `unicode-range` (inclusive code point ranges; `None` for all).
+    /// Faces of one family and style that differ only in their ranges form
+    /// a composite font (CSS Fonts 4 §4.5): each character uses the face
+    /// whose range includes it, later registrations first.
+    pub fn add_font_data_ranged(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, data: &[u8]) -> Option<FontId> {
+        // An empty or full range is no restriction.
+        let unicode_range: Option<Rc<[(u32, u32)]>> = unicode_range
+            .filter(|r| !r.iter().any(|&(lo, hi)| lo == 0 && hi >= 0x10FFFF))
+            .map(Rc::from);
         // Raw SFNT can be compared against the store without first copying it.
         let sfnt = match data.get(..4) {
             Some([0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true") => std::borrow::Cow::Borrowed(data),
@@ -97,7 +110,13 @@ impl FontContext {
                     continue;
                 }
                 data = Some((bytes.clone(), slot.font.borrow().clone()));
-                if slot.generic.is_none() && slot.family_lower == family_lower && slot.weight == weight && slot.italic == italic && slot.stretch == stretch {
+                if slot.generic.is_none()
+                    && slot.family_lower == family_lower
+                    && slot.weight == weight
+                    && slot.italic == italic
+                    && slot.stretch == stretch
+                    && slot.unicode_range == unicode_range
+                {
                     binding = Some(idx);
                     break;
                 }
@@ -130,6 +149,7 @@ impl FontContext {
             italic,
             stretch,
             generic: None,
+            unicode_range,
             source: FaceSource::Bytes(bytes),
             font: RefCell::new(Some(font)),
             failed: Cell::new(false),
@@ -164,6 +184,7 @@ impl FontContext {
                 italic: f.italic,
                 stretch: (100, 100),
                 generic: None,
+                unicode_range: None,
                 source: FaceSource::Path(f.path, f.index),
                 font: RefCell::new(None),
                 failed: Cell::new(false),
