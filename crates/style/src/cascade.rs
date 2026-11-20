@@ -65,16 +65,18 @@ impl IndexedRule {
     }
 }
 
+pub(crate) type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
+
 /// Rules bucketed by the key of their rightmost compound selector. Owns
 /// copies of the active rules so it can be kept across restyles.
 #[derive(Default)]
 pub(crate) struct RuleIndex {
     pub(crate) rules: Vec<IndexedRule>,
-    by_id: HashMap<String, Vec<usize>>,
-    by_class: HashMap<String, Vec<usize>>,
-    by_tag: HashMap<String, Vec<usize>>,
+    by_id: FxMap<String, Vec<usize>>,
+    by_class: FxMap<String, Vec<usize>>,
+    by_tag: FxMap<String, Vec<usize>>,
     /// Rightmost compound keyed only by an attribute selector.
-    by_attr: HashMap<String, Vec<usize>>,
+    by_attr: FxMap<String, Vec<usize>>,
     universal: Vec<usize>,
     /// Rules whose subject is `:host...` (applied to the shadow host).
     host: Vec<usize>,
@@ -425,8 +427,53 @@ impl DeclCache {
 /// (siblings in lists, table cells, paragraphs...).
 #[derive(Default)]
 pub(crate) struct ShareCache {
-    map: HashMap<ShareKey, (ElementOut, Rc<ComputedStyle>, Rc<Vec<Declaration>>, Rc<Vec<Declaration>>)>,
+    map: HashMap<ShareKey, (ElementOut, Rc<ComputedStyle>, Rc<Vec<Declaration>>, Rc<Vec<Declaration>>), std::hash::BuildHasherDefault<FxHasher>>,
     pub(crate) hits: usize,
+}
+
+/// A fast hasher for keys made of pointers and small integers (not
+/// attacker-chosen strings).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FxHasher(u64);
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().unwrap_or_default()));
+        }
+        for &b in chunks.remainder() {
+            self.add(b as u64);
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, v: u8) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
+    #[inline]
+    fn write_usize(&mut self, v: usize) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(PartialEq, Eq, Hash)]
