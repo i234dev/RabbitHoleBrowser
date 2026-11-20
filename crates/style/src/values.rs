@@ -34,6 +34,11 @@ thread_local! {
     /// The last few `font_units` results (consecutive elements mostly share
     /// their font): looked up without building the cache key.
     static UNIT_RECENT: std::cell::RefCell<Vec<RecentUnits>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Line metrics (em) of first available fonts, for `line-height: normal`.
+    static LINE_CACHE: std::cell::RefCell<LineCache> = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// The last few `LINE_CACHE` results (an element's and its parent's
+    /// fonts alternate), looked up without building their key.
+    static LINE_RECENT: std::cell::RefCell<Vec<(Vec<String>, u8, u16, bool, (u64, u64), rabbithole_gfx::LineMetrics)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 struct RecentUnits {
@@ -47,6 +52,7 @@ struct RecentUnits {
 
 fn clear_recent_units() {
     UNIT_RECENT.with(|r| r.borrow_mut().clear());
+    LINE_RECENT.with(|r| r.borrow_mut().clear());
 }
 
 /// Fonts used to resolve the font-relative units `ch` and `ex` on this
@@ -54,12 +60,14 @@ fn clear_recent_units() {
 pub fn set_unit_fonts(fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>) {
     UNIT_FONTS.with(|f| *f.borrow_mut() = fonts);
     UNIT_CACHE.with(|c| c.borrow_mut().clear());
+    LINE_CACHE.with(|c| c.borrow_mut().clear());
     clear_recent_units();
 }
 
 /// Forget the cached `ch` / `ex` (fonts were added).
 pub fn clear_unit_cache() {
     UNIT_CACHE.with(|c| c.borrow_mut().clear());
+    LINE_CACHE.with(|c| c.borrow_mut().clear());
     clear_recent_units();
 }
 
@@ -70,6 +78,7 @@ thread_local! {
 }
 
 type UnitCache = std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), (f32, f32, f32)>;
+type LineCache = std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), rabbithole_gfx::LineMetrics>;
 
 /// Restores all font-unit state, including nested document/style passes.
 /// A cache belongs to a view, not merely to its number of registered faces.
@@ -77,6 +86,7 @@ type UnitCache = std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), 
 pub struct FontUnitScope {
     fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>,
     cache: UnitCache,
+    lines: LineCache,
     skip: Vec<String>,
 }
 
@@ -85,6 +95,7 @@ pub fn scope_unit_fonts(fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>,
     FontUnitScope {
         fonts: UNIT_FONTS.with(|f| std::mem::replace(&mut *f.borrow_mut(), fonts)),
         cache: UNIT_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        lines: LINE_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut())),
         skip: UNIT_SKIP.with(|s| std::mem::replace(&mut *s.borrow_mut(), skip)),
     }
 }
@@ -98,6 +109,7 @@ impl Drop for FontUnitScope {
     fn drop(&mut self) {
         UNIT_FONTS.with(|f| *f.borrow_mut() = self.fonts.take());
         UNIT_CACHE.with(|c| *c.borrow_mut() = std::mem::take(&mut self.cache));
+        LINE_CACHE.with(|c| *c.borrow_mut() = std::mem::take(&mut self.lines));
         UNIT_SKIP.with(|s| *s.borrow_mut() = std::mem::take(&mut self.skip));
         clear_recent_units();
     }
@@ -155,6 +167,50 @@ pub fn font_units(style: &crate::ComputedStyle) -> (f32, f32, f32) {
         remember(v);
         v
     })
+}
+
+/// The used `line-height: normal` (px) of a style: from its first
+/// available font's ascent, descent and line gap (1.2em without fonts).
+pub fn normal_line_height(style: &crate::ComputedStyle) -> f32 {
+    let size = style.font_size;
+    let em = UNIT_FONTS.with(|f| {
+        let f = f.borrow();
+        let fonts = f.as_ref()?;
+        let generation = fonts.selection_generation();
+        let (generic, weight, italic) = (style.font_family as u8, style.font_weight, style.is_italic());
+        let recent = LINE_RECENT.with(|r| {
+            r.borrow().iter().find(|e| e.4 == generation && e.1 == generic && e.2 == weight && e.3 == italic && e.0 == style.font_family_list).map(|e| e.5)
+        });
+        if recent.is_some() {
+            return recent;
+        }
+        let remember = |m| {
+            LINE_RECENT.with(|r| {
+                let mut r = r.borrow_mut();
+                if r.len() >= 4 {
+                    r.remove(0);
+                }
+                r.push((style.font_family_list.clone(), generic, weight, italic, generation, m));
+            })
+        };
+        let key = (style.font_family_list.join(","), generic, weight, italic, generation);
+        if let Some(m) = LINE_CACHE.with(|c| c.borrow().get(&key).copied()) {
+            remember(m);
+            return Some(m);
+        }
+        let list: Vec<String> = UNIT_SKIP.with(|s| {
+            let s = s.borrow();
+            style.font_family_list.iter().filter(|f| !s.iter().any(|x| x.eq_ignore_ascii_case(f.trim().trim_matches('"').trim_matches('\''))) ).cloned().collect()
+        });
+        let m = fonts.unit_line_metrics(&list, style.font_family, style.font_weight, style.is_italic());
+        LINE_CACHE.with(|c| c.borrow_mut().insert(key, m));
+        remember(m);
+        Some(m)
+    });
+    match em {
+        Some(m) => rabbithole_gfx::font::normal_line_height(rabbithole_gfx::LineMetrics { ascent: m.ascent * size, descent: m.descent * size, line_gap: m.line_gap * size }),
+        None => size * 1.2,
+    }
 }
 
 /// Cap height (em) of the element's first available font.
@@ -1397,5 +1453,31 @@ mod font_scope_tests {
         let after = font_units(&style);
         assert_ne!(before, after);
         assert_eq!(after, page.unit_metrics(&style.font_family_list, Family::Sans, 400, false));
+    }
+
+    /// `line-height: normal` follows the first available font (and its
+    /// metric overrides), per scope; without fonts it is 1.2em.
+    #[test]
+    fn normal_line_height_follows_first_available_font() {
+        let mut style = crate::ComputedStyle::initial();
+        style.font_size = 20.0;
+        style.font_family_list = vec!["Tall lines".into()];
+        {
+            let _none = scope_unit_fonts(None, vec![]);
+            assert_eq!(normal_line_height(&style), 24.0);
+        }
+        let host = FontContext::new();
+        let page = Rc::new(host.document_scope());
+        let overrides = rabbithole_gfx::MetricOverrides { ascent: Some(1.0), descent: Some(0.5), line_gap: Some(0.25) };
+        page.add_font_face_with_metrics("Tall lines", (400, 400), false, (100, 100), None, overrides, include_bytes!("../../../assets/fonts/DejaVuSans.ttf"));
+        let _scope = scope_unit_fonts(Some(page.clone()), vec![]);
+        assert_eq!(normal_line_height(&style), 20.0 + 10.0 + 5.0);
+        assert_eq!(style.line_height_px(), 35.0);
+        // DejaVu Sans (hhea 1901 / -483 at 2048 units): 15 + 4 at 16px.
+        style.font_family_list = vec!["Missing".into()];
+        style.font_size = 16.0;
+        assert_eq!(normal_line_height(&style), 19.0);
+        style.line_height = Some(30.0);
+        assert_eq!(style.line_height_px(), 30.0);
     }
 }

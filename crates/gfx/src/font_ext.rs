@@ -94,6 +94,14 @@ impl FontContext {
     /// its own. Other fonts register once, at the range's minimum.
     /// Returns the registered faces (empty when the data cannot be used).
     pub fn add_font_face(&self, family: &str, weight: (u16, u16), italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, data: &[u8]) -> Vec<FontId> {
+        self.add_font_face_with_metrics(family, weight, italic, stretch, unicode_range, crate::MetricOverrides::default(), data)
+    }
+
+    /// [`FontContext::add_font_face`] with the rule's `ascent-override`,
+    /// `descent-override` and `line-gap-override` descriptors (faces that
+    /// differ in them are distinct).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_font_face_with_metrics(&self, family: &str, weight: (u16, u16), italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, metric_overrides: crate::MetricOverrides, data: &[u8]) -> Vec<FontId> {
         // Raw SFNT can be compared against the store without first copying it.
         let sfnt = match data.get(..4) {
             Some([0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true") => std::borrow::Cow::Borrowed(data),
@@ -126,7 +134,7 @@ impl FontContext {
                 Some(static_font) => std::borrow::Cow::Owned(static_font),
                 None => sfnt,
             };
-            return self.register_sfnt(family, lo, italic, stretch, unicode_range, face).into_iter().collect();
+            return self.register_sfnt(family, lo, italic, stretch, unicode_range, metric_overrides, face).into_iter().collect();
         }
         let mut out = Vec::new();
         for w in weights {
@@ -134,12 +142,13 @@ impl FontContext {
                 Some(static_font) => std::borrow::Cow::Owned(static_font),
                 None => std::borrow::Cow::Borrowed(sfnt.as_ref()),
             };
-            out.extend(self.register_sfnt(family, w, italic, stretch, unicode_range, face));
+            out.extend(self.register_sfnt(family, w, italic, stretch, unicode_range, metric_overrides, face));
         }
         out
     }
 
-    fn register_sfnt(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, sfnt: std::borrow::Cow<[u8]>) -> Option<FontId> {
+    #[allow(clippy::too_many_arguments)]
+    fn register_sfnt(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, metric_overrides: crate::MetricOverrides, sfnt: std::borrow::Cow<[u8]>) -> Option<FontId> {
         // An empty or full range is no restriction.
         let unicode_range: Option<Rc<[(u32, u32)]>> = unicode_range
             .filter(|r| !r.iter().any(|&(lo, hi)| lo == 0 && hi >= 0x10FFFF))
@@ -167,6 +176,7 @@ impl FontContext {
                     && slot.italic == italic
                     && slot.stretch == stretch
                     && slot.unicode_range == unicode_range
+                    && slot.metric_overrides == metric_overrides
                 {
                     binding = Some(idx);
                     break;
@@ -191,6 +201,9 @@ impl FontContext {
             let font = fontdue::Font::from_bytes(sfnt.as_ref(), crate::font::fontdue_settings()).ok()?;
             (Rc::new(sfnt.into_owned()), Rc::new(font))
         };
+        if !metric_overrides.is_empty() {
+            self.shaping.any_metric_overrides.set(true);
+        }
         let name = format!("{family} {weight}{}", if italic { " Italic" } else { "" });
         let id = self.register(FaceSlot {
             name,
@@ -201,6 +214,7 @@ impl FontContext {
             stretch,
             generic: None,
             unicode_range,
+            metric_overrides,
             source: FaceSource::Bytes(bytes),
             font: RefCell::new(Some(font)),
             failed: Cell::new(false),
@@ -236,6 +250,7 @@ impl FontContext {
                 stretch: (100, 100),
                 generic: None,
                 unicode_range: None,
+                metric_overrides: Default::default(),
                 source: FaceSource::Path(f.path, f.index),
                 font: RefCell::new(None),
                 failed: Cell::new(false),

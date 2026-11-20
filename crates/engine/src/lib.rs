@@ -1298,7 +1298,7 @@ impl Engine {
             // hosted font) are all needed: each covers its own characters.
             let key = (f.face.family.to_ascii_lowercase(), f.face.weight, f.face.italic, f.face.stretch, f.face.unicode_range.clone());
             if registered.insert(key) {
-                let ids = fonts.add_font_face(&f.face.family, f.face.weight, f.face.italic, f.face.stretch, f.face.unicode_range.as_deref(), &f.data);
+                let ids = fonts.add_font_face_with_metrics(&f.face.family, f.face.weight, f.face.italic, f.face.stretch, f.face.unicode_range.as_deref(), f.face.metric_overrides, &f.data);
                 if !f.face.feature_settings.is_empty() {
                     for id in ids {
                         fonts.set_face_features(id, &f.face.feature_settings);

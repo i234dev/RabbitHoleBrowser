@@ -17,7 +17,7 @@ pub mod raster;
 pub mod stroke;
 mod shaping;
 pub mod color_glyph;
-pub use shaping::{DecorationMetrics, FontFeature, ShapeFeatures, LANGUAGE_TAG};
+pub use shaping::{DecorationMetrics, FontFeature, MetricOverrides, ShapeFeatures, LANGUAGE_TAG};
 
 #[cfg(test)]
 mod tests_v02;
@@ -25,6 +25,8 @@ mod tests_v02;
 mod tests_font_scopes;
 #[cfg(test)]
 mod tests_font_ranges;
+#[cfg(test)]
+mod tests_line_metrics;
 
 pub use canvas::{Canvas, Color, ColorStop, FillRule, LineCap, LineJoin, Matrix, Paint, PathSeg, Point, Radii, Rect, StrokeStyle, IDENTITY};
 pub use canvas_ext::{blend_mode_index, blend_pixel, ellipse_path, parse_svg_path, rounded_rect_path};
