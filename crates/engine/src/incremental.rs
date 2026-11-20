@@ -454,11 +454,10 @@ impl Engine {
         let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, .. } = page;
         // Inputs changed outside the style system: images, background
         // images, scroll offsets, viewport.
-        let mut images_now = HashMap::with_capacity(images.len());
-        for (n, img) in images.iter() {
-            images_now.insert(*n, Arc::as_ptr(img) as *const u8 as usize);
-        }
-        if images_now != incr.images_seen {
+        let img_ptr = |v: &Arc<rabbithole_gfx::Image>| Arc::as_ptr(v) as *const u8 as usize;
+        let images_same = images.len() == incr.images_seen.len() && images.iter().all(|(n, img)| incr.images_seen.get(n) == Some(&img_ptr(img)));
+        if !images_same {
+            let images_now: HashMap<NodeId, usize> = images.iter().map(|(n, img)| (*n, img_ptr(img))).collect();
             for (n, p) in &images_now {
                 if incr.images_seen.get(n) != Some(p) {
                     incr.box_dirty.insert(*n);
@@ -472,10 +471,9 @@ impl Engine {
             incr.images_seen = images_now;
             incr.layout_dirty = true;
         }
-        let bg_ptr = |v: &Arc<rabbithole_gfx::Image>| Arc::as_ptr(v) as *const u8 as usize;
-        let bg_same = background_images.len() == incr.bg_seen.len() && incr.bg_seen.iter().all(|(k, p)| background_images.get(k).is_some_and(|v| bg_ptr(v) == *p));
+        let bg_same = background_images.len() == incr.bg_seen.len() && incr.bg_seen.iter().all(|(k, p)| background_images.get(k).is_some_and(|v| img_ptr(v) == *p));
         if !bg_same {
-            let mut bg_now: Vec<(String, usize)> = background_images.iter().map(|(k, v)| (k.clone(), bg_ptr(v))).collect();
+            let mut bg_now: Vec<(String, usize)> = background_images.iter().map(|(k, v)| (k.clone(), img_ptr(v))).collect();
             bg_now.sort();
             // Background images reach layout only as generated `content:
             // url()` images; any other use (backgrounds, border images) is
