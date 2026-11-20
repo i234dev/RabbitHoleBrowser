@@ -151,6 +151,14 @@ pub struct FontContext {
     cache: Rc<RefCell<HashMap<(usize, u16, u32, u8), Rc<GlyphBitmap>>>>,
     /// (primary face, char) → face that has the char (None = nowhere)
     fallback_cache: RefCell<HashMap<(usize, char), Option<usize>>>,
+    /// Font → (font selection generation, its first available face, that
+    /// face's vertical metrics at 1px), for line layout.
+    line_cache: RefCell<crate::fxhash::FxHashMap<usize, ((u64, u64), usize, LineMetrics)>>,
+    /// The last `line_cache` entry (consecutive text mostly shares a font).
+    line_last: Cell<Option<(usize, (u64, u64), usize, LineMetrics)>>,
+    /// The last font asked for its fallback faces: (font, generation, the
+    /// printable ASCII it renders itself as its first available face).
+    cover_last: Cell<Option<(usize, (u64, u64), u128)>>,
     pub(crate) system_loaded: Rc<Cell<bool>>,
     /// OpenType shaping state (face data, shaped-run cache).
     pub(crate) shaping: Rc<crate::shaping::ShapingState>,
@@ -286,6 +294,9 @@ impl FontContext {
             local_generation: Cell::new(0),
             cache: Rc::new(RefCell::new(HashMap::new())),
             fallback_cache: RefCell::new(HashMap::new()),
+            line_cache: RefCell::new(Default::default()),
+            line_last: Cell::new(None),
+            cover_last: Cell::new(None),
             system_loaded: Rc::new(Cell::new(false)),
             shaping: Default::default(),
             color_cache: Rc::new(RefCell::new(HashMap::new())),
@@ -336,6 +347,9 @@ impl FontContext {
             local_generation: Cell::new(0),
             cache: self.cache.clone(),
             fallback_cache: RefCell::new(HashMap::new()),
+            line_cache: RefCell::new(Default::default()),
+            line_last: Cell::new(None),
+            cover_last: Cell::new(None),
             system_loaded: self.system_loaded.clone(),
             shaping: self.shaping.clone(),
             color_cache: self.color_cache.clone(),
@@ -533,26 +547,65 @@ impl FontContext {
         }
     }
 
+    /// The first available face of `font` and its metrics at 1px (cached
+    /// per font and font selection generation).
+    fn line_unit(&self, font: FontId) -> (usize, LineMetrics) {
+        let generation = self.selection_generation();
+        if let Some((f, g, first, m)) = self.line_last.get() {
+            if f == font.0 && g == generation {
+                return (first, m);
+            }
+        }
+        let cached = self.line_cache.borrow().get(&font.0).copied();
+        let (first, m) = match cached {
+            Some((g, first, m)) if g == generation => (first, m),
+            _ => {
+                let first = self.resolve_index(self.first_available_face(font).0);
+                let m = self.metrics(FontId(first), 1.0);
+                self.line_cache.borrow_mut().insert(font.0, (generation, first, m));
+                (first, m)
+            }
+        };
+        self.line_last.set(Some((font.0, generation, first, m)));
+        (first, m)
+    }
+
     /// Vertical metrics of the first available face of `font`.
     pub fn line_metrics(&self, font: FontId, size: f32) -> LineMetrics {
-        self.metrics(self.first_available_face(font), size)
+        let m = self.line_unit(font).1;
+        LineMetrics { ascent: m.ascent * size, descent: m.descent * size, line_gap: m.line_gap * size }
     }
 
     /// The faces other than the first available one of `font` that render
     /// characters of `text` (font fallback, `unicode-range`): with `line-height: normal` their metrics
     /// also count in the line box (CSS Inline 3 §5.1, as in browsers).
     pub fn fallback_faces(&self, font: FontId, text: &str) -> Vec<FontId> {
+        // ASCII the primary face renders itself needs no lookup (the
+        // common case, checked first).
+        let generation = self.selection_generation();
+        let cover = match self.cover_last.get() {
+            Some((f, g, c)) if f == font.0 && g == generation => c,
+            _ => {
+                let primary = self.resolve_index(font.0);
+                let c = if self.line_unit(font).0 == primary { self.ascii_cover(primary) } else { 0 };
+                self.cover_last.set(Some((font.0, generation, c)));
+                c
+            }
+        };
+        // (Fonts usually have every printable ASCII character: then ASCII
+        // text needs no per-character check.)
+        const PRINTABLE: u128 = ((1u128 << 0x7F) - 1) & !((1u128 << 0x21) - 1);
+        if text.is_ascii() && (cover & PRINTABLE == PRINTABLE || text.bytes().all(|b| b <= b' ' || cover & (1u128 << b) != 0)) {
+            return Vec::new();
+        }
         let primary = self.resolve_index(font.0);
         // (The first available face's metrics are the strut's already.)
-        let first = self.resolve_index(self.first_available_face(font).0);
-        if text.is_ascii() && first == primary {
-            let cover = self.ascii_cover(primary);
-            if text.bytes().all(|b| b <= b' ' || b == 0x7F || cover & (1u128 << b) != 0) {
-                return Vec::new();
-            }
-        }
+        let first = self.line_unit(font).0;
         let mut out: Vec<FontId> = Vec::new();
         for ch in text.chars() {
+            if (ch as u32) < 0x80 && ((ch as u32) <= 0x20 || cover & (1u128 << ch as u32) != 0) {
+                continue;
+            }
             if ch.is_whitespace() || ch.is_control() || is_zero_width(ch) || is_mark_like(ch) {
                 continue;
             }

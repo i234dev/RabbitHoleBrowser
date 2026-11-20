@@ -373,6 +373,10 @@ pub struct LayoutBox {
     /// Its inline content has an inline box aligned by `top` / `bottom` /
     /// `text-*` / `middle` (set with the pieces).
     pub(crate) aligned_inline: bool,
+    /// Font fallback draws some of its inline content's text with
+    /// `line-height: normal` (set with the pieces): those fonts' metrics
+    /// count in its lines.
+    pub(crate) fallback_text: bool,
     /// Logical → physical mapping of a wrapper's contents.
     pub(crate) wm_transform: Option<Matrix>,
     /// How a wrapper's contents are turned (see `wm.rs`).
@@ -456,6 +460,7 @@ impl LayoutBox {
             wm_wrapper: false,
             wm_tcy: false,
             aligned_inline: false,
+            fallback_text: false,
             ruby: 0,
             wm_transform: None,
             wm_kind: WmKind::Cw,

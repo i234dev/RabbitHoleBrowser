@@ -35,9 +35,10 @@ thread_local! {
     /// their font): looked up without building the cache key.
     static UNIT_RECENT: std::cell::RefCell<Vec<RecentUnits>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Line metrics (em) of first available fonts, for `line-height: normal`.
-    static LINE_CACHE: std::cell::RefCell<std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), rabbithole_gfx::LineMetrics>> = std::cell::RefCell::new(std::collections::HashMap::new());
-    /// The last `LINE_CACHE` result, looked up without building its key.
-    static LINE_RECENT: std::cell::RefCell<Option<(Vec<String>, u8, u16, bool, (u64, u64), rabbithole_gfx::LineMetrics)>> = const { std::cell::RefCell::new(None) };
+    static LINE_CACHE: std::cell::RefCell<LineCache> = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// The last few `LINE_CACHE` results (an element's and its parent's
+    /// fonts alternate), looked up without building their key.
+    static LINE_RECENT: std::cell::RefCell<Vec<(Vec<String>, u8, u16, bool, (u64, u64), rabbithole_gfx::LineMetrics)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 struct RecentUnits {
@@ -51,8 +52,7 @@ struct RecentUnits {
 
 fn clear_recent_units() {
     UNIT_RECENT.with(|r| r.borrow_mut().clear());
-    LINE_CACHE.with(|c| c.borrow_mut().clear());
-    LINE_RECENT.with(|r| *r.borrow_mut() = None);
+    LINE_RECENT.with(|r| r.borrow_mut().clear());
 }
 
 /// Fonts used to resolve the font-relative units `ch` and `ex` on this
@@ -60,12 +60,14 @@ fn clear_recent_units() {
 pub fn set_unit_fonts(fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>) {
     UNIT_FONTS.with(|f| *f.borrow_mut() = fonts);
     UNIT_CACHE.with(|c| c.borrow_mut().clear());
+    LINE_CACHE.with(|c| c.borrow_mut().clear());
     clear_recent_units();
 }
 
 /// Forget the cached `ch` / `ex` (fonts were added).
 pub fn clear_unit_cache() {
     UNIT_CACHE.with(|c| c.borrow_mut().clear());
+    LINE_CACHE.with(|c| c.borrow_mut().clear());
     clear_recent_units();
 }
 
@@ -76,6 +78,7 @@ thread_local! {
 }
 
 type UnitCache = std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), (f32, f32, f32)>;
+type LineCache = std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), rabbithole_gfx::LineMetrics>;
 
 /// Restores all font-unit state, including nested document/style passes.
 /// A cache belongs to a view, not merely to its number of registered faces.
@@ -83,6 +86,7 @@ type UnitCache = std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), 
 pub struct FontUnitScope {
     fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>,
     cache: UnitCache,
+    lines: LineCache,
     skip: Vec<String>,
 }
 
@@ -91,6 +95,7 @@ pub fn scope_unit_fonts(fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>,
     FontUnitScope {
         fonts: UNIT_FONTS.with(|f| std::mem::replace(&mut *f.borrow_mut(), fonts)),
         cache: UNIT_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        lines: LINE_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut())),
         skip: UNIT_SKIP.with(|s| std::mem::replace(&mut *s.borrow_mut(), skip)),
     }
 }
@@ -104,6 +109,7 @@ impl Drop for FontUnitScope {
     fn drop(&mut self) {
         UNIT_FONTS.with(|f| *f.borrow_mut() = self.fonts.take());
         UNIT_CACHE.with(|c| *c.borrow_mut() = std::mem::take(&mut self.cache));
+        LINE_CACHE.with(|c| *c.borrow_mut() = std::mem::take(&mut self.lines));
         UNIT_SKIP.with(|s| *s.borrow_mut() = std::mem::take(&mut self.skip));
         clear_recent_units();
     }
@@ -173,12 +179,20 @@ pub fn normal_line_height(style: &crate::ComputedStyle) -> f32 {
         let generation = fonts.selection_generation();
         let (generic, weight, italic) = (style.font_family as u8, style.font_weight, style.is_italic());
         let recent = LINE_RECENT.with(|r| {
-            r.borrow().as_ref().filter(|e| e.4 == generation && e.1 == generic && e.2 == weight && e.3 == italic && e.0 == style.font_family_list).map(|e| e.5)
+            r.borrow().iter().find(|e| e.4 == generation && e.1 == generic && e.2 == weight && e.3 == italic && e.0 == style.font_family_list).map(|e| e.5)
         });
         if recent.is_some() {
             return recent;
         }
-        let remember = |m| LINE_RECENT.with(|r| *r.borrow_mut() = Some((style.font_family_list.clone(), generic, weight, italic, generation, m)));
+        let remember = |m| {
+            LINE_RECENT.with(|r| {
+                let mut r = r.borrow_mut();
+                if r.len() >= 4 {
+                    r.remove(0);
+                }
+                r.push((style.font_family_list.clone(), generic, weight, italic, generation, m));
+            })
+        };
         let key = (style.font_family_list.join(","), generic, weight, italic, generation);
         if let Some(m) = LINE_CACHE.with(|c| c.borrow().get(&key).copied()) {
             remember(m);

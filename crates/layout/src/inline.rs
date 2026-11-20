@@ -501,6 +501,13 @@ impl<'a> Layouter<'a> {
         };
         let pieces = self.build_pieces(&b.items, &b.style, &tcy);
         b.aligned_inline = b.items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if aligns_as_a_whole(style)));
+        b.fallback_text = b.items.iter().any(|it| match it {
+            InlineItem::Text { text, style, .. } if style.line_height.is_none() && !style.line_height_tight => {
+                let font = self.font_for(style);
+                !self.ctx.fonts.fallback_faces(font, text).is_empty()
+            }
+            _ => false,
+        });
         b.pieces = Some(pieces);
     }
 
@@ -851,6 +858,8 @@ impl<'a> Layouter<'a> {
                 inset_seen: std::collections::HashSet::new(),
                 inset_fixups: Vec::new(),
                 inset_total: std::collections::HashMap::new(),
+                fallback_free: Vec::new(),
+                fallback_text: b.fallback_text,
                 wrap_limits: wrap_limits.clone(),
                 group: 0,
                 group_stats: Vec::new(),
@@ -1025,6 +1034,44 @@ struct InlineLayout<'l, 'a> {
     inset_fixups: Vec<InsetFixup>,
     /// Inline size of the text of each inset decorating box, all lines.
     inset_total: std::collections::HashMap<usize, f32>,
+    /// Per text item: 1 when font fallback draws none of its text, 2 when
+    /// it may (0 not known yet), for `line-height: normal`.
+    fallback_free: Vec<u8>,
+    /// See `LayoutBox::fallback_text`.
+    fallback_text: bool,
+}
+
+/// The extents above and below the line's baseline of the fonts that
+/// fallback uses for a text fragment with `line-height: normal` (CSS
+/// Inline 3 §5.1; Blink's used fonts), each with its own half-leading;
+/// `None` when there are none. Whether fallback draws any of a text item
+/// is found once per item (`memo`) for all its fragments.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn fallback_extents(memo: &mut Vec<u8>, lay: &Layouter, items: &[InlineItem], cstyle: &Rc<ComputedStyle>, item: usize, text: &str, tm: &TextMetrics, shift: f32) -> Option<(f32, f32)> {
+    let st = item_style(items, cstyle, item);
+    if st.line_height.is_some() || st.line_height_tight {
+        return None;
+    }
+    if let Some(InlineItem::Text { text: all, .. }) = items.get(item) {
+        if memo.is_empty() {
+            *memo = vec![0; items.len()];
+        }
+        if memo[item] == 0 {
+            memo[item] = if lay.ctx.fonts.fallback_faces(tm.font, all).is_empty() { 1 } else { 2 };
+        }
+        if memo[item] == 1 {
+            return None;
+        }
+    }
+    let mut out: Option<(f32, f32)> = None;
+    for ff in lay.ctx.fonts.fallback_faces(tm.font, text) {
+        let m = lay.ctx.fonts.metrics(ff, tm.size);
+        let half = (rabbithole_gfx::font::normal_line_height(m) - (m.ascent + m.descent)) / 2.0;
+        let (fa, fd) = (m.ascent + half + shift, m.descent + half - shift);
+        out = Some(out.map_or((fa, fd), |(a, d)| (a.max(fa), d.max(fd))));
+    }
+    out
 }
 
 impl<'l, 'a> InlineLayout<'l, 'a> {
@@ -2714,13 +2761,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // Inline 3 §5.1; Blink's used fonts).
             // (Not for a block ellipsis: its line height is zero.)
             if let (PFKind::Text { text, item }, Some(tm), 0, false) = (&f.kind, fm.tm, fm.mode, central || (block_ellipsis && matches!(&f.kind, PFKind::Text { item: MARKER_ITEM, .. }))) {
-                let st = self.style(*item);
-                if st.line_height.is_none() && !st.line_height_tight {
-                    for ff in self.lay.ctx.fonts.fallback_faces(tm.font, text) {
-                        let m = self.lay.ctx.fonts.metrics(ff, tm.size);
-                        let half = (rabbithole_gfx::font::normal_line_height(m) - (m.ascent + m.descent)) / 2.0;
-                        a = a.max(m.ascent + half + fm.shift);
-                        d = d.max(m.descent + half - fm.shift);
+                if self.fallback_text || *item == MARKER_ITEM {
+                    if let Some((fa, fd)) = fallback_extents(&mut self.fallback_free, &*self.lay, self.items, self.cstyle, *item, text, &tm, fm.shift) {
+                        a = a.max(fa);
+                        d = d.max(fd);
                     }
                 }
             }

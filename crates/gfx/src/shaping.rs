@@ -60,6 +60,8 @@ pub(crate) struct ShapingState {
     /// Face → the printable ASCII characters it renders itself (bit per
     /// code point), for [`FontContext::fallback_faces`].
     pub(crate) ascii_cover: RefCell<HashMap<usize, u128>>,
+    /// Has any face metric overrides (`@font-face` descriptors)?
+    pub(crate) any_metric_overrides: std::cell::Cell<bool>,
     /// (face, tag) → does the face's GSUB have that feature?
     gsub_features: RefCell<HashMap<(usize, [u8; 4]), bool>>,
 }
@@ -143,6 +145,9 @@ impl FontContext {
     /// The `@font-face` metric overrides of a face (of its base face for
     /// a feature variant).
     pub(crate) fn metric_overrides(&self, idx: usize) -> Option<MetricOverrides> {
+        if !self.shaping.any_metric_overrides.get() {
+            return None;
+        }
         let base = self.variant_base(idx);
         let faces = self.faces.borrow();
         faces.get(base).map(|s| s.metric_overrides).filter(|o| !o.is_empty())

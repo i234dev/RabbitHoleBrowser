@@ -201,6 +201,9 @@ impl FontContext {
             let font = fontdue::Font::from_bytes(sfnt.as_ref(), crate::font::fontdue_settings()).ok()?;
             (Rc::new(sfnt.into_owned()), Rc::new(font))
         };
+        if !metric_overrides.is_empty() {
+            self.shaping.any_metric_overrides.set(true);
+        }
         let name = format!("{family} {weight}{}", if italic { " Italic" } else { "" });
         let id = self.register(FaceSlot {
             name,
