@@ -54,9 +54,13 @@ fn class_size(c: usize) -> usize {
 static CHUNKS: [AtomicUsize; 1 << TABLE_BITS] = [const { AtomicUsize::new(0) }; 1 << TABLE_BITS];
 static NCHUNKS: AtomicUsize = AtomicUsize::new(0);
 
+/// Table slot of a chunk: its chunk number, so that chunks carved from
+/// neighbouring memory (the usual case) have neighbouring entries and the
+/// entries `dealloc` looks up stay in a few cache lines (a scattering hash
+/// made most lookups miss the cache).
 #[inline(always)]
 fn slot_of(base: usize) -> usize {
-    ((base >> 18).wrapping_mul(0x9E37_79B9_7F4A_7C15usize) >> (usize::BITS - TABLE_BITS)) & ((1 << TABLE_BITS) - 1)
+    (base >> 18) & ((1 << TABLE_BITS) - 1)
 }
 
 #[inline]
