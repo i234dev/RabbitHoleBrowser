@@ -122,6 +122,9 @@ pub(crate) fn parse_selectors(realm: &mut Realm, src: &str) -> JsResult<Vec<Sele
 pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first_only: bool) -> JsResult<Vec<NodeRef>> {
     let list = parse_selectors(realm, selectors)?;
     Ok(with_doc(root.doc, |doc| {
+        if let Some(found) = indexed_query(doc, root.node, &list, first_only) {
+            return found.into_iter().map(|node| NodeRef { doc: root.doc, node }).collect();
+        }
         let state = rabbithole_css::MatchState::default();
         let matcher = SelectorMatcher::new(doc, &state);
         let mut out = Vec::new();
@@ -138,6 +141,49 @@ pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first
         }
         out
     }))
+}
+
+/// `querySelector(All)` through the document's lookup indexes, when every
+/// selector's subject has an id, an `[attr=value]` or a class to look up
+/// and few elements are candidates; `None`: scan the tree instead.
+fn indexed_query(doc: &mut Document, root: NodeId, list: &[Selector], first_only: bool) -> Option<Vec<NodeId>> {
+    use rabbithole_css::selector::AttrOp;
+    // A scan of a small subtree beats checking many candidates.
+    let max = if root == Document::ROOT { 256 } else { 16 };
+    let mut found: Vec<NodeId> = Vec::new();
+    for s in list {
+        if s.pseudo_element.is_some() {
+            continue; // matches nothing
+        }
+        let c = s.compounds.last()?;
+        let candidates = if let Some(id) = &c.id {
+            doc.attr_candidates("id", id)?
+        } else if let Some(a) = c.attrs.iter().find(|a| a.op == AttrOp::Equals && !a.case_insensitive) {
+            doc.attr_candidates(&a.name, &a.value)?
+        } else if let Some(class) = c.classes.first() {
+            doc.class_candidates(class)?
+        } else {
+            return None;
+        };
+        if found.len() + candidates.len() > max {
+            return None;
+        }
+        found.extend_from_slice(candidates);
+    }
+    let doc: &Document = doc;
+    doc.retain_descendants_in_order(root, &mut found);
+    let state = rabbithole_css::MatchState::default();
+    let matcher = SelectorMatcher::new(doc, &state);
+    let mut out = Vec::new();
+    for n in found {
+        if list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, n)) {
+            out.push(n);
+            if first_only {
+                break;
+            }
+        }
+    }
+    Some(out)
 }
 
 pub(crate) fn element_matches(realm: &mut Realm, n: NodeRef, selectors: &str) -> JsResult<bool> {
@@ -1854,6 +1900,63 @@ mod selector_pass_tests {
             console.log(fields[0].matches(':is(input,button):not(:disabled)'));
         "#);
         assert_eq!(out, ["1 email true", "true"]);
+        assert!(env.errors().is_empty(), "{:?}", env.errors());
+    }
+
+    #[test]
+    fn indexed_queries_follow_attribute_and_tree_changes() {
+        let mut html = String::from("<ul id=list>");
+        for i in 0..50 { html.push_str(&format!("<li data-id={i} class='item c{i}'><input class=toggle></li>")); }
+        html.push_str("</ul><template><p id=t data-id=7></p></template><div id=host></div>");
+        let (mut env, mut host) = setup(&html);
+        let out = run(&mut env, &mut host, r#"
+            const q = (s, r = document) => { const e = r.querySelector(s); return e ? (e.id || e.dataset.id || e.tagName) : 'null'; };
+            const list = document.getElementById('list');
+            console.log(q('[data-id="7"]'), q('li[data-id="7"].c7'), q('li[data-id="7"].c8'), q('.c3'), q('#t'));
+            // Attribute changes, removal and insertion.
+            const li = document.querySelector('[data-id="7"]');
+            li.setAttribute('data-id', 'x');
+            console.log(q('[data-id="7"]'), q('[data-id="x"]'));
+            li.remove();
+            console.log(q('[data-id="x"]'), q('[data-id="x"]', li));
+            list.insertBefore(li, list.firstChild);
+            console.log(document.querySelectorAll('.item')[0] === li, q('[data-id="x"]'));
+            // Elements created later and inserted through innerHTML.
+            const n = document.createElement('li'); n.id = 'late'; n.className = 'item fresh';
+            console.log(document.getElementById('late'), q('.fresh'));
+            list.append(n);
+            console.log(document.getElementById('late') === n, q('.fresh'));
+            list.insertAdjacentHTML('afterbegin', '<li id=html class=fresh data-id=y></li>');
+            console.log(q('.fresh'), q('[data-id="y"]'), document.querySelectorAll('.fresh').length);
+            // Duplicate ids: first in tree order.
+            n.id = 'html';
+            console.log(document.getElementById('html').className, document.querySelectorAll('#html').length);
+            document.getElementById('html').removeAttribute('id');
+            console.log(document.getElementById('html') === n);
+            // Class changes and scoped queries.
+            li.className = 'other';
+            console.log(q('.other'), q('.other', list), q('.other', n), list.querySelectorAll('.item').length);
+            // Shadow trees are not in the document's results.
+            const root = document.getElementById('host').attachShadow({mode: 'open'});
+            root.innerHTML = '<span id=s class=fresh data-id=z></span>';
+            console.log(document.getElementById('s'), q('[data-id="z"]'), q('[data-id="z"]', root), root.querySelectorAll('.fresh').length);
+            // Selector lists merge in tree order.
+            console.log([...document.querySelectorAll('[data-id="3"], #list > [data-id="1"]')].map(e => e.dataset.id).join());
+        "#);
+        assert_eq!(out, [
+            "7 7 null 3 null",
+            "null x",
+            "null null",
+            "true x",
+            "null null",
+            "true late",
+            "html html 2",
+            "fresh 2",
+            "true",
+            "x x null 50",
+            "null null s 1",
+            "1,3",
+        ]);
         assert!(env.errors().is_empty(), "{:?}", env.errors());
     }
 }
