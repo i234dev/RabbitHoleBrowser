@@ -31,7 +31,10 @@
   }
 
   // ---- structured clone (serialize to a JSON string, rebuild in the target realm)
-  function serialize(value) {
+  // `ports` (optional): a Map from transferred MessagePorts to their index
+  // in the transfer list; those ports may appear in the value and are
+  // rebuilt from deserialize's `ports` array. Other ports cannot be cloned.
+  function serialize(value, ports) {
     const seen = new Map();
     let next = 0;
     function enc(v) {
@@ -65,6 +68,10 @@
         const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
         return { t: 'ta', id, k: tag, v: Array.from(bytes) };
       }
+      if (ports && typeof MessagePort === 'function' && v instanceof MessagePort) {
+        if (!ports.has(v)) throw cloneError(tag);
+        return { t: 'port', i: ports.get(v) };
+      }
       if (typeof Node === 'function' && v instanceof Node) throw cloneError(tag);
       if (typeof Blob === 'function' && v instanceof Blob) throw cloneError(tag);
       const props = [];
@@ -74,7 +81,7 @@
     return JSON.stringify(enc(value));
   }
 
-  function deserialize(text) {
+  function deserialize(text, ports) {
     const objs = new Map();
     function dec(x) {
       if (x === null || typeof x !== 'object') return x;
@@ -84,6 +91,7 @@
         case 'n': return x.v === '-0' ? -0 : Number(x.v);
         case 'b': return BigInt(x.v);
         case 'ref': return objs.get(x.id);
+        case 'port': return ports ? ports[x.i] : undefined;
         case 'a':
           out = new Array(x.l || 0); objs.set(x.id, out);
           x.v.forEach((e, i) => { put(out, i, dec(e)); });

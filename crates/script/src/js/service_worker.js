@@ -204,7 +204,7 @@
     if (m.t === 'port') { api.portMessage(m, kind, id); return; }
     const source = kind === 'client' ? (clientById(id) || null) : api.worker(id);
     let data, type = 'message', ports = [];
-    try { data = api.clone.deserialize(m.d); ports = api.incoming(kind, id, m.ports); } catch (_) { type = 'messageerror'; data = null; }
+    try { ports = api.incoming(kind, id, m.ports); data = api.clone.deserialize(m.d, ports); } catch (_) { type = 'messageerror'; data = null; ports = []; }
     const event = new ExtendableMessageEvent(type, { data, origin: selfOrigin, lastEventId: '', source, ports });
     const life = lifetime.get(event);
     life.dispatching = true;

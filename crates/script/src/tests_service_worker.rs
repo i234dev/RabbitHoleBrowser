@@ -614,3 +614,31 @@ fn service_worker_messaging_validates_clones_clients_queries_and_redundant_targe
     let output = logs(&env);
     assert_eq!(output.iter().filter(|s| s.contains("] query ")).count(), 1, "{output:?}");
 }
+
+#[test]
+fn service_worker_messages_carry_ports_inside_data_and_detach_transferred_buffers() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), r#"
+        var port;
+        self.onmessage = e => { if ('port' in e.data) port = e.data.port; };
+        self.addEventListener('message', e => {
+            if ('value' in e.data) port.postMessage('Acking value: ' + e.data.value + ' ' + (port === e.ports[0] || e.ports.length === 0));
+            if ('bytes' in e.data) port.postMessage(new TextDecoder().decode(e.data.bytes));
+        });
+    "#.into()));
+    run(&mut env, &mut host, r#"
+        var acks = [], detached = null, stray = null;
+        navigator.serviceWorker.register('sw.js').then(r => {
+            const ch = new MessageChannel(), worker = r.installing;
+            ch.port1.onmessage = e => acks.push(e.data);
+            worker.postMessage({ port: ch.port2 }, [ch.port2]);
+            worker.postMessage({ value: 1 });
+            const bytes = new TextEncoder().encode('hi');
+            worker.postMessage({ bytes }, [bytes.buffer]);
+            detached = bytes.byteLength;
+            try { worker.postMessage({ port: new MessageChannel().port1 }); } catch (e) { stray = e.name; }
+        });
+    "#);
+    advance(&mut env, &mut host, 30);
+    assert_eq!(run(&mut env, &mut host, "console.log(acks.join('|'), detached, stray);"), ["Acking value: 1 true|hi 0 DataCloneError"]);
+}

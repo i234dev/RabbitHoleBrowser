@@ -659,14 +659,16 @@
     const list = typeof transfer === 'object' && !(Symbol.iterator in transfer) ? transfer.transfer : transfer;
     if (list === undefined || list === null) return [];
     if (typeof list !== 'object' || !(Symbol.iterator in list)) throw new TypeError("The transfer list must be a sequence.");
-    const ports = Array.from(list).filter(t => t instanceof g.MessagePort);
-    if (new Set(ports).size !== ports.length) throw domError('A MessagePort was transferred twice.', 'DataCloneError');
-    return ports;
+    const items = Array.from(list);
+    if (new Set(items).size !== items.length) throw domError('An object was transferred twice.', 'DataCloneError');
+    for (const t of items) if (!(t instanceof g.MessagePort) && !(t instanceof ArrayBuffer)) throw domError('Value is not transferable.', 'DataCloneError');
+    return items;
   };
+  const swPortIndex = ports => new Map(Array.from(ports || []).map((p, i) => [p, i]));
   const swPost = (kind, id, msg) => N.swPostMessage(kind, id, JSON.stringify(msg));
   function swBridge(port, b, kind, id) {
     swBridges.set(b, port);
-    port.onmessage = ev => swPost(kind, id, { t: 'port', b, d: swClone.serialize(ev.data), ports: swOutgoing(kind, id, ev.ports) });
+    port.onmessage = ev => swPost(kind, id, { t: 'port', b, d: swClone.serialize(ev.data, swPortIndex(ev.ports)), ports: swOutgoing(kind, id, ev.ports) });
   }
   function swOutgoing(kind, id, ports) {
     if (swBridgePrefix === null) { const s = swSnapshot(); swBridgePrefix = s.worker !== null ? `w${s.worker}` : `c${s.client}`; }
@@ -677,13 +679,18 @@
   }
   // Serialize before any side effect: DataCloneError leaves ports untouched.
   function swSend(kind, id, message, transfer) {
-    const ports = swTransferPorts(transfer);
-    const d = swClone.serialize(message);
+    const items = swTransferPorts(transfer);
+    const ports = items.filter(t => t instanceof g.MessagePort);
+    const d = swClone.serialize(message, swPortIndex(ports));
+    // Transferred buffers are detached in the sending realm.
+    for (const buffer of items) if (buffer instanceof ArrayBuffer && typeof buffer.transfer === 'function') buffer.transfer();
     return swPost(kind, id, { t: 'msg', d, ports: swOutgoing(kind, id, ports) });
   }
   function swPortMessage(m, kind, id) {
     const p = swBridges.get(m.b);
-    if (p) p.postMessage(swClone.deserialize(m.d), swIncoming(kind, id, m.ports));
+    if (!p) return;
+    const ports = swIncoming(kind, id, m.ports);
+    p.postMessage(swClone.deserialize(m.d, ports), ports);
   }
   class ServiceWorker extends g.EventTarget {
     constructor() { super(); ILLEGAL(); }
@@ -790,9 +797,9 @@
       while (st.queue.length && swMessagesEnabled()) {
         const { m, source } = st.queue.shift();
         const worker = swWorker(source), origin = new URL(worker.scriptURL || swBase()).origin;
-        let data;
-        try { data = swClone.deserialize(m.d); } catch (e) { swContainer.dispatchEvent(new g.MessageEvent('messageerror', { origin, source: worker })); continue; }
-        swContainer.dispatchEvent(new g.MessageEvent('message', { data, origin, lastEventId: '', source: worker, ports: Object.freeze(swIncoming('worker', source, m.ports)) }));
+        let data, ports;
+        try { ports = swIncoming('worker', source, m.ports); data = swClone.deserialize(m.d, ports); } catch (e) { swContainer.dispatchEvent(new g.MessageEvent('messageerror', { origin, source: worker })); continue; }
+        swContainer.dispatchEvent(new g.MessageEvent('message', { data, origin, lastEventId: '', source: worker, ports: Object.freeze(ports) }));
       }
     }, 0);
   }
