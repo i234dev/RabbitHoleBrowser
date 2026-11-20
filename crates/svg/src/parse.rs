@@ -615,6 +615,12 @@ impl<'a> Builder<'a> {
             }
         }
         for id in wanted {
+            if id.starts_with("data:") {
+                if let Some((def, _)) = crate::SvgTree::data_url_filter(&id) {
+                    self.filters.insert(id, def);
+                }
+                continue;
+            }
             let Some(el) = self.doc.element_by_id(&id) else { continue };
             if self.doc.tag(el).is_some_and(|t| t.eq_ignore_ascii_case("filter")) {
                 let f = self.build_filter(el);

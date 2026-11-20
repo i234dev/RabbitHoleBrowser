@@ -151,6 +151,19 @@ impl SvgTree {
         self.built.nodes.iter().any(|n| n.spec.mask.is_some() || n.spec.filter.as_ref().is_some_and(|f| !f.is_empty()))
     }
 
+    /// The `<filter>` named by the fragment of an SVG `data:` URL, with
+    /// the document holding it.
+    pub fn data_url_filter(url: &str) -> Option<(std::sync::Arc<filter::FilterDef>, std::sync::Arc<SvgTree>)> {
+        let (doc_url, frag) = url.rsplit_once('#')?;
+        let (meta, bytes) = parse::data_url_bytes(doc_url)?;
+        if !meta.contains("svg") {
+            return None;
+        }
+        let tree = SvgTree::parse(&String::from_utf8_lossy(&bytes))?;
+        let def = tree.filter(frag)?;
+        Some((def, std::sync::Arc::new(tree)))
+    }
+
     /// The `<filter>` element with this `id` (for `filter: url(#id)` on
     /// CSS boxes).
     pub fn filter(&self, id: &str) -> Option<std::sync::Arc<filter::FilterDef>> {

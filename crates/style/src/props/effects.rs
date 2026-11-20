@@ -20,7 +20,10 @@ pub fn parse_filter_list(comps: &[&[Token]], current: Color, ctx: &LengthContext
     for c in comps {
         if matches!(c.first(), Some(Token::Url(_))) || super::fn_name(c).as_deref() == Some("url") {
             let u = crate::cascade::url_of(c)?;
-            let id = u.trim().rsplit_once('#').map(|(_, f)| f.to_string()).unwrap_or_default();
+            // `data:` URLs are kept whole (a filter of that SVG document);
+            // other URLs name an element of this document by fragment.
+            let u = u.trim();
+            let id = if u.len() > 5 && u[..5].eq_ignore_ascii_case("data:") { u.to_string() } else { u.rsplit_once('#').map(|(_, f)| f.to_string()).unwrap_or_default() };
             out.push(FilterOp::Url(id));
             continue;
         }

@@ -1206,7 +1206,7 @@ pub enum FilterOp {
     /// filters that follow).
     DropShadow { x: f32, y: f32, blur: f32, color: Color, current: bool },
     /// `url(#id)`: an SVG `<filter>` (the id; empty when the URL has no
-    /// fragment).
+    /// fragment; a whole `data:` URL for a filter of that document).
     Url(String),
 }
 

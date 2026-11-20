@@ -84,6 +84,10 @@ pub(crate) fn resolve_urls(b: &crate::tree::LayoutBox, ops: &[FilterOp], ctx: &c
             continue;
         }
         let found = (|| {
+            if id.starts_with("data:") {
+                let (def, tree) = rabbithole_svg::SvgTree::data_url_filter(id)?;
+                return Some((id.clone(), def, tree));
+            }
             let node = doc.element_by_id(id)?;
             if !doc.tag(node)?.eq_ignore_ascii_case("filter") {
                 return None;

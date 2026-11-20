@@ -153,3 +153,13 @@ fn svg_element_filter_floods_its_region() {
     assert_eq!(px(10, 10), &[0, 255, 0, 255]);
     assert_eq!(px(2, 2)[3], 0);
 }
+
+#[test]
+fn data_url_filters_resolve() {
+    let url = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='g'%3E%3CfeFlood/%3E%3C/filter%3E%3C/svg%3E#g";
+    let (def, _) = crate::SvgTree::data_url_filter(url).expect("filter");
+    assert_eq!(def.primitives.len(), 1);
+    assert!(crate::SvgTree::data_url_filter("data:text/plain,hi#g").is_none());
+    let v = parse_filter_value("url(\"data:image/svg+xml;base64,AAAA#g\")").unwrap();
+    assert!(matches!(&v[0], FilterItem::Url(u) if u.starts_with("data:")));
+}
