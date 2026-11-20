@@ -551,7 +551,14 @@ impl TreeBuilder {
                     if skip_lf && t.starts_with('\n') {
                         t.remove(0);
                     }
-                    self.chars(&t);
+                    // In body, runs of whitespace and of other characters
+                    // are handled alike (insert, after reconstructing the
+                    // active formatting elements): no need to split.
+                    if self.mode == Mode::InBody && !t.is_empty() && !t.contains('\0') {
+                        self.dispatch(Tok::Chars(t));
+                    } else {
+                        self.chars(&t);
+                    }
                 }
             }
             if self.done {

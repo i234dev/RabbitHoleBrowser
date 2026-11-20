@@ -402,7 +402,11 @@ impl Loader {
             // Resource discovery has no document font view yet, and may run
             // on the same thread as a retained page's synchronous load.
             let _font_units = rabbithole_style::values::scope_unit_fonts(None, Vec::new());
-            rabbithole_style::style_tree_with(&doc, &sheets, &env, &opts)
+            // Only the properties that reference resources (and `display`,
+            // which hides them) are needed here: the other declarations
+            // are left out of this cascade.
+            let discovery = discovery_sheets(&doc, &sheets);
+            rabbithole_style::style_tree_with(&doc, &discovery, &env, &opts)
         };
         if debug {
             eprintln!("[load] discovery cascade {:?}", t.elapsed());
@@ -1869,6 +1873,54 @@ fn resolve_url(base: &str, raw: &str) -> Option<String> {
     }
     let base = Url::parse_absolute(base)?;
     base.join(raw).map(|u| u.to_string())
+}
+
+/// Properties whose computed values the loader's resource discovery reads
+/// (images, generated content, fonts) or that decide whether an element
+/// is rendered at all.
+fn discovery_property(name: &str) -> bool {
+    let name = name.strip_prefix("-webkit-").unwrap_or(name);
+    matches!(name, "display" | "all" | "content" | "font" | "font-family" | "list-style" | "list-style-image")
+        || name.starts_with("background")
+        || name.starts_with("mask")
+        || name.starts_with("border-image")
+        || (name.starts_with("border") && !name.contains('-'))
+}
+
+/// `sheets` reduced to the declarations resource discovery needs (see
+/// [`discovery_property`]); custom properties are kept when a kept
+/// declaration or a `style` attribute uses `var()`. Rules left without declarations keep only
+/// their place in the cascade layer order.
+fn discovery_sheets(doc: &Document, sheets: &[Stylesheet]) -> Vec<Stylesheet> {
+    fn uses_var(rules: &[Rule]) -> bool {
+        rules.iter().any(|r| match r {
+            Rule::Style(sr) => sr.declarations.iter().any(|d| discovery_property(&d.name) && d.value.iter().any(|t| matches!(t, rabbithole_css::Token::Function(f) if f.eq_ignore_ascii_case("var")))),
+            Rule::Media { rules, .. } | Rule::Supports { rules, .. } => uses_var(rules),
+            _ => false,
+        })
+    }
+    fn filter(rules: &[Rule], vars: bool) -> Vec<Rule> {
+        let mut out = Vec::with_capacity(rules.len());
+        for r in rules {
+            match r {
+                Rule::Style(sr) => {
+                    let declarations: Vec<rabbithole_css::Declaration> = sr.declarations.iter().filter(|d| discovery_property(&d.name) || (vars && d.name.starts_with("--"))).cloned().collect();
+                    if !declarations.is_empty() {
+                        out.push(Rule::Style(rabbithole_css::StyleRule { selectors: sr.selectors.clone(), declarations, layer: sr.layer.clone(), container: sr.container.clone(), flags: sr.flags }));
+                    } else if sr.layer.is_some() {
+                        out.push(Rule::Style(rabbithole_css::StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: sr.layer.clone(), container: None, flags: 0 }));
+                    }
+                }
+                Rule::Media { query, rules } => out.push(Rule::Media { query: query.clone(), rules: filter(rules, vars) }),
+                Rule::Supports { matches, rules } => out.push(Rule::Supports { matches: *matches, rules: filter(rules, vars) }),
+                Rule::Keyframes { .. } => {}
+                other => out.push(other.clone()),
+            }
+        }
+        out
+    }
+    let vars = sheets.iter().any(|s| uses_var(&s.rules)) || (0..doc.node_count()).any(|n| doc.attr(n, "style").is_some_and(|v| v.contains("var(")));
+    sheets.iter().map(|s| Stylesheet { rules: filter(&s.rules, vars), base_url: s.base_url.clone(), shadow_scopes: s.shadow_scopes.clone(), source_id: s.source_id }).collect()
 }
 
 fn wrap_media(sheet: Stylesheet, media: Option<&str>) -> Stylesheet {

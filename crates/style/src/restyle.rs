@@ -1163,7 +1163,7 @@ impl StyleEngine {
         let mut decls = std::mem::take(&mut self.decls);
         let mut share = ShareCache::default();
         let root_parent = Rc::new(ComputedStyle::initial());
-        let mut stack = vec![Step::Enter { node: html, parent: root_parent, pvars: Rc::new(HashMap::new()), root_fs: 16.0, force: all, pchange: 0 }];
+        let mut stack = vec![Step::Enter { node: html, parent: root_parent, pvars: Vars::empty(), root_fs: 16.0, force: all, pchange: 0 }];
         let mut recomputed = 0;
         while let Some(step) = stack.pop() {
             let (node, parent, pvars, root_fs, force, pchange) = match step {
@@ -1339,7 +1339,7 @@ impl StyleEngine {
         let mut decls = DeclCache::default();
         let (mut parent, mut vars, mut root_fs) = match start {
             Some((st, v)) => (st, v, tree.map(|t| t.root_font_size).unwrap_or(16.0)),
-            None => (Rc::new(ComputedStyle::initial()), Rc::new(HashMap::new()), 16.0),
+            None => (Rc::new(ComputedStyle::initial()), Vars::empty(), 16.0),
         };
         let matcher = SelectorMatcher::new(doc, opts.state);
         let so_far = tree.map(|t| crate::cascade::StyledSoFar { styles: &t.styles, vars: &self.vars });
@@ -1406,7 +1406,7 @@ impl StyleEngine {
         let matcher = SelectorMatcher::new(doc, opts.state);
         let so_far = crate::cascade::StyledSoFar { styles: &tree.styles, vars: &self.vars };
         let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: None, style_source: Some(&so_far as &dyn rabbithole_css::container::StyleSource) };
-        let empty_vars: Rc<Vars> = Rc::new(HashMap::new());
+        let empty_vars: Rc<Vars> = Vars::empty();
         let initial = Rc::new(ComputedStyle::initial());
         // Raw matched styles (for inheritance of the computed values).
         let mut raw: HashMap<NodeId, Option<Rc<(ComputedStyle, Vec<String>)>>> = HashMap::new();

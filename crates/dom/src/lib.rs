@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+mod index;
 mod live;
 mod select;
 mod selection;
@@ -318,6 +319,8 @@ pub struct Document {
     /// were opened (last = topmost). Painted above everything else, each
     /// over its `::backdrop`; matched by `:modal`.
     pub top_layer: Vec<NodeId>,
+    /// Elements by attribute value and class, for queries.
+    lookup: index::LookupIndex,
 }
 
 /// A CSS-connected `FontFace`: its descriptors serialized as CSS and its
@@ -404,6 +407,7 @@ impl Document {
             attr_namespaces: HashMap::new(),
             url: None,
             top_layer: Vec::new(),
+            lookup: index::LookupIndex::default(),
         }
     }
 
@@ -481,7 +485,13 @@ impl Document {
             next_sibling: None,
             data,
         });
-        self.nodes.len() - 1
+        let id = self.nodes.len() - 1;
+        if self.lookup.active() {
+            if let NodeData::Element(el) = &self.nodes[id].data {
+                self.lookup.add_element(id, el, false);
+            }
+        }
+        id
     }
 
     pub fn create_element(&mut self, tag: &str, attrs: Vec<(String, String)>) -> NodeId {
@@ -575,6 +585,9 @@ impl Document {
     /// Raw mutable access; recorded as an unknown change of the node.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
         self.record(Mutation::Node { node: id });
+        if self.lookup.active() {
+            self.lookup.mark_dirty(id);
+        }
         &mut self.nodes[id]
     }
 
@@ -800,6 +813,9 @@ impl Document {
         self.copy_attr_namespaces_from(Some(other), root, copy);
         self.copy_node_kind(Some(other), root, copy);
         self.nodes[copy].data = std::mem::replace(&mut other.nodes[root].data, NodeData::Comment(String::new()));
+        if self.lookup.active() {
+            self.lookup.mark_dirty(copy);
+        }
         if let Some(state) = other.option_states.get(&root).copied() {
             self.option_states.insert(copy, state);
         }
@@ -904,6 +920,9 @@ impl Document {
             },
         };
         self.select_attribute_changed(id, &name, old.is_some(), value.is_some());
+        if self.lookup.active() {
+            self.lookup.attr_changed(id, &name, old.as_deref(), value);
+        }
         self.record(Mutation::Attr { node: id, name, old });
     }
 
@@ -1330,6 +1349,9 @@ impl Document {
     pub fn element_mut(&mut self, id: NodeId) -> Option<&mut ElementData> {
         if matches!(self.nodes[id].data, NodeData::Element(_)) {
             self.record(Mutation::Node { node: id });
+            if self.lookup.active() {
+                self.lookup.mark_dirty(id);
+            }
         }
         match &mut self.nodes[id].data {
             NodeData::Element(e) => Some(e),

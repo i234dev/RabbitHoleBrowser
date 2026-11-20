@@ -15,6 +15,7 @@ mod tests_props;
 mod tests_errors;
 pub mod ua;
 pub mod values;
+mod vars;
 mod color_spaces;
 
 pub use computed::*;

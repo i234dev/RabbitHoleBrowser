@@ -65,16 +65,18 @@ impl IndexedRule {
     }
 }
 
+pub(crate) type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
+
 /// Rules bucketed by the key of their rightmost compound selector. Owns
 /// copies of the active rules so it can be kept across restyles.
 #[derive(Default)]
 pub(crate) struct RuleIndex {
     pub(crate) rules: Vec<IndexedRule>,
-    by_id: HashMap<String, Vec<usize>>,
-    by_class: HashMap<String, Vec<usize>>,
-    by_tag: HashMap<String, Vec<usize>>,
+    by_id: FxMap<String, Vec<usize>>,
+    by_class: FxMap<String, Vec<usize>>,
+    by_tag: FxMap<String, Vec<usize>>,
     /// Rightmost compound keyed only by an attribute selector.
-    by_attr: HashMap<String, Vec<usize>>,
+    by_attr: FxMap<String, Vec<usize>>,
     universal: Vec<usize>,
     /// Rules whose subject is `:host...` (applied to the shadow host).
     host: Vec<usize>,
@@ -218,7 +220,7 @@ pub(crate) struct Matched<'a> {
     pseudo: Option<PseudoElement>,
 }
 
-pub(crate) type Vars = HashMap<String, Vec<Token>>;
+pub(crate) use crate::vars::Vars;
 
 /// Rule indices per tree scope: the document, and each shadow root (UA
 /// rules + the sheets scoped to it). Shadow roots with the same sheets
@@ -425,8 +427,53 @@ impl DeclCache {
 /// (siblings in lists, table cells, paragraphs...).
 #[derive(Default)]
 pub(crate) struct ShareCache {
-    map: HashMap<ShareKey, (ElementOut, Rc<ComputedStyle>, Rc<Vec<Declaration>>, Rc<Vec<Declaration>>)>,
+    map: HashMap<ShareKey, (ElementOut, Rc<ComputedStyle>, Rc<Vec<Declaration>>, Rc<Vec<Declaration>>), std::hash::BuildHasherDefault<FxHasher>>,
     pub(crate) hits: usize,
+}
+
+/// A fast hasher for keys made of pointers and small integers (not
+/// attacker-chosen strings).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FxHasher(u64);
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().unwrap_or_default()));
+        }
+        for &b in chunks.remainder() {
+            self.add(b as u64);
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, v: u8) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
+    #[inline]
+    fn write_usize(&mut self, v: usize) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -469,7 +516,7 @@ impl rabbithole_css::container::StyleSource for StyledSoFar<'_> {
 
     fn custom_property(&self, n: NodeId, name: &str) -> Option<Option<Vec<Token>>> {
         let vars = self.vars.get(n)?.as_ref()?;
-        Some(vars.get(name).map(|v| substitute_vars(v, vars, 0).unwrap_or_else(|| v.clone())))
+        Some(vars.get(name).map(|v| substitute_vars(v, vars, 0).unwrap_or_else(|| v.to_vec())))
     }
 
     fn same_value(&self, a: &[Token], b: &[Token]) -> bool {
@@ -702,15 +749,19 @@ fn custom_properties(local: &[Matched], parent_vars: &Rc<Vars>, memo: Option<&mu
             }
         }
     }
-    let mut vars: Rc<Vars> = parent_vars.clone();
+    // A layer over the parent's map, created on the first change.
+    let mut layer: Option<Vars> = None;
     let attrs = attrs_active();
     for m in own.clone() {
+        let current: &Vars = layer.as_ref().unwrap_or(parent_vars);
         // `attr()` refers to the declaring element: substitute it here.
         let value = if attrs && m.decl.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("attr"))) {
-            match substitute_attrs_only(&m.decl.value, &vars) {
+            match substitute_attrs_only(&m.decl.value, current) {
                 Some(v) => std::borrow::Cow::Owned(v),
                 None => {
-                    Rc::make_mut(&mut vars).remove(&m.decl.name);
+                    if current.get(&m.decl.name).is_some() {
+                        layer.get_or_insert_with(|| Vars::child_of(parent_vars)).remove(&m.decl.name);
+                    }
                     continue;
                 }
             }
@@ -718,10 +769,15 @@ fn custom_properties(local: &[Matched], parent_vars: &Rc<Vars>, memo: Option<&mu
             std::borrow::Cow::Borrowed(&m.decl.value)
         };
         // Redeclaring the inherited value keeps sharing the parent's map.
-        if vars.get(&m.decl.name) != Some(&*value) {
-            Rc::make_mut(&mut vars).insert(m.decl.name.clone(), value.into_owned());
+        if current.get(&m.decl.name) != Some(&value[..]) {
+            let value: Rc<[Token]> = Rc::from(value.into_owned());
+            layer.get_or_insert_with(|| Vars::child_of(parent_vars)).insert(&m.decl.name, value);
         }
     }
+    let vars = match layer {
+        Some(l) => Rc::new(l),
+        None => parent_vars.clone(),
+    };
     if let Some(slot) = memo {
         *slot = Some(VarsMemo {
             parent: parent_vars.clone(),

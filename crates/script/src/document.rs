@@ -166,7 +166,7 @@ fn d_current_script(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
 fn d_get_element_by_id(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
     let id = arg_str(realm, args, 0)?;
-    let n = with_doc(d, |doc| doc.element_by_id(&id));
+    let n = with_doc(d, |doc| doc.element_by_id_indexed(&id));
     Ok(wrap_opt(realm, d, n))
 }
 
