@@ -472,12 +472,27 @@ impl Engine {
             incr.images_seen = images_now;
             incr.layout_dirty = true;
         }
-        let mut bg_now: Vec<(String, usize)> = background_images.iter().map(|(k, v)| (k.clone(), Arc::as_ptr(v) as *const u8 as usize)).collect();
-        bg_now.sort();
-        if bg_now != incr.bg_seen {
+        let bg_ptr = |v: &Arc<rabbithole_gfx::Image>| Arc::as_ptr(v) as *const u8 as usize;
+        let bg_same = background_images.len() == incr.bg_seen.len() && incr.bg_seen.iter().all(|(k, p)| background_images.get(k).is_some_and(|v| bg_ptr(v) == *p));
+        if !bg_same {
+            let mut bg_now: Vec<(String, usize)> = background_images.iter().map(|(k, v)| (k.clone(), bg_ptr(v))).collect();
+            bg_now.sort();
+            // Background images reach layout only as generated `content:
+            // url()` images; any other use (backgrounds, border images) is
+            // painted from the display list.
+            let changed: HashSet<&str> = bg_now
+                .iter()
+                .filter(|e| incr.bg_seen.binary_search(e).is_err())
+                .chain(incr.bg_seen.iter().filter(|e| bg_now.binary_search(e).is_err()))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            if generated_content_uses(styles, &changed) {
+                incr.layout_full = true;
+                incr.layout_dirty = true;
+            } else {
+                incr.dl_dirty = true;
+            }
             incr.bg_seen = bg_now;
-            incr.layout_full = true;
-            incr.layout_dirty = true;
         }
         if *scroll_offsets != incr.scroll_seen {
             for (n, o) in scroll_offsets.iter() {
@@ -707,6 +722,16 @@ impl Engine {
             rabbithole_layout::paint_region(&page.display_list, canvas, &page.fonts, scroll.0, scroll.1, r);
         }
     }
+}
+
+/// Some generated content (`::before`, `::after`, `::marker`) shows one of
+/// the images `urls` names.
+fn generated_content_uses(styles: &rabbithole_style::StyledTree, urls: &HashSet<&str>) -> bool {
+    use rabbithole_style::{Content, ContentItem};
+    [&styles.before, &styles.after, &styles.marker].into_iter().flatten().flatten().any(|s| match &s.content {
+        Content::Items(items) => items.iter().any(|i| matches!(i, ContentItem::Url(u) if urls.contains(u.as_str()))),
+        _ => false,
+    })
 }
 
 fn se_state_differs(se: &StyleEngine, state: &rabbithole_css::MatchState) -> bool {
