@@ -739,6 +739,24 @@ impl Canvas {
                 let px_data = image.pixels();
                 let iw = image.width as i64;
                 let (ox, oy) = (src.x as i64 - d.x as i64, src.y as i64 - d.y as i64);
+                if mask.is_none() && op >= 1.0 {
+                    // Fully opaque copy (a frame's raster): row slices,
+                    // opaque pixels stored as they are.
+                    let n = (b.x1 - b.x0) as usize;
+                    for py in b.y0..b.y1 {
+                        let d0 = py as usize * w + b.x0 as usize;
+                        let s0 = (((py as i64 + oy) * iw + b.x0 as i64 + ox) * 4) as usize;
+                        let src_row = &px_data[s0..s0 + n * 4];
+                        for (dp, sp) in self.data[d0..d0 + n].iter_mut().zip(src_row.chunks_exact(4)) {
+                            match sp[3] {
+                                255 => *dp = ((sp[0] as u32) << 16) | ((sp[1] as u32) << 8) | sp[2] as u32,
+                                0 => {}
+                                a => *dp = blend_image(*dp, [sp[0] as f32, sp[1] as f32, sp[2] as f32], a as u32),
+                            }
+                        }
+                    }
+                    return;
+                }
                 for py in b.y0..b.y1 {
                     let drow = py as usize * w;
                     let srow = (py as i64 + oy) * iw;
