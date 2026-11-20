@@ -165,6 +165,8 @@ pub enum FragmentKind {
         oblique: bool,
         /// `text-emphasis` marks.
         emphasis: Option<Emphasis>,
+        /// The DOM text node the fragment shows (for selections).
+        src: Option<NodeId>,
     },
     /// Background / border segment of an inline element.
     InlineBox {

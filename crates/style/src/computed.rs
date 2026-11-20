@@ -1391,6 +1391,7 @@ pub enum UserSelect {
     None,
     Text,
     All,
+    Contain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

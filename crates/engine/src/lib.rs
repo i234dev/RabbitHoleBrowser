@@ -23,7 +23,7 @@ pub mod scripting;
 pub mod select;
 mod text;
 
-pub use select::{Selection, TextRun};
+pub use select::{SelectStart, Selection, TextRun};
 
 pub use forms::{ChosenFile, ControlKind};
 pub use pointer::{ClickAction, Modifiers};
@@ -1428,7 +1428,7 @@ impl Engine {
     /// and inner scroll offsets).
     pub fn rebuild_display_list(&self, page: &mut Page) {
         let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
-        let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, incr, .. } = page;
+        let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, incr, state, base_url: page_base, .. } = page;
         let ctx = LayoutContext {
             doc,
             styles,
@@ -1440,9 +1440,35 @@ impl Engine {
             scroll_offsets,
             page_scroll: *page_scroll,
         };
-        let old = std::mem::replace(display_list, rabbithole_layout::build_display_list(layout, &ctx));
+        // `::selection` styles, only while something is selected.
+        let selection_styles = match doc.selection() {
+            Some(sel) if !sel.is_collapsed() => incr.style_engine().map(|se| {
+                let mut elements: Vec<NodeId> = doc.text_in_range(sel.start, sel.end).into_iter().filter_map(|(t, _, _)| doc.flat_parent(t).or_else(|| doc.parent(t))).collect();
+                elements.dedup();
+                let base_str = page_base.to_string();
+                let opts = rabbithole_style::StyleOptions { state, resolve_url: &|b, r| resolve_url(b, r), document_base: &base_str };
+                se.selection_styles(doc, &opts, styles, &elements)
+            }),
+            _ => None,
+        };
+        let old = std::mem::replace(display_list, rabbithole_layout::build_display_list_with_selection(layout, &ctx, selection_styles.as_ref()));
         incr.display_list_replaced(old);
         incr.mark_display_list_clean();
+    }
+
+    /// Repaint when the document selection changed since the display list
+    /// was built (cheap when it did not). Returns whether it was rebuilt.
+    pub fn sync_selection(&self, page: &mut Page) -> bool {
+        let now = page.doc.selection().filter(|s| !s.is_collapsed());
+        if now == page.display_list.selection || (now.is_none() && page.display_list.selection.is_none()) {
+            return false;
+        }
+        if page.incr.dirty() {
+            self.flush_display_list(page);
+        } else {
+            self.rebuild_display_list(page);
+        }
+        true
     }
 
     /// Change the viewport (window resize).

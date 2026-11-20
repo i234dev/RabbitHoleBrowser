@@ -4333,3 +4333,41 @@ mod subject_cover_tests {
         assert_eq!(candidates.iter().filter(|&&i| !index.doc.rules[i].is_ua).count(), 1);
     }
 }
+
+/// The style of `node`'s highlight pseudo-element `which` (`::selection`)
+/// from the rules that match it, inheriting from `parent` (the parent
+/// element's highlight style: CSS Pseudo-Elements 4 §3.5 "highlight
+/// inheritance"). Returns `None` when no rule matches, else the style and
+/// the names of the declared properties.
+pub(crate) fn highlight_pseudo_style(doc: &Document, node: NodeId, parent: &ComputedStyle, vars: &Vars, root_font_size: f32, cx: &MatchCtx<'_, '_, '_>, which: PseudoElement) -> Option<(ComputedStyle, Vec<String>)> {
+    let index = cx.scopes.for_scope(doc.containing_shadow_root(node));
+    let mut candidates = Vec::new();
+    index.candidates(doc, node, &mut candidates);
+    let mut local: Vec<Matched> = Vec::new();
+    for &ci in candidates.iter() {
+        let r = &index.rules[ci];
+        if r.selector.pseudo_element != Some(which) || !cx.matcher.matches(&r.selector, node) || !r.container_matches(doc, node, cx) {
+            continue;
+        }
+        for d in r.decls.iter() {
+            let rank = match (r.is_ua, d.important) {
+                (true, false) => Rank::UaNormal,
+                (true, true) => Rank::UaImportant,
+                (false, false) => Rank::AuthorNormal,
+                (false, true) => Rank::AuthorImportant,
+            };
+            local.push(Matched { rank, specificity: layered(r.specificity, r.layer, d.important), order: ci as u32 + 1, decl: d, base: r.base.as_deref(), pseudo: None });
+        }
+    }
+    if local.is_empty() {
+        return None;
+    }
+    local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
+    let names = local.iter().map(|m| m.decl.name.to_ascii_lowercase()).collect();
+    Some((apply_declarations(&local, vars, parent, root_font_size, cx.env, cx.opts, false, true), names))
+}
+
+/// Whether any rule of the index styles the pseudo-element `which`.
+pub(crate) fn index_has_pseudo(scopes: &ScopeIndex, which: PseudoElement) -> bool {
+    std::iter::once(&scopes.doc).chain(scopes.shadow.iter()).any(|ix| ix.rules.iter().any(|r| r.selector.pseudo_element == Some(which)))
+}

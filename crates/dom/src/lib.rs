@@ -8,7 +8,9 @@ use std::fmt;
 
 mod live;
 mod select;
+mod selection;
 mod xmlser;
+pub use selection::{DocSelection, SelectionRange};
 pub use xmlser::{XML_NS, XMLNS_NS};
 pub use live::{BoundaryPoint, IteratorPosition};
 
@@ -276,6 +278,9 @@ pub struct Document {
     /// Live NodeIterator positions (reference / candidate nodes), updated
     /// by the "pre-removing steps".
     pub live_iterators: Vec<Option<IteratorPosition>>,
+    /// The selection's range (Selection API), as live point slots.
+    selection: Option<DocSelection>,
+    selection_generation: u64,
     /// Current values of form controls changed by the user or a script
     /// (HTML "dirty value"); the `value` attribute stays the default value.
     pub control_values: HashMap<NodeId, String>,
@@ -362,6 +367,8 @@ impl Document {
             is_html: true,
             live_points: Vec::new(),
             live_iterators: Vec::new(),
+            selection: None,
+            selection_generation: 0,
             control_values: HashMap::new(),
             control_selections: HashMap::new(),
             checkedness: HashMap::new(),

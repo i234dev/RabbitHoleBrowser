@@ -196,6 +196,76 @@ fn iter_before_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     Ok(Value::Undefined)
 }
 
+// ------------------------------------------------------------ selection
+
+/// A handle object owning an existing live point slot of the main document.
+fn adopt_point(realm: &mut Realm, slot: usize) -> Value {
+    let o = realm.new_object_with_proto(Some(proto("__LiveBoundary")));
+    realm.set_host_data(o, Box::new(PointHandle { doc: 0, slot, freed: freed_slots() }));
+    Value::Object(o)
+}
+
+/// `selectionSync(knownGeneration)`: `null` when the document's selection
+/// still has the range the caller knows, else `[generation]` (empty) or
+/// `[generation, startHandle, endHandle, backward]`: handles owning the
+/// selection's boundary points, for a new `Range` object.
+fn selection_sync(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    purge();
+    let known = realm.to_number(arg(args, 0))?;
+    let (generation, sel) = with_doc(0, |d| (d.selection_generation(), d.selection_slots()));
+    if known == generation as f64 {
+        return Ok(Value::Null);
+    }
+    let Some(sel) = sel else {
+        return Ok(array(realm, vec![Value::Number(generation as f64)]));
+    };
+    let (start, end, generation) = if sel.owned {
+        with_doc(0, |d| d.disown_selection_slots());
+        (sel.start, sel.end, generation)
+    } else {
+        // Slots of a Range this realm doesn't know: copy the points.
+        with_doc(0, |d| {
+            let (a, b) = (d.live_point(sel.start), d.live_point(sel.end));
+            let a = d.add_live_point(a.unwrap_or(BoundaryPoint { node: Document::ROOT, offset: 0 }));
+            let b = d.add_live_point(b.unwrap_or(BoundaryPoint { node: Document::ROOT, offset: 0 }));
+            let g = d.set_selection_slots(a, b, sel.backward);
+            (a, b, g)
+        })
+    };
+    let a = adopt_point(realm, start);
+    let b = adopt_point(realm, end);
+    Ok(array(realm, vec![Value::Number(generation as f64), a, b, Value::Bool(sel.backward)]))
+}
+
+/// `selectionSet(startHandle, endHandle, backward)`: make a `Range`'s
+/// boundary points the document's selection (`null`: empty selection).
+/// Returns the new generation.
+fn selection_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let a = arg(args, 0);
+    if matches!(a, Value::Null | Value::Undefined) {
+        let generation = with_doc(0, |d| {
+            d.clear_selection();
+            d.selection_generation()
+        });
+        return Ok(Value::Number(generation as f64));
+    }
+    let (_, da, sa, _) = point(realm, &a)?;
+    let (_, db, sb, _) = point(realm, &arg(args, 1))?;
+    let backward = realm.to_boolean(&arg(args, 2));
+    if da != 0 || db != 0 {
+        return Err(realm.throw_type_error("selection range of another document"));
+    }
+    let generation = with_doc(0, |d| d.set_selection_slots(sa, sb, backward));
+    Ok(Value::Number(generation as f64))
+}
+
+/// `selectionSetBackward(backward)`: change the selection's direction.
+fn selection_set_backward(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let backward = realm.to_boolean(&arg(args, 0));
+    with_doc(0, |d| d.set_selection_backward(backward));
+    Ok(Value::Undefined)
+}
+
 /// Add `liveBoundary` / `liveIteratorPosition` to the `__rhNative` object.
 pub(crate) fn install(realm: &mut Realm, natives: rabbithole_js::ObjectId) {
     const ACC: u8 = CONFIGURABLE | ENUMERABLE;
@@ -211,4 +281,7 @@ pub(crate) fn install(realm: &mut Realm, natives: rabbithole_js::ObjectId) {
     state().borrow_mut().protos.insert("__LiveIteratorPosition", ip);
     realm.define_method(natives, "liveBoundary", 2, live_boundary);
     realm.define_method(natives, "liveIteratorPosition", 3, live_iterator_position);
+    realm.define_method(natives, "selectionSync", 1, selection_sync);
+    realm.define_method(natives, "selectionSet", 3, selection_set);
+    realm.define_method(natives, "selectionSetBackward", 1, selection_set_backward);
 }

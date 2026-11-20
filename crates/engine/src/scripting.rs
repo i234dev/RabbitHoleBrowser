@@ -1249,6 +1249,9 @@ impl Engine {
         if !page.frames.children.is_empty() && self.sync_dirty_frames(page) {
             out.relayout = true;
         }
+        if self.sync_selection(page) {
+            out.relayout = true;
+        }
         out.navigation = page.script.pending_navigation.take();
         out.new_windows = std::mem::take(&mut page.script.new_windows);
         out.dialogs = std::mem::take(&mut page.script.dialogs);

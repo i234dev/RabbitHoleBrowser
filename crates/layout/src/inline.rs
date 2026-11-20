@@ -2835,6 +2835,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                         kind: FragmentKind::Text {
+                            src: match self.items.get(item) {
+                                Some(InlineItem::Text { node, .. }) if item != MARKER_ITEM => *node,
+                                _ => None,
+                            },
                             text: paint_text(&text),
                             font: tm.font,
                             size: tm.size,

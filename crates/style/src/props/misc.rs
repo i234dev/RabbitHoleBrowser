@@ -237,6 +237,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                     "none" => UserSelect::None,
                     "text" => UserSelect::Text,
                     "all" => UserSelect::All,
+                    "contain" | "element" => UserSelect::Contain,
                     _ => UserSelect::Auto,
                 };
             }

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use crate::background::{self, box_radii, BoxGeometry};
-use crate::tree::{BoxKind, DecorationInfo, Flow, Formatting, FragmentKind, LayoutBox, LayoutTree};
+use crate::tree::{BoxKind, DecorationInfo, Flow, Formatting, Fragment, FragmentKind, LayoutBox, LayoutTree};
 use crate::LayoutContext;
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{Color, FillRule, FontId, Image, Matrix, Paint, PathSeg, Point, Radii, Rect};
@@ -193,6 +193,8 @@ pub struct DisplayList {
     /// Bounds of `position: fixed` boxes (viewport coordinates): what must
     /// be repainted when the page scrolls under them.
     pub fixed_bounds: Vec<Rect>,
+    /// The (non-collapsed) document selection this list paints.
+    pub selection: Option<rabbithole_dom::SelectionRange>,
 }
 
 /// Where a sticky box's displacement lives in the list.
@@ -340,8 +342,11 @@ impl DisplayList {
     }
 }
 
-pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
+pub fn build(tree: &LayoutTree, ctx: &LayoutContext, selection_styles: Option<&rabbithole_style::highlight::SelectionStyles>) -> DisplayList {
     let mut list = DisplayList::default();
+    // The selection (nothing to do, and no per-fragment cost, without one).
+    let sel = crate::selection::selection_paint(&tree.root, ctx.doc, ctx.styles, selection_styles);
+    list.selection = ctx.doc.selection().filter(|s| !s.is_collapsed());
     let bounds = Rect::new(0.0, 0.0, tree.width, tree.height);
     // Canvas background: the root's background propagates to the viewport,
     // falling back to the body's.
@@ -406,6 +411,7 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         parents3d: Vec::new(),
         child3d: 0,
         next3d: 0,
+        sel,
     };
     p.paint_stacking_context(root, bounds);
     for (node, b) in top_layer {
@@ -418,6 +424,8 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
 
 struct Painter<'l, 't, 'a> {
     list: &'l mut DisplayList,
+    /// The selected parts of text fragments (`None`: nothing selected).
+    sel: Option<crate::selection::SelectionPaint<'l>>,
     ctx: &'l LayoutContext<'a>,
     bounds: Rect,
     root: &'t LayoutBox,
@@ -2005,6 +2013,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         small_caps,
                         oblique,
                         emphasis,
+                        src,
                     } => {
                         if *hidden {
                             continue;
@@ -2049,7 +2058,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         if decoration_info.any() {
                             self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, false, None);
                         }
-                        self.list.push(DisplayItem::Text {
+                        let item = DisplayItem::Text {
                             x: f.rect.x,
                             y: f.baseline,
                             font: *font,
@@ -2061,7 +2070,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             shadows: if decorated_shadows { Vec::new() } else { shadows.clone() },
                             small_caps: *small_caps,
                             oblique: *oblique,
-                        });
+                        };
+                        match self.sel.as_ref().and_then(|s| s.frags.get(&(f as *const Fragment as usize)).copied()) {
+                            None => self.list.push(item),
+                            Some(range) => self.paint_selected_text(f, item, range, *src, decoration_info),
+                        }
                         if decoration_info.any() {
                             self.paint_decorations(f.rect, f.baseline, *font, *size, (text, *letter_spacing, *word_spacing), decoration_info, true, None);
                         }
@@ -2081,6 +2094,84 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
         }
+    }
+
+    /// Paint a text fragment whose bytes `range` are selected: the
+    /// highlight background under the selected part, then the text, the
+    /// selected part in the `::selection` colors (CSS Pseudo-Elements 4
+    /// §3.6: highlight overlays over the originating text, backgrounds
+    /// below their text).
+    fn paint_selected_text(&mut self, f: &Fragment, item: DisplayItem, range: (usize, usize), src: Option<NodeId>, decorations: &DecorationInfo) {
+        let DisplayItem::Text { font, size, color, ref text, letter_spacing, word_spacing, ref shadows, .. } = item else {
+            self.list.push(item);
+            return;
+        };
+        let fonts = self.ctx.fonts;
+        let x_at = |b: usize| -> f32 {
+            let prefix = &text[..b.min(text.len())];
+            if prefix.is_empty() {
+                return 0.0;
+            }
+            fonts.measure(font, size, prefix) + letter_spacing * prefix.chars().count() as f32 + crate::tree::word_spacing_before(prefix, prefix.len(), word_spacing)
+        };
+        let x0 = f.rect.x + x_at(range.0);
+        let x1 = if range.1 >= text.len() { f.rect.right().max(f.rect.x + x_at(range.1)) } else { f.rect.x + x_at(range.1) };
+        let styles = self.sel.as_ref().and_then(|s| s.styles);
+        let originating = src.and_then(|t| self.ctx.doc.flat_parent(t).or_else(|| self.ctx.doc.parent(t)));
+        let hs = originating.and_then(|e| styles.and_then(|s| s.get(e)));
+        let (bg, fg, sel_shadows) = match hs {
+            Some(h) => (h.background.unwrap_or(Color::TRANSPARENT), h.text_fill.or(h.color).unwrap_or(color), h.shadows.clone().unwrap_or_else(|| shadows.clone())),
+            None => {
+                let (bg, fg) = rabbithole_style::highlight::default_selection_colors();
+                (bg, fg, shadows.clone())
+            }
+        };
+        // Clips extend well past the glyph box (ascenders, italics).
+        let pad = f.rect.h.max(size) * 2.0 + 64.0;
+        let (top, height) = (f.rect.y - pad, f.rect.h + 2.0 * pad);
+        let left = Rect::new(f.rect.x - pad, top, (x0 - (f.rect.x - pad)).max(0.0), height);
+        let mid = Rect::new(x0, top, (x1 - x0).max(0.0), height);
+        let right = Rect::new(x1, top, (f.rect.right() + pad - x1).max(0.0), height);
+        if !bg.is_transparent() && x1 > x0 {
+            self.list.push(DisplayItem::Rect { rect: Rect::new(x0, f.rect.y, x1 - x0, f.rect.h), color: bg, radius: 0.0 });
+            if decorations.any() {
+                // The originating underlines stay visible over the highlight.
+                self.list.push(DisplayItem::PushClip(mid));
+                self.paint_decorations(f.rect, f.baseline, font, size, (text, letter_spacing, word_spacing), decorations, false, None);
+                self.list.push(DisplayItem::PopClip);
+            }
+        }
+        if range.0 > 0 {
+            self.list.push(DisplayItem::PushClip(left));
+            self.list.push(item.clone());
+            self.list.push(DisplayItem::PopClip);
+        }
+        if range.1 < text.len() {
+            self.list.push(DisplayItem::PushClip(right));
+            self.list.push(item.clone());
+            self.list.push(DisplayItem::PopClip);
+        }
+        self.list.push(DisplayItem::PushClip(mid));
+        if let Some((lines, dcolor, style)) = hs.and_then(|h| h.decoration) {
+            // The highlight's own text decorations (simple metrics).
+            let dc = dcolor.unwrap_or(fg);
+            let m = fonts.metrics(font, size);
+            let w = (size / 14.0).max(1.0);
+            let mut line = |y: f32| self.list.push(DisplayItem::Line { x0, y0: y, x1, y1: y, width: w, color: dc, style });
+            if lines.underline {
+                line(f.baseline + (m.descent * 0.5).max(w));
+            }
+            if lines.overline {
+                line(f.baseline - m.ascent + w / 2.0);
+            }
+            if lines.line_through {
+                line(f.baseline - m.ascent * 0.3);
+            }
+        }
+        if let DisplayItem::Text { x, y, font, size, text, letter_spacing, word_spacing, small_caps, oblique, .. } = item {
+            self.list.push(DisplayItem::Text { x, y, font, size, color: fg, text, letter_spacing, word_spacing, shadows: sel_shadows, small_caps, oblique });
+        }
+        self.list.push(DisplayItem::PopClip);
     }
 
     /// Paint emphasis marks centered over (or under) each character of a

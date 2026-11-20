@@ -1366,3 +1366,60 @@ fn clear_styles(doc: &Document, tree: &mut StyledTree, node: NodeId) {
 fn collect_font_faces(author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> Vec<FontFace> {
     crate::cascade::collect_font_faces(author, env, opts)
 }
+
+impl StyleEngine {
+    /// Whether any rule styles `::selection`.
+    pub fn has_selection_rules(&self) -> bool {
+        crate::cascade::index_has_pseudo(&self.index, rabbithole_css::PseudoElement::Selection)
+    }
+
+    /// `::selection` styles of `elements` (originating elements of
+    /// selected text) and their ancestors, from the styles this engine
+    /// computed (`tree`).
+    pub fn selection_styles(&self, doc: &Document, opts: &StyleOptions, tree: &StyledTree, elements: &[NodeId]) -> crate::highlight::SelectionStyles {
+        let mut out = crate::highlight::SelectionStyles::default();
+        if !self.has_selection_rules() {
+            return out;
+        }
+        out.any = true;
+        let matcher = SelectorMatcher::new(doc, opts.state);
+        let so_far = crate::cascade::StyledSoFar { styles: &tree.styles, vars: &self.vars };
+        let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: None, style_source: Some(&so_far as &dyn rabbithole_css::container::StyleSource) };
+        let empty_vars: Rc<Vars> = Rc::new(HashMap::new());
+        let initial = Rc::new(ComputedStyle::initial());
+        // Raw matched styles (for inheritance of the computed values).
+        let mut raw: HashMap<NodeId, Option<Rc<(ComputedStyle, Vec<String>)>>> = HashMap::new();
+        for &e in elements {
+            // The chain from the outermost unresolved ancestor down to `e`.
+            let mut chain = Vec::new();
+            let mut cur = Some(e);
+            while let Some(n) = cur {
+                if out.by_element.contains_key(&n) {
+                    break;
+                }
+                if doc.element(n).is_some() {
+                    chain.push(n);
+                }
+                cur = doc.flat_parent(n);
+            }
+            for &n in chain.iter().rev() {
+                let parent = doc.flat_parent(n).filter(|p| doc.element(*p).is_some());
+                let parent_resolved = parent.and_then(|p| out.by_element.get(&p).cloned());
+                let parent_raw = parent.and_then(|p| raw.get(&p).cloned().flatten());
+                let base = match &parent_raw {
+                    Some(r) => &r.0,
+                    None => parent.and_then(|p| tree.get(p)).map(|s| &**s).unwrap_or(&*initial),
+                };
+                let vars = self.vars.get(n).cloned().flatten().unwrap_or_else(|| empty_vars.clone());
+                let root_fs = tree.root_font_size;
+                let own = crate::cascade::highlight_pseudo_style(doc, n, base, &vars, root_fs, &cx, rabbithole_css::PseudoElement::Selection).map(Rc::new);
+                // Inherited computed values pass through elements without rules.
+                let own_or_inherited = own.clone().or(parent_raw);
+                let resolved = crate::highlight::resolve(own.as_deref(), parent_resolved.as_deref());
+                raw.insert(n, own_or_inherited);
+                out.by_element.insert(n, Rc::new(resolved));
+            }
+        }
+        out
+    }
+}

@@ -4,6 +4,7 @@
 //! pseudo-element), plus `@font-face` and `@keyframes` collection.
 
 pub mod cascade;
+pub mod highlight;
 pub mod computed;
 pub mod props;
 pub mod restyle;
