@@ -3197,18 +3197,18 @@ fn logical_to_physical_slow(name: &str, wm: WritingMode, rtl: bool) -> Option<St
 const SVG_PROPS: &[&str] = &[
     "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
     "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "text-anchor", "paint-order", "vector-effect", "stop-color",
-    "stop-opacity", "clip-rule",
+    "stop-opacity", "clip-rule", "flood-color", "flood-opacity", "lighting-color", "color-interpolation-filters",
 ];
 
 fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) {
-    if SVG_PROPS.contains(&name) || name == "clip-path" {
+    if SVG_PROPS.contains(&name) || name == "clip-path" || name == "filter" {
         let v = value.to_vec();
         match style.svg_props.iter_mut().find(|(n, _)| n == name) {
             Some(slot) => slot.1 = v,
             None => style.svg_props.push((name.to_string(), v)),
         }
-        // `clip-path` also applies to CSS boxes.
-        if name != "clip-path" {
+        // `clip-path` and `filter` also apply to CSS boxes.
+        if name != "clip-path" && name != "filter" {
             return;
         }
     }

@@ -7,6 +7,31 @@ use rabbithole_gfx::{Canvas, Color, ColorStop, FillRule, FontContext, Paint, Pat
 
 const MAX_USE_DEPTH: usize = 16;
 
+thread_local! {
+    /// Nesting of filtered painting (feImage can reach filtered content).
+    static FILTER_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Render the element `id` of `tree` (feImage) through `m` into a
+/// transparent `w`×`h` buffer.
+pub(crate) fn render_element(tree: &Built, fonts: &FontContext, viewport: (f32, f32), id: &str, m: &rabbithole_gfx::Matrix, w: usize, h: usize) -> Option<crate::filter::Pixels> {
+    let &target = tree.ids.get(id)?;
+    let render = |bg: Color| {
+        let mut c = Canvas::new(w as u32, h as u32);
+        c.clear(bg);
+        c.push_transform(*m);
+        {
+            let mut p = Painter::new(tree, &mut c, fonts, viewport);
+            let props = Props::default();
+            p.paint_node(target, &props);
+        }
+        c.data
+    };
+    let black = render(Color::BLACK);
+    let white = render(Color::WHITE);
+    Some(crate::filter::css::from_black_white(&black, &white, w, h))
+}
+
 pub struct Painter<'a> {
     pub tree: &'a Built,
     pub canvas: &'a mut Canvas,
@@ -42,7 +67,7 @@ impl<'a> Painter<'a> {
             return;
         }
         match node.kind {
-            Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_) | Kind::Symbol { .. } => return,
+            Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Mask { .. } | Kind::Pattern(_) | Kind::Symbol { .. } => return,
             _ => {}
         }
         let props = parent.inherit(&node.spec, self.diag());
@@ -62,6 +87,32 @@ impl<'a> Painter<'a> {
             None => false,
         };
 
+        let mask = node.spec.mask.as_ref().and_then(|id| self.tree.ids.get(id)).copied().filter(|&m| matches!(self.tree.nodes[m].kind, Kind::Mask { .. }));
+        match mask {
+            Some(m) if FILTER_DEPTH.with(|d| d.get()) <= 6 => {
+                FILTER_DEPTH.with(|d| d.set(d.get() + 1));
+                self.paint_masked(idx, &props, m);
+                FILTER_DEPTH.with(|d| d.set(d.get() - 1));
+            }
+            _ => self.paint_effects(idx, &props),
+        }
+
+        if clipped {
+            self.canvas.pop_clip();
+        }
+        if layered {
+            self.canvas.end_layer(opacity);
+        }
+        if pushed_transform {
+            self.canvas.pop_transform();
+        }
+    }
+
+    /// Paint what the element `idx` itself draws (no transform, opacity,
+    /// clip or filter).
+    fn paint_content(&mut self, idx: usize, props: &Props) {
+        let node: &Node = &self.tree.nodes[idx];
+        let props = props.clone();
         match &node.kind {
             Kind::Root | Kind::Group => {
                 let children = node.children.clone();
@@ -109,18 +160,149 @@ impl<'a> Painter<'a> {
                 let (href, x, y, width, height) = (href.clone(), *x, *y, *width, *height);
                 self.paint_use(&href, x, y, width, height, &props);
             }
-            Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_) | Kind::Symbol { .. } => {}
+            Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Mask { .. } | Kind::Pattern(_) | Kind::Symbol { .. } => {}
         }
 
-        if clipped {
-            self.canvas.pop_clip();
+    }
+
+    /// `filter`: paint the element offscreen (over black and over white to
+    /// recover its alpha), run the filter chain and draw the result.
+    /// Device pixels (x0, y0, w, h) covering the user-space `area` (limited
+    /// around the canvas) and the matrix from user space to them.
+    fn offscreen_geometry(&self, area: Rect) -> Option<(i32, i32, usize, usize, rabbithole_gfx::Matrix)> {
+        let t = self.canvas.transform();
+        let (cw, ch) = (self.canvas.width as f32, self.canvas.height as f32);
+        let dev = crate::units::transform_rect_bounds(&t, area).intersect(&Rect::new(-cw, -ch, 3.0 * cw, 3.0 * ch));
+        if dev.w <= 0.0 || dev.h <= 0.0 {
+            return None;
         }
-        if layered {
-            self.canvas.end_layer(opacity);
+        let (x0, y0) = (dev.x.floor() as i32, dev.y.floor() as i32);
+        let (w, h) = (((dev.x + dev.w).ceil() as i32 - x0) as usize, ((dev.y + dev.h).ceil() as i32 - y0) as usize);
+        if w == 0 || h == 0 || w * h > 1 << 24 {
+            return None;
         }
-        if pushed_transform {
+        Some((x0, y0, w, h, multiply(&translate(-(x0 as f32), -(y0 as f32)), &t)))
+    }
+
+    /// What `f` paints, rendered through `m` into a transparent `w`×`h`
+    /// buffer (over black and over white to recover the alpha).
+    fn render_offscreen(&mut self, w: usize, h: usize, m: rabbithole_gfx::Matrix, f: &mut dyn FnMut(&mut Self)) -> crate::filter::Pixels {
+        let mut render = |bg: Color, me: &mut Self| {
+            let mut c = Canvas::new(w as u32, h as u32);
+            c.clear(bg);
+            c.push_transform(m);
+            std::mem::swap(me.canvas, &mut c);
+            f(me);
+            std::mem::swap(me.canvas, &mut c);
+            c.data
+        };
+        let black = render(Color::BLACK, self);
+        let white = render(Color::WHITE, self);
+        crate::filter::css::from_black_white(&black, &white, w, h)
+    }
+
+    /// Draw premultiplied pixels at device position (x0, y0).
+    fn draw_device(&mut self, px: &crate::filter::Pixels, x0: i32, y0: i32) {
+        let img = rabbithole_gfx::Image::new(px.w as u32, px.h as u32, crate::filter::css::to_rgba(px));
+        let inv = crate::units::invert(&self.canvas.transform());
+        if let Some(inv) = inv {
+            self.canvas.push_transform(inv);
+        }
+        let smooth = self.canvas.image_smoothing;
+        self.canvas.image_smoothing = false;
+        self.canvas.draw_image(&img, Rect::new(x0 as f32, y0 as f32, px.w as f32, px.h as f32), 1.0);
+        self.canvas.image_smoothing = smooth;
+        if inv.is_some() {
             self.canvas.pop_transform();
         }
+    }
+
+    /// The element's painting with its filter applied.
+    fn paint_effects(&mut self, idx: usize, props: &Props) {
+        match self.tree.nodes[idx].spec.filter.as_deref() {
+            Some(items) if !items.is_empty() => {
+                let items = items.to_vec();
+                self.paint_filtered(idx, &items, props);
+            }
+            _ => self.paint_content(idx, props),
+        }
+    }
+
+    /// `mask`: the element's painting scaled by the luminance × alpha of
+    /// the `<mask>` content (CSS Masking 1 §7), within the mask region.
+    fn paint_masked(&mut self, idx: usize, props: &Props, mask: usize) {
+        let tree = self.tree;
+        let node = &tree.nodes[idx];
+        let Kind::Mask { units_bbox, content_bbox, x, y, width, height } = tree.nodes[mask].kind else { return };
+        let bbox = node.bbox.unwrap_or_default();
+        let (vw, vh) = self.viewport;
+        let frac = |l: Length| match l {
+            Length::Px(v) => v,
+            Length::Percent(p) => p / 100.0,
+        };
+        let (x, y, w, h) = (x.unwrap_or(Length::Percent(-10.0)), y.unwrap_or(Length::Percent(-10.0)), width.unwrap_or(Length::Percent(120.0)), height.unwrap_or(Length::Percent(120.0)));
+        let region = if units_bbox {
+            Rect::new(bbox.x + frac(x) * bbox.w, bbox.y + frac(y) * bbox.h, frac(w) * bbox.w, frac(h) * bbox.h)
+        } else {
+            Rect::new(x.resolve(vw), y.resolve(vh), w.resolve(vw), h.resolve(vh))
+        };
+        if region.w <= 0.0 || region.h <= 0.0 || (content_bbox && (bbox.w <= 0.0 || bbox.h <= 0.0)) {
+            return;
+        }
+        let Some((x0, y0, pw, ph, m)) = self.offscreen_geometry(region) else { return };
+        let mut content = self.render_offscreen(pw, ph, m, &mut |me: &mut Self| me.paint_effects(idx, props));
+        let mprops = Props::default().inherit(&tree.nodes[mask].spec, self.diag());
+        let children = tree.nodes[mask].children.clone();
+        let cm = if content_bbox { [bbox.w, 0.0, 0.0, bbox.h, bbox.x, bbox.y] } else { rabbithole_gfx::IDENTITY };
+        let lum = self.render_offscreen(pw, ph, multiply(&m, &cm), &mut |me: &mut Self| {
+            for &c in &children {
+                me.paint_node(c, &mprops);
+            }
+        });
+        let keep = crate::units::transform_rect_bounds(&m, region);
+        let (kx0, ky0, kx1, ky1) = (keep.x.round() as i32, keep.y.round() as i32, (keep.x + keep.w).round() as i32, (keep.y + keep.h).round() as i32);
+        for yy in 0..ph {
+            for xx in 0..pw {
+                let i = yy * pw + xx;
+                let inside = (xx as i32) >= kx0 && (xx as i32) < kx1 && (yy as i32) >= ky0 && (yy as i32) < ky1;
+                let l = lum.px[i];
+                // Premultiplied luminance = luminance × alpha.
+                let f = if inside { (0.2125 * l[0] + 0.7154 * l[1] + 0.0721 * l[2]).clamp(0.0, 1.0) } else { 0.0 };
+                for v in content.px[i].iter_mut() {
+                    *v *= f;
+                }
+            }
+        }
+        self.draw_device(&content, x0, y0);
+    }
+
+    fn paint_filtered(&mut self, idx: usize, items: &[crate::filter::FilterItem], props: &Props) {
+        use crate::filter::{FilterEnv, FilterItem};
+        let tree = self.tree;
+        let node = &tree.nodes[idx];
+        // A missing `url()` target: the filter is ignored. Deep nesting
+        // (feImage cycles) paints unfiltered.
+        let missing = items.iter().any(|i| matches!(i, FilterItem::Url(id) if !tree.filters.contains_key(id)));
+        let depth = FILTER_DEPTH.with(|d| d.get());
+        if missing || depth > 6 {
+            self.paint_content(idx, props);
+            return;
+        }
+        let bbox = node.bbox.unwrap_or_default();
+        let defs = |id: &str| tree.filters.get(id).cloned();
+        let scale = scale_factor(&self.canvas.transform());
+        let painted = self.layer_bounds(node, props);
+        let area = crate::filter::chain_bounds(items, &defs, bbox, painted, self.viewport);
+        let Some((x0, y0, w, h, m)) = self.offscreen_geometry(area) else { return };
+        FILTER_DEPTH.with(|d| d.set(depth + 1));
+        let src = self.render_offscreen(w, h, m, &mut |me: &mut Self| me.paint_content(idx, props));
+        let (fonts, viewport) = (self.fonts, self.viewport);
+        let element = |id: &str, m: &rabbithole_gfx::Matrix, w: usize, h: usize| render_element(tree, fonts, viewport, id, m, w, h);
+        let env = FilterEnv { m, bbox, viewport: self.viewport, element: Some(&element), fonts: Some(fonts) };
+        let out = crate::filter::apply_chain(items, &defs, src, &env, scale);
+        FILTER_DEPTH.with(|d| d.set(depth));
+        let Some(out) = out else { return };
+        self.draw_device(&out, x0, y0);
     }
 
     fn layer_bounds(&self, node: &Node, props: &Props) -> Rect {

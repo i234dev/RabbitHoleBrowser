@@ -1677,7 +1677,9 @@ impl rabbithole_gfx::image::VectorRender for SvgImageRender {
 /// node, so layout/paint treat them as replaced images.
 /// Rasterize the rendered outermost `<svg>` elements of the document (or
 /// only the elements `only`) that have no image yet.
-fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContext, images: &mut HashMap<NodeId, Arc<Image>>, only: Option<&[NodeId]>) {
+/// Roots using filters are added to `filtered` (they are rasterized again
+/// when their content changes).
+fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContext, images: &mut HashMap<NodeId, Arc<Image>>, only: Option<&[NodeId]>, filtered: &mut std::collections::HashSet<NodeId>) {
     let mut roots = Vec::new();
     let candidates: Vec<NodeId> = match only {
         None => doc.shadow_including_descendants(Document::ROOT),
@@ -1719,6 +1721,9 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
             }
         };
         let Some(tree) = rabbithole_svg::SvgTree::from_dom(doc, n, &style_of) else { continue };
+        if tree.has_filters() {
+            filtered.insert(n);
+        }
         let st = styles.get(n).cloned();
         let css_w = st.as_ref().and_then(|s| match s.width { rabbithole_style::Length::Px(v) => Some(v), _ => None });
         let css_h = st.as_ref().and_then(|s| match s.height { rabbithole_style::Length::Px(v) => Some(v), _ => None });

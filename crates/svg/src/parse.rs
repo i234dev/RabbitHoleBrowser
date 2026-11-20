@@ -101,6 +101,16 @@ pub enum Kind {
     ClipPath {
         units_bbox: bool,
     },
+    /// `<mask>` (its content is the node's children): `maskUnits` /
+    /// `maskContentUnits` are objectBoundingBox, and the mask region.
+    Mask {
+        units_bbox: bool,
+        content_bbox: bool,
+        x: Option<Length>,
+        y: Option<Length>,
+        width: Option<Length>,
+        height: Option<Length>,
+    },
     /// `<pattern>` (its content is the node's children).
     Pattern(Pattern),
 }
@@ -162,6 +172,8 @@ pub struct Built {
     pub viewbox: Option<ViewBox>,
     pub par: AspectRatio,
     pub overflow_visible: bool,
+    /// `<filter>` elements by id.
+    pub filters: HashMap<String, std::sync::Arc<crate::filter::FilterDef>>,
 }
 
 const MAX_DEPTH: usize = 64;
@@ -175,6 +187,7 @@ struct Builder<'a> {
     /// DOM node → tree node (so `use` can reference anything built).
     built: HashMap<NodeId, usize>,
     viewport: (f32, f32),
+    filters: HashMap<String, std::sync::Arc<crate::filter::FilterDef>>,
 }
 
 /// Build the tree for the `<svg>` element `root`.
@@ -219,12 +232,13 @@ pub fn build_in(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) ->
     let vw = viewbox.map(|v| v.w).or(both.map(|b| b.0)).or(viewport.map(|v| v.0)).or(width).unwrap_or(300.0);
     let vh = viewbox.map(|v| v.h).or(both.map(|b| b.1)).or(viewport.map(|v| v.1)).or(height).unwrap_or(150.0);
 
-    let mut b = Builder { doc, style_of, rules, nodes: Vec::new(), ids: HashMap::new(), built: HashMap::new(), viewport: (vw, vh) };
+    let mut b = Builder { doc, style_of, rules, nodes: Vec::new(), ids: HashMap::new(), built: HashMap::new(), viewport: (vw, vh), filters: HashMap::new() };
     let root_idx = b.build_node(root, 0, true)?;
+    b.resolve_filters();
     b.resolve_gradients();
     b.resolve_patterns();
     let overflow_visible = b.nodes[root_idx].spec.overflow_visible.unwrap_or(false);
-    let mut built = Built { nodes: b.nodes, root: root_idx, ids: b.ids, width, height, viewbox, par, overflow_visible };
+    let mut built = Built { nodes: b.nodes, root: root_idx, ids: b.ids, width, height, viewbox, par, overflow_visible, filters: b.filters };
     compute_bboxes(&mut built);
     if built.nodes.iter().any(|n| n.xform.is_some()) {
         for i in 0..built.nodes.len() {
@@ -538,6 +552,14 @@ impl<'a> Builder<'a> {
                 let children = self.build_children(n, depth);
                 mk(Kind::ClipPath { units_bbox }, children)
             }
+            "mask" => {
+                let units_bbox = !self.attr(n, "maskunits").is_some_and(|u| u.trim().eq_ignore_ascii_case("userSpaceOnUse"));
+                let content_bbox = self.attr(n, "maskcontentunits").is_some_and(|u| u.trim().eq_ignore_ascii_case("objectBoundingBox"));
+                let l = |name: &str| self.attr(n, name).and_then(parse_length);
+                let (x, y, width, height) = (l("x"), l("y"), l("width"), l("height"));
+                let children = self.build_children(n, depth);
+                mk(Kind::Mask { units_bbox, content_bbox, x, y, width, height }, children)
+            }
             "pattern" => {
                 let l = |name: &str| self.attr(n, name).and_then(parse_length);
                 let pat = Pattern {
@@ -555,14 +577,56 @@ impl<'a> Builder<'a> {
                 let children = self.build_children(n, depth);
                 mk(Kind::Pattern(pat), children)
             }
+            "filter" => {
+                if let Some(id) = &id {
+                    if !self.filters.contains_key(id) {
+                        let f = self.build_filter(n);
+                        self.filters.insert(id.clone(), std::sync::Arc::new(f));
+                    }
+                }
+                return None;
+            }
             // Never rendered / unsupported.
-            "title" | "desc" | "metadata" | "style" | "script" | "filter" | "mask" | "marker" | "foreignobject"
+            "title" | "desc" | "metadata" | "style" | "script" | "marker" | "foreignobject"
             | "font" | "font-face" | "animate" | "animatetransform" | "animatemotion" | "set" | "view" | "cursor" => {
                 return None;
             }
             _ => return None,
         };
         Some(self.push(n, node))
+    }
+
+    fn build_filter(&self, n: NodeId) -> crate::filter::FilterDef {
+        let attr = |x: NodeId, name: &str| self.attr(x, name).map(str::to_string);
+        let spec = |x: NodeId| self.specified(x);
+        crate::filter::build_filter(self.doc, n, &attr, &spec, &decode_data_url)
+    }
+
+    /// Build the `<filter>` elements referenced from outside this `<svg>`.
+    fn resolve_filters(&mut self) {
+        let mut wanted: Vec<String> = Vec::new();
+        for node in &self.nodes {
+            for it in node.spec.filter.iter().flatten() {
+                if let crate::filter::FilterItem::Url(id) = it {
+                    if !self.filters.contains_key(id) && !wanted.contains(id) {
+                        wanted.push(id.clone());
+                    }
+                }
+            }
+        }
+        for id in wanted {
+            if id.starts_with("data:") {
+                if let Some((def, _)) = crate::SvgTree::data_url_filter(&id) {
+                    self.filters.insert(id, def);
+                }
+                continue;
+            }
+            let Some(el) = self.doc.element_by_id(&id) else { continue };
+            if self.doc.tag(el).is_some_and(|t| t.eq_ignore_ascii_case("filter")) {
+                let f = self.build_filter(el);
+                self.filters.insert(id, std::sync::Arc::new(f));
+            }
+        }
     }
 
     fn build_gradient(&mut self, n: NodeId, linear: bool) -> Gradient {
@@ -845,6 +909,16 @@ pub fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<PathSeg> {
 }
 
 /// Decode a `data:` URL image (base64 or percent-encoded).
+/// The media type and bytes of a `data:` URL.
+pub(crate) fn data_url_bytes(href: &str) -> Option<(String, Vec<u8>)> {
+    let rest = href.strip_prefix("data:")?;
+    let comma = rest.find(',')?;
+    let meta = rest[..comma].to_ascii_lowercase();
+    let data = &rest[comma + 1..];
+    let bytes = if meta.contains(";base64") { base64_decode(data)? } else { percent_decode(data) };
+    Some((meta, bytes))
+}
+
 fn decode_data_url(href: &str) -> Option<Image> {
     let rest = href.strip_prefix("data:")?;
     let comma = rest.find(',')?;
@@ -982,13 +1056,13 @@ fn compute_bboxes(b: &mut Built) {
                 };
                 inner.map(|r| r.translate(*x, *y))
             }
-            Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_) | Kind::Defs => None,
+            Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Mask { .. } | Kind::Pattern(_) | Kind::Defs => None,
             Kind::Root | Kind::Group | Kind::Symbol { .. } => None,
         };
         let mut acc = own;
-        if !matches!(node.kind, Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_)) {
+        if !matches!(node.kind, Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Mask { .. } | Kind::Pattern(_)) {
             for &c in &node.children {
-                if matches!(b.nodes[c].kind, Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Pattern(_) | Kind::Symbol { .. }) {
+                if matches!(b.nodes[c].kind, Kind::Defs | Kind::Gradient(_) | Kind::ClipPath { .. } | Kind::Mask { .. } | Kind::Pattern(_) | Kind::Symbol { .. }) {
                     continue;
                 }
                 if let Some(r) = bbox_of(b, c, depth + 1, memo) {

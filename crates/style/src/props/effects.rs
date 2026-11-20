@@ -13,11 +13,20 @@ fn color(c: &[Token], current: Color) -> Option<Color> {
     }
 }
 
-/// A `<filter-value-list>` (`url()` references are not supported: the
-/// whole value is then ignored).
-fn parse_filters(comps: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<Vec<FilterOp>> {
+/// A `<filter-value-list>`: filter functions and `url()` references
+/// (the fragment of the URL names the `<filter>` element).
+pub fn parse_filter_list(comps: &[&[Token]], current: Color, ctx: &LengthContext) -> Option<Vec<FilterOp>> {
     let mut out = Vec::new();
     for c in comps {
+        if matches!(c.first(), Some(Token::Url(_))) || super::fn_name(c).as_deref() == Some("url") {
+            let u = crate::cascade::url_of(c)?;
+            // `data:` URLs are kept whole (a filter of that SVG document);
+            // other URLs name an element of this document by fragment.
+            let u = u.trim();
+            let id = if u.len() > 5 && u[..5].eq_ignore_ascii_case("data:") { u.to_string() } else { u.rsplit_once('#').map(|(_, f)| f.to_string()).unwrap_or_default() };
+            out.push(FilterOp::Url(id));
+            continue;
+        }
         let f = super::fn_name(c)?;
         let args = super::fn_args(c);
         let a0: Option<&[Token]> = args.first().and_then(|a| a.first()).copied();
@@ -49,11 +58,13 @@ fn parse_filters(comps: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<V
                 let parts = args.first()?;
                 let mut lens = Vec::new();
                 let mut col = None;
+                let mut uses_current = false;
                 for p in parts {
                     if let Some(v) = super::px(p, ctx) {
                         lens.push(v);
                     } else if let Some(cc) = color(p, current) {
                         col = Some(cc);
+                        uses_current = p.iter().any(|t| matches!(t, Token::Ident(i) if i.eq_ignore_ascii_case("currentcolor")));
                     } else {
                         return None;
                     }
@@ -61,7 +72,7 @@ fn parse_filters(comps: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<V
                 if lens.len() < 2 || lens.len() > 3 {
                     return None;
                 }
-                FilterOp::DropShadow { x: lens[0], y: lens[1], blur: lens.get(2).copied().unwrap_or(0.0).max(0.0), color: col.unwrap_or(current) }
+                FilterOp::DropShadow { x: lens[0], y: lens[1], blur: lens.get(2).copied().unwrap_or(0.0).max(0.0), color: col.unwrap_or(current), current: col.is_none() || uses_current }
             }
             _ => return None,
         };
@@ -568,7 +579,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.filters.clear();
                 return true;
             }
-            let Some(ops) = parse_filters(comps, current, ctx) else { return true };
+            let Some(ops) = parse_filter_list(comps, current, ctx) else { return true };
             // A lone opacity() is a plain opacity layer.
             if ops.iter().all(|o| matches!(o, FilterOp::Opacity(_))) {
                 for o in &ops {
@@ -588,7 +599,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.backdrop_filters.clear();
                 return true;
             }
-            let Some(ops) = parse_filters(comps, current, ctx) else { return true };
+            let Some(ops) = parse_filter_list(comps, current, ctx) else { return true };
             style.backdrop = true;
             style.backdrop_filters = ops;
             style.creates_stacking_context = true;

@@ -7,6 +7,7 @@
 //! opacity, transforms, `viewBox`/`preserveAspectRatio`.
 
 mod color;
+pub mod filter;
 mod paint;
 mod parse;
 mod style;
@@ -145,6 +146,40 @@ impl SvgTree {
         Some((paint::transform_path(&path, &m), rule))
     }
 
+    /// Does any element use the `filter` or `mask` property?
+    pub fn has_filters(&self) -> bool {
+        self.built.nodes.iter().any(|n| n.spec.mask.is_some() || n.spec.filter.as_ref().is_some_and(|f| !f.is_empty()))
+    }
+
+    /// The `<filter>` named by the fragment of an SVG `data:` URL, with
+    /// the document holding it.
+    pub fn data_url_filter(url: &str) -> Option<(std::sync::Arc<filter::FilterDef>, std::sync::Arc<SvgTree>)> {
+        let (doc_url, frag) = url.rsplit_once('#')?;
+        let (meta, bytes) = parse::data_url_bytes(doc_url)?;
+        if !meta.contains("svg") {
+            return None;
+        }
+        let tree = SvgTree::parse(&String::from_utf8_lossy(&bytes))?;
+        let def = tree.filter(frag)?;
+        Some((def, std::sync::Arc::new(tree)))
+    }
+
+    /// The `<filter>` element with this `id` (for `filter: url(#id)` on
+    /// CSS boxes).
+    pub fn filter(&self, id: &str) -> Option<std::sync::Arc<filter::FilterDef>> {
+        self.built.filters.get(id).cloned()
+    }
+
+    /// Render the element `id` through `m` into a transparent `w`×`h`
+    /// buffer (feImage references).
+    pub fn render_element(&self, fonts: &FontContext, id: &str, m: &rabbithole_gfx::Matrix, w: usize, h: usize) -> Option<filter::Pixels> {
+        let vp = match self.built.viewbox {
+            Some(v) => (v.w, v.h),
+            None => (self.built.width.unwrap_or(300.0), self.built.height.unwrap_or(150.0)),
+        };
+        paint::render_element(&self.built, fonts, vp, id, m, w, h)
+    }
+
     /// Draw into `canvas` filling `dest` (applies viewBox + preserveAspectRatio).
     pub fn render(&self, canvas: &mut Canvas, fonts: &FontContext, dest: Rect) {
         self.render_mode(canvas, fonts, dest, false);
@@ -196,6 +231,22 @@ impl SvgTree {
         if !b.overflow_visible {
             canvas.pop_clip();
         }
+    }
+
+    /// Rasterize the image of concrete size `vw`×`vh` (user units of the
+    /// referencing content) seen through `m` (image space → pixels) into a
+    /// transparent `pw`×`ph` buffer.
+    pub(crate) fn rasterize_stretched(&self, fonts: &FontContext, vw: f32, vh: f32, m: rabbithole_gfx::Matrix, pw: usize, ph: usize) -> filter::Pixels {
+        let render = |bg: Color| {
+            let mut c = Canvas::new(pw as u32, ph as u32);
+            c.clear(bg);
+            c.push_transform(m);
+            self.render_mode(&mut c, fonts, Rect::new(0.0, 0.0, vw, vh), true);
+            c.data
+        };
+        let black = render(Color::BLACK);
+        let white = render(Color::WHITE);
+        filter::css::from_black_white(&black, &white, pw, ph)
     }
 
     /// Rasterize to an RGBA image with a transparent background.
