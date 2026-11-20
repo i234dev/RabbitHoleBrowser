@@ -297,7 +297,7 @@ impl ScriptHost {
 
     /// `worker`: (name, shared, id) for a worker realm.
     pub(crate) fn new_inner(env: &mut dyn HostEnv, worker: Option<(String, bool, u32)>) -> ScriptHost {
-        let (service_context, service_registry) = service_worker::new_context(env);
+        let (service_context, service_registry) = service_worker::new_context(env, worker.as_ref().map(|w| w.1));
         let service_scope = service_worker::is_worker(&service_context);
         let mut realm = Realm::new();
         realm.set_task_budget(Some(task_budget()));
