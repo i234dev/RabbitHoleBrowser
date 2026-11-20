@@ -6,8 +6,8 @@ dir css/css-backgrounds 596 718
 dir css/css-borders 43 123
 dir css/css-box 38 42
 dir css/css-cascade 41 51
-dir css/css-color 289 311
-dir css/css-conditional 144 172
+dir css/css-color 291 311
+dir css/css-conditional 148 172
 dir css/css-contain 302 435
 dir css/css-display 178 223
 dir css/css-flexbox 875 1027
@@ -20,13 +20,13 @@ dir css/css-overflow 444 719
 dir css/css-position 150 251
 dir css/css-sizing 399 568
 dir css/css-text 1190 1550
-dir css/css-text-decor 280 339
+dir css/css-text-decor 281 339
 dir css/css-transforms 735 794
-dir css/css-ui 872 962
+dir css/css-ui 877 962
 dir css/css-values 115 192
 dir css/css-writing-modes 924 1162
-dir css/filter-effects 188 370
-dir css/selectors 200 229
+dir css/filter-effects 281 370
+dir css/selectors 201 229
 fail css/CSS2/abspos/abspos-containing-block-initial-004a.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004b.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004c.xht
@@ -849,8 +849,6 @@ fail css/css-color/relative-currentcolor-displayp3-01.html
 fail css/css-color/relative-currentcolor-prophoto-01.html
 fail css/css-color/relative-currentcolor-rec2020-01.html
 fail css/css-color/relative-currentcolor-rec2020-02.html
-fail css/css-color/system-color-hightlights-vs-getSelection-001.html
-fail css/css-color/system-color-hightlights-vs-getSelection-002.html
 fail css/css-color/t32-opacity-offscreen-multiple-boxes-1-c.xht
 fail css/css-color/t32-opacity-offscreen-multiple-boxes-2-c.xht
 fail css/css-color/t421-rgb-func-no-mixed-f.xht
@@ -879,10 +877,6 @@ fail css/css-conditional/container-queries/multicol-inside-container.html
 fail css/css-conditional/container-queries/multiple-conditions-001.html
 fail css/css-conditional/container-queries/no-layout-containment-fixedpos-dynamic.html
 fail css/css-conditional/container-queries/no-layout-containment-fixedpos.html
-fail css/css-conditional/container-queries/pseudo-elements-009.html
-fail css/css-conditional/container-queries/pseudo-elements-010.html
-fail css/css-conditional/container-queries/pseudo-elements-011.html
-fail css/css-conditional/container-queries/pseudo-elements-012.html
 fail css/css-conditional/container-queries/query-style-color.html
 fail css/css-conditional/container-queries/whitespace-update-after-removal.html
 fail css/css-contain/contain-body-overflow-002.html
@@ -2456,7 +2450,6 @@ fail css/css-text-decor/text-decoration-inset-021.html
 fail css/css-text-decor/text-decoration-inset-022.html
 fail css/css-text-decor/text-decoration-inset-023.html
 fail css/css-text-decor/text-decoration-inset-029.html
-fail css/css-text-decor/text-decoration-inset-marked-text-gap.html
 fail css/css-text-decor/text-decoration-inset-orthogonal-block-001.html
 fail css/css-text-decor/text-decoration-inset-percentage-clone.html
 fail css/css-text-decor/text-decoration-inset-svg-fragment-001.html
@@ -2944,11 +2937,6 @@ fail css/css-ui/caret-color-block-shape-text-color-001.html
 fail css/css-ui/caret-color-block-shape-text-color-002.html
 fail css/css-ui/caret-color-block-shape-text-color-003.html
 fail css/css-ui/caret-color-block-shape-text-color-005.html
-fail css/css-ui/caret-shape-block-001-rtl-sideways-lr.html
-fail css/css-ui/caret-shape-block-001-rtl-sideways-rl.html
-fail css/css-ui/caret-shape-block-001-rtl-vlr.html
-fail css/css-ui/caret-shape-block-001-rtl-vrl.html
-fail css/css-ui/caret-shape-block-001-rtl.html
 fail css/css-ui/caret-shape-block-001-sideways-lr.html
 fail css/css-ui/caret-shape-block-001-sideways-rl.html
 fail css/css-ui/caret-shape-block-001-vlr.html
@@ -3348,13 +3336,11 @@ fail css/filter-effects/backdrop-filter-nested-border-radius-clip-3.html
 fail css/filter-effects/backdrop-filter-nested-border-radius-clip-4.html
 fail css/filter-effects/backdrop-filter-nested-border-radius-clip.html
 fail css/filter-effects/backdrop-filter-plus-filter.html
-fail css/filter-effects/backdrop-filter-reference-filter-mutated.html
 fail css/filter-effects/backdrop-filter-reference-filter.html
 fail css/filter-effects/backdrop-filter-root-element.html
 fail css/filter-effects/backdrop-filter-svg-blur.html
 fail css/filter-effects/backdrop-filter-svg-displacement.html
 fail css/filter-effects/backdrop-filter-svg-foreignObject.html
-fail css/filter-effects/backdrop-filter-svg.html
 fail css/filter-effects/blur-clip-border-radius.html
 fail css/filter-effects/drop-shadow-currentcolor-dynamic-002.html
 fail css/filter-effects/drop-shadow-currentcolor-dynamic-003.html
@@ -3363,56 +3349,21 @@ fail css/filter-effects/drop-shadow-outsets-sample-composited-child.html
 fail css/filter-effects/drop-shadow-scale.html
 fail css/filter-effects/drop-shadow-with-3d-transform.html
 fail css/filter-effects/dynamic-filter-changes-001.html
-fail css/filter-effects/effect-reference-add-hw-001.html
-fail css/filter-effects/effect-reference-displacement-negative-scale-001.html
 fail css/filter-effects/effect-reference-feimage-001.html
 fail css/filter-effects/effect-reference-feimage-002.html
 fail css/filter-effects/effect-reference-feimage-003.html
 fail css/filter-effects/effect-reference-feimage-004.html
-fail css/filter-effects/effect-reference-lighting-no-light.tentative.html
-fail css/filter-effects/effect-reference-local-url-with-base-001.html
-fail css/filter-effects/effect-reference-merge-no-inputs.tentative.html
-fail css/filter-effects/effect-reference-obb-dimensions.html
 fail css/filter-effects/effect-reference-on-span.html
-fail css/filter-effects/effect-reference-on-transparent-element.html
-fail css/filter-effects/effect-reference-source-alpha-001.html
-fail css/filter-effects/effect-reference-source-alpha-002.html
-fail css/filter-effects/empty-element-with-filter-002.html
 fail css/filter-effects/empty-element-with-filter-003.html
-fail css/filter-effects/empty-element-with-filter-004.html
-fail css/filter-effects/empty-element-with-filter.html
-fail css/filter-effects/feComposite-intersection-feTile-input-svg.html
-fail css/filter-effects/feComposite-intersection-feTile-input.html
-fail css/filter-effects/feImage-with-hidden-container-defs.html
-fail css/filter-effects/feImage-with-hidden-container-filter.html
-fail css/filter-effects/feImage-with-hidden-container-linearGradient.html
-fail css/filter-effects/feImage-with-hidden-container-mask.html
-fail css/filter-effects/feImage-with-hidden-container-pattern.html
-fail css/filter-effects/feImage-with-hidden-container-radialGradient.html
-fail css/filter-effects/feImage-with-text-viewport-dependence.html
 fail css/filter-effects/feTile-01.html
 fail css/filter-effects/fecolormatrix-display-p3.html
-fail css/filter-effects/fecolormatrix-negative.html
-fail css/filter-effects/fecolormatrix-special-value.html
-fail css/filter-effects/fecolormatrix-type.html
 fail css/filter-effects/fecomponenttransfer-display-p3.html
-fail css/filter-effects/fecomposite-non-zero-inoffset-001.html
 fail css/filter-effects/feconvolve-region-001.html
 fail css/filter-effects/feconvolve-region-002.html
-fail css/filter-effects/fedisplacementmap-non-uniform-transform-001.html
-fail css/filter-effects/feflood-with-filter-reference.html
-fail css/filter-effects/feimage-huge-subregion.html
-fail css/filter-effects/feimage-subregion-beyond-filter-region.html
-fail css/filter-effects/feimage-svg-fragment.html
-fail css/filter-effects/feimage-svg-preserveaspectratio-slice.html
-fail css/filter-effects/feimage-svg-resolution.html
-fail css/filter-effects/feimage-svg-root-preserveaspectratio.html
 fail css/filter-effects/filter-ancestor-border-radius-overflow-hidden-border.html
 fail css/filter-effects/filter-cb-abspos-inline-001.html
 fail css/filter-effects/filter-cb-abspos-inline-002.html
 fail css/filter-effects/filter-cb-dynamic-1a.html
-fail css/filter-effects/filter-change-to-reference-filter.html
-fail css/filter-effects/filter-external-001-test.html
 fail css/filter-effects/filter-external-002-test.html
 fail css/filter-effects/filter-function/filter-function-001.html
 fail css/filter-effects/filter-function/filter-function-002.html
@@ -3429,11 +3380,7 @@ fail css/filter-effects/filter-function/filter-function-repeating-radial-gradien
 fail css/filter-effects/filter-invalid.html
 fail css/filter-effects/filter-outsets-clipped-by-document-edge.html
 fail css/filter-effects/filter-overflow-transformed-child-001.html
-fail css/filter-effects/filter-region-calc-001.html
-fail css/filter-effects/filter-region-html-content-viewport.tentative.html
-fail css/filter-effects/filter-region-units-001.html
 fail css/filter-effects/filter-subregion-01.html
-fail css/filter-effects/filter-turbulence-invalid-001.html
 fail css/filter-effects/filtered-inline-applies-to-block.html
 fail css/filter-effects/filtered-inline-applies-to-float.html
 fail css/filter-effects/filtered-inline-is-container.html
@@ -3444,64 +3391,12 @@ fail css/filter-effects/grayscale-clip-border-radius.html
 fail css/filter-effects/hidpi-invert-filter-background.html
 fail css/filter-effects/invalidation-css-dropshadow-002.html
 fail css/filter-effects/invert-scale.html
-fail css/filter-effects/lighting-region.html
-fail css/filter-effects/morphology-mirrored.html
-fail css/filter-effects/svg-data-uri-filter-resource.html
-fail css/filter-effects/svg-empty-container-with-filter-content-added.html
 fail css/filter-effects/svg-empty-hidden-foreignobject-with-filter-001.html
 fail css/filter-effects/svg-external-filter-resource.html
-fail css/filter-effects/svg-feflood-001.html
-fail css/filter-effects/svg-feimage-001.html
-fail css/filter-effects/svg-feimage-002.html
-fail css/filter-effects/svg-feimage-003.html
-fail css/filter-effects/svg-feimage-004.html
-fail css/filter-effects/svg-feimage-005.html
-fail css/filter-effects/svg-feoffset-001.html
-fail css/filter-effects/svg-filter-filter-units-user-space.html
-fail css/filter-effects/svg-filter-primitive-units-user-space.html
-fail css/filter-effects/svg-filter-user-space-viewport-change.html
 fail css/filter-effects/svg-image-root-filter.html
-fail css/filter-effects/svg-multiple-filter-functions.html
-fail css/filter-effects/svg-mutation-drop-shadow-color.html
-fail css/filter-effects/svg-mutation-drop-shadow-offset.html
-fail css/filter-effects/svg-mutation-function-to-url.html
-fail css/filter-effects/svg-mutation-group-position-changed.html
-fail css/filter-effects/svg-mutation-group-size-changed.html
-fail css/filter-effects/svg-mutation-group-transform-changed.html
-fail css/filter-effects/svg-mutation-object-position-changed.html
-fail css/filter-effects/svg-mutation-object-size-changed.html
-fail css/filter-effects/svg-mutation-object-transform-changed.html
-fail css/filter-effects/svg-mutation-single-to-multiple-001.html
-fail css/filter-effects/svg-mutation-single-to-multiple-002.html
-fail css/filter-effects/svg-mutation-url-to-function.html
 fail css/filter-effects/svg-relative-urls-001.html
-fail css/filter-effects/svg-shorthand-drop-shadow-001.html
-fail css/filter-effects/svg-shorthand-hue-rotate-001.html
-fail css/filter-effects/svg-sourcegraphic-currentcolor-dynamic-001.html
-fail css/filter-effects/svg-sourcegraphic-invalidation-001.html
-fail css/filter-effects/svg-unknown-input-001.html
-fail css/filter-effects/svg-unknown-input-002.html
-fail css/filter-effects/svg-visibility-hidden-element-with-filter-001.html
 fail css/filter-effects/svg-visibility-hidden-element-with-filter-002.html
-fail css/filter-effects/svg-visibility-hidden-element-with-filter-003.html
 fail css/filter-effects/tainting-css-dropshadow-001.html
-fail css/filter-effects/tainting-feblend-001.html
-fail css/filter-effects/tainting-fecomponenttransfer-001.html
-fail css/filter-effects/tainting-fecomposite-001.html
-fail css/filter-effects/tainting-feconvolvematrix-001.html
-fail css/filter-effects/tainting-fediffuselighting-001.html
-fail css/filter-effects/tainting-fedisplacementmap-001.html
-fail css/filter-effects/tainting-fedropshadow-001.html
-fail css/filter-effects/tainting-feflood-001.html
-fail css/filter-effects/tainting-feflood-007.html
-fail css/filter-effects/tainting-feflood-008.html
-fail css/filter-effects/tainting-feflood-009.html
-fail css/filter-effects/tainting-fegaussianblur-001.html
-fail css/filter-effects/tainting-femorphology-001.html
-fail css/filter-effects/tainting-feoffset-001.html
-fail css/filter-effects/tainting-fespecularlighting-001.html
-fail css/filter-effects/tainting-fetile-001.html
-fail css/filter-effects/visibility-hidden-element-with-filter-001.html
 fail css/filter-effects/will-change-blur-filter-under-clip.html
 fail css/selectors/child-indexed-no-parent.html
 fail css/selectors/dir-style-01a.html
@@ -3528,7 +3423,6 @@ fail css/selectors/of-type-selectors.xhtml
 fail css/selectors/popover-open-with-has-sibling-selector.html
 fail css/selectors/remove-hovered-element.html
 fail css/selectors/selection-image-001.html
-fail css/selectors/selection-image-002.html
 fail css/selectors/selector-structural-pseudo-root.html
 fail css/selectors/selectors-attr-white-space-001.html
 fail css/selectors/user-invalid-form-submission-invalidation.html
