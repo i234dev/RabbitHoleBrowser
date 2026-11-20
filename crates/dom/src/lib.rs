@@ -420,6 +420,18 @@ impl Document {
         if !self.tracking || self.log.overflow {
             return;
         }
+        // Changes inside disconnected subtrees render nothing: inserting
+        // such a subtree is logged (and restyles and relays out all of it)
+        // when it is connected. Building one (an `innerHTML` fragment, a
+        // framework's detached tree) must not fill the log.
+        let connected = match &m {
+            Mutation::Children { parent, .. } => self.is_connected(*parent),
+            Mutation::Attr { node, .. } | Mutation::Text { node } => self.is_connected(*node),
+            Mutation::Node { .. } => true,
+        };
+        if !connected {
+            return;
+        }
         if self.log.entries.len() >= MutationLog::CAP {
             self.log.entries.clear();
             self.log.overflow = true;
