@@ -1570,3 +1570,50 @@ fn content_editable_and_attribute_node_removal() {
     );
     assert_eq!(out, vec!["true inherit true false false false SyntaxError 0"]);
 }
+
+/// DOMTokenList's indexed getter: `classList[i]` is the i-th token, live,
+/// and the indices are own enumerable properties. Closure-style component
+/// registries look decorators up by `classList[i]`; with `undefined` there
+/// no child component was ever decorated.
+#[test]
+fn dom_token_list_indexed_getter() {
+    let out = result_of(
+        "<html><body><table><tr id=bar><td class='tab  first'>a</td><td class=tab>b</td><td class=other>c</td></tr></table></body></html>",
+        r#"
+        'use strict';
+        const r = [];
+        const td = document.querySelector('td');
+        const l = td.classList;
+        r.push(l[0], l[1], l[2], l['0'], l.length, l === td.classList, l instanceof DOMTokenList);
+        r.push(0 in l, 2 in l, Object.keys(l).join(','), JSON.stringify(Object.getOwnPropertyDescriptor(l, '1')));
+        r.push(Array.prototype.slice.call(l).join('+'), Array.prototype.indexOf.call(l, 'first'));
+        const seen = [];
+        Array.prototype.forEach.call(l, (t) => seen.push(t));
+        r.push(seen.join('+'));
+        // Live: attribute changes show through a list obtained earlier.
+        td.className = 'x y z';
+        r.push(l[2], l.length, l.item(0));
+        l.add('w');
+        r.push(l[3], td.getAttribute('class'));
+        let threw = '';
+        try { l[0] = 'q'; } catch (e) { threw = e.name; }
+        r.push(threw, l[0]);
+        // Registry lookup by class token, as component libraries do.
+        const registry = { tab: () => 'decorated' };
+        const found = [];
+        for (const cell of document.getElementById('bar').children) {
+          const cl = cell.classList;
+          let dec = null;
+          for (let i = 0; i < cl.length; i++) { const k = cl[i]; if (k in registry) { dec = registry[k](); break; } }
+          found.push(dec);
+        }
+        r.push(found.join(','));
+        r.push(document.createElement('a').relList[0], String(l.toString()), l.contains('y'));
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(
+        out,
+        r#"'tab|first||tab|2|true|true|true|false|0,1|{"value":"first","writable":false,"enumerable":true,"configurable":true}|tab+first|1|tab+first|z|3|x|w|x y z w|TypeError|x|,decorated,||x y z w|true'"#
+    );
+}

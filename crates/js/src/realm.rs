@@ -769,9 +769,17 @@ impl Realm {
         self.obj_mut(obj).kind = ObjectKind::Host(data);
     }
 
+    /// Host data for a platform object with an indexed getter: `get(data, i)`
+    /// answers `obj[i]` live and `len(data)` bounds the indices (see
+    /// `IndexedHost`). `host_data` reads `data` back as for `set_host_data`.
+    pub fn set_indexed_host_data(&mut self, obj: ObjectId, data: Box<dyn Any>, get: fn(&dyn Any, u32) -> Option<Value>, len: fn(&dyn Any) -> u32) {
+        self.obj_mut(obj).kind = ObjectKind::IndexedHost(Box::new(crate::heap::IndexedHost { data, get, len }));
+    }
+
     pub fn host_data<T: 'static>(&self, obj: ObjectId) -> Option<&T> {
         match &self.obj(obj).kind {
             ObjectKind::Host(d) => d.downcast_ref::<T>(),
+            ObjectKind::IndexedHost(h) => h.data.downcast_ref::<T>(),
             _ => None,
         }
     }
@@ -779,6 +787,7 @@ impl Realm {
     pub fn host_data_mut<T: 'static>(&mut self, obj: ObjectId) -> Option<&mut T> {
         match &mut self.obj_mut(obj).kind {
             ObjectKind::Host(d) => d.downcast_mut::<T>(),
+            ObjectKind::IndexedHost(h) => h.data.downcast_mut::<T>(),
             _ => None,
         }
     }

@@ -509,10 +509,21 @@ pub(crate) fn token_list(realm: &mut Realm, wrapper: ObjectId, n: NodeRef, attr:
     }
     let p = proto("DOMTokenList");
     let o = realm.new_object_with_proto(Some(p));
-    realm.set_host_data(o, Box::new(TokenListRef { node: n, attr }));
+    // DOMTokenList supports indexed properties: `list[i]` is the i-th
+    // token of the current attribute value (read-only, live).
+    realm.set_indexed_host_data(o, Box::new(TokenListRef { node: n, attr }), tl_index, tl_count);
     realm.set_class_name(o, "DOMTokenList");
     set_hidden(realm, wrapper, &key, Value::Object(o));
     Value::Object(o)
+}
+
+fn tl_index(data: &dyn std::any::Any, i: u32) -> Option<Value> {
+    let r = data.downcast_ref::<TokenListRef>()?;
+    tokens_of(r.node, r.attr).get(i as usize).map(|t| Value::str(t))
+}
+
+fn tl_count(data: &dyn std::any::Any) -> u32 {
+    data.downcast_ref::<TokenListRef>().map(|r| tokens_of(r.node, r.attr).len() as u32).unwrap_or(0)
 }
 
 fn e_class_list(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {

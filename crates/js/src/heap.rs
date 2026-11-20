@@ -684,6 +684,31 @@ pub struct RegExpData {
     pub realm: u16,
 }
 
+/// Host data of a platform object that supports indexed properties
+/// (WebIDL legacy platform object with an indexed getter and no indexed
+/// setter, e.g. `DOMTokenList`). Array-index keys are answered by `get`
+/// at every access (live), as read-only, enumerable, configurable own
+/// properties, and cannot be defined, written or deleted; `len` bounds
+/// them for key enumeration. Every other key behaves as on an ordinary
+/// object, so named lookups cost nothing extra.
+pub struct IndexedHost {
+    pub data: Box<dyn Any>,
+    pub get: fn(&dyn Any, u32) -> Option<Value>,
+    pub len: fn(&dyn Any) -> u32,
+}
+
+impl IndexedHost {
+    #[inline]
+    pub fn item(&self, i: u32) -> Option<Value> {
+        (self.get)(&*self.data, i)
+    }
+
+    #[inline]
+    pub fn length(&self) -> u32 {
+        (self.len)(&*self.data)
+    }
+}
+
 /// The internal shape of an object.
 pub enum ObjectKind {
     Ordinary,
@@ -729,6 +754,8 @@ pub enum ObjectKind {
     ForInIterator(Box<ForInState>),
     /// Host-defined (DOM nodes etc.)
     Host(Box<dyn Any>),
+    /// Host-defined with an indexed property getter (see `IndexedHost`).
+    IndexedHost(Box<IndexedHost>),
     /// Reference to a module's top-level binding (an import resolved at
     /// link time). Never exposed to scripts: it lives in import slots and
     /// in namespace getters, and is dereferenced on every read so imports
@@ -792,7 +819,7 @@ impl ObjectKind {
             ObjectKind::StringIterator { .. } => "String Iterator",
             ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
             ObjectKind::ForInIterator(_) => "ForIn Iterator",
-            ObjectKind::Host(_) => "Object",
+            ObjectKind::Host(_) | ObjectKind::IndexedHost(_) => "Object",
             ObjectKind::ModuleBinding { .. } => "ModuleBinding",
             ObjectKind::ModuleNamespace => "Module",
             ObjectKind::Slots(_) => "Object",
