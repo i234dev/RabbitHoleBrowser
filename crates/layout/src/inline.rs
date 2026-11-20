@@ -2535,7 +2535,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let more_follows = !self.final_flush || self.ellipsize_final;
         let clamp_hit = matches!(self.max_lines, Some(n) if self.lines.len() + 1 >= n) && more_follows;
         let overflows = self.cur.x > self.cur.right + 0.5;
-        if clamp_hit && self.cstyle.block_ellipsis.is_some() {
+        let block_ellipsis = clamp_hit && self.cstyle.block_ellipsis.is_some();
+        if block_ellipsis {
             self.ellipsize(true);
         } else if self.ellipsis && overflows {
             self.ellipsize(false);
@@ -2711,8 +2712,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // With `line-height: normal`, the fonts that fallback uses for
             // the text count too, each with its own half-leading (CSS
             // Inline 3 §5.1; Blink's used fonts).
-            // (Not for ellipses, which never grow the line.)
-            if let (PFKind::Text { text, item }, Some(tm), 0, false) = (&f.kind, fm.tm, fm.mode, central || matches!(&f.kind, PFKind::Text { item: MARKER_ITEM, .. })) {
+            // (Not for a block ellipsis: its line height is zero.)
+            if let (PFKind::Text { text, item }, Some(tm), 0, false) = (&f.kind, fm.tm, fm.mode, central || (block_ellipsis && matches!(&f.kind, PFKind::Text { item: MARKER_ITEM, .. }))) {
                 let st = self.style(*item);
                 if st.line_height.is_none() && !st.line_height_tight {
                     for ff in self.lay.ctx.fonts.fallback_faces(tm.font, text) {
