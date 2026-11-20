@@ -511,7 +511,7 @@ pub(crate) fn token_list(realm: &mut Realm, wrapper: ObjectId, n: NodeRef, attr:
     let o = realm.new_object_with_proto(Some(p));
     // DOMTokenList supports indexed properties: `list[i]` is the i-th
     // token of the current attribute value (read-only, live).
-    realm.set_indexed_host_data(o, Box::new(TokenListRef { node: n, attr }), tl_index, tl_count);
+    realm.set_indexed_host_data(o, Box::new(TokenListRef { node: n, attr }));
     realm.set_class_name(o, "DOMTokenList");
     set_hidden(realm, wrapper, &key, Value::Object(o));
     Value::Object(o)
@@ -2992,6 +2992,7 @@ pub(crate) fn install(realm: &mut Realm) {
 
     // Misc support classes.
     let tl = define_class(realm, "DOMTokenList", None, illegal_ctor);
+    rabbithole_js::heap::set_indexed_host_hook(rabbithole_js::heap::IndexedHostHook { get: tl_index, len: tl_count });
     realm.define_method(tl, "add", 1, tl_add);
     realm.define_method(tl, "remove", 1, tl_remove);
     realm.define_method(tl, "toggle", 1, tl_toggle);
