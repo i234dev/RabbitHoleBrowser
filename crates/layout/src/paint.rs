@@ -569,7 +569,8 @@ fn paint_isolated(bounds: Rect, items: &[DisplayItem], canvas: &mut Canvas, font
 }
 
 /// `backdrop-filter`: filter the canvas pixels under `rect`.
-fn paint_backdrop(rect: Rect, radii: Radii, filters: &[rabbithole_style::FilterOp], canvas: &mut Canvas, st: &mut State, view: Rect) {
+#[allow(clippy::too_many_arguments)]
+fn paint_backdrop(rect: Rect, radii: Radii, filters: &[rabbithole_style::FilterOp], svg: Option<&crate::filter::UrlFilters>, canvas: &mut Canvas, fonts: &FontContext, st: &mut State, view: Rect) {
     let local = snap(rect.translate(st.dx, st.dy), canvas);
     if !st.ext {
         return;
@@ -597,7 +598,15 @@ fn paint_backdrop(rect: Rect, radii: Radii, filters: &[rabbithole_style::FilterO
         }
     }
     let mut px = crate::filter::from_opaque(&data, pw, ph);
-    crate::filter::apply(&mut px, filters, device_scale(&canvas.transform()));
+    match svg {
+        Some(u) => {
+            // Layout coordinates → buffer pixels.
+            let m = rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, -((x0 - e) as f32), -((y0 - e) as f32)], canvas.transform());
+            let lm = rabbithole_style::multiply_matrix(m, [1.0, 0.0, 0.0, 1.0, st.dx, st.dy]);
+            px = u.apply(filters, px, &lm, device_scale(&canvas.transform()), fonts);
+        }
+        None => crate::filter::apply(&mut px, filters, device_scale(&canvas.transform())),
+    }
     // Keep the box's part, composited over the original backdrop (drop
     // shadows / opacity may leave it partly transparent).
     let mut rgba = Vec::with_capacity(w * h * 4);
@@ -722,8 +731,8 @@ pub(crate) fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontCo
         DisplayItem::Filtered { bounds, filters, items, svg } => {
             paint_filtered(*bounds, filters, svg.as_deref(), items, canvas, fonts, st, view);
         }
-        DisplayItem::BackdropFilter { rect, radii, filters } => {
-            paint_backdrop(*rect, *radii, filters, canvas, st, view);
+        DisplayItem::BackdropFilter { rect, radii, filters, svg } => {
+            paint_backdrop(*rect, *radii, filters, svg.as_deref(), canvas, fonts, st, view);
         }
         DisplayItem::Blended { bounds, mode, opacity, items } => {
             paint_blended(*bounds, *mode, *opacity, items, canvas, fonts, st, view);

@@ -128,6 +128,8 @@ pub enum DisplayItem {
         rect: Rect,
         radii: Radii,
         filters: Vec<rabbithole_style::FilterOp>,
+        /// The `<filter>` elements of `url()` entries.
+        svg: Option<std::sync::Arc<crate::filter::UrlFilters>>,
     },
     /// Items inside are in viewport coordinates (not scrolled).
     PushFixed,
@@ -772,7 +774,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
             return;
         }
-        if !root.style.backdrop_filters.is_empty() && root.style.visibility != Visibility::Hidden {
+        let backdrop_urls = crate::filter::resolve_urls(root, &root.style.backdrop_filters, self.ctx, &[]);
+        if !root.style.backdrop_filters.is_empty() && root.style.visibility != Visibility::Hidden && !matches!(backdrop_urls, Some(None)) {
             let r = root.rect;
             // Shaped corners / `border-shape` bound the backdrop too.
             let shaped = self.push_border_shape(root, box_radii(root), true);
@@ -782,7 +785,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                     radii[i] = (0.0, 0.0);
                 }
             }
-            self.list.push(DisplayItem::BackdropFilter { rect: r, radii, filters: root.style.backdrop_filters.clone() });
+            self.list.push(DisplayItem::BackdropFilter { rect: r, radii, filters: root.style.backdrop_filters.clone(), svg: backdrop_urls.flatten() });
             if shaped {
                 self.list.push(DisplayItem::PopClip);
             }
