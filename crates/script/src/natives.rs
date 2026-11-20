@@ -303,6 +303,26 @@ fn set_script_font_faces(realm: &mut Realm, _this: Value, args: &[Value]) -> JsR
     Ok(Value::Undefined)
 }
 
+/// `cssFontFaces()`: the document's CSS-connected font faces as
+/// `{family, style, weight, stretch, unicodeRange, display, url, status}`.
+fn css_font_faces(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+    let faces = with_doc(0, |doc| doc.css_font_faces.clone());
+    let mut out = Vec::with_capacity(faces.len());
+    for f in faces {
+        out.push(object_from(realm, vec![
+            ("family", Value::str(&f.family)),
+            ("style", Value::str(&f.style)),
+            ("weight", Value::str(&f.weight)),
+            ("stretch", Value::str(&f.stretch)),
+            ("unicodeRange", Value::str(&f.unicode_range)),
+            ("display", Value::str(&f.display)),
+            ("url", Value::str(&f.url)),
+            ("status", Value::str(f.status)),
+        ]));
+    }
+    Ok(realm.new_array_value(out))
+}
+
 /// Compression formats of `CompressionStream` / `DecompressionStream`.
 fn compression_format(realm: &mut Realm, v: &Value) -> JsResult<u8> {
     match realm.to_rust_string(v.clone())?.as_str() {
@@ -368,6 +388,7 @@ pub(crate) fn install(realm: &mut Realm) {
     crate::webgl::install(realm, o);
     crate::webanim::install(realm, o);
     realm.define_method(o, "setScriptFontFaces", 1, set_script_font_faces);
+    realm.define_method(o, "cssFontFaces", 0, css_font_faces);
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
     realm.define_method(o, "imagePixels", 1, image_pixels);
     realm.define_method(o, "installHandlers", 2, install_handlers);

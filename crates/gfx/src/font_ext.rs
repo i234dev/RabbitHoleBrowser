@@ -1,6 +1,7 @@
 //! Web fonts (`@font-face`: TTF/OTF/WOFF/WOFF2), system font discovery and
 //! CSS family matching.
 
+pub mod instance;
 pub mod sfnt;
 pub mod sysfonts;
 pub mod woff;
@@ -74,17 +75,80 @@ impl FontContext {
     /// [`FontContext::add_font_data`] with the face's `font-stretch` range
     /// in percent (min, max).
     pub fn add_font_data_stretch(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), data: &[u8]) -> Option<FontId> {
+        self.add_font_data_ranged(family, weight, italic, stretch, None, data)
+    }
+
+    /// [`FontContext::add_font_data_stretch`] with the face's
+    /// `unicode-range` (inclusive code point ranges; `None` for all).
+    /// Faces of one family and style that differ only in their ranges form
+    /// a composite font (CSS Fonts 4 §4.5): each character uses the face
+    /// whose range includes it, later registrations first.
+    pub fn add_font_data_ranged(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, data: &[u8]) -> Option<FontId> {
+        self.add_font_face(family, (weight, weight), italic, stretch, unicode_range, data).into_iter().next()
+    }
+
+    /// Register an `@font-face` with its weight range (min, max). A
+    /// variable font is drawn at the axis values the descriptors select
+    /// (CSS Fonts 4 §5.1: they clamp the variations): one static instance
+    /// per hundred of weight in the range, so each requested weight finds
+    /// its own. Other fonts register once, at the range's minimum.
+    /// Returns the registered faces (empty when the data cannot be used).
+    pub fn add_font_face(&self, family: &str, weight: (u16, u16), italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, data: &[u8]) -> Vec<FontId> {
         // Raw SFNT can be compared against the store without first copying it.
         let sfnt = match data.get(..4) {
             Some([0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true") => std::borrow::Cow::Borrowed(data),
-            _ => std::borrow::Cow::Owned(decode_font_container(data)?),
+            _ => match decode_font_container(data) {
+                Some(d) => std::borrow::Cow::Owned(d),
+                None => return Vec::new(),
+            },
         };
+        let lo = weight.0.clamp(1, 1000);
+        let hi = weight.1.clamp(lo, 1000);
+        let mut weights = vec![lo];
+        if hi > lo {
+            weights.extend((1..=9).map(|n| n * 100).filter(|&w| w > lo && w < hi));
+            weights.push(hi);
+        }
+        let axes = |w: u16| {
+            let mut axes = vec![(*b"wght", w as f32)];
+            if stretch.0 == stretch.1 {
+                axes.push((*b"wdth", stretch.0 as f32));
+            }
+            if italic {
+                axes.push((*b"ital", 1.0));
+            }
+            axes
+        };
+        if !instance::has_axis(sfnt.as_ref(), b"wght") {
+            // Not weight-variable: one face for the whole range (other axes
+            // still follow the descriptors).
+            let face = match instance::instantiate(sfnt.as_ref(), &axes(lo)) {
+                Some(static_font) => std::borrow::Cow::Owned(static_font),
+                None => sfnt,
+            };
+            return self.register_sfnt(family, lo, italic, stretch, unicode_range, face).into_iter().collect();
+        }
+        let mut out = Vec::new();
+        for w in weights {
+            let face = match instance::instantiate(sfnt.as_ref(), &axes(w)) {
+                Some(static_font) => std::borrow::Cow::Owned(static_font),
+                None => std::borrow::Cow::Borrowed(sfnt.as_ref()),
+            };
+            out.extend(self.register_sfnt(family, w, italic, stretch, unicode_range, face));
+        }
+        out
+    }
+
+    fn register_sfnt(&self, family: &str, weight: u16, italic: bool, stretch: (u16, u16), unicode_range: Option<&[(u32, u32)]>, sfnt: std::borrow::Cow<[u8]>) -> Option<FontId> {
+        // An empty or full range is no restriction.
+        let unicode_range: Option<Rc<[(u32, u32)]>> = unicode_range
+            .filter(|r| !r.iter().any(|&(lo, hi)| lo == 0 && hi >= 0x10FFFF))
+            .map(Rc::from);
         let family = family.trim().trim_matches('"').trim_matches('\'').to_string();
         if family.is_empty() {
             return None;
         }
         let family_lower = family.to_ascii_lowercase();
-        let weight = weight.clamp(1, 1000);
         let (existing_binding, existing_data) = {
             let faces = self.faces.borrow();
             let mut binding = None;
@@ -97,7 +161,13 @@ impl FontContext {
                     continue;
                 }
                 data = Some((bytes.clone(), slot.font.borrow().clone()));
-                if slot.generic.is_none() && slot.family_lower == family_lower && slot.weight == weight && slot.italic == italic && slot.stretch == stretch {
+                if slot.generic.is_none()
+                    && slot.family_lower == family_lower
+                    && slot.weight == weight
+                    && slot.italic == italic
+                    && slot.stretch == stretch
+                    && slot.unicode_range == unicode_range
+                {
                     binding = Some(idx);
                     break;
                 }
@@ -130,6 +200,7 @@ impl FontContext {
             italic,
             stretch,
             generic: None,
+            unicode_range,
             source: FaceSource::Bytes(bytes),
             font: RefCell::new(Some(font)),
             failed: Cell::new(false),
@@ -164,6 +235,7 @@ impl FontContext {
                 italic: f.italic,
                 stretch: (100, 100),
                 generic: None,
+                unicode_range: None,
                 source: FaceSource::Path(f.path, f.index),
                 font: RefCell::new(None),
                 failed: Cell::new(false),
@@ -190,30 +262,54 @@ impl FontContext {
     /// only ranks faces within a family, so host faces (all `normal`) are
     /// unaffected.
     pub fn select_family_stretch(&self, families: &[String], generic: Family, weight: u16, italic: bool, stretch: u16) -> FontId {
-        for fam in families {
-            let name = fam.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase();
-            if name.is_empty() {
-                continue;
-            }
-            if let Some(candidates) = generic_candidates(&name) {
-                for c in candidates {
-                    if let Some(id) = self.select_exact_family(c, weight, italic) {
-                        return id;
-                    }
+        for (i, fam) in families.iter().enumerate() {
+            let Some(id) = self.select_one_family(fam, generic, weight, italic, stretch) else { continue };
+            // A family limited by unicode-range leaves the other characters
+            // to the later families of the list.
+            if self.has_range_limits(id) {
+                let mut chain: Vec<usize> = families[i + 1..].iter().filter_map(|f| self.select_one_family(f, generic, weight, italic, stretch)).map(|f| f.0).collect();
+                let last = self.select(generic, weight, italic).0;
+                if !chain.contains(&last) {
+                    chain.push(last);
                 }
-                // A generic keyword with no system match: use the bundled face.
-                let g = match name.as_str() {
-                    "serif" | "ui-serif" => Family::Serif,
-                    "monospace" | "ui-monospace" => Family::Mono,
-                    _ => generic,
-                };
-                return self.select(g, weight, italic);
+                return self.with_chain(id, chain);
             }
-            if let Some(id) = self.select_exact_family_stretch(&name, weight, italic, stretch) {
-                return id;
-            }
+            return id;
         }
         self.select(generic, weight, italic)
+    }
+
+    /// The face one entry of a `font-family` list selects, if any.
+    fn select_one_family(&self, fam: &str, generic: Family, weight: u16, italic: bool, stretch: u16) -> Option<FontId> {
+        let name = fam.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(candidates) = generic_candidates(&name) {
+            for c in candidates {
+                if let Some(id) = self.select_exact_family(c, weight, italic) {
+                    return Some(id);
+                }
+            }
+            // A generic keyword with no system match: use the bundled face.
+            let g = match name.as_str() {
+                "serif" | "ui-serif" => Family::Serif,
+                "monospace" | "ui-monospace" => Family::Mono,
+                _ => generic,
+            };
+            return Some(self.select(g, weight, italic));
+        }
+        self.select_exact_family_stretch(&name, weight, italic, stretch)
+    }
+
+    /// Does any face of `font`'s family have a unicode-range?
+    fn has_range_limits(&self, font: FontId) -> bool {
+        let family = match self.faces.borrow().get(font.0) {
+            Some(s) if s.generic.is_none() => s.family_lower.clone(),
+            _ => return false,
+        };
+        let faces = self.faces.borrow();
+        self.family_faces(&family).is_some_and(|ids| ids.iter().any(|&i| faces.get(i).is_some_and(|s| s.unicode_range.is_some())))
     }
 
     /// Resolve a generic through host fonts, without treating a document's

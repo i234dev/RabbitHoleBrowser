@@ -50,8 +50,11 @@ pub(crate) struct ShapingState {
     /// Faces that are another face shaped with OpenType features (CSS
     /// `font-feature-settings` / `font-variant-*`): face → (base, features).
     pub(crate) variants: RefCell<HashMap<usize, (usize, Rc<[FontFeature]>)>>,
-    /// (base face, features) → variant face.
-    pub(crate) variant_ids: RefCell<HashMap<(usize, Rc<[FontFeature]>), usize>>,
+    /// (base face, features, fallback chain) → variant face.
+    pub(crate) variant_ids: RefCell<HashMap<(usize, Rc<[FontFeature]>, Option<Rc<[usize]>>), usize>>,
+    /// Variant face → the faces of the later families of its `font-family`
+    /// list, for characters outside its family's unicode-ranges.
+    pub(crate) chains: RefCell<HashMap<usize, Rc<[usize]>>>,
     /// Default features of a face (`@font-face { font-feature-settings }`).
     pub(crate) face_features: RefCell<HashMap<usize, Rc<[FontFeature]>>>,
     /// (face, tag) → does the face's GSUB have that feature?
@@ -132,13 +135,33 @@ impl FontContext {
             merged.retain(|g| g.0 != f.0);
             merged.push(*f);
         }
-        let feats: Rc<[FontFeature]> = Rc::from(merged);
-        if let Some(&id) = self.shaping.variant_ids.borrow().get(&(base, feats.clone())) {
-            return FontId(id);
+        let chain = self.shaping.chains.borrow().get(&font.0).cloned();
+        self.variant(base, Rc::from(merged), chain).unwrap_or(font)
+    }
+
+    /// `font` falling back to `chain` (the faces chosen for the later
+    /// families of a `font-family` list) for characters outside the
+    /// unicode-ranges of its family (CSS Fonts 4 §5.2: such characters
+    /// use the next family).
+    pub(crate) fn with_chain(&self, font: FontId, chain: Vec<usize>) -> FontId {
+        let base = self.variant_base(font.0);
+        let feats = self.shaping.variants.borrow().get(&font.0).map(|v| v.1.clone());
+        let feats = feats.or_else(|| self.shaping.face_features.borrow().get(&base).cloned()).unwrap_or_else(|| Rc::from(Vec::new()));
+        self.variant(base, feats, Some(Rc::from(chain))).unwrap_or(font)
+    }
+
+    /// An unbound copy of face `base` shaped with `feats` and falling back
+    /// to `chain` (the same id for the same request).
+    fn variant(&self, base: usize, feats: Rc<[FontFeature]>, chain: Option<Rc<[usize]>>) -> Option<FontId> {
+        let key = (base, feats.clone(), chain.clone());
+        if let Some(&id) = self.shaping.variant_ids.borrow().get(&key) {
+            return Some(FontId(id));
         }
+        // Copies share the parsed font.
+        let _ = self.try_face(base);
         let idx = {
             let mut faces = self.faces.borrow_mut();
-            let Some(slot) = faces.get(base) else { return font };
+            let slot = faces.get(base)?;
             let copy = crate::font::FaceSlot {
                 name: slot.name.clone(),
                 family: slot.family.clone(),
@@ -147,6 +170,7 @@ impl FontContext {
                 italic: slot.italic,
                 stretch: slot.stretch,
                 generic: slot.generic,
+                unicode_range: slot.unicode_range.clone(),
                 source: match &slot.source {
                     crate::font::FaceSource::Bytes(b) => crate::font::FaceSource::Bytes(Rc::clone(b)),
                     crate::font::FaceSource::Path(p, i) => crate::font::FaceSource::Path(p.clone(), *i),
@@ -157,9 +181,12 @@ impl FontContext {
             faces.push(copy);
             faces.len() - 1
         };
-        self.shaping.variants.borrow_mut().insert(idx, (base, feats.clone()));
-        self.shaping.variant_ids.borrow_mut().insert((base, feats), idx);
-        FontId(idx)
+        self.shaping.variants.borrow_mut().insert(idx, (base, feats));
+        if let Some(chain) = chain {
+            self.shaping.chains.borrow_mut().insert(idx, chain);
+        }
+        self.shaping.variant_ids.borrow_mut().insert(key, idx);
+        Some(FontId(idx))
     }
 
     /// SFNT bytes of a face and whether it has OpenType layout tables.

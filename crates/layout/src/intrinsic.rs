@@ -137,8 +137,13 @@ impl<'a> Layouter<'a> {
                     let mut min: f32 = 0.0;
                     let mut max: f32 = 0.0;
                     let is_row = b.formatting == Formatting::TableRow;
+                    // Consecutive floats sit side by side at max-content:
+                    // their widths add up (left and right separately, as in
+                    // browsers) until a clear or an in-flow block.
+                    let (mut float_left, mut float_right): (f32, f32) = (0.0, 0.0);
                     for c in &mut b.children {
-                        if !(c.is_in_flow() || c.flow.is_float()) {
+                        let is_float = c.flow.is_float();
+                        if !(c.is_in_flow() || is_float) {
                             continue;
                         }
                         let ex = extras_px(&c.style);
@@ -151,11 +156,32 @@ impl<'a> Layouter<'a> {
                         if is_row {
                             min += cmin + ex;
                             max += cmax + ex;
+                            continue;
+                        }
+                        min = min.max(cmin + ex);
+                        if is_float {
+                            use rabbithole_style::Clear;
+                            let clear = c.style.clear;
+                            if matches!(clear, Clear::Left | Clear::Both) && float_left > 0.0 {
+                                max = max.max(float_left + float_right);
+                                float_left = 0.0;
+                            }
+                            if matches!(clear, Clear::Right | Clear::Both) && float_right > 0.0 {
+                                max = max.max(float_left + float_right);
+                                float_right = 0.0;
+                            }
+                            if c.style.float == rabbithole_style::Float::Right {
+                                float_right += cmax + ex;
+                            } else {
+                                float_left += cmax + ex;
+                            }
                         } else {
-                            min = min.max(cmin + ex);
-                            max = max.max(cmax + ex);
+                            max = max.max(float_left + float_right).max(cmax + ex);
+                            float_left = 0.0;
+                            float_right = 0.0;
                         }
                     }
+                    max = max.max(float_left + float_right);
                     (min, max)
                 }
                 Formatting::Flex => self.flex_intrinsic(b),

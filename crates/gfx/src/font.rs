@@ -104,6 +104,9 @@ pub(crate) struct FaceSlot {
     pub stretch: (u16, u16),
     /// Generic family for bundled faces (used for fallback preference).
     pub generic: Option<Family>,
+    /// `unicode-range` of a web font as inclusive code point ranges; `None`
+    /// covers every character. The face is only used for characters in it.
+    pub unicode_range: Option<Rc<[(u32, u32)]>>,
     pub source: FaceSource,
     pub font: RefCell<Option<Rc<fontdue::Font>>>,
     pub failed: Cell<bool>,
@@ -290,6 +293,7 @@ impl FontContext {
                 italic,
                 stretch: (100, 100),
                 generic: Some(generic),
+                unicode_range: None,
                 source: FaceSource::Bytes(Rc::new(bytes.to_vec())),
                 font: RefCell::new(None),
                 failed: Cell::new(false),
@@ -489,12 +493,22 @@ impl FontContext {
             .unwrap_or(0.0)
     }
 
+    /// Does the `unicode-range` of face `idx` include `ch`?
+    pub(crate) fn covers(&self, idx: usize, ch: u32) -> bool {
+        let faces = self.faces.borrow();
+        match faces.get(idx).and_then(|s| s.unicode_range.as_deref()) {
+            Some(ranges) => ranges.iter().any(|&(lo, hi)| ch >= lo && ch <= hi),
+            None => true,
+        }
+    }
+
     /// Find a face that has `ch`: the primary face first, then fallbacks.
     fn lookup(&self, primary: usize, ch: char) -> (usize, u16) {
-        let face = self.face(primary);
-        let g = face.lookup_glyph_index(ch);
-        if g != 0 {
-            return (primary, g);
+        if self.covers(primary, ch as u32) {
+            let g = self.face(primary).lookup_glyph_index(ch);
+            if g != 0 {
+                return (primary, g);
+            }
         }
         match self.fallback_for_char(ch, FontId(primary)) {
             Some(FontId(f)) => {
@@ -529,6 +543,10 @@ impl FontContext {
         // more, and most candidates of a fallback search lack the character.
         // Only a face that maps it is loaded, which also confirms it is usable.
         let has = |idx: usize| -> bool {
+            // A face is only used for the characters of its unicode-range.
+            if !self.covers(idx, ch as u32) {
+                return false;
+            }
             let loaded = self.faces.borrow().get(idx).and_then(|s| s.font.borrow().clone());
             if let Some(f) = loaded {
                 return f.lookup_glyph_index(ch) != 0;
@@ -544,13 +562,52 @@ impl FontContext {
         if has(primary) {
             return Some(primary);
         }
-        let (family_lower, generic, prim_italic, prim_weight) = {
+        let (family_lower, generic, prim_italic, prim_weight, prim_stretch) = {
             let faces = self.faces.borrow();
             let s = &faces[primary];
-            (s.family_lower.clone(), s.generic, s.italic, s.weight)
+            (s.family_lower.clone(), s.generic, s.italic, s.weight, s.stretch.0)
         };
-        // 1. Same family, other styles.
-        let same_family: Vec<usize> = self.family_faces(&family_lower).unwrap_or_default();
+        // 1. The other unicode-range subsets of the same style (later
+        //    @font-face rules first).
+        let composite = |family: &str, idx: usize| -> Vec<usize> {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(idx) else { return Vec::new() };
+            let (w, it, st) = (s.weight, s.italic, s.stretch);
+            let mut ids: Vec<usize> = self.family_faces(family).unwrap_or_default();
+            ids.retain(|&i| i != idx && faces.get(i).is_some_and(|f| f.weight == w && f.italic == it && f.stretch == st));
+            ids.sort_by_key(|&i| std::cmp::Reverse(i));
+            ids
+        };
+        for idx in composite(&family_lower, primary) {
+            if has(idx) {
+                return Some(idx);
+            }
+        }
+        // 2. The later families of the `font-family` list, when the
+        //    family's unicode-ranges leave the character out.
+        let chain = self.shaping.chains.borrow().get(&primary).cloned();
+        if let Some(chain) = chain {
+            for &c in chain.iter() {
+                if has(c) {
+                    return Some(c);
+                }
+                let fam = self.faces.borrow().get(c).map(|s| s.family_lower.clone()).unwrap_or_default();
+                for idx in composite(&fam, c) {
+                    if has(idx) {
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        // 3. Same family, other styles (closest first), except
+        //    unicode-range subsets: they only serve their own style.
+        let mut same_family: Vec<usize> = self.family_faces(&family_lower).unwrap_or_default();
+        {
+            let faces = self.faces.borrow();
+            same_family.retain(|&i| faces.get(i).is_some_and(|f| f.unicode_range.is_none()));
+            let score = |idx: usize| faces.get(idx).map(|s| match_score(s, prim_weight, prim_italic, prim_stretch)).unwrap_or(i32::MAX);
+            same_family.sort_by_key(|&idx| (score(idx), idx));
+        }
         for idx in same_family {
             if idx != primary && has(idx) {
                 return Some(idx);
@@ -824,47 +881,69 @@ impl FontContext {
     /// weight.
     pub(crate) fn best_of_stretch(&self, ids: &[usize], weight: u16, italic: bool, stretch: u16) -> Option<usize> {
         let faces = self.faces.borrow();
-        let mut best: Option<(i32, usize)> = None;
+        let mut best: Option<(i64, usize)> = None;
         for &idx in ids {
             let Some(s) = faces.get(idx) else { continue };
             if s.failed.get() {
                 continue;
             }
-            let style_penalty = if s.italic == italic { 0 } else { 10_000 };
-            let w = s.weight as i32;
-            let d = weight as i32;
-            let weight_penalty = if d <= 500 {
-                // Prefer weights at or below, closest first; then above.
-                if w <= d {
-                    d - w
-                } else {
-                    1000 + (w - d)
-                }
-            } else {
-                if w >= d {
-                    w - d
-                } else {
-                    1000 + (d - w)
-                }
+            // Among the unicode-range subsets of one style, the first
+            // available font is one whose range includes U+0020 (CSS Fonts 4
+            // §5.2): it gives the metrics of the text.
+            let no_space = match s.unicode_range.as_deref() {
+                Some(r) => !r.iter().any(|&(lo, hi)| lo <= 0x20 && hi >= 0x20),
+                None => false,
             };
-            let (lo, hi) = (s.stretch.0 as i32, s.stretch.1 as i32);
-            let want = stretch as i32;
-            let stretch_penalty = if want >= lo && want <= hi {
-                0
-            } else if want <= 100 {
-                if hi < want { want - hi } else { 1000 + (lo - want) }
-            } else if lo > want {
-                lo - want
-            } else {
-                1000 + (want - hi)
-            };
-            let score = stretch_penalty * 100_000 + style_penalty + weight_penalty;
+            let score = match_score(s, weight, italic, stretch) as i64 * 2 + no_space as i64;
             if best.map(|(b, _)| score < b).unwrap_or(true) {
                 best = Some((score, idx));
             }
         }
         best.map(|(_, i)| i)
     }
+}
+
+/// CSS Fonts 4 §5.2 distance of a face from a requested width, style and
+/// weight (lower is better): width first (narrower faces first for a desired
+/// width at or below 100%, wider ones above), then style, then weight.
+pub(crate) fn match_score(s: &FaceSlot, weight: u16, italic: bool, stretch: u16) -> i32 {
+    let style_penalty = if s.italic == italic { 0 } else { 10_000 };
+    let w = s.weight as i32;
+    let d = weight as i32;
+    let weight_penalty = if (400..=500).contains(&d) {
+        // Weights from the desired one up to 500 first, then lighter ones
+        // (closest first), then heavier than 500.
+        if w >= d && w <= 500 {
+            w - d
+        } else if w < d {
+            1000 + (d - w)
+        } else {
+            2000 + (w - d)
+        }
+    } else if d < 400 {
+        // Lighter (or equal) weights first, closest first; then heavier.
+        if w <= d {
+            d - w
+        } else {
+            1000 + (w - d)
+        }
+    } else if w >= d {
+        w - d
+    } else {
+        1000 + (d - w)
+    };
+    let (lo, hi) = (s.stretch.0 as i32, s.stretch.1 as i32);
+    let want = stretch as i32;
+    let stretch_penalty = if want >= lo && want <= hi {
+        0
+    } else if want <= 100 {
+        if hi < want { want - hi } else { 1000 + (lo - want) }
+    } else if lo > want {
+        lo - want
+    } else {
+        1000 + (want - hi)
+    };
+    stretch_penalty * 100_000 + style_penalty + weight_penalty
 }
 
 /// Shift a coverage bitmap right by `frac` (0..1) pixels with linear
