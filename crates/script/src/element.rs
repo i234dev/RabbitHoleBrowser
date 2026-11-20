@@ -340,12 +340,11 @@ fn tokens_of(n: NodeRef, attr: &str) -> Vec<String> {
 }
 
 fn token_list_ref(realm: &mut Realm, this: &Value) -> JsResult<TokenListRef> {
-    match this.v() {
-        V::Object(o) => match realm.host_data::<TokenListRef>(o) {
-            Some(r) => Ok(TokenListRef { node: r.node, attr: r.attr }),
-            None => Err(realm.throw_type_error("Illegal invocation")),
-        },
-        _ => Err(realm.throw_type_error("Illegal invocation")),
+    // `this` is usually the Proxy that adds the indexed getter (see
+    // `token_list`); the host data lives on its target.
+    match crate::host::host_obj(realm, this).and_then(|o| realm.host_data::<TokenListRef>(o)) {
+        Some(r) => Ok(TokenListRef { node: r.node, attr: r.attr }),
+        None => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
 
@@ -511,8 +510,18 @@ pub(crate) fn token_list(realm: &mut Realm, wrapper: ObjectId, n: NodeRef, attr:
     let o = realm.new_object_with_proto(Some(p));
     realm.set_host_data(o, Box::new(TokenListRef { node: n, attr }));
     realm.set_class_name(o, "DOMTokenList");
-    set_hidden(realm, wrapper, &key, Value::Object(o));
-    Value::Object(o)
+    // DOMTokenList supports indexed properties (`list[0]`): the prelude's
+    // factory wraps the list in a Proxy that serves them live.
+    let factory = state().borrow().factories.get("tokenList").cloned();
+    let list = match factory {
+        Some(f) => match realm.call(f, Value::Undefined, &[Value::Object(o)]) {
+            Ok(v) if v.is_object() => v,
+            _ => Value::Object(o),
+        },
+        None => Value::Object(o),
+    };
+    set_hidden(realm, wrapper, &key, list.clone());
+    list
 }
 
 fn e_class_list(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
