@@ -509,3 +509,24 @@ fn a_fragment_navigation_during_load_does_not_reload_the_frame() {
     settle(&e, &mut page);
     assert_eq!(eval(&e, &mut page, "String(loads)"), "1");
 }
+
+/// A script keeps an element of a frame's first document and the frame
+/// then navigates to a smaller document: reading `isConnected` or the
+/// element's box (a ResizeObserver watching it does both every frame)
+/// must not index the new document with the old node id.
+#[test]
+fn nodes_of_a_replaced_frame_document_stay_usable() {
+    let mut e = engine();
+    let mut page = load(&mut e, "<p>parent</p>");
+    let r = eval(
+        &e,
+        &mut page,
+        "var i = document.createElement('iframe'); document.body.appendChild(i); var d = i.contentDocument; \
+         for (var k = 0; k < 40; k++) d.body.appendChild(d.createElement('div')); window.kept = d.body.lastChild; \
+         i.srcdoc = 'x'; typeof kept.isConnected",
+    );
+    assert_eq!(r, "boolean");
+    settle(&e, &mut page);
+    let r = eval(&e, &mut page, "try { [typeof kept.isConnected, typeof kept.getBoundingClientRect().width, document.querySelector('iframe').contentDocument.body.textContent].join() } catch (err) { 'threw ' + err.message }");
+    assert_eq!(r, "boolean,number,x");
+}

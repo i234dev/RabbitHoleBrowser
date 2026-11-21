@@ -941,14 +941,17 @@ impl Document {
     }
 
     /// Is the node attached to the document (reachable from the root,
-    /// crossing from shadow roots to their hosts)?
+    /// crossing from shadow roots to their hosts)? An id this document
+    /// never allocated (a node of a frame's earlier document, kept by a
+    /// script across a navigation) is not.
     pub fn is_connected(&self, id: NodeId) -> bool {
         let mut cur = id;
         loop {
             if cur == Self::ROOT {
                 return true;
             }
-            match self.nodes[cur].parent {
+            let Some(node) = self.nodes.get(cur) else { return false };
+            match node.parent {
                 Some(p) => cur = p,
                 None => match self.shadow_hosts.get(&cur) {
                     Some(&h) => cur = h,

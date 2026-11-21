@@ -229,7 +229,10 @@
       const st = ro[S];
       const entries = [];
       for (const [target, rec] of st.targets) {
-        const b = boxesOf(target);
+        // One unmeasurable target must not stop the others' (and the
+        // other observers') notifications.
+        let b;
+        try { b = boxesOf(target); } catch (e) { b = { bw: 0, bh: 0, cw: 0, ch: 0, pl: 0, pt: 0 }; }
         const size = rec.box === 'border-box' ? [b.bw, b.bh] : [b.cw, b.ch];
         if (rec.last && rec.last[0] === size[0] && rec.last[1] === size[1]) continue;
         // The first observation of a 0x0 target is reported too (its
