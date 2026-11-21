@@ -194,6 +194,9 @@ fn webgl_clear_context_lock_and_aliases() {
       const pixel = new Uint8Array(4); gl.readPixels(4,4,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
       console.log(Array.from(pixel).join(','), gl.getError(), gl.drawingBufferWidth, gl.drawingBufferHeight);
       console.log(gl.getContextAttributes().antialias, gl.getSupportedExtensions().length, gl.getExtension('imaginary') === null);
+      console.log(gl.getParameter(0x9245), gl.getError() === gl.INVALID_ENUM);
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      console.log(info === gl.getExtension('webgl_debug_renderer_info'), String(info), info.UNMASKED_VENDOR_WEBGL, gl.getParameter(info.UNMASKED_VENDOR_WEBGL), typeof gl.getParameter(info.UNMASKED_RENDERER_WEBGL), gl.getError());
     "#,
     );
     assert_eq!(
@@ -203,7 +206,9 @@ fn webgl_clear_context_lock_and_aliases() {
             "true true true true",
             "true",
             "64,128,191,255 0 8 8",
-            "false 0 true"
+            "false 1 true",
+            "null true",
+            "true [object WebGLDebugRendererInfo] 37445 RabbitHole string 0"
         ]
     );
     assert!(env.errors().is_empty(), "{:?}", env.errors());

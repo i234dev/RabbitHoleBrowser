@@ -230,6 +230,8 @@
   class WebGLUniformLocation { constructor() { illegal(); } }
   class WebGLActiveInfo { constructor() { illegal(); } }
   class WebGLShaderPrecisionFormat { constructor() { illegal(); } }
+  class WEBGL_debug_renderer_info { constructor() { illegal(); } }
+  for (const [k, v] of [['UNMASKED_VENDOR_WEBGL', 0x9245], ['UNMASKED_RENDERER_WEBGL', 0x9246]]) Object.defineProperty(WEBGL_debug_renderer_info.prototype, k, { value: v, enumerable: true });
   class WebGLContextEvent extends g.Event {
     constructor(type, init = {}) { super(type, init); Object.defineProperty(this, 'statusMessage', { value: String(init.statusMessage || ''), enumerable: true }); }
   }
@@ -241,8 +243,15 @@
     getContextAttributes() { const s = state(this); syncSize(s); return s.lost ? null : { ...s.attrs }; }
     isContextLost() { const s = state(this); syncSize(s); return s.lost; }
     getError() { const s = state(this); syncSize(s); return s.errors.length ? s.errors.shift() : GL.NO_ERROR; }
-    getSupportedExtensions() { const s = state(this); return s.lost ? null : []; }
-    getExtension(name) { required('getExtension', 1, arguments); state(this); String(name); return null; }
+    getSupportedExtensions() { const s = state(this); return s.lost ? null : ['WEBGL_debug_renderer_info']; }
+    getExtension(name) {
+      required('getExtension', 1, arguments); const s = state(this); name = String(name);
+      // Extension names match case-insensitively; each context returns
+      // the same object every time. Only the renderer-info query is
+      // exposed: pages read it (behind a null check that many skip).
+      if (s.lost || name.toLowerCase() !== 'webgl_debug_renderer_info') return null;
+      return s.debugInfo || (s.debugInfo = Object.create(WEBGL_debug_renderer_info.prototype));
+    }
     createShader(type) { required('createShader', 1, arguments); const s = state(this); type >>>= 0; const r = call(s, 'createShader', type); return r.error ? null : wrap(s, 'Shader', r.value, { type, source: '' }); }
     shaderSource(shader, source) { required('shaderSource', 2, arguments); const s = state(this), o = owned(s, shader, 'Shader'); source = String(source); if (o && !call(s, 'shaderSource', o.id, source).error) o.source = source; }
     compileShader(shader) { required('compileShader', 1, arguments); const s = state(this), o = owned(s, shader, 'Shader'); if (o) call(s, 'compileShader', o.id); }
@@ -420,6 +429,7 @@
         case GL.VERSION: return s.version === 2 ? 'WebGL 2.0 (RabbitHole experimental software subset)' : 'WebGL 1.0 (RabbitHole experimental software subset)';
         case GL.SHADING_LANGUAGE_VERSION: return s.version === 2 ? 'WebGL GLSL ES 3.00 (experimental subset)' : 'WebGL GLSL ES 1.0 (experimental subset)';
         case GL.VENDOR: return 'RabbitHole'; case GL.RENDERER: return 'RabbitHole software rasterizer (experimental)';
+        case 0x9245: case 0x9246: if (!s.debugInfo) { flag(s, GL.INVALID_ENUM); return null; } return pname === 0x9245 ? 'RabbitHole' : 'RabbitHole software rasterizer (experimental)';
         case GL.SHADER_COMPILER: return true;
         case 0x85B5: if (s.version === 2) return s.currentVAO; flag(s, GL.INVALID_ENUM); return null;
         case 0x8D6B: if (s.version === 2) return 4294967294; flag(s, GL.INVALID_ENUM); return null;
@@ -633,6 +643,7 @@
   for (const [name, value] of Object.entries({ ...GL, VERTEX_ARRAY_BINDING: 0x85B5, MAX_ELEMENT_INDEX: 0x8D6B, VERTEX_ATTRIB_ARRAY_DIVISOR: 0x88FE, READ_FRAMEBUFFER: 0x8CA8, DRAW_FRAMEBUFFER: 0x8CA9, READ_FRAMEBUFFER_BINDING: 0x8CAA, DRAW_FRAMEBUFFER_BINDING: 0x8CA6, BACK: 0x0405, READ_BUFFER: 0x0C02, DRAW_BUFFER0: 0x8825, MAX_DRAW_BUFFERS: 0x8824, MAX_COLOR_ATTACHMENTS: 0x8CDF })) { Object.defineProperty(WebGL2RenderingContext, name, { value, enumerable: true }); if (!(name in WebGL2RenderingContext.prototype)) Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, enumerable: true }); }
   for (const name of ['drawRangeElements', 'vertexAttribIPointer', 'vertexAttribI4i', 'vertexAttribI4ui', 'vertexAttribI4iv', 'vertexAttribI4uiv', 'texImage3D', 'texSubImage3D', 'copyTexSubImage3D', 'compressedTexImage3D', 'compressedTexSubImage3D', 'texStorage2D', 'texStorage3D', 'invalidateFramebuffer', 'invalidateSubFramebuffer', 'framebufferTextureLayer', 'renderbufferStorageMultisample', 'copyBufferSubData', 'getBufferSubData', 'bindBufferBase', 'bindBufferRange', 'getIndexedParameter', 'getInternalformatParameter', 'getUniformIndices', 'getActiveUniforms', 'getUniformBlockIndex', 'getActiveUniformBlockParameter', 'getActiveUniformBlockName', 'uniformBlockBinding', 'createQuery', 'deleteQuery', 'isQuery', 'beginQuery', 'endQuery', 'getQuery', 'getQueryParameter', 'createSampler', 'deleteSampler', 'isSampler', 'bindSampler', 'samplerParameteri', 'samplerParameterf', 'getSamplerParameter', 'fenceSync', 'isSync', 'deleteSync', 'clientWaitSync', 'waitSync', 'getSyncParameter', 'createTransformFeedback', 'deleteTransformFeedback', 'isTransformFeedback', 'bindTransformFeedback', 'beginTransformFeedback', 'endTransformFeedback', 'transformFeedbackVaryings', 'getTransformFeedbackVarying', 'pauseTransformFeedback', 'resumeTransformFeedback', 'getFragDataLocation', 'clearBufferiv', 'clearBufferuiv', 'clearBufferfv', 'clearBufferfi', 'uniform1ui', 'uniform2ui', 'uniform3ui', 'uniform4ui', 'uniform1uiv', 'uniform2uiv', 'uniform3uiv', 'uniform4uiv', 'uniformMatrix2x3fv', 'uniformMatrix3x2fv', 'uniformMatrix2x4fv', 'uniformMatrix4x2fv', 'uniformMatrix3x4fv', 'uniformMatrix4x3fv']) hidden(WebGL2RenderingContext.prototype, name, function () { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); flag(s, GL.INVALID_OPERATION); return null; });
   for (const C of [WebGLObject, WebGL2RenderingContext, WebGLVertexArrayObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLFramebuffer, WebGLRenderbuffer, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
+  tag(WEBGL_debug_renderer_info, 'WebGLDebugRendererInfo');
   hidden(N, 'makeWebGLContext', function (canvas, surface, options, version = 1) {
     if (options !== null && typeof options !== 'object' && typeof options !== 'function') throw new TypeError('WebGL context attributes must be a dictionary');
     const alpha = options.alpha, depth = options.depth, premultipliedAlpha = options.premultipliedAlpha, powerPreference = options.powerPreference;
