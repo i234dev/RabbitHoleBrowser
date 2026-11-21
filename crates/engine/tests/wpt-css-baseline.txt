@@ -1,14 +1,14 @@
 # WPT reftest baseline: per-directory pass/total, then failing tests.
 dir css/CSS2 5782 6232
-dir css/compositing 37 60
+dir css/compositing 36 60
 dir css/css-align 37 64
 dir css/css-backgrounds 606 718
-dir css/css-borders 43 123
+dir css/css-borders 42 123
 dir css/css-box 38 42
 dir css/css-cascade 41 51
 dir css/css-color 291 311
 dir css/css-conditional 149 172
-dir css/css-contain 304 435
+dir css/css-contain 307 435
 dir css/css-display 179 223
 dir css/css-flexbox 875 1027
 dir css/css-fonts 262 387
@@ -18,7 +18,7 @@ dir css/css-masking 268 384
 dir css/css-nesting 13 17
 dir css/css-overflow 449 719
 dir css/css-position 156 251
-dir css/css-sizing 399 568
+dir css/css-sizing 400 568
 dir css/css-text 1201 1550
 dir css/css-text-decor 283 339
 dir css/css-transforms 748 794
@@ -493,6 +493,7 @@ fail css/compositing/mix-blend-mode/mix-blend-mode-plus-lighter-basic.html
 fail css/compositing/mix-blend-mode/mix-blend-mode-plus-lighter-svg-basic.html
 fail css/compositing/mix-blend-mode/mix-blend-mode-plus-lighter-svg.html
 fail css/compositing/mix-blend-mode/mix-blend-mode-plus-lighter.html
+fail css/compositing/mix-blend-mode/mix-blend-mode-video.html
 fail css/compositing/root-element-background-image-transparency-001.html
 fail css/compositing/root-element-background-image-transparency-002.html
 fail css/compositing/root-element-background-image-transparency-003.html
@@ -674,6 +675,7 @@ fail css/css-borders/border-shape/border-shape-shape-arc-miter-limit.html
 fail css/css-borders/border-shape/border-shape-stroke-from-border.html
 fail css/css-borders/border-shape/border-shape-two-shapes-shadow.html
 fail css/css-borders/corner-shape/corner-shape-ancestor-clip-dynamic.html
+fail css/css-borders/corner-shape/corner-shape-backdrop-filter-video-overflow.html
 fail css/css-borders/corner-shape/corner-shape-bevel-overflow-composite.html
 fail css/css-borders/corner-shape/corner-shape-bevel-overflow.html
 fail css/css-borders/corner-shape/corner-shape-bevel-round-scoop-square-outset.html
@@ -881,11 +883,8 @@ fail css/css-contain/content-visibility/content-visibility-020.html
 fail css/css-contain/content-visibility/content-visibility-021.html
 fail css/css-contain/content-visibility/content-visibility-022.html
 fail css/css-contain/content-visibility/content-visibility-032.html
-fail css/css-contain/content-visibility/content-visibility-049.html
-fail css/css-contain/content-visibility/content-visibility-055.html
 fail css/css-contain/content-visibility/content-visibility-058.html
 fail css/css-contain/content-visibility/content-visibility-073.html
-fail css/css-contain/content-visibility/content-visibility-076.html
 fail css/css-contain/content-visibility/content-visibility-094.html
 fail css/css-contain/content-visibility/content-visibility-095.html
 fail css/css-contain/content-visibility/content-visibility-099.html
@@ -2169,7 +2168,6 @@ fail css/css-sizing/aspect-ratio/intrinsic-size-011.html
 fail css/css-sizing/aspect-ratio/intrinsic-size-014.html
 fail css/css-sizing/aspect-ratio/intrinsic-size-015.html
 fail css/css-sizing/aspect-ratio/replaced-element-002.html
-fail css/css-sizing/aspect-ratio/replaced-element-003.html
 fail css/css-sizing/aspect-ratio/replaced-element-004.html
 fail css/css-sizing/aspect-ratio/replaced-element-006.html
 fail css/css-sizing/aspect-ratio/replaced-element-010.html

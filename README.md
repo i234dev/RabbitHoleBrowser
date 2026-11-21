@@ -32,6 +32,18 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.1.43 keeps single-page apps in their document: `location.href`,
+`assign`, `replace`, `location =`, script link clicks and `window.open(…, '_self')`
+that change only the fragment no longer reload the page (webmail reloaded after
+opening each message), `pushState`/`replaceState` update the address bar and
+back/forward history, and back/forward between entries of one document fire
+`popstate`/`hashchange` instead of reloading. Content decoding accepts every
+`Content-Encoding` line and the lenient brotli/gzip/zstd cases browsers accept;
+undecodable video-only files fall back to the next `<source>`; built-in Web API
+functions print as native code; `atob` follows the forgiving-base64 rules; module
+import maps are parsed once ([measurement](docs/benchmarks/wpt-css-2026-11-21-v0.1.43.md),
+[Speedometer](docs/benchmarks/speedometer-2026-11-21-v0.1.43.md)).
+
 Version 0.1.42 fixes problems found on popular websites: `parentElement` no
 longer returns a shadow root, `iframe.sandbox` and `link.sizes` are token lists,
 `navigator` members live on `Navigator.prototype`, network-information and
@@ -188,7 +200,7 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 |---|---|---|
 | **test262** (ECMAScript) | **99.90 %** (46,017 / 46,064 run) | 2026-11-18, 0.1.34 JavaScript code `fe3d71e`, JIT on, 8 workers, profile ci; **99.93 % excluding Intl**, ECMA-402 98.6 %; multi-agent `Atomics` and `Intl.NumberFormat` v3 tests included; [measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md) and `crates/js/tests/test262_baseline.txt` |
 | **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **83.5 %** (16,395 / 19,627) | 2026-11-21, 0.1.42 CSS/layout code `3bb98823`; transforms 94.2 %, color 93.6 %, CSS2 92.8 %, css-ui 91.2 %, images 90.0 %, flexbox 85.2 %, filter-effects 75.9 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-21-v0.1.42.md) and `crates/engine/tests/wpt-css-baseline.txt` |
+| **WPT CSS reftests** (pixel comparison) | **83.5 %** (16,397 / 19,627) | 2026-11-21, 0.1.43 CSS/layout code `03522e5f`; transforms 94.2 %, color 93.6 %, CSS2 92.8 %, css-ui 91.2 %, images 90.0 %, flexbox 85.2 %, filter-effects 75.9 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-21-v0.1.43.md) and `crates/engine/tests/wpt-css-baseline.txt` |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
