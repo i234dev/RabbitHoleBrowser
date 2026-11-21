@@ -553,6 +553,11 @@ pub mod names {
     name!(constructor, "constructor");
     name!(value, "value");
     name!(done, "done");
+    name!(enumerable, "enumerable");
+    name!(configurable, "configurable");
+    name!(writable, "writable");
+    name!(get, "get");
+    name!(set, "set");
 }
 
 /// JS WhiteSpace + LineTerminator code units.

@@ -232,3 +232,37 @@ fn use_strict_is_a_directive_only_when_it_is_the_whole_statement() {
     assert!(crate::parser::parse_program("'\\1';'use strict';", false).is_err());
     assert!(crate::parser::parse_program("'\\1'\n+1;'use strict';", false).is_ok());
 }
+
+#[test]
+fn property_descriptors_read_inherited_and_accessor_fields() {
+    // Plain literals, then fields from Object.prototype, getters and
+    // other prototypes: every field is read through [[HasProperty]] /
+    // [[Get]] in specification order.
+    let source = r#"
+      const log = [];
+      const o = {};
+      Object.defineProperty(o, 'a', { value: 1, enumerable: true });
+      const d1 = JSON.stringify(Object.getOwnPropertyDescriptor(o, 'a'));
+      Object.prototype.enumerable = true;
+      Object.defineProperty(o, 'b', { value: 2 });
+      delete Object.prototype.enumerable;
+      const d2 = Object.getOwnPropertyDescriptor(o, 'b').enumerable;
+      const desc = { get value() { log.push('value'); return 3; }, get writable() { log.push('writable'); return true; }, get enumerable() { log.push('enumerable'); return 0; } };
+      Object.defineProperty(o, 'c', desc);
+      const d3 = JSON.stringify(Object.getOwnPropertyDescriptor(o, 'c'));
+      Object.defineProperty(o, 'd', Object.create({ get: function () { return 4; } }));
+      const d4 = o.d;
+      let e1 = '';
+      try { Object.defineProperty(o, 'e', { get: 1 }); } catch (e) { e1 = e.constructor.name; }
+      let e2 = '';
+      try { Object.defineProperty(o, 'f', { get() {}, value: 1 }); } catch (e) { e2 = e.constructor.name; }
+      const arr = [];
+      arr.value = 5;
+      Object.defineProperty(o, 'g', arr);
+      [d1, d2, log.join(), d3, d4, e1, e2, o.g].join('|')
+    "#;
+    assert_eq!(
+        evaluate(source),
+        r#"{"value":1,"writable":false,"enumerable":true,"configurable":false}|true|enumerable,value,writable|{"value":3,"writable":true,"enumerable":false,"configurable":false}|4|TypeError|TypeError|5"#
+    );
+}
