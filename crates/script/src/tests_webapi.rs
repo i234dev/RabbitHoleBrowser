@@ -1728,3 +1728,27 @@ fn token_list_attributes_forward_assignments() {
     );
     assert_eq!(out, "'b c|true|2|label icon|2|true|noopener noreferrer|2'");
 }
+
+/// Navigator attributes are accessors of Navigator.prototype and its
+/// operations are prototype methods (Web IDL), as consent managers expect
+/// when they read `Object.getOwnPropertyDescriptor(Navigator.prototype,
+/// 'languages').get`.
+#[test]
+fn navigator_members_live_on_the_prototype() {
+    let out = result_of(
+        "<html><body></body></html>",
+        r#"
+        const r = [];
+        const P = Navigator.prototype;
+        r.push(Object.getOwnPropertyNames(navigator).length);
+        for (const k of ['userAgent', 'languages', 'language', 'platform', 'onLine', 'cookieEnabled', 'hardwareConcurrency', 'webdriver']) {
+          const d = Object.getOwnPropertyDescriptor(P, k);
+          r.push(k + ':' + (d && typeof d.get) + ':' + (d && d.enumerable));
+        }
+        r.push(typeof P.sendBeacon, typeof P.javaEnabled, navigator.javaEnabled(), navigator.language, navigator.languages[0]);
+        r.push(Object.getOwnPropertyDescriptor(P, 'languages').get.call(navigator)[0], 'userAgent' in navigator, navigator.onLine);
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(out, "'0|userAgent:function:true|languages:function:true|language:function:true|platform:function:true|onLine:function:true|cookieEnabled:function:true|hardwareConcurrency:function:true|webdriver:function:true|function|function|false|en-US|en-US|en-US|true|true'");
+}

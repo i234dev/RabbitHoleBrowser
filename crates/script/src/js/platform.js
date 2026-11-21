@@ -29,6 +29,22 @@
   const setNav = (name, value) => { try { delete nav[name]; } catch (e) {} Object.defineProperty(g.Navigator.prototype, name, { get() { return value; }, configurable: true, enumerable: true }); };
   const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, fn); };
   const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true }); };
+  // Navigator members are accessors and operations of Navigator.prototype
+  // (Web IDL), not own properties of navigator: consent managers and
+  // fingerprinting guards read Object.getOwnPropertyDescriptor(
+  // Navigator.prototype, 'languages').get and crash on undefined.
+  for (const k of Object.getOwnPropertyNames(nav)) {
+    const d = Object.getOwnPropertyDescriptor(nav, k);
+    if (!d || !d.configurable) continue;
+    if (!Object.prototype.hasOwnProperty.call(g.Navigator.prototype, k)) {
+      let nd;
+      if (d.get || d.set) nd = { get: d.get, set: d.set, configurable: true, enumerable: true };
+      else if (typeof d.value === 'function') nd = { value: d.value, writable: true, configurable: true, enumerable: true };
+      else { const v = d.value; nd = { get: Object.getOwnPropertyDescriptor({ get [k]() { return v; } }, k).get, configurable: true, enumerable: true }; }
+      Object.defineProperty(g.Navigator.prototype, k, nd);
+    }
+    delete nav[k];
+  }
 
   // ----------------------------------------------------------- Permissions
   const PERMS = { geolocation: 'denied', notifications: 'denied', push: 'denied', midi: 'denied', camera: 'denied', microphone: 'denied', 'background-fetch': 'denied', 'background-sync': 'granted', 'persistent-storage': 'denied', 'screen-wake-lock': 'denied', 'storage-access': 'granted', 'clipboard-read': 'denied', 'clipboard-write': 'granted', 'local-fonts': 'denied', 'idle-detection': 'denied', 'window-management': 'denied', accelerometer: 'granted', gyroscope: 'granted', magnetometer: 'granted', 'payment-handler': 'denied', 'display-capture': 'denied' };
