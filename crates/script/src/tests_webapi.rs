@@ -1752,3 +1752,30 @@ fn navigator_members_live_on_the_prototype() {
     );
     assert_eq!(out, "'0|userAgent:function:true|languages:function:true|language:function:true|platform:function:true|onLine:function:true|cookieEnabled:function:true|hardwareConcurrency:function:true|webdriver:function:true|function|function|false|en-US|en-US|en-US|true|true'");
 }
+
+/// The URL components of `<a>` are settable (HTMLHyperlinkElementUtils):
+/// video blocks strip a flag from `a.hash` before decorating the link.
+#[test]
+fn anchor_url_components_are_settable() {
+    let out = result_of(
+        "<html><body><a id=a href='https://example.test/v/clip.mp4?x=1#_autoplay'>v</a><a id=n>none</a></body></html>",
+        r#"
+        'use strict';
+        const r = [];
+        const a = document.getElementById('a');
+        a.hash = a.hash.replace('#_autoplay', '');
+        r.push(a.getAttribute('href'), a.hash);
+        a.hash = '#autoplay';
+        a.search = '?y=2';
+        a.pathname = '/w/other.mp4';
+        a.hostname = 'cdn.example.test';
+        a.protocol = 'http:';
+        r.push(a.href, a.host);
+        const n = document.getElementById('n');
+        n.hash = '#x';
+        r.push(n.getAttribute('href'), n.hash);
+        window.result = r.map(String).join('|');
+        "#,
+    );
+    assert_eq!(out, "'https://example.test/v/clip.mp4?x=1||http://cdn.example.test/w/other.mp4?y=2#autoplay|cdn.example.test|null|'");
+}

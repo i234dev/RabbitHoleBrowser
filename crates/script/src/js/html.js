@@ -979,16 +979,21 @@
   for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement]) {
     if (!C) continue;
     for (const k of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) {
-      acc(C, k, function () {
-        const u = hyperlinkURL(this);
-        if (!u) return k === 'protocol' ? ':' : '';
-        return u[k];
-      }, k === 'origin' ? undefined : function (v) {
+      const set = k === 'origin' ? undefined : function (v) {
         const u = hyperlinkURL(this);
         if (!u) return;
         u[k] = v;
         this.setAttribute('href', u.href);
-      });
+      };
+      // Native getters without a setter (the anchor's) get this one:
+      // `a.hash = '#x'` must update the href, not throw in strict code.
+      const d = Object.getOwnPropertyDescriptor(C.prototype, k);
+      if (d && d.get && !d.set && set) { Object.defineProperty(C.prototype, k, { get: d.get, set, configurable: true, enumerable: true }); continue; }
+      acc(C, k, function () {
+        const u = hyperlinkURL(this);
+        if (!u) return k === 'protocol' ? ':' : '';
+        return u[k];
+      }, set);
     }
   }
   if (g.HTMLAreaElement) {
