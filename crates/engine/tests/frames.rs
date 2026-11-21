@@ -530,3 +530,19 @@ fn nodes_of_a_replaced_frame_document_stay_usable() {
     let r = eval(&e, &mut page, "try { [typeof kept.isConnected, typeof kept.getBoundingClientRect().width, document.querySelector('iframe').contentDocument.body.textContent].join() } catch (err) { 'threw ' + err.message }");
     assert_eq!(r, "boolean,number,x");
 }
+
+/// A same-origin frame's WindowProxy is a Window: sandboxing libraries
+/// create a hidden about:blank iframe and check that its window's
+/// constructor is Window before taking pristine built-ins from it.
+#[test]
+fn same_origin_frame_window_is_a_window() {
+    let mut e = engine();
+    let mut page = load(&mut e, "<p>parent</p>");
+    let r = eval(
+        &e,
+        &mut page,
+        "var i = document.createElement('iframe'); i.style.display = 'none'; document.body.appendChild(i); var w = i.contentWindow; \
+         [w.constructor === w.Window, w.constructor.name, w instanceof w.Window, Object.getPrototypeOf(w) === w.Window.prototype, Object.prototype.toString.call(w), typeof w.JSON.stringify].join()",
+    );
+    assert_eq!(r, "true,Window,true,true,[object Window],function");
+}
