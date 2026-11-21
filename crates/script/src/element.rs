@@ -544,6 +544,27 @@ fn e_part(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(token_list(realm, w, n, "part"))
 }
 
+// `[PutForwards=value]`: assigning a string to `classList` / `relList` /
+// `part` sets the attribute (and must not throw in strict code).
+fn e_class_list_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    put_forward(realm, this, args, "classList", "class")
+}
+
+fn e_rel_list_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    put_forward(realm, this, args, "relList", "rel")
+}
+
+fn e_part_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    put_forward(realm, this, args, "part", "part")
+}
+
+fn put_forward(realm: &mut Realm, this: Value, args: &[Value], what: &str, attr: &str) -> JsResult<Value> {
+    let n = this_node(realm, &this, what)?;
+    let v = arg_str(realm, args, 0)?;
+    set_attribute(n, attr, Some(&v));
+    Ok(Value::Undefined)
+}
+
 // dataset -------------------------------------------------------------------
 
 fn camel_to_data(name: &str) -> String {
@@ -2517,8 +2538,8 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "prefix", e_prefix, None);
     acc(realm, "id", e_id_get, Some(id_set));
     acc(realm, "className", e_class_name_get, Some(e_class_name_set));
-    acc(realm, "classList", e_class_list, None);
-    acc(realm, "part", e_part, None);
+    acc(realm, "classList", e_class_list, Some(e_class_list_set));
+    acc(realm, "part", e_part, Some(e_part_set));
     acc(realm, "attributes", e_attributes, None);
     acc(realm, "innerHTML", e_inner_html_get, Some(e_inner_html_set));
     acc(realm, "outerHTML", e_outer_html_get, Some(e_outer_html_set));
@@ -2695,7 +2716,7 @@ pub(crate) fn install(realm: &mut Realm) {
     for (p, at) in [("target", "target"), ("rel", "rel"), ("download", "download"), ("hreflang", "hreflang"), ("type", "type"), ("referrerPolicy", "referrerpolicy"), ("ping", "ping"), ("name", "name")] {
         reflect(realm, a, p, at, Reflect::Str);
     }
-    realm.define_accessor(a, "relList", Some(e_rel_list), None, ACC);
+    realm.define_accessor(a, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
     realm.define_accessor(a, "text", Some(e_inner_text_get), Some(n_text_set_alias), ACC);
 
     // --- HTMLInputElement

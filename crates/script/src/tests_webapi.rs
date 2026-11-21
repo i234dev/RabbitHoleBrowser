@@ -1703,3 +1703,28 @@ fn iframe_sandbox_and_link_sizes_are_token_lists() {
     );
     assert_eq!(out, "'true|1|true|true|allow-forms allow-scripts allow-same-origin|allow-popups|1|true|2|32x32|16x16 32x32|true|string'");
 }
+
+/// `classList`, `relList` and `part` are `[PutForwards=value]`: assigning a
+/// string sets the attribute, also from strict code (component libraries
+/// assign `el.part = 'label'`).
+#[test]
+fn token_list_attributes_forward_assignments() {
+    let out = result_of(
+        "<html><body><div id=d class=a></div><a id=l rel=x></a></body></html>",
+        r#"
+        'use strict';
+        const r = [];
+        const d = document.getElementById('d');
+        const list = d.classList;
+        d.classList = 'b c';
+        r.push(d.className, d.classList === list, list.length);
+        d.part = 'label icon';
+        r.push(d.getAttribute('part'), d.part.length, d.part.contains('icon'));
+        const a = document.getElementById('l');
+        a.relList = 'noopener noreferrer';
+        r.push(a.rel, a.relList.length);
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(out, "'b c|true|2|label icon|2|true|noopener noreferrer|2'");
+}
