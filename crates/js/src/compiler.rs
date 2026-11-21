@@ -160,7 +160,11 @@ pub struct EvalSite {
 /// What a lazy [`FunctionCode`] keeps to compile its function on first
 /// call.
 #[derive(Debug)]
+#[derive(Clone)]
 pub struct LazyCode {
+    /// The function this one is a [`FunctionCode::fresh_copy`] of: it
+    /// compiles there (once for all copies) and the result is copied.
+    shared: Option<Rc<FunctionCode>>,
     func: Rc<Function>,
     name: String,
     env: Option<Rc<LazyScope>>,
@@ -396,9 +400,29 @@ fn lazy_enabled() -> bool {
     LAZY.with(|l| *l)
 }
 
+impl LazyCode {
+    /// This lazy function's state for a fresh copy of `code` (its owner).
+    pub(crate) fn shared_with(&self, code: &Rc<FunctionCode>) -> LazyCode {
+        LazyCode { shared: Some(self.shared.clone().unwrap_or_else(|| code.clone())), ..self.clone() }
+    }
+}
+
 /// Compile the function of a lazy [`FunctionCode`] (see [`LazyCode`]).
+/// A fresh copy's function compiles in the original, once, and gets a
+/// fresh copy of the result.
 pub fn compile_lazy(code: &FunctionCode) -> CResult<Rc<FunctionCode>> {
     let lz = code.lazy.as_ref().expect("not a lazy function");
+    if let Some(shared) = &lz.shared {
+        let compiled = match shared.compiled.get() {
+            Some(c) => c.clone(),
+            None => {
+                let c = compile_lazy(shared)?;
+                let _ = shared.compiled.set(c.clone());
+                c
+            }
+        };
+        return Ok(FunctionCode::fresh_copy(&compiled));
+    }
     let mut c = Compiler {
         completion: false,
         fns: Vec::new(),
@@ -884,6 +908,7 @@ impl Compiler {
         }
         let env = self.env_snapshot();
         let lazy = LazyCode {
+            shared: None,
             func: f.clone(),
             name: fname.clone(),
             env,

@@ -643,7 +643,7 @@ pub struct FunctionCode {
 }
 
 /// Names a script declares in the global environment.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct GlobalDecls {
     /// `let` / `const` / `class`.
     pub lex: Vec<JsStr>,
@@ -689,6 +689,58 @@ pub const CALL_ARROW: u8 = 32;
 pub const CALL_SIMPLE: u8 = 64;
 
 impl FunctionCode {
+    /// A copy of `code` and of every function nested in it with nothing
+    /// a run has filled in: empty inline caches, no native code, no
+    /// compiled lazy functions. Lazy functions of the copy compile through
+    /// the original (see `LazyCode::shared`): the bytecode of a function
+    /// is compiled once and copied for every copy that runs it.
+    ///
+    /// Compiled code holds no heap references (its constants are strings
+    /// and numbers), only caches tied to the heap that ran it, so a copy
+    /// can run in another realm or heap of the same thread.
+    pub fn fresh_copy(code: &Rc<FunctionCode>) -> Rc<FunctionCode> {
+        let c = &**code;
+        let lazy = c.lazy.as_ref().map(|l| Box::new(l.shared_with(code)));
+        Rc::new(FunctionCode {
+            name: c.name.clone(),
+            ops: c.ops.clone(),
+            positions: c.positions.clone(),
+            constants: c.constants.clone(),
+            functions: c.functions.iter().map(FunctionCode::fresh_copy).collect(),
+            handlers: c.handlers.clone(),
+            param_count: c.param_count,
+            scope_slots: c.scope_slots,
+            nregs: c.nregs,
+            reg_names: c.reg_names.clone(),
+            param_locs: c.param_locs.clone(),
+            arg_map: c.arg_map.clone(),
+            global_decls: c.global_decls.clone(),
+            this_slot: c.this_slot,
+            rest_loc: c.rest_loc,
+            arguments_loc: c.arguments_loc,
+            self_loc: c.self_loc,
+            flags: c.flags,
+            call_flags: c.call_flags,
+            slot_names: c.slot_names.clone(),
+            block_names: c.block_names.clone(),
+            templates: c.templates.clone(),
+            ics: (0..c.ics.len()).map(|_| std::cell::Cell::new(PropIc::default())).collect(),
+            call_ics: (0..c.call_ics.len()).map(|_| std::cell::Cell::new(CallIc::default())).collect(),
+            ic_keys: c.ic_keys.clone(),
+            depths: c.depths.clone(),
+            max_depth: c.max_depth,
+            lazy,
+            compiled: std::cell::OnceCell::new(),
+            jit: Default::default(),
+            eval_sites: c.eval_sites.clone(),
+            source: c.source.clone(),
+            source_span: c.source_span,
+            filename: c.filename.clone(),
+            module: c.module,
+            realm: std::cell::Cell::new(c.realm.get()),
+        })
+    }
+
     /// Assign the code and every function nested in it to `realm`.
     pub fn set_realm(&self, realm: u16) {
         self.realm.set(realm);

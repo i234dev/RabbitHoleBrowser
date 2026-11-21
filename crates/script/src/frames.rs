@@ -27,7 +27,7 @@ pub(crate) fn install(realm: &mut Realm) {
     };
     let post = realm.new_native_function("post", 3, native_post);
     let info = realm.new_native_function("info", 3, native_info);
-    let factory = match realm.eval(include_str!("frames.js"), "rabbithole:frames.js") {
+    let factory = match realm.eval_builtin(include_str!("frames.js"), "rabbithole:frames.js") {
         Ok(f) => f,
         Err(e) => {
             let msg = realm.error_to_string(&e);

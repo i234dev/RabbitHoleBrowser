@@ -99,7 +99,7 @@ pub(crate) fn install(realm: &mut Realm) {
     let native = Value::Object(native);
     root_value(realm, &native);
     let clone = state().borrow().protos.get("__frames_api").copied().map(Value::Object).unwrap_or(Value::Null);
-    let result = realm.eval(include_str!("windows.js"), "rabbithole:windows.js").and_then(|factory| realm.call(factory, Value::Undefined, &[native.clone(), clone]));
+    let result = realm.eval_builtin(include_str!("windows.js"), "rabbithole:windows.js").and_then(|factory| realm.call(factory, Value::Undefined, &[native.clone(), clone]));
     unroot_value(realm, &native);
     match result {
         Ok(api) if api.is_object() => {
