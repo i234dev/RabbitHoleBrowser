@@ -786,7 +786,9 @@ impl Engine {
         let mut deferred = Vec::new();
         let mut asyncs = Vec::new();
         for s in scripts {
-            if s.source.trim().is_empty() {
+            // Inline scripts without code do nothing; external ones still
+            // get their `load` (empty file) or `error` (failed fetch) event.
+            if s.source.trim().is_empty() && s.url.is_none() {
                 continue;
             }
             if s.is_async && s.url.is_some() {
@@ -848,9 +850,20 @@ impl Engine {
                 }
                 let t = std::time::Instant::now();
                 host.set_current_script(Some(s.node));
-                let _ = host.run_script(&mut env, &s.source, &name, s.is_module);
+                if !s.failed {
+                    let _ = host.run_script(&mut env, &s.source, &name, s.is_module);
+                }
                 host.set_current_script(None);
                 host.run_jobs(&mut env);
+                // "Execute the script element": an external script fires
+                // `load` once it ran (`error` when its fetch failed). Loaders
+                // track their parser-inserted bundles through these events.
+                if s.url.is_some() && s.node != Document::ROOT {
+                    let ev = if s.failed { "error" } else { "load" };
+                    host.realm().begin_task();
+                    host.dispatch_event(&mut env, s.node, ev, EventInit { bubbles: false, cancelable: false, detail: None });
+                    host.run_jobs(&mut env);
+                }
                 if debug {
                     eprintln!("[script] done  {} in {:?}", name, t.elapsed());
                 }
@@ -1004,8 +1017,13 @@ impl Engine {
     /// style flush; `modulepreload` / `preload` / `prefetch`: right away).
     /// Loaders such as Vite's preload helper await a stylesheet link's
     /// `load` before importing the module that needs it.
+    ///
+    /// The flush that sees the `<link>` change can be a forced one inside a
+    /// script (`offsetHeight` after the insertion), while the script host
+    /// is out of the page: the events are still queued then, and fired
+    /// when the script returns. Later flushes do not look again.
     pub(crate) fn queue_link_events(&self, page: &mut Page) {
-        if page.script.host.is_none() {
+        if !self.scripting {
             return;
         }
         let mut roots = vec![Document::ROOT];

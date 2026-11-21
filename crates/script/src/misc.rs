@@ -800,8 +800,9 @@ fn abort_signal_timeout_static(realm: &mut Realm, _this: Value, args: &[Value]) 
     let s = new_abort_signal(realm);
     let ms = realm.to_number(arg(args, 0)).unwrap_or(0.0);
     let f = realm.new_native_function_full("abortTimeout", 0, abort_timeout_fire, None, vec![Value::Object(s)], false);
-    let set_timeout = realm.get_str(Value::Object(realm.global()), "setTimeout")?;
-    realm.call(set_timeout, Value::Undefined, &[Value::Object(f), Value::Number(ms)])?;
+    // The engine's own timer: a page that replaced `setTimeout` must not
+    // see (or delay) the signal's timeout task.
+    crate::window::add_timer(realm, Value::Object(f), ms, Vec::new(), false);
     Ok(Value::Object(s))
 }
 

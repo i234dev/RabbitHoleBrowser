@@ -69,6 +69,27 @@ fn initial_blank_frames_fire_load_once_without_replacing_the_document() {
     assert_eq!(eval(&e, &mut page, "loads.length"), "3");
 }
 
+/// A frame inside a shadow tree keeps its browsing context: frames were
+/// only looked for in the document tree, so the shadow tree's frame lost
+/// its document on the next sync, and nodes scripts had appended to it
+/// (a font-size probe in a closed shadow root) vanished; re-appending
+/// through the stale document then failed.
+#[test]
+fn frames_in_shadow_trees_keep_their_document() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<script>
+        var host = document.createElement('x-probe'), root = host.attachShadow({ mode: 'closed' });
+        var f = document.createElement('iframe'), probe = document.createElement('div');
+        document.body.appendChild(host);
+        root.appendChild(f);
+        f.contentDocument.body.appendChild(probe);
+        var doc = f.contentDocument;
+    </script>"#);
+    settle(&e, &mut page);
+    assert_eq!(eval(&e, &mut page, "String(f.contentDocument === doc && doc.body.contains(probe))"), "true");
+    assert_eq!(eval(&e, &mut page, "doc.body.appendChild(document.createElement('p')).isConnected"), "true");
+}
+
 #[test]
 fn document_open_replaces_the_initial_frame_load_with_its_own() {
     let mut e = engine();

@@ -143,6 +143,9 @@ pub struct ScriptSource {
     pub is_module: bool,
     pub defer: bool,
     pub is_async: bool,
+    /// An external script whose fetch failed (network error or HTTP
+    /// error status): it does not run and gets an `error` event.
+    pub failed: bool,
 }
 
 /// A fetched web font (from `@font-face`).
@@ -1018,12 +1021,14 @@ impl Loader {
                         eprintln!("[script] failed to load {url}: HTTP {}", resp.status);
                     }
                     scripts[*idx].source.clear();
+                    scripts[*idx].failed = true;
                 }
                 Err(e) => {
                     if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
                         eprintln!("[script] failed to load {url}: {e}");
                     }
                     scripts[*idx].source.clear();
+                    scripts[*idx].failed = true;
                 }
             }
         }
@@ -1057,6 +1062,7 @@ impl Loader {
                 is_module,
                 defer: el.attr("defer").is_some() || is_module,
                 is_async: el.attr("async").is_some(),
+                failed: false,
             });
             match el.attr("src").map(str::trim).filter(|s| !s.is_empty()) {
                 Some(src) => match base.join(src) {

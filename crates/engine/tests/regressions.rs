@@ -349,6 +349,52 @@ fn link_elements_fire_load_and_error_events() {
     assert_eq!(e.eval_in_page(&mut page, "log.length"), "4");
 }
 
+/// Parser-inserted external scripts fire `load` after they run (`error`
+/// when the fetch fails), as "execute the script element" says. Module
+/// loaders that find their bundles already in the document wait for these
+/// events before resolving the modules defined in them.
+#[test]
+fn parser_inserted_external_scripts_fire_load_and_error() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        r#"<script>var log = []; document.addEventListener('load', function (ev) { if (ev.target.id) log.push('capture:' + ev.target.id); }, true);</script>
+           <script id=ok src="data:text/javascript,log.push('ran')" onload="log.push('load')"></script>
+           <script id=bad src="file:///nonexistent-rabbithole-dir/missing.js" onerror="log.push('error')" onload="log.push('bad-load')"></script>"#,
+    );
+    for _ in 0..3 {
+        let _ = e.tick(&mut page);
+    }
+    assert_eq!(e.eval_in_page(&mut page, "log.join(',')"), "'ran,capture:ok,load,error'");
+}
+
+/// A stylesheet `<link>` inserted by a script that then forces a layout
+/// (the "media swap" loader: clone a `media=print` link, set `media=all`,
+/// replace the original, await the clone's `load`) still fires `load`: the
+/// forced flush that collected the new link ran while the script host was
+/// busy, and later flushes never looked at the link again.
+#[test]
+fn link_load_fires_after_forced_layout_in_inserting_script() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        r#"<link rel="stylesheet" href="data:text/css,p{margin:0}" media="print" data-swap>
+           <p id=p>x</p>
+           <script>var log = [];
+             var o = document.querySelector('[data-swap]'), l = o.cloneNode();
+             l.media = 'all';
+             l.addEventListener('load', function () { log.push('load'); });
+             o.replaceWith(l);
+             log.push('h' + (document.getElementById('p').offsetHeight > 0));
+           </script>"#,
+    );
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = e.tick(&mut page);
+    }
+    assert_eq!(e.eval_in_page(&mut page, "log.join(',')"), "'htrue,load'");
+}
+
 /// Grid tracks sized with math functions mixing percentages and lengths
 /// resolve against the grid container: svelte-split-pane's
 /// `grid-template-columns: clamp(var(--min), var(--pos), var(--max)) 1fr`

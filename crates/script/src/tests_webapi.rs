@@ -86,6 +86,30 @@ fn result_of(html: &str, src: &str) -> String {
     host.eval_for_console(&mut env, "String(result)")
 }
 
+/// `:scope` in `el.querySelectorAll`, `matches` and `closest` is the
+/// element the method was called on (block loaders list a section's blocks
+/// with `:scope > div[class]`); `dataset` serializes like an ordinary object.
+#[test]
+fn scope_selector_and_dataset_json() {
+    let out = result_of(
+        r#"<main><div id=s><div class="a"><div class="b"></div></div><div class="content"></div><p class="a"></p></div></main>"#,
+        r#"
+        const s = document.getElementById('s'), b = s.querySelector('.b');
+        s.dataset.status = 'pending';
+        window.result = [
+          s.querySelectorAll(':scope > div[class]:not(.content)').length,
+          s.querySelectorAll(':scope > .a').length,
+          s.querySelectorAll(':scope .b').length,
+          s.querySelector(':scope') === null,
+          s.matches(':scope'), b.closest(':scope > div') === null, b.parentNode.closest(':scope') === b.parentNode,
+          document.querySelectorAll(':scope > body').length,
+          JSON.stringify(s.dataset), s.dataset.hasOwnProperty('status'),
+        ].join(' ');
+        "#,
+    );
+    assert_eq!(out, r#"'1 2 1 true true true true 1 {"status":"pending"} true'"#);
+}
+
 #[test]
 fn shadow_root_basics_and_scoping() {
     let out = result_of(
@@ -600,6 +624,29 @@ fn messaging_workers_and_blob_urls() {
     let mut rest = out[1..].to_vec();
     rest.sort();
     assert_eq!(rest, vec!["bc hi c", "blob-fetch true true", "port {\"a\":[1,2]} 0", "win 7 true https://example.test", "worker 42"]);
+}
+
+/// A page that replaces the timer globals (with wrappers that only queue
+/// the callbacks, as some app frameworks do until their scheduler starts)
+/// must not hold up the engine's own tasks: port messages, idle callbacks,
+/// scheduler tasks and AbortSignal.timeout.
+#[test]
+fn engine_tasks_ignore_replaced_timer_globals() {
+    let mut out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const parked = [];
+        window.setTimeout = window.setInterval = window.requestAnimationFrame = window.queueMicrotask = (f) => { parked.push(f); return 1; };
+        const ch = new MessageChannel();
+        ch.port1.onmessage = () => console.log('port');
+        ch.port2.postMessage(null);
+        requestIdleCallback(() => console.log('idle'));
+        scheduler.postTask(() => console.log('task'));
+        AbortSignal.timeout(0).onabort = () => console.log('abort');
+        "#,
+    );
+    out.sort();
+    assert_eq!(out, ["abort", "idle", "port", "task"]);
 }
 
 #[test]

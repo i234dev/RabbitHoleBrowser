@@ -125,7 +125,7 @@ pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first
         if let Some(found) = indexed_query(doc, root.node, &list, first_only) {
             return found.into_iter().map(|node| NodeRef { doc: root.doc, node }).collect();
         }
-        let state = rabbithole_css::MatchState::default();
+        let state = scoped_state(doc, root.node);
         let matcher = SelectorMatcher::new(doc, &state);
         let mut out = Vec::new();
         for n in doc.descendants(root.node).skip(1) {
@@ -172,7 +172,7 @@ fn indexed_query(doc: &mut Document, root: NodeId, list: &[Selector], first_only
     }
     let doc: &Document = doc;
     doc.retain_descendants_in_order(root, &mut found);
-    let state = rabbithole_css::MatchState::default();
+    let state = scoped_state(doc, root);
     let matcher = SelectorMatcher::new(doc, &state);
     let mut out = Vec::new();
     for n in found {
@@ -186,10 +186,18 @@ fn indexed_query(doc: &mut Document, root: NodeId, list: &[Selector], first_only
     Some(out)
 }
 
+/// Match state whose `:scope` is `root` when it is an element (`:scope`
+/// in `el.querySelectorAll(':scope > div')` is `el`); for a document or a
+/// fragment it stays the root element.
+pub(crate) fn scoped_state(doc: &Document, root: NodeId) -> rabbithole_css::MatchState {
+    let scope = doc.element(root).filter(|e| e.tag != "#fragment" && e.tag != "#shadow-root").map(|_| root);
+    rabbithole_css::MatchState { scope, ..Default::default() }
+}
+
 pub(crate) fn element_matches(realm: &mut Realm, n: NodeRef, selectors: &str) -> JsResult<bool> {
     let list = parse_selectors(realm, selectors)?;
     Ok(with_doc(n.doc, |doc| {
-        let state = rabbithole_css::MatchState::default();
+        let state = scoped_state(doc, n.node);
         let matcher = SelectorMatcher::new(doc, &state);
         doc.element(n.node).is_some() && list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, n.node))
     }))

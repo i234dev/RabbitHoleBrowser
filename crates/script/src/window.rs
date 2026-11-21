@@ -816,7 +816,7 @@ fn timer_callback_args(realm: &mut Realm, args: &[Value]) -> JsResult<(Value, f6
     Ok((cb, delay, extra))
 }
 
-fn add_timer(realm: &mut Realm, cb: Value, delay: f64, args: Vec<Value>, repeat: bool) -> u32 {
+pub(crate) fn add_timer(realm: &mut Realm, cb: Value, delay: f64, args: Vec<Value>, repeat: bool) -> u32 {
     let now = with_env(|env| env.now_ms());
     root_value(realm, &cb);
     for a in &args {
