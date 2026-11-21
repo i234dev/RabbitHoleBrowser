@@ -118,6 +118,46 @@
   define('GeolocationPositionError', GeolocationPositionError);
   setNav('geolocation', make(Geolocation));
 
+  // ------------------------- NetworkInformation, BatteryManager, MediaDevices
+  // Event targets in browsers: pages subscribe to `change` /
+  // `levelchange` / `devicechange` on them right away.
+  class NetworkInformation extends g.EventTarget {
+    constructor() { super(); ILLEGAL(); }
+    get effectiveType() { return '4g'; }
+    get downlink() { return 10; }
+    get rtt() { return 50; }
+    get saveData() { return false; }
+  }
+  tag(NetworkInformation, 'NetworkInformation');
+  N.installHandlers(NetworkInformation.prototype, ['change']);
+  define('NetworkInformation', NetworkInformation);
+  setNav('connection', make(NetworkInformation));
+  class BatteryManager extends g.EventTarget {
+    constructor() { super(); ILLEGAL(); }
+    get charging() { return true; }
+    get chargingTime() { return 0; }
+    get dischargingTime() { return Infinity; }
+    get level() { return 1; }
+  }
+  tag(BatteryManager, 'BatteryManager');
+  N.installHandlers(BatteryManager.prototype, ['chargingchange', 'chargingtimechange', 'dischargingtimechange', 'levelchange']);
+  define('BatteryManager', BatteryManager);
+  const battery = make(BatteryManager);
+  hidden(g.Navigator.prototype, 'getBattery', function getBattery() { return Promise.resolve(battery); });
+  try { delete nav.getBattery; } catch (e) {}
+  const oldDevices = nav.mediaDevices;
+  class MediaDevices extends g.EventTarget {
+    constructor() { super(); ILLEGAL(); }
+    enumerateDevices() { return Promise.resolve([]); }
+    getSupportedConstraints() { return { aspectRatio: true, deviceId: true, echoCancellation: true, facingMode: true, frameRate: true, groupId: true, height: true, sampleRate: true, sampleSize: true, width: true }; }
+    getUserMedia(c) { return oldDevices && oldDevices.getUserMedia ? oldDevices.getUserMedia(c) : Promise.reject(domError('Requested device not found', 'NotFoundError')); }
+    getDisplayMedia() { return Promise.reject(domError('Permission denied', 'NotAllowedError')); }
+  }
+  tag(MediaDevices, 'MediaDevices');
+  N.installHandlers(MediaDevices.prototype, ['devicechange']);
+  define('MediaDevices', MediaDevices);
+  setNav('mediaDevices', make(MediaDevices));
+
   // ----------------------------------------------------- ScreenOrientation
   class ScreenOrientation extends g.EventTarget {
     constructor() { super(); ILLEGAL(); }

@@ -1617,3 +1617,36 @@ fn dom_token_list_indexed_getter() {
         r#"'tab|first||tab|2|true|true|true|false|0,1|{"value":"first","writable":false,"enumerable":true,"configurable":true}|tab+first|1|tab+first|z|3|x|w|x y z w|TypeError|x|,decorated,||x y z w|true'"#
     );
 }
+
+/// `navigator.connection`, the battery manager and `navigator.mediaDevices`
+/// are event targets: media players subscribe to connection `change` at
+/// startup, and a plain object there aborted their whole bundle.
+#[test]
+fn navigator_connection_battery_and_media_devices_are_event_targets() {
+    let out = result_of(
+        "<html><body></body></html>",
+        r#"
+        const r = [];
+        const c = navigator.connection;
+        r.push(c instanceof EventTarget, c instanceof NetworkInformation, c.effectiveType, c.downlink, String(c));
+        let changes = 0;
+        c.addEventListener('change', () => changes++);
+        c.dispatchEvent(new Event('change'));
+        c.onchange = () => changes++;
+        c.dispatchEvent(new Event('change'));
+        r.push(changes);
+        const m = navigator.mediaDevices;
+        m.addEventListener('devicechange', () => {});
+        r.push(m instanceof EventTarget, typeof m.enumerateDevices, 'ondevicechange' in m);
+        let threw = '';
+        try { new NetworkInformation(); } catch (e) { threw = e.name; }
+        r.push(threw);
+        navigator.getBattery().then((b) => {
+          b.addEventListener('levelchange', () => {});
+          r.push(b instanceof BatteryManager, b instanceof EventTarget, b.level, b.charging);
+          window.result = r.join('|');
+        });
+        "#,
+    );
+    assert_eq!(out, "'true|true|4g|10|[object NetworkInformation]|3|true|function|true|TypeError|true|true|1|true'");
+}
