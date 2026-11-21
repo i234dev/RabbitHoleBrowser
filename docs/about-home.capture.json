@@ -1,17 +1,17 @@
 {
-  "browser_version": "0.1.42",
-  "source_revision_before_documentation_commit": "c5f26253d1638a636cb325095656067651656f44",
-  "binary": "CI artifact browser-ubuntu-latest-c5f26253d1638a636cb325095656067651656f44 (run 44900914860)",
+  "browser_version": "0.1.43",
+  "source_revision_before_documentation_commit": "22df73069878ae6598b53e62e6de3a5247827063",
+  "binary": "CI artifact browser-ubuntu-latest-22df73069878ae6598b53e62e6de3a5247827063 (run 44912973926)",
   "profile": "ci",
   "jit": "on (default)",
   "viewport_css_px": [
     1100,
     780
   ],
-  "captured_utc": "2026-11-21T12:13:31+00:00",
-  "binary_sha256": "ec5364b39edb54344f1458d0122a5ebf5fd3d55a9b2eda25241d5d529051a7db",
-  "png_sha256": "98ae553894386c24b0dd8c2d529007fab19ea9174b6effa04b0a121822197ed0",
+  "captured_utc": "2026-11-21T14:39:44+00:00",
+  "binary_sha256": "3fe0aaffa920e8115424cd42bc519fda7c83989b2265ecb9730a86bfc138ff7e",
+  "png_sha256": "a6747d9eeb268396515c97c31e0b64989a23796d41b8b9190645e41ba1427aa3",
   "performance_measurement": false,
   "scope": "Internal about:home screenshot from the browser CLI. Compatibility/performance rows retain their own measurement source and date; this capture is not a fresh benchmark.",
-  "root_visual_review": "v0.1.42 badge; test262 46,017/46,064 dated 2026-11-18 and CSS 16,395/19,627 dated 2026-11-21; no clipping of header/table at viewport width."
+  "root_visual_review": "v0.1.43 badge; test262 46,017/46,064 dated 2026-11-18 and CSS 16,397/19,627 dated 2026-11-21; no clipping of header/table at viewport width."
 }
