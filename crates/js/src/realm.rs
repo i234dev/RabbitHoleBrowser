@@ -147,6 +147,13 @@ pub type ConsoleSink = Box<dyn FnMut(&str, String)>;
 /// [`Realm::maybe_gc`]).
 pub const GC_MIN_BYTES: isize = 4 << 20;
 
+/// Objects allocated between two cycles, in percent of the objects alive
+/// after the last one (see [`GcPacing::growth`]). Marking costs in
+/// proportion to the live objects and sweeping to the dead ones, so letting
+/// twice the live count be allocated halves the marking per allocation;
+/// memory stays bounded by the separate trigger on bytes.
+const GC_GROWTH: usize = 200;
+
 /// During a collection cycle, a slice runs once the program allocated this
 /// many objects or bytes since the previous one.
 const GC_SLICE_OBJECTS: usize = 2048;
@@ -169,9 +176,8 @@ pub(crate) struct GcPacing {
     pub slice: std::time::Duration,
     /// `RH_GC_STRESS` mode (0, [`GC_STRESS_FULL`], [`GC_STRESS_INCREMENTAL`]).
     pub stress: u8,
-    /// How far the heap may grow between cycles, in percent of what the
-    /// last cycle left (`RH_GC_GROWTH`, default 100: objects allocated up
-    /// to the live count, memory up to half the memory in use).
+    /// How many objects may be allocated between cycles, in percent of the
+    /// objects the last cycle left alive (at least 50 000), `RH_GC_GROWTH`.
     pub growth: usize,
     pub stress_n: u32,
     /// When the running cycle started, and the allocation counters then.
@@ -199,7 +205,7 @@ impl GcPacing {
                 Some("inc" | "incremental" | "2") => GC_STRESS_INCREMENTAL,
                 Some(_) => GC_STRESS_FULL,
             },
-            growth: var("RH_GC_GROWTH").and_then(|v| v.parse().ok()).filter(|&g| g > 0).unwrap_or(100),
+            growth: var("RH_GC_GROWTH").and_then(|v| v.parse().ok()).filter(|&g| g > 0).unwrap_or(GC_GROWTH),
             stress_n: 0,
             cycle_start: std::time::Instant::now(),
             cycle_alloc: 0,
@@ -1054,7 +1060,7 @@ impl Realm {
             );
         }
         self.gc_bytes_base = in_use;
-        self.gc_bytes_budget = (in_use / 2).max(GC_MIN_BYTES) * g as isize / 100;
+        self.gc_bytes_budget = (in_use / 2).max(GC_MIN_BYTES);
     }
 
     /// Whether the heap grew enough since the last cycle for a new one
