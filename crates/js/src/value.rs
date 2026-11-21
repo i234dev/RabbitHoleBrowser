@@ -21,6 +21,9 @@ pub struct JsStr(std::num::NonZeroU64);
 /// hash (property names are hashed on every dictionary / shape lookup).
 pub(crate) struct StrBox {
     hash: Cell<u32>,
+    /// The thread's shared instance of its text (see [`JsStr::intern`]):
+    /// two interned strings are equal only if they are the same instance.
+    interned: Cell<bool>,
     s: StrInner,
 }
 
@@ -70,6 +73,13 @@ impl JsStr {
     pub fn bits(&self) -> u64 {
         self.0.get()
     }
+    /// Is this the thread's interned instance of its text? Two interned
+    /// strings with different handles have different contents.
+    #[inline(always)]
+    pub fn is_interned(&self) -> bool {
+        // SAFETY: the handle holds a strong reference.
+        unsafe { (*self.ptr()).interned.get() }
+    }
     /// Hash of the code units (FxHash-style), computed once per string.
     #[inline]
     pub fn hash32(&self) -> u32 {
@@ -88,7 +98,7 @@ impl JsStr {
         h
     }
     fn from_inner(i: StrInner) -> JsStr {
-        let p = Rc::into_raw(Rc::new(StrBox { hash: Cell::new(0), s: i })) as u64;
+        let p = Rc::into_raw(Rc::new(StrBox { hash: Cell::new(0), interned: Cell::new(false), s: i })) as u64;
         assert!(p & TAG_MASK == 0, "pointer beyond 48 bits");
         // SAFETY: the tag is non-zero.
         JsStr(unsafe { std::num::NonZeroU64::new_unchecked(TAG_STRING | p) })
@@ -717,6 +727,8 @@ impl JsStr {
                 return j.clone();
             }
             let j = JsStr::new(s);
+            // SAFETY: the handle holds a strong reference.
+            unsafe { (*j.ptr()).interned.set(true) };
             m.borrow_mut().insert(s.into(), j.clone());
             j
         });

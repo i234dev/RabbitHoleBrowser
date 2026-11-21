@@ -51,6 +51,8 @@ thread_local! {
     static ROOT: Rc<Shape> = Rc::new(Shape {
         id: ROOT_SHAPE_ID,
         len: 0,
+        ids: [0; LINEAR_LOOKUP],
+        all_interned: true,
         keys: Rc::new(RefCell::new(Vec::new())),
         parent: None,
         transitions: RefCell::new(Transitions::default()),
@@ -68,15 +70,42 @@ pub fn fresh_id() -> u32 {
     })
 }
 
-#[derive(Default)]
 struct Transitions {
     small: Vec<(PropertyKey, Weak<Shape>)>,
     map: Option<HashMap<PropertyKey, Weak<Shape>, FxBuild>>,
+    /// Every key in `small` is an interned string (an interned key that
+    /// matches none by identity matches none).
+    small_interned: bool,
+}
+
+impl Default for Transitions {
+    fn default() -> Self {
+        Transitions { small: Vec::new(), map: None, small_interned: true }
+    }
+}
+
+/// Identity word of a key for [`Shape::ids`] (0 for symbols).
+#[inline(always)]
+fn id_word(key: &PropertyKey) -> u64 {
+    match key {
+        PropertyKey::String(s) => s.bits(),
+        PropertyKey::Symbol(_) => 0,
+    }
+}
+
+#[inline(always)]
+fn interned_string(key: &PropertyKey) -> bool {
+    matches!(key, PropertyKey::String(s) if s.is_interned())
 }
 
 pub struct Shape {
     pub id: u32,
     len: u32,
+    /// Identity words of the first keys (string handles; 0 for symbols):
+    /// the usual lookup compares these without leaving the shape.
+    ids: [u64; LINEAR_LOOKUP],
+    /// Every key is an interned string.
+    all_interned: bool,
     /// Key storage shared along a linear transition chain; this shape's
     /// keys are `keys[..len]`.
     keys: Rc<RefCell<Vec<PropertyKey>>>,
@@ -119,6 +148,8 @@ pub fn lazy_fn_shape(ln: &Rc<Shape>) -> Rc<Shape> {
             Rc::new(Shape {
                 id: LAZY_FN_SHAPE_ID,
                 len: ln.len,
+                ids: ln.ids,
+                all_interned: ln.all_interned,
                 keys: ln.keys.clone(),
                 parent: ln.parent.clone(),
                 transitions: RefCell::new(Transitions::default()),
@@ -148,17 +179,18 @@ impl Shape {
     pub fn find(&self, key: &PropertyKey) -> Option<u32> {
         let n = self.len as usize;
         if n <= LINEAR_LOOKUP {
-            let keys = self.keys.borrow();
             // Identity first: interned names usually match by pointer.
             if let PropertyKey::String(k) = key {
-                for (i, x) in keys[..n].iter().enumerate() {
-                    if let PropertyKey::String(s) = x {
-                        if s.ptr_eq(k) {
-                            return Some(i as u32);
-                        }
-                    }
+                let b = k.bits();
+                if let Some(i) = self.ids[..n].iter().position(|&w| w == b) {
+                    return Some(i as u32);
+                }
+                // Interned names differ from each other by identity.
+                if self.all_interned && k.is_interned() {
+                    return None;
                 }
             }
+            let keys = self.keys.borrow();
             return keys[..n].iter().position(|x| key_eq(x, key)).map(|i| i as u32);
         }
         let index = self.index.get_or_init(|| {
@@ -198,9 +230,15 @@ impl Shape {
                 Rc::new(RefCell::new(v))
             }
         };
+        let mut ids = self.ids;
+        if n < LINEAR_LOOKUP {
+            ids[n] = id_word(key);
+        }
         let child = Rc::new(Shape {
             id: fresh_id(),
             len: self.len + 1,
+            ids,
+            all_interned: self.all_interned && interned_string(key),
             keys,
             parent: Some(self.clone()),
             transitions: RefCell::new(Transitions::default()),
@@ -224,6 +262,7 @@ impl Shape {
                     m.insert(key.clone(), weak);
                     t.map = Some(m);
                 } else {
+                    t.small_interned &= interned_string(key);
                     t.small.push((key.clone(), weak));
                 }
             }
@@ -262,6 +301,9 @@ impl Shape {
                                 return w.upgrade();
                             }
                         }
+                    }
+                    if t.small_interned && k.is_interned() {
+                        return None;
                     }
                 }
                 t.small.iter().find(|(x, _)| key_eq(x, key)).and_then(|(_, w)| w.upgrade())
