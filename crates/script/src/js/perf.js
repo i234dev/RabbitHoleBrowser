@@ -217,17 +217,19 @@
     for (const o of observers) if (o[S].types.has('resource')) { o[S].queue.push(e); if (!o[S].scheduled) { o[S].scheduled = true; setTimeout(() => deliver(o), 0); } }
   }
   const nativeFetch = g.fetch;
+  // Workers have no document: their URLs resolve against their location.
+  const baseURL = () => (g.document ? g.document.baseURI : String(g.location && g.location.href));
   hidden(g, 'fetch', function fetch(input, init) {
     const start = nativeNow();
     let url;
-    try { url = new URL(input instanceof g.Request ? input.url : String(input), document.baseURI).href; } catch (e) { url = String(input); }
+    try { url = new URL(input instanceof g.Request ? input.url : String(input), baseURL()).href; } catch (e) { url = String(input); }
     const p = nativeFetch.call(this, input, init);
     p.then((r) => addResource(url, 'fetch', start, r.status), () => addResource(url, 'fetch', start, 0));
     return p;
   });
   if (g.XMLHttpRequest) {
     const open = g.XMLHttpRequest.prototype.open, send = g.XMLHttpRequest.prototype.send;
-    hidden(g.XMLHttpRequest.prototype, 'open', function (method, url) { hidden(this, S, { url: (() => { try { return new URL(url, document.baseURI).href; } catch (e) { return String(url); } })() }); return open.apply(this, arguments); });
+    hidden(g.XMLHttpRequest.prototype, 'open', function (method, url) { hidden(this, S, { url: (() => { try { return new URL(url, baseURL()).href; } catch (e) { return String(url); } })() }); return open.apply(this, arguments); });
     hidden(g.XMLHttpRequest.prototype, 'send', function () { const st = this[S]; if (st) { const start = nativeNow(); this.addEventListener('loadend', () => addResource(st.url, 'xmlhttprequest', start, this.status), { once: true }); } return send.apply(this, arguments); });
   }
 

@@ -642,3 +642,25 @@ fn service_worker_messages_carry_ports_inside_data_and_detach_transferred_buffer
     advance(&mut env, &mut host, 30);
     assert_eq!(run(&mut env, &mut host, "console.log(acks.join('|'), detached, stray);"), ["Acking value: 1 true|hi 0 DataCloneError"]);
 }
+
+/// A worker's fetch() records its resource timing entry under the URL
+/// resolved against the worker's location (there is no document to take a
+/// base URL from).
+#[test]
+fn service_worker_fetch_resolves_resource_urls_without_a_document() {
+    let (mut env, mut host) = setup("<!doctype html><body></body>");
+    env.fetches.insert("https://example.test/dir/data.txt".into(), (200, "text/plain".into(), "data".into()));
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), r#"
+        self.addEventListener('install', event => {
+            event.waitUntil(fetch('data.txt').then(r => r.text()).then(t => new Promise(resolve => setTimeout(() => {
+                console.log('fetched', t, typeof performance.getEntriesByType === 'function' ? performance.getEntriesByType('resource').map(e => e.name).join() : 'no timing');
+                resolve();
+            }, 5)), e => console.log('failed', e)));
+        });
+    "#.into()));
+    run(&mut env, &mut host, "navigator.serviceWorker.register('sw.js');");
+    tick(&mut env, &mut host, 30);
+    let output = logs(&env);
+    let line = output.iter().find(|s| s.contains("fetched") || s.contains("failed")).unwrap_or_else(|| panic!("{output:?} {:?}", env.errors()));
+    assert!(line.ends_with("fetched data https://example.test/dir/data.txt"), "{line}");
+}
