@@ -11,7 +11,8 @@
 //!    are found and classified as tops (ink below) or bottoms (ink above);
 //! 2. edges near a blue zone of the face snap to the rounded zone (keeping
 //!    a rounded overshoot), a bottom and the top just above it form a stem
-//!    whose width is lightly quantized, other edges round to the grid;
+//!    whose width is lightly quantized (as FreeType's light hinting does),
+//!    edges within a pixel of those move with them, the rest round;
 //! 3. every outline point moves by the piecewise-linear interpolation of
 //!    the edge moves, and the outline is rasterized with exact area
 //!    coverage.
@@ -68,14 +69,21 @@ pub(crate) struct Zone {
 
 /// Per-face data for grid fitting.
 pub(crate) struct HintFace {
-    pub bytes: std::rc::Rc<Vec<u8>>,
+    /// Parsed from `bytes` (declared first: dropped before them).
+    face: ttf_parser::Face<'static>,
+    /// Keeps the bytes `face` borrows alive and unmoved.
+    _bytes: std::rc::Rc<Vec<u8>>,
     pub upem: f32,
     pub zones: Vec<Zone>,
 }
 
 impl HintFace {
     pub(crate) fn new(bytes: std::rc::Rc<Vec<u8>>) -> Option<HintFace> {
-        let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
+        // SAFETY: the slice lives in the `Rc<Vec<u8>>` heap buffer, which is
+        // never mutated and outlives `face` (stored next to it, dropped
+        // after it); parsing per glyph would cost more than rasterizing.
+        let data: &'static [u8] = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
+        let face = ttf_parser::Face::parse(data, 0).ok()?;
         let upem = face.units_per_em() as f32;
         if !(upem > 0.0) {
             return None;
@@ -99,14 +107,13 @@ impl HintFace {
                 }
             }
         }
-        Some(HintFace { bytes, upem, zones })
+        Some(HintFace { face, _bytes: bytes, upem, zones })
     }
 
     /// The outline of `glyph` in font units (None: no outline).
     pub(crate) fn outline(&self, glyph: u16) -> Option<Vec<Cmd>> {
-        let face = ttf_parser::Face::parse(&self.bytes, 0).ok()?;
-        let mut c = Collect::default();
-        face.outline_glyph(GlyphId(glyph), &mut c)?;
+        let mut c = Collect(Vec::with_capacity(64));
+        self.face.outline_glyph(GlyphId(glyph), &mut c)?;
         Some(c.0)
     }
 }
@@ -368,73 +375,34 @@ pub(crate) struct Raster {
 /// Rasterize an outline at `scale` px per font unit, shifted right by
 /// `shift` px, with its y coordinates (px, y up) mapped through `knots`.
 pub(crate) fn rasterize(cmds: &[Cmd], scale: f32, shift: f32, knots: &[(f32, f32)]) -> Raster {
-    // Device points (y up), flattened into closed polygons.
-    let tx = |x: f32| x * scale + shift;
-    let ty = |y: f32| fit_y(knots, y * scale);
-    let mut polys: Vec<Vec<(f32, f32)>> = Vec::new();
-    let mut cur: Vec<(f32, f32)> = Vec::new();
-    let mut pen = (0.0f32, 0.0f32);
+    // Device points (y up) of every command; the bounds of the control
+    // points contain the curves.
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(cmds.len() * 2);
+    let mut push = |x: f32, y: f32| pts.push((x * scale + shift, fit_y(knots, y * scale)));
     for c in cmds {
         match *c {
-            Cmd::Move(x, y) => {
-                if cur.len() > 1 {
-                    polys.push(std::mem::take(&mut cur));
-                }
-                cur.clear();
-                pen = (tx(x), ty(y));
-                cur.push(pen);
-            }
-            Cmd::Line(x, y) => {
-                pen = (tx(x), ty(y));
-                cur.push(pen);
-            }
+            Cmd::Move(x, y) | Cmd::Line(x, y) => push(x, y),
             Cmd::Quad(x1, y1, x, y) => {
-                let c1 = (tx(x1), ty(y1));
-                let p = (tx(x), ty(y));
-                let dd = ((pen.0 - 2.0 * c1.0 + p.0).powi(2) + (pen.1 - 2.0 * c1.1 + p.1).powi(2)).sqrt();
-                let steps = ((dd * 5.0).sqrt().ceil() as usize).clamp(1, 64);
-                for k in 1..=steps {
-                    let t = k as f32 / steps as f32;
-                    let u = 1.0 - t;
-                    cur.push((u * u * pen.0 + 2.0 * u * t * c1.0 + t * t * p.0, u * u * pen.1 + 2.0 * u * t * c1.1 + t * t * p.1));
-                }
-                pen = p;
+                push(x1, y1);
+                push(x, y);
             }
             Cmd::Cubic(x1, y1, x2, y2, x, y) => {
-                let c1 = (tx(x1), ty(y1));
-                let c2 = (tx(x2), ty(y2));
-                let p = (tx(x), ty(y));
-                let d1 = ((pen.0 - 2.0 * c1.0 + c2.0).powi(2) + (pen.1 - 2.0 * c1.1 + c2.1).powi(2)).sqrt();
-                let d2 = ((c1.0 - 2.0 * c2.0 + p.0).powi(2) + (c1.1 - 2.0 * c2.1 + p.1).powi(2)).sqrt();
-                let steps = ((d1.max(d2) * 30.0).sqrt().ceil() as usize).clamp(1, 64);
-                for k in 1..=steps {
-                    let t = k as f32 / steps as f32;
-                    let u = 1.0 - t;
-                    let (a, b, cc, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-                    cur.push((a * pen.0 + b * c1.0 + cc * c2.0 + d * p.0, a * pen.1 + b * c1.1 + cc * c2.1 + d * p.1));
-                }
-                pen = p;
+                push(x1, y1);
+                push(x2, y2);
+                push(x, y);
             }
-            Cmd::Close => {
-                if cur.len() > 1 {
-                    polys.push(std::mem::take(&mut cur));
-                }
-                cur.clear();
-            }
+            Cmd::Close => {}
         }
     }
-    if cur.len() > 1 {
-        polys.push(cur);
-    }
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for p in polys.iter().flatten() {
+    for p in &pts {
         x0 = x0.min(p.0);
         x1 = x1.max(p.0);
         y0 = y0.min(p.1);
         y1 = y1.max(p.1);
     }
     let empty = Raster { width: 0, height: 0, left: 0, top: 0, coverage: Vec::new() };
-    if polys.is_empty() || !(x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite()) || x1 <= x0 || y1 <= y0 {
+    if pts.len() < 2 || !(x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite()) || x1 <= x0 || y1 <= y0 {
         return empty;
     }
     // Snap bounds that are within float noise of a pixel boundary.
@@ -450,17 +418,86 @@ pub(crate) fn rasterize(cmds: &[Cmd], scale: f32, shift: f32, knots: &[(f32, f32
         return empty;
     }
     let mut acc = Accumulator::new(w, h);
+    // Bitmap space: x from the left edge, y down from the top.
     let (ox, oy) = (left as f32, top as f32);
-    for poly in &polys {
-        let m = poly.len();
-        for k in 0..m {
-            let a = poly[k];
-            let b = poly[(k + 1) % m];
-            // Bitmap space: x from the left edge, y down from the top.
-            acc.line((a.0 - ox, oy - a.1), (b.0 - ox, oy - b.1));
+    let bm = |p: (f32, f32)| (p.0 - ox, oy - p.1);
+    let mut i = 0;
+    let mut start = (0.0f32, 0.0f32);
+    let mut pen = start;
+    let mut open = false;
+    for c in cmds {
+        match *c {
+            Cmd::Move(..) => {
+                if open {
+                    acc.line(pen, start);
+                }
+                start = bm(pts[i]);
+                pen = start;
+                open = true;
+                i += 1;
+            }
+            Cmd::Line(..) => {
+                let p = bm(pts[i]);
+                acc.line(pen, p);
+                pen = p;
+                i += 1;
+            }
+            Cmd::Quad(..) => {
+                let (c1, p) = (bm(pts[i]), bm(pts[i + 1]));
+                i += 2;
+                let dd = ((pen.0 - 2.0 * c1.0 + p.0).powi(2) + (pen.1 - 2.0 * c1.1 + p.1).powi(2)).sqrt();
+                let steps = ceil_pos((dd * 2.5).sqrt()).clamp(1, 64);
+                let inv = 1.0 / steps as f32;
+                let mut prev = pen;
+                for k in 1..steps {
+                    let t = k as f32 * inv;
+                    let u = 1.0 - t;
+                    let q = (u * u * pen.0 + 2.0 * u * t * c1.0 + t * t * p.0, u * u * pen.1 + 2.0 * u * t * c1.1 + t * t * p.1);
+                    acc.line(prev, q);
+                    prev = q;
+                }
+                acc.line(prev, p);
+                pen = p;
+            }
+            Cmd::Cubic(..) => {
+                let (c1, c2, p) = (bm(pts[i]), bm(pts[i + 1]), bm(pts[i + 2]));
+                i += 3;
+                let d1 = ((pen.0 - 2.0 * c1.0 + c2.0).powi(2) + (pen.1 - 2.0 * c1.1 + c2.1).powi(2)).sqrt();
+                let d2 = ((c1.0 - 2.0 * c2.0 + p.0).powi(2) + (c1.1 - 2.0 * c2.1 + p.1).powi(2)).sqrt();
+                let steps = ceil_pos((d1.max(d2) * 15.0).sqrt()).clamp(1, 64);
+                let inv = 1.0 / steps as f32;
+                let mut prev = pen;
+                for k in 1..steps {
+                    let t = k as f32 * inv;
+                    let u = 1.0 - t;
+                    let (a, b, cc, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                    let q = (a * pen.0 + b * c1.0 + cc * c2.0 + d * p.0, a * pen.1 + b * c1.1 + cc * c2.1 + d * p.1);
+                    acc.line(prev, q);
+                    prev = q;
+                }
+                acc.line(prev, p);
+                pen = p;
+            }
+            Cmd::Close => {
+                if open {
+                    acc.line(pen, start);
+                    pen = start;
+                }
+                open = false;
+            }
         }
     }
+    if open {
+        acc.line(pen, start);
+    }
     Raster { width: w as u32, height: h as u32, left, top, coverage: acc.finish() }
+}
+
+/// `v.ceil()` for non-negative `v`, without a libm call.
+#[inline(always)]
+fn ceil_pos(v: f32) -> usize {
+    let t = v as usize;
+    if (t as f32) < v { t + 1 } else { t }
 }
 
 /// Exact-area coverage accumulation (signed area per cell, then a running
@@ -488,7 +525,7 @@ impl Accumulator {
             x -= p0.1 * dxdy;
         }
         let wmax = self.w as f32;
-        let y_end = (p1.1.ceil() as usize).min(self.h);
+        let y_end = ceil_pos(p1.1.max(0.0)).min(self.h);
         for y in (y_start as usize)..y_end {
             let line_start = y * self.w;
             let dy = ((y + 1) as f32).min(p1.1) - (y as f32).max(p0.1);
@@ -496,10 +533,11 @@ impl Accumulator {
             let d = dy * dir;
             let (xa, xb) = if x < xnext { (x, xnext) } else { (xnext, x) };
             let (xa, xb) = (xa.clamp(0.0, wmax), xb.clamp(0.0, wmax));
-            let xa_floor = xa.floor();
-            let xa_i = xa_floor as usize;
-            let xb_ceil = xb.ceil();
-            let xb_i = xb_ceil as usize;
+            // (Non-negative: truncation is floor; libm calls are slow.)
+            let xa_i = xa as usize;
+            let xa_floor = xa_i as f32;
+            let xb_i = ceil_pos(xb);
+            let xb_ceil = xb_i as f32;
             if xb_i <= xa_i + 1 {
                 let xmf = 0.5 * (x + xnext).clamp(0.0, 2.0 * wmax) - xa_floor;
                 let i = line_start + xa_i;
@@ -648,32 +686,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod debug_dump {
-    use super::*;
-    #[test]
-    #[ignore]
-    fn dump() {
-        let font = std::env::var("RH_DUMP_FONT").unwrap_or("DejaVuSerif.ttf".into());
-        let bytes = std::rc::Rc::new(std::fs::read(format!("{}/../../assets/fonts/{}", env!("CARGO_MANIFEST_DIR"), font)).unwrap());
-        let hf = HintFace::new(bytes.clone()).unwrap();
-        println!("zones {:?}", hf.zones);
-        let size: f32 = std::env::var("RH_DUMP_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(13.0);
-        let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
-        for ch in std::env::var("RH_DUMP_CHARS").unwrap_or("EF".into()).chars() {
-            let g = face.glyph_index(ch).unwrap().0;
-            let cmds = hf.outline(g).unwrap();
-            println!("{ch} edges {:?}", find_edges(&cmds, hf.upem));
-            let scale = size / hf.upem;
-            let knots = fit_knots(&cmds, hf.upem, &hf.zones, scale);
-            println!("{ch} knots {:?}", knots);
-            for k in [Vec::new(), knots] {
-                let r = rasterize(&cmds, scale, 0.0, &k);
-                println!("top {} left {}", r.top, r.left);
-                for row in r.coverage.chunks(r.width as usize) {
-                    println!("{}", row.iter().map(|&c| [' ', '.', ':', '+', '#'][(c as usize * 5 / 256).min(4)]).collect::<String>());
-                }
-            }
-        }
-    }
-}
