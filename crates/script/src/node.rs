@@ -1025,7 +1025,9 @@ fn n_parent_node(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
 
 fn n_parent_element(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "parentElement")?;
-    let p = with_doc(n.doc, |doc| doc.parent(n.node).filter(|&p| doc.element(p).is_some()));
+    // Fragments and shadow roots are element-shaped internally but are not
+    // elements: their children have no parent element.
+    let p = with_doc(n.doc, |doc| doc.parent(n.node).filter(|&p| doc.element(p).is_some_and(|e| e.tag != "#fragment" && e.tag != "#shadow-root")));
     Ok(wrap_opt(realm, n.doc, p))
 }
 

@@ -921,8 +921,12 @@ fn e_closest(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
         let matcher = rabbithole_css::selector::SelectorMatcher::new(doc, &state);
         let mut cur = Some(n.node);
         while let Some(c) = cur {
-            if doc.element(c).is_some() && list.iter().any(|sel| matcher.matches(sel, c)) {
-                return Some(c);
+            match doc.element(c) {
+                // Inclusive ancestor *elements* only: a fragment or shadow
+                // root ends the walk.
+                Some(e) if e.tag == "#fragment" || e.tag == "#shadow-root" => break,
+                Some(_) if list.iter().any(|sel| matcher.matches(sel, c)) => return Some(c),
+                _ => {}
             }
             cur = doc.parent(c);
         }

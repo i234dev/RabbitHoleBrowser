@@ -1650,3 +1650,32 @@ fn navigator_connection_battery_and_media_devices_are_event_targets() {
     );
     assert_eq!(out, "'true|true|4g|10|[object NetworkInformation]|3|true|function|true|TypeError|true|true|1|true'");
 }
+
+/// `parentElement` is the parent only when it is an element: children of a
+/// shadow root or a document fragment have none, and `closest()` stops at
+/// those roots. Telemetry code walks `el.parentElement` and calls
+/// `closest()` on it, falling back to the shadow host when it is null.
+#[test]
+fn parent_element_skips_fragments_and_shadow_roots() {
+    let out = result_of(
+        "<html><body><div id=h class=c></div><template id=tp><span>x</span></template></body></html>",
+        r#"
+        const r = [];
+        const h = document.getElementById('h');
+        const root = h.attachShadow({ mode: 'open' });
+        root.innerHTML = '<b><i>x</i></b>';
+        const b = root.firstChild;
+        r.push(b.parentElement, b.parentNode === root, root.querySelector('i').parentElement === b);
+        const f = document.createDocumentFragment();
+        const s = f.appendChild(document.createElement('s'));
+        r.push(s.parentElement, document.getElementById('tp').content.firstChild.parentElement);
+        r.push(document.documentElement.parentElement, document.body.parentElement === document.documentElement);
+        r.push(b.closest('*') === b, root.querySelector('i').closest('.c'), s.closest('*') === s);
+        const t = document.createTextNode('t');
+        root.appendChild(t);
+        r.push(t.parentElement);
+        window.result = r.map(String).join('|');
+        "#,
+    );
+    assert_eq!(out, "'null|true|true|null|null|null|true|true|null|true|null'");
+}
