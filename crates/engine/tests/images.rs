@@ -171,3 +171,21 @@ fn video_poster_and_picture_type() {
     let p = by_id(&page, "p");
     assert_eq!(page.images.get(&p).map(|i| i.width), Some(40));
 }
+
+/// A video without controls, poster or frame represents nothing: no black
+/// box over what is behind it (page fallback images show through).
+#[test]
+fn video_without_poster_or_controls_is_transparent() {
+    use rabbithole_engine::layout::DisplayItem;
+    let mut engine = Engine::new_bundled_fonts_only();
+    let html = r#"<body style="margin:0"><video id=v width=200 height=100 muted playsinline></video><video id=c controls width=200 height=100></video>"#;
+    let mut page = engine.load_html(html, base(), VP);
+    settle(&engine, &mut page);
+    let rect_of = |id: &str| page.rect_of(by_id(&page, id)).unwrap();
+    let (v, c) = (rect_of("v"), rect_of("c"));
+    let dark_inside = |r: &rabbithole_engine::gfx::Rect| {
+        page.display_list.items.iter().any(|it| matches!(it, DisplayItem::Rect { rect, color, .. } if color.r < 64 && color.g < 64 && color.b < 64 && color.a > 0 && rect.x >= r.x - 0.5 && rect.y >= r.y - 0.5 && rect.x + rect.w <= r.x + r.w + 0.5 && rect.y + rect.h <= r.y + r.h + 0.5))
+    };
+    assert!(!dark_inside(&v), "posterless video without controls painted a dark box");
+    assert!(dark_inside(&c), "video with controls keeps its player surface");
+}
