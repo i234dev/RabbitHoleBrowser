@@ -32,6 +32,15 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.1.40 is 1.119× faster than 0.1.39 on Speedometer 3.1 (8 of 8
+paired runs, every suite faster; [record](docs/benchmarks/speedometer-2026-11-21-v0.1.40.md)):
+the JavaScript allocator and collector are cheaper (collector time over three
+iterations 5.2 s → 1.8 s), custom-property maps are layered instead of copied,
+and `querySelector` uses attribute and class indexes; pages with many DOM
+nodes load up to 1.4–1.5× faster. `line-height: normal` follows the first
+available font's metrics, with `ascent-override`, `descent-override` and
+`line-gap-override` (WPT CSS 83.0 %, [measurement](docs/benchmarks/wpt-css-2026-11-21-v0.1.40.md)).
+
 Version 0.1.39 fixes web compatibility: `DOMTokenList` (`classList`) answers
 indexed reads (`classList[0]`), which webmail with inbox category tabs needs
 to start; web fonts register every `unicode-range` subset of a face and
@@ -162,7 +171,7 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 |---|---|---|
 | **test262** (ECMAScript) | **99.90 %** (46,017 / 46,064 run) | 2026-11-18, 0.1.34 JavaScript code `fe3d71e`, JIT on, 8 workers, profile ci; **99.93 % excluding Intl**, ECMA-402 98.6 %; multi-agent `Atomics` and `Intl.NumberFormat` v3 tests included; [measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md) and `crates/js/tests/test262_baseline.txt` |
 | **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **82.7 %** (16,239 / 19,627) | 2026-11-20, 0.1.39 CSS/layout code `7c9af779`; color 92.9 %, transforms 92.6 %, CSS2 91.3 %, css-ui 90.6 %, images 90.0 %, flexbox 85.2 %, filter-effects 75.9 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-20-v0.1.39.md) and `crates/engine/tests/wpt-css-baseline.txt` |
+| **WPT CSS reftests** (pixel comparison) | **83.0 %** (16,296 / 19,627) | 2026-11-21, 0.1.40 CSS/layout code `9b4e7cc9`; transforms 94.1 %, color 93.6 %, CSS2 91.5 %, css-ui 91.2 %, images 90.0 %, flexbox 85.1 %, filter-effects 75.9 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-21-v0.1.40.md) and `crates/engine/tests/wpt-css-baseline.txt` |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
