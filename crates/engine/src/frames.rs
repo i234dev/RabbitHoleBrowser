@@ -524,9 +524,15 @@ impl Engine {
             let nodes: Vec<NodeId> = if page.frame_depth >= MAX_DEPTH {
                 Vec::new()
             } else {
-                // With scripting on, `<noscript>` content is inert.
-                page.doc
-                    .descendants(Document::ROOT)
+                // With scripting on, `<noscript>` content is inert. Frames
+                // in connected shadow trees have browsing contexts too
+                // (after the document tree's, which keep their indices):
+                // without one, a frame's document was dropped and
+                // recreated on every sync while scripts still held nodes
+                // of the old one.
+                let roots = std::iter::once(Document::ROOT).chain(page.doc.connected_shadow_roots());
+                roots
+                    .flat_map(|r| page.doc.descendants(r))
                     .filter(|&n| matches!(page.doc.tag(n), Some("iframe" | "frame")) && !(self.scripting && crate::in_noscript(&page.doc, n)))
                     .take(MAX_FRAMES_PER_PAGE)
                     .collect()
