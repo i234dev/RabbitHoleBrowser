@@ -180,6 +180,54 @@ fn http1_keepalive_codings_and_headers() {
     assert!(last.header("user-agent").unwrap().contains("Chrome/"));
 }
 
+/// Codings as browsers decode them over the wire: a second
+/// `Content-Encoding` field line stacks its coding (CDNs append one), a
+/// gzip body followed by padding, chunked transfer of a coded body, and an
+/// empty coded body on a POST answer.
+#[test]
+fn stacked_and_sloppy_content_codings() {
+    let text = "coded response body ".repeat(80);
+    let gz = |data: &[u8]| {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(data).unwrap();
+        e.finish().unwrap()
+    };
+    let zl = |data: &[u8]| {
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(data).unwrap();
+        e.finish().unwrap()
+    };
+    let stacked = gz(&zl(text.as_bytes()));
+    let mut padded = gz(text.as_bytes());
+    padded.extend_from_slice(&[0, 0, 0, 0]);
+    let chunked = {
+        let body = gz(text.as_bytes());
+        let mut c = Vec::new();
+        for part in body.chunks(7) {
+            c.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+            c.extend_from_slice(part);
+            c.extend_from_slice(b"\r\n");
+        }
+        c.extend_from_slice(b"0\r\n\r\n");
+        c
+    };
+    let srv = serve(Arc::new(move |req: &Req| match req.path.as_str() {
+        "/stacked" => (200, hv(&[("content-encoding", "deflate"), ("Content-Encoding", "gzip")]), stacked.clone()),
+        "/padded" => (200, hv(&[("content-encoding", "gzip")]), padded.clone()),
+        "/chunked" => (200, hv(&[("content-encoding", "gzip"), ("transfer-encoding", "chunked")]), chunked.clone()),
+        _ => (400, hv(&[("content-encoding", "br")]), vec![0x3b]),
+    }));
+    let f = fetcher();
+    for p in ["/stacked", "/padded", "/chunked"] {
+        let r = f.request(&Request::get(srv.url(p)).with_cache_mode(CacheMode::NoStore)).unwrap_or_else(|e| panic!("{p}: {e}"));
+        assert_eq!(String::from_utf8(r.body).unwrap(), text, "{p}");
+    }
+    let mut post = Request::post(srv.url("/report"), Body { content_type: "text/plain".into(), data: b"x".to_vec() });
+    post.mode = Some(RequestMode::Cors);
+    let r = f.fetch_api(&post).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!((r.response.status, r.response.body.len()), (400, 0));
+}
+
 #[test]
 fn duplicate_urls_in_a_batch_are_fetched_once() {
     let srv = serve(Arc::new(|req: &Req| (200, hv(&[("cache-control", "no-store")]), req.path.clone().into_bytes())));
