@@ -338,6 +338,10 @@ impl HostEnv for EngineEnv<'_> {
         }
         self.page.styles.get(node).cloned().or_else(|| self.engine.unrendered_style(self.page, node))
     }
+    fn computed_custom_property(&mut self, node: NodeId, name: &str) -> Option<Vec<rabbithole_css::Token>> {
+        self.engine.flush_style(self.page);
+        self.page.incr.style_engine()?.custom_property(node, name)
+    }
     fn used_grid_tracks(&mut self, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
         self.ensure_layout();
         self.page.layout.used_grid_tracks(&self.page.doc, node, rows)

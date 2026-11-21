@@ -193,6 +193,11 @@ pub trait HostEnv {
     fn frame_element(&mut self) -> Option<(u64, NodeId)> {
         None
     }
+    /// Computed value of custom property `name` (`--*`) on an element of
+    /// this document. None: not set (or unsupported).
+    fn computed_custom_property(&mut self, _node: NodeId, _name: &str) -> Option<Vec<rabbithole_css::Token>> {
+        None
+    }
     /// Computed style of a node of a same-origin frame's document.
     fn frame_computed_style(&mut self, _id: u64, _node: NodeId) -> Option<Rc<ComputedStyle>> {
         None

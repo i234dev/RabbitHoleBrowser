@@ -664,6 +664,14 @@ const P_INH: u8 = 2;
 const P_DISP: u8 = 4;
 
 impl StyleEngine {
+    /// The computed value of custom property `name` on `node` (its tokens
+    /// with `var()` / `env()` substituted), as of the last pass; None when
+    /// it is not set or is invalid at computed-value time.
+    pub fn custom_property(&self, node: rabbithole_dom::NodeId, name: &str) -> Option<Vec<rabbithole_css::Token>> {
+        let vars = self.vars.get(node)?.as_ref()?;
+        crate::cascade::substitute_vars(vars.get(name)?, vars, 0)
+    }
+
     pub fn new(author: &[Stylesheet], env: &MediaEnv) -> StyleEngine {
         let index = ScopeIndex::build(author, env);
         let inval = InvalidationMap::build(&index);
