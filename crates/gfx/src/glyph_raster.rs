@@ -75,7 +75,19 @@ pub(crate) struct HintFace {
     _bytes: std::rc::Rc<Vec<u8>>,
     pub upem: f32,
     pub zones: Vec<Zone>,
+    /// Recently fitted outlines by (glyph, size×4, fitted): the subpixel
+    /// variants of a glyph share one.
+    fitted: std::cell::RefCell<std::collections::HashMap<(u16, u32, bool), std::rc::Rc<Fitted>>>,
 }
+
+/// A glyph outline with its fitting knots at one size.
+pub(crate) struct Fitted {
+    pub cmds: Vec<Cmd>,
+    pub knots: Vec<(f32, f32)>,
+}
+
+/// Fitted outlines kept per face before the cache starts over.
+const FITTED_CAP: usize = 256;
 
 impl HintFace {
     pub(crate) fn new(bytes: std::rc::Rc<Vec<u8>>) -> Option<HintFace> {
@@ -107,7 +119,25 @@ impl HintFace {
                 }
             }
         }
-        Some(HintFace { face, _bytes: bytes, upem, zones })
+        Some(HintFace { face, _bytes: bytes, upem, zones, fitted: Default::default() })
+    }
+
+    /// The outline of `glyph` with its fitting knots at `size` (none when
+    /// not `hinted`), cached; None when the glyph has no outline.
+    pub(crate) fn fitted(&self, glyph: u16, size: f32, hinted: bool) -> Option<std::rc::Rc<Fitted>> {
+        let key = (glyph, (size * 4.0).round().max(0.0) as u32, hinted);
+        if let Some(f) = self.fitted.borrow().get(&key) {
+            return Some(f.clone());
+        }
+        let cmds = self.outline(glyph)?;
+        let knots = if hinted { fit_knots(&cmds, self.upem, &self.zones, size / self.upem) } else { Vec::new() };
+        let f = std::rc::Rc::new(Fitted { cmds, knots });
+        let mut cache = self.fitted.borrow_mut();
+        if cache.len() >= FITTED_CAP {
+            cache.clear();
+        }
+        cache.insert(key, f.clone());
+        Some(f)
     }
 
     /// The outline of `glyph` in font units (None: no outline).

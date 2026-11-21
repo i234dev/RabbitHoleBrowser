@@ -985,26 +985,23 @@ impl FontContext {
                 top: 0,
                 coverage: Vec::new(),
             }
-        } else if quarter != 0 {
-            // Subpixel variants resample the whole-pixel rendering (exact
-            // for vertical stems; the outline is fitted and rasterized
-            // once per glyph and size).
-            let base = self.rasterize_key(font, glyph, size, 0, hinted);
-            if base.is_empty() {
-                (*base).clone()
-            } else {
-                shift_coverage(&base, quarter as f32 / 4.0)
-            }
-        } else if let Some(b) = self.rasterize_outline(face_idx, glyph, size, hinted) {
+        } else if let Some(b) = self.rasterize_outline(face_idx, glyph, size, quarter, hinted) {
+            // Subpixel variants are rasterized from the shifted outline, as
+            // Skia does: the same glyph renders the same at any position.
             b
         } else {
             let (m, coverage) = self.face(face_idx).rasterize_indexed(glyph, size);
-            GlyphBitmap {
+            let base = GlyphBitmap {
                 width: m.width as u32,
                 height: m.height as u32,
                 left: m.xmin,
                 top: m.ymin + m.height as i32,
                 coverage,
+            };
+            if quarter == 0 || base.is_empty() {
+                base
+            } else {
+                shift_coverage(&base, quarter as f32 / 4.0)
             }
         };
         let rc = Rc::new(bitmap);
@@ -1014,14 +1011,11 @@ impl FontContext {
 
     /// Rasterize a glyph from its outline (None: no outline data, use
     /// fontdue). Glyphs without contours give an empty bitmap.
-    fn rasterize_outline(&self, face_idx: usize, glyph: u16, size: f32, hinted: bool) -> Option<GlyphBitmap> {
+    fn rasterize_outline(&self, face_idx: usize, glyph: u16, size: f32, quarter: u8, hinted: bool) -> Option<GlyphBitmap> {
         let hf = self.hint_face(face_idx)?;
-        // fontdue substitutes glyph 0 for out-of-range ids; so do we by
-        // falling back to it.
-        let cmds = hf.outline(glyph)?;
-        let scale = size / hf.upem;
-        let knots = if hinted { crate::glyph_raster::fit_knots(&cmds, hf.upem, &hf.zones, scale) } else { Vec::new() };
-        let r = crate::glyph_raster::rasterize(&cmds, scale, 0.0, &knots);
+        // (No outline: fontdue renders the glyph, glyph 0 for bad ids.)
+        let fitted = hf.fitted(glyph, size, hinted)?;
+        let r = crate::glyph_raster::rasterize(&fitted.cmds, size / hf.upem, quarter as f32 / 4.0, &fitted.knots);
         Some(GlyphBitmap { width: r.width, height: r.height, left: r.left, top: r.top, coverage: r.coverage })
     }
 
