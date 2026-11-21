@@ -2,7 +2,7 @@
 dir css/CSS2 5782 6232
 dir css/compositing 36 60
 dir css/css-align 37 64
-dir css/css-backgrounds 606 718
+dir css/css-backgrounds 607 718
 dir css/css-borders 42 123
 dir css/css-box 38 42
 dir css/css-cascade 41 51
@@ -534,7 +534,6 @@ fail css/css-backgrounds/animations/background-color-animation-half-opaque.html
 fail css/css-backgrounds/animations/background-color-animation-pseudo-element.html
 fail css/css-backgrounds/animations/background-color-animation-with-blur.html
 fail css/css-backgrounds/animations/invalidation/background-color-transition-with-initially-transparent.html
-fail css/css-backgrounds/background-attachment-353.html
 fail css/css-backgrounds/background-attachment-fixed-inside-transform-1.html
 fail css/css-backgrounds/background-attachment-local-hidden.html
 fail css/css-backgrounds/background-attachment-local/attachment-local-clipping-color-6.html
