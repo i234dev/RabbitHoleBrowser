@@ -1878,3 +1878,17 @@ fn load_event_resource_rearms_do_not_amplify_a_window_ready_callback() {
     assert_eq!(after, ["1 1 1 complete"]);
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
+
+/// `atob` is Infra's forgiving-base64 decode: whitespace and final padding
+/// are optional, anything else outside the standard alphabet throws.
+#[test]
+fn atob_is_forgiving_base64() {
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    let out = run(&mut env, &mut host, r#"
+        const t = (s) => { try { return JSON.stringify(atob(s)); } catch (e) { return e.name; } };
+        console.log(['YQ', 'YQ=', 'YQ==', ' Y Q\n=\t= ', 'YWJj', 'YWI', 'YQ===', 'Y', 'YQ==YQ==', '_-8', 'YQ=a', 'YW I', '/w=='].map(t).join(' '));
+        console.log([...atob('/+7d')].map(c => c.charCodeAt(0)).join(','));
+    "#);
+    assert!(out.contains(&r#""a" InvalidCharacterError "a" "a" "abc" "ab" InvalidCharacterError InvalidCharacterError InvalidCharacterError InvalidCharacterError InvalidCharacterError InvalidCharacterError "ÿ""#.to_string()), "{out:?}");
+    assert!(out.contains(&"255,238,221".to_string()), "{out:?}");
+}
