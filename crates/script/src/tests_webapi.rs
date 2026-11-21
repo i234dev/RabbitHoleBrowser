@@ -1679,3 +1679,27 @@ fn parent_element_skips_fragments_and_shadow_roots() {
     );
     assert_eq!(out, "'null|true|true|null|null|null|true|true|null|true|null'");
 }
+
+/// `iframe.sandbox` and `link.sizes` are DOMTokenLists (players add
+/// sandbox flags with `iframe.sandbox.add(...)`); assigning a string
+/// forwards to the attribute.
+#[test]
+fn iframe_sandbox_and_link_sizes_are_token_lists() {
+    let out = result_of(
+        "<html><body><iframe sandbox='allow-forms'></iframe><link rel=icon sizes='16x16 32x32'></body></html>",
+        r#"
+        const r = [];
+        const f = document.querySelector('iframe');
+        r.push(f.sandbox instanceof DOMTokenList, f.sandbox.length, f.sandbox.contains('allow-forms'), f.sandbox === f.sandbox);
+        f.sandbox.add('allow-scripts', 'allow-same-origin');
+        r.push(f.getAttribute('sandbox'));
+        f.sandbox = 'allow-popups';
+        r.push(f.sandbox.value, f.sandbox.length);
+        const l = document.querySelector('link');
+        r.push(l.sizes instanceof DOMTokenList, l.sizes.length, l.sizes.item(1), String(l.sizes));
+        r.push(document.createElement('img').sizes === '', typeof document.createElement('source').sizes);
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(out, "'true|1|true|true|allow-forms allow-scripts allow-same-origin|allow-popups|1|true|2|32x32|16x16 32x32|true|string'");
+}

@@ -2851,9 +2851,10 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, style, "disabled", "disabled", Reflect::Bool);
     let link = define_class(realm, "HTMLLinkElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(link, "sheet", Some(style_sheet), None, ACC);
-    realm.define_accessor(link, "relList", Some(e_rel_list), None, ACC);
+    realm.define_accessor(link, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
     reflect(realm, link, "href", "href", Reflect::Url);
-    for (p, at) in [("rel", "rel"), ("type", "type"), ("media", "media"), ("as", "as"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("hreflang", "hreflang"), ("referrerPolicy", "referrerpolicy"), ("sizes", "sizes"), ("imageSrcset", "imagesrcset")] {
+    for (p, at) in [("rel", "rel"), ("type", "type"), ("media", "media"), ("as", "as"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("hreflang", "hreflang"), ("referrerPolicy", "referrerpolicy"), ("imageSrcset", "imagesrcset")] {
+        // (`sizes` is a DOMTokenList, reflected from the table in html.js.)
         reflect(realm, link, p, at, Reflect::Str);
     }
     reflect(realm, link, "disabled", "disabled", Reflect::Bool);
@@ -2862,7 +2863,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(iframe, "contentWindow", Some(iframe_content_window), None, ACC);
     realm.define_accessor(iframe, "contentDocument", Some(iframe_content_document), None, ACC);
     reflect(realm, iframe, "src", "src", Reflect::Url);
-    for (p, at) in [("name", "name"), ("allow", "allow"), ("sandbox", "sandbox"), ("srcdoc", "srcdoc"), ("loading", "loading"), ("referrerPolicy", "referrerpolicy"), ("width", "width"), ("height", "height"), ("title", "title")] {
+    // (`sandbox` is a DOMTokenList, reflected from the table in html.js.)
+    for (p, at) in [("name", "name"), ("allow", "allow"), ("srcdoc", "srcdoc"), ("loading", "loading"), ("referrerPolicy", "referrerpolicy"), ("width", "width"), ("height", "height"), ("title", "title")] {
         reflect(realm, iframe, p, at, Reflect::Str);
     }
     reflect(realm, iframe, "allowFullscreen", "allowfullscreen", Reflect::Bool);
