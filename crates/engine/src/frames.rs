@@ -152,6 +152,22 @@ pub struct ChildFrame {
 #[derive(Default)]
 pub struct Frames {
     pub children: Vec<ChildFrame>,
+    /// The frame elements of the document and their sources, as last
+    /// found by [`Engine::sync_frames`] (see [`FrameScan`]).
+    scan: Option<FrameScan>,
+}
+
+/// The `<iframe>` / `<frame>` elements of a document in tree order with
+/// their sources, valid while the document has the same incarnation and
+/// mutation count, the base URL is the same (sources resolve against it)
+/// and scripting is still on or off (`<noscript>` content).
+struct FrameScan {
+    doc: rabbithole_dom::DocumentWeak,
+    epoch: u64,
+    base: Url,
+    scripting: bool,
+    nodes: Vec<NodeId>,
+    sources: Vec<FrameSource>,
 }
 
 impl Frames {
@@ -502,19 +518,28 @@ impl Engine {
     }
 
     pub(crate) fn sync_frames(&self, page: &mut Page) {
-        let iframes: Vec<NodeId> = if page.frame_depth >= MAX_DEPTH {
-            Vec::new()
-        } else {
-            // With scripting on, `<noscript>` content is inert.
-            page.doc
-                .descendants(Document::ROOT)
-                .filter(|&n| matches!(page.doc.tag(n), Some("iframe" | "frame")) && !(self.scripting && crate::in_noscript(&page.doc, n)))
-                .take(MAX_FRAMES_PER_PAGE)
-                .collect()
-        };
-        if iframes.is_empty() && page.frames.children.is_empty() {
+        let epoch = page.doc.epoch();
+        let fresh = page.frames.scan.as_ref().is_some_and(|s| s.epoch == epoch && s.scripting == self.scripting && s.doc.is_for(&page.doc) && s.base == page.base_url);
+        if !fresh {
+            let nodes: Vec<NodeId> = if page.frame_depth >= MAX_DEPTH {
+                Vec::new()
+            } else {
+                // With scripting on, `<noscript>` content is inert.
+                page.doc
+                    .descendants(Document::ROOT)
+                    .filter(|&n| matches!(page.doc.tag(n), Some("iframe" | "frame")) && !(self.scripting && crate::in_noscript(&page.doc, n)))
+                    .take(MAX_FRAMES_PER_PAGE)
+                    .collect()
+            };
+            let sources = nodes.iter().map(|&n| frame_source(page, n)).collect();
+            page.frames.scan = Some(FrameScan { doc: page.doc.weak_identity(), epoch, base: page.base_url.clone(), scripting: self.scripting, nodes, sources });
+        }
+        let scan = page.frames.scan.as_ref().expect("frame scan");
+        if scan.nodes.is_empty() && page.frames.children.is_empty() {
             return;
         }
+        let iframes = scan.nodes.clone();
+        let sources = scan.sources.clone();
         let mut reg = self.frames.borrow_mut();
         // Removed iframes drop their browsing context.
         let before = page.frames.children.len();
@@ -526,8 +551,7 @@ impl Engine {
             keep
         });
         let mut changed = before != page.frames.children.len();
-        for &node in &iframes {
-            let source = frame_source(page, node);
+        for (&node, source) in iframes.iter().zip(sources) {
             match page.frames.children.iter_mut().find(|c| c.node == node) {
                 Some(c) if c.source == source => {}
                 Some(c) => {
