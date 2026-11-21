@@ -36,7 +36,7 @@ pub(crate) struct Layout {
     /// Offset of the frame's scope id.
     pub frame_scope: i32,
     /// In an object table entry: the byte that tells a scope object
-    /// (`ObjectKind::Scope`) and its value, and the `Box<ScopeData>`.
+    /// (`ObjectKind::Scope`) and its value, and the `ScopeBox` pointer.
     pub scope_tag: i32,
     pub scope_tag_value: u64,
     /// How variants are told apart: `false`, an explicit tag byte at
@@ -138,7 +138,7 @@ fn probe() -> Result<Layout, u32> {
     let kind = obj + std::mem::offset_of!(Object, kind);
     let ksize = std::mem::size_of::<ObjectKind>();
     let scope = |parent: Option<ObjectId>, n: usize| {
-        Some(Object::new(None, ObjectKind::Scope(Box::new(crate::heap::ScopeData { slots: vec![crate::value::Value::Undefined; n], parent, names: None }))))
+        Some(Object::new(None, ObjectKind::Scope(crate::heap::ScopeBox::new(n, parent, None))))
     };
     let bytes = |e: &Option<Object>| -> Vec<u8> {
         let b = e as *const Option<Object> as *const u8;
@@ -193,7 +193,18 @@ fn probe() -> Result<Layout, u32> {
         return Err(1000 + line!());
     }
     let sd = std::mem::offset_of!(crate::heap::ScopeData, slots);
-    let (sp, sl) = vec_words::<crate::value::Value>(Vec::new(), crate::value::Value::Undefined).ok_or(14u32)?;
+    let (sp, sl) = crate::heap::ScopeSlots::WORDS;
+    // Check them on the probe scope.
+    {
+        let ObjectKind::Scope(b) = &s1.as_ref().ok_or(14u32)?.kind else { return Err(14) };
+        let at = |i: usize| -> usize {
+            // SAFETY: reading a word of the live `ScopeData` within its size.
+            unsafe { std::ptr::read((b1 + sd + i * w) as *const usize) }
+        };
+        if at(sp) != b.slots.as_ptr() as usize || at(sl) != 3 {
+            return Err(1000 + line!());
+        }
+    }
     let parent = std::mem::offset_of!(crate::heap::ScopeData, parent);
     Ok(Layout {
         heap_ptr: i32_of(heap + hp * w).ok_or(15u32)?,

@@ -131,11 +131,148 @@ pub struct BoundFunction {
 
 #[derive(Debug)]
 pub struct ScopeData {
-    pub slots: Vec<Value>,
+    pub slots: ScopeSlots,
     pub parent: Option<ObjectId>,
     /// Slot names (for TDZ error messages); `None` for function scopes,
     /// whose names live on the `FunctionCode`.
     pub names: Option<Rc<Vec<JsStr>>>,
+}
+
+/// The fixed-size slot array of a scope, stored right after its
+/// [`ScopeData`] in the same allocation (see [`ScopeBox`]). Native code
+/// reads `ptr` and `len` (see `jit::layout`).
+#[repr(C)]
+pub struct ScopeSlots {
+    ptr: std::ptr::NonNull<Value>,
+    len: usize,
+}
+
+impl ScopeSlots {
+    /// Word indices of the slots pointer and of the length (`repr(C)`).
+    #[cfg(feature = "jit")]
+    pub(crate) const WORDS: (usize, usize) = (0, 1);
+}
+
+impl std::ops::Deref for ScopeSlots {
+    type Target = [Value];
+    #[inline(always)]
+    fn deref(&self) -> &[Value] {
+        // SAFETY: `ptr` points to `len` initialized values owned by the
+        // enclosing `ScopeBox` allocation.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl std::ops::DerefMut for ScopeSlots {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [Value] {
+        // SAFETY: as in `deref`; `&mut self` gives exclusive access.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl std::fmt::Debug for ScopeSlots {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+/// An owned [`ScopeData`] and its slots in one allocation (a scope per
+/// call is common enough that a box plus a slot vector cost twice).
+pub struct ScopeBox(std::ptr::NonNull<ScopeData>);
+
+impl ScopeBox {
+    /// Header layout and the offset of the slots after it.
+    #[inline(always)]
+    fn layout(n: usize) -> (std::alloc::Layout, usize) {
+        let (l, off) = std::alloc::Layout::new::<ScopeData>().extend(std::alloc::Layout::array::<Value>(n).expect("scope size")).expect("scope size");
+        (l.pad_to_align(), off)
+    }
+
+    /// A scope of `n` slots, each `undefined`.
+    #[inline]
+    pub fn new(n: usize, parent: Option<ObjectId>, names: Option<Rc<Vec<JsStr>>>) -> ScopeBox {
+        // SAFETY: every slot is written before the box exists.
+        unsafe { Self::build(n, parent, names, |p| for i in 0..n { std::ptr::write(p.add(i), Value::Undefined) }) }
+    }
+
+    /// A scope holding `values`.
+    pub fn from_values(values: Vec<Value>, parent: Option<ObjectId>, names: Option<Rc<Vec<JsStr>>>) -> ScopeBox {
+        let n = values.len();
+        // SAFETY: the values are moved into the `n` slots.
+        unsafe {
+            Self::build(n, parent, names, |p| {
+                for (i, v) in values.into_iter().enumerate() {
+                    std::ptr::write(p.add(i), v);
+                }
+            })
+        }
+    }
+
+    /// A copy of this scope (same parent and names, cloned values).
+    pub fn copy(&self) -> ScopeBox {
+        let src: &[Value] = &self.slots;
+        // SAFETY: each slot is written with a clone of the source slot.
+        unsafe {
+            Self::build(src.len(), self.parent, self.names.clone(), |p| {
+                for (i, v) in src.iter().enumerate() {
+                    std::ptr::write(p.add(i), v.clone());
+                }
+            })
+        }
+    }
+
+    /// SAFETY: `init` must initialize all `n` slots.
+    #[inline(always)]
+    unsafe fn build(n: usize, parent: Option<ObjectId>, names: Option<Rc<Vec<JsStr>>>, init: impl FnOnce(*mut Value)) -> ScopeBox {
+        let (layout, off) = Self::layout(n);
+        let base = std::alloc::alloc(layout);
+        if base.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        let slots = base.add(off) as *mut Value;
+        init(slots);
+        let head = base as *mut ScopeData;
+        std::ptr::write(head, ScopeData { slots: ScopeSlots { ptr: std::ptr::NonNull::new_unchecked(slots), len: n }, parent, names });
+        ScopeBox(std::ptr::NonNull::new_unchecked(head))
+    }
+}
+
+impl std::ops::Deref for ScopeBox {
+    type Target = ScopeData;
+    #[inline(always)]
+    fn deref(&self) -> &ScopeData {
+        // SAFETY: the box owns a live `ScopeData`.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl std::ops::DerefMut for ScopeBox {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut ScopeData {
+        // SAFETY: the box owns a live `ScopeData`; `&mut self` is exclusive.
+        unsafe { self.0.as_mut() }
+    }
+}
+
+impl Drop for ScopeBox {
+    fn drop(&mut self) {
+        // SAFETY: the allocation was made by `build` with the layout for
+        // `len` slots; values and header are dropped once, then freed.
+        unsafe {
+            let head = self.0.as_ptr();
+            let n = (*head).slots.len;
+            std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut((*head).slots.ptr.as_ptr(), n));
+            std::ptr::drop_in_place(&mut (*head).names);
+            std::alloc::dealloc(head as *mut u8, Self::layout(n).0);
+        }
+    }
+}
+
+impl std::fmt::Debug for ScopeBox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -694,7 +831,7 @@ pub enum ObjectKind {
     Function(Box<Closure>),
     Native(Box<NativeFunction>),
     Bound(Box<BoundFunction>),
-    Scope(Box<ScopeData>),
+    Scope(ScopeBox),
     Error,
     Arguments,
     /// A sloppy function's arguments object whose index properties alias
@@ -888,7 +1025,7 @@ impl Object {
     fn prefetch_inner_parts(&self) {
         use crate::alloc::prefetch;
         match &self.kind {
-            ObjectKind::Scope(s) if s.slots.capacity() != 0 => prefetch(s.slots.as_ptr()),
+            ObjectKind::Scope(s) if s.slots.len() > 3 => prefetch(s.slots.as_ptr().wrapping_add(4)),
             ObjectKind::Function(c) => prefetch(std::rc::Rc::as_ptr(&c.code)),
             _ => {}
         }
@@ -1561,7 +1698,7 @@ pub fn visit_refs(obj: &Object, f: &mut impl FnMut(ObjectId)) {
             if let Some(p) = s.parent {
                 f(p);
             }
-            for v in &s.slots {
+            for v in s.slots.iter() {
                 val(f, v);
             }
         }

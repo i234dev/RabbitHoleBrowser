@@ -409,7 +409,7 @@ impl Realm {
     /// Run a compiled script in the global scope.
     pub fn run_script(&mut self, code: Rc<FunctionCode>) -> JsResult<Value> {
         let slots = code.scope_slots as usize;
-        let scope = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; slots], parent: None, names: None }))));
+        let scope = self.alloc(Object::new(None, ObjectKind::Scope(ScopeBox::new(slots, None, None))));
         let this = if code.flags.is_script { Value::Object(self.global) } else { Value::Undefined };
         let base = self.reserve_slots(code.frame_size());
         let frame = Frame {
@@ -561,7 +561,7 @@ impl Realm {
         let bottom = self.vstack.len();
         let base = bottom + kept;
         let nslots = cr.scope_slots as usize;
-        let mut slots: Vec<Value> = Vec::new();
+        let mut sb: Option<ScopeBox> = if nslots > 0 { Some(ScopeBox::new(nslots, parent_scope, None)) } else { None };
         // SAFETY: capacity was reserved above; source slots (caller frame
         // or an outside slice) do not overlap the new slots; every new slot
         // is written before `set_len` makes it visible.
@@ -592,32 +592,27 @@ impl Realm {
                     std::ptr::write(regs.add(i), arg(i));
                 }
             } else {
-                if nslots > 0 {
-                    slots = vec![Value::Undefined; nslots];
-                }
                 for (i, &loc) in cr.param_locs.iter().enumerate() {
                     // Repeated formal names share a location. A missing
                     // later argument must overwrite its earlier value too.
                     let v = if i < argc { arg(i) } else { Value::Undefined };
                     match loc {
                         VarLoc::Reg(r) => *regs.add(r as usize) = v,
-                        VarLoc::Slot(s) => slots[s as usize] = v,
+                        VarLoc::Slot(s) => sb.as_mut().expect("scope slot without a scope").slots[s as usize] = v,
                     }
                 }
             }
         }
-        if nslots > 0 && slots.is_empty() {
-            slots = vec![Value::Undefined; nslots];
-        }
         if let Some(sl) = cr.self_loc {
             match sl {
                 VarLoc::Reg(r) => self.vstack[base + r as usize] = Value::Object(id),
-                VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
+                VarLoc::Slot(s) => sb.as_mut().expect("scope slot without a scope").slots[s as usize] = Value::Object(id),
             }
         }
-        let scope = match parent_scope {
-            Some(p) if nslots == 0 => p,
-            _ => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None })))),
+        let scope = match (parent_scope, sb) {
+            (_, Some(sb)) => self.alloc(Object::new(None, ObjectKind::Scope(sb))),
+            (Some(p), None) => p,
+            (None, None) => self.alloc(Object::new(None, ObjectKind::Scope(ScopeBox::new(0, None, None)))),
         };
         let frame = Frame {
             code,
@@ -1055,7 +1050,7 @@ impl Realm {
         };
         let new_target = if flags.is_arrow { arrow_nt.unwrap_or(Value::Undefined) } else { new_target };
         let nslots = code.scope_slots as usize;
-        let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
+        let mut sb = ScopeBox::new(nslots, parent_scope, None);
         let mut arguments_obj = None;
         let mut rest_arr = None;
         if code.rest_loc.is_some() {
@@ -1077,6 +1072,7 @@ impl Realm {
         }
         let base = self.reserve_slots(code.frame_size());
         let stack = &mut self.vstack[base..];
+        let slots: &mut [Value] = &mut sb.slots;
         #[inline(always)]
         fn put(stack: &mut [Value], slots: &mut [Value], loc: VarLoc, v: Value) {
             match loc {
@@ -1086,23 +1082,23 @@ impl Realm {
         }
         for (i, &loc) in code.param_locs.iter().enumerate() {
             let v = args.get(i).cloned().unwrap_or(Value::Undefined);
-            put(stack, &mut slots, loc, v);
+            put(stack, slots, loc, v);
         }
         if let (Some(rl), Some(arr)) = (code.rest_loc, rest_arr) {
-            put(stack, &mut slots, rl, arr);
+            put(stack, slots, rl, arr);
         }
         if let Some(sl) = code.self_loc {
-            put(stack, &mut slots, sl, Value::Object(id));
+            put(stack, slots, sl, Value::Object(id));
         }
         if let (Some(al), Some(ao)) = (code.arguments_loc, &arguments_obj) {
-            put(stack, &mut slots, al, ao.clone());
+            put(stack, slots, al, ao.clone());
         }
         let scope = if nslots > 0 {
-            self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
+            self.alloc(Object::new(None, ObjectKind::Scope(sb)))
         } else {
             match parent_scope {
                 Some(p) => p,
-                None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
+                None => self.alloc(Object::new(None, ObjectKind::Scope(sb))),
             }
         };
         if let (Some(map), Some(V::Object(ao)), true) = (&code.arg_map, arguments_obj.as_ref().map(Value::v), nslots > 0) {
@@ -3327,7 +3323,7 @@ impl Realm {
                 Op::PushScope(n, names_idx) => {
                     let parent = frame!().scope;
                     let names = frame!().code().block_names.get(names_idx as usize).cloned();
-                    let s = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; n as usize], parent: Some(parent), names }))));
+                    let s = self.alloc(Object::new(None, ObjectKind::Scope(ScopeBox::new(n as usize, Some(parent), names))));
                     frame!().scope = s;
                     frame!().scope_depth += 1;
                 }
@@ -3342,11 +3338,11 @@ impl Realm {
                 }
                 Op::CopyScope => {
                     let cur = frame!().scope;
-                    let (slots, parent, names) = match &self.heap.get(cur).kind {
-                        ObjectKind::Scope(s) => (s.slots.clone(), s.parent, s.names.clone()),
+                    let copy = match &self.heap.get(cur).kind {
+                        ObjectKind::Scope(s) => s.copy(),
                         _ => unreachable!(),
                     };
-                    let s = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent, names }))));
+                    let s = self.alloc(Object::new(None, ObjectKind::Scope(copy)));
                     frame!().scope = s;
                 }
                 Op::GetProp(i, ic) => {
