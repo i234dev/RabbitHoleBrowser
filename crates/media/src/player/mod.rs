@@ -441,9 +441,15 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
             }
         }
     }
-    if decoder.is_none() && video.is_none() {
+    // Like browsers without a codec: a resource whose tracks cannot be
+    // decoded at all (e.g. an H.264-only MP4 where H.264 is unavailable)
+    // fails with MEDIA_ERR_SRC_NOT_SUPPORTED, so the element tries its
+    // next <source> and pages fall back instead of waiting on a picture
+    // that never comes.
+    if decoder.is_none() && vtx.is_none() {
         let codec = tracks.iter().filter_map(|t| t.codec_params.as_ref()?.audio()).map(crate::decode::codec_name).next().unwrap_or("none");
-        shared.fail(ERR_SRC_NOT_SUPPORTED, format!("no supported audio or video track (audio codec: {codec})"));
+        let vcodec = if vcodec.is_empty() { "none" } else { vcodec.as_str() };
+        shared.fail(ERR_SRC_NOT_SUPPORTED, format!("no supported audio or video track (audio codec: {codec}, video codec: {vcodec})"));
         return;
     }
     {

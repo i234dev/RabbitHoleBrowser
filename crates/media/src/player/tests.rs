@@ -69,6 +69,20 @@ fn unsupported_bytes_report_error() {
     assert_eq!(st.error.unwrap().0, ERR_SRC_NOT_SUPPORTED);
 }
 
+/// A video-only file whose codec this build cannot decode is unsupported
+/// (as in browsers without that codec), not a silent picture-less play.
+#[cfg(not(windows))]
+#[test]
+fn undecodable_video_only_file_is_unsupported() {
+    null_env();
+    let data = std::fs::read(format!("{}/tests/fixtures/green-h264-frag.mp4", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let p = Player::new(PlayerSource::Bytes { data, mime: "video/mp4".into() });
+    let st = wait_for(&p, 30.0, "error", |s| s.error.is_some() || s.ready >= 1);
+    let (code, msg) = st.error.clone().unwrap_or_else(|| panic!("played an undecodable file: {st:?}"));
+    assert_eq!(code, ERR_SRC_NOT_SUPPORTED);
+    assert!(msg.contains("h264"), "{msg}");
+}
+
 #[test]
 fn mse_opus_plays_buffered_range() {
     null_env();
