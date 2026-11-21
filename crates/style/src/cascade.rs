@@ -425,10 +425,26 @@ impl DeclCache {
 /// Style sharing: elements with the same parent style, custom properties,
 /// matched rules and inline declarations get the same computed style
 /// (siblings in lists, table cells, paragraphs...).
+///
+/// The key holds pointers: the entry keeps what they point to alive
+/// (parent style and custom properties, inline declarations), so a key
+/// cannot match a later, different object at the same address.
 #[derive(Default)]
 pub(crate) struct ShareCache {
-    map: HashMap<ShareKey, (ElementOut, Rc<ComputedStyle>, Rc<Vec<Declaration>>, Rc<Vec<Declaration>>), std::hash::BuildHasherDefault<FxHasher>>,
+    map: HashMap<ShareKey, ShareEntry, std::hash::BuildHasherDefault<FxHasher>>,
     pub(crate) hits: usize,
+}
+
+type ShareEntry = (ElementOut, Rc<ComputedStyle>, Rc<Vars>, Rc<Vec<Declaration>>, Rc<Vec<Declaration>>);
+
+impl ShareCache {
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.map.clear();
+    }
 }
 
 /// A fast hasher for keys made of pointers and small integers (not
@@ -659,7 +675,7 @@ pub(crate) fn compute_element<'a>(
         if cache.map.len() > 200_000 {
             cache.map.clear();
         }
-        cache.map.insert(k, (out.clone(), parent.clone(), presentational, style_attr));
+        cache.map.insert(k, (out.clone(), parent.clone(), parent_vars.clone(), presentational, style_attr));
     }
     out
 }
