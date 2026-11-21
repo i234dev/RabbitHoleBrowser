@@ -123,6 +123,16 @@ impl PartialEq for Vars {
         if same_layers(self, other) {
             return true;
         }
+        // Layers over the same map (a restyled element whose own
+        // declarations changed): only the names they set can differ.
+        let same_base = match (&self.parent, &other.parent) {
+            (Some(x), Some(y)) => same_layers(x, y),
+            (None, None) => true,
+            _ => false,
+        };
+        if same_base {
+            return self.own.keys().chain(other.own.keys()).all(|k| self.get(k) == other.get(k));
+        }
         let (a, b) = (self.flatten(), other.flatten());
         a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).map(|o| o.as_deref() == v.as_deref()).unwrap_or(false))
     }
@@ -163,6 +173,27 @@ mod tests {
         assert!(grand == flat);
         flat.insert("--c", val("4"));
         assert!(grand != flat);
+    }
+
+    #[test]
+    fn layers_over_the_same_map_compare_by_their_names() {
+        let mut root = Vars::default();
+        root.insert("--a", val("1"));
+        root.insert("--b", val("2"));
+        let root = Rc::new(root);
+        let layer = |f: &dyn Fn(&mut Vars)| {
+            let mut v = Vars::child_of(&root);
+            f(&mut v);
+            v
+        };
+        let plain = layer(&|_| {});
+        // Redeclaring an inherited value changes nothing.
+        assert!(layer(&|v| v.insert("--a", val("1"))) == plain);
+        assert!(layer(&|v| v.insert("--a", val("3"))) != plain);
+        assert!(layer(&|v| v.remove("--b")) != plain);
+        assert!(layer(&|v| v.remove("--b")) == layer(&|v| v.remove("--b")));
+        assert!(layer(&|v| v.insert("--c", val("4"))) != layer(&|v| v.insert("--d", val("4"))));
+        assert!(layer(&|v| v.insert("--c", val("4"))) == layer(&|v| v.insert("--c", val("4"))));
     }
 
     #[test]
