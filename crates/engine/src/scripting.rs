@@ -1004,8 +1004,13 @@ impl Engine {
     /// style flush; `modulepreload` / `preload` / `prefetch`: right away).
     /// Loaders such as Vite's preload helper await a stylesheet link's
     /// `load` before importing the module that needs it.
+    ///
+    /// The flush that sees the `<link>` change can be a forced one inside a
+    /// script (`offsetHeight` after the insertion), while the script host
+    /// is out of the page: the events are still queued then, and fired
+    /// when the script returns. Later flushes do not look again.
     pub(crate) fn queue_link_events(&self, page: &mut Page) {
-        if page.script.host.is_none() {
+        if !self.scripting {
             return;
         }
         let mut roots = vec![Document::ROOT];
