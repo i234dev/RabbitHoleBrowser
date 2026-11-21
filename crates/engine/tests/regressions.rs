@@ -349,6 +349,25 @@ fn link_elements_fire_load_and_error_events() {
     assert_eq!(e.eval_in_page(&mut page, "log.length"), "4");
 }
 
+/// Parser-inserted external scripts fire `load` after they run (`error`
+/// when the fetch fails), as "execute the script element" says. Module
+/// loaders that find their bundles already in the document wait for these
+/// events before resolving the modules defined in them.
+#[test]
+fn parser_inserted_external_scripts_fire_load_and_error() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        r#"<script>var log = []; document.addEventListener('load', function (ev) { if (ev.target.id) log.push('capture:' + ev.target.id); }, true);</script>
+           <script id=ok src="data:text/javascript,log.push('ran')" onload="log.push('load')"></script>
+           <script id=bad src="file:///nonexistent-rabbithole-dir/missing.js" onerror="log.push('error')" onload="log.push('bad-load')"></script>"#,
+    );
+    for _ in 0..3 {
+        let _ = e.tick(&mut page);
+    }
+    assert_eq!(e.eval_in_page(&mut page, "log.join(',')"), "'ran,capture:ok,load,error'");
+}
+
 /// A stylesheet `<link>` inserted by a script that then forces a layout
 /// (the "media swap" loader: clone a `media=print` link, set `media=all`,
 /// replace the original, await the clone's `load`) still fires `load`: the
