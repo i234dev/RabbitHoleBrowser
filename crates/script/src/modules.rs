@@ -60,6 +60,40 @@ pub struct ModuleState {
     pub import_map_nodes: HashSet<NodeId>,
     /// Whether the document has been scanned for import maps at least once.
     pub scanned: bool,
+    /// `import_map` normalised against a base URL (the map and base it was
+    /// computed from, to notice changes): resolving a specifier must not
+    /// re-parse every key of a large map.
+    normalized: Option<(ImportMap, String, Rc<NormalizedMap>)>,
+}
+
+/// An import map with its keys resolved against the document base URL
+/// and each specifier map sorted longest key first (HTML "sort and
+/// normalize a specifier map").
+#[derive(Debug, Default)]
+pub(crate) struct NormalizedMap {
+    imports: Vec<(String, String)>,
+    scopes: Vec<(String, Vec<(String, String)>)>,
+}
+
+impl NormalizedMap {
+    pub(crate) fn new(map: &ImportMap, doc_base: &Url) -> NormalizedMap {
+        let entries = |m: &[(String, String)]| {
+            let mut e: Vec<(String, String)> = m
+                .iter()
+                .map(|(k, v)| {
+                    // Keys that are URL-like are normalised to absolute URLs.
+                    let key = parse_url_like(k, doc_base).map(|u| u.to_string()).unwrap_or_else(|| k.clone());
+                    (key, v.clone())
+                })
+                .collect();
+            e.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+            e
+        };
+        let mut scopes: Vec<(String, Vec<(String, String)>)> =
+            map.scopes.iter().map(|(s, e)| (parse_url_like(s, doc_base).map(|u| u.to_string()).unwrap_or_else(|| s.clone()), entries(e))).collect();
+        scopes.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        NormalizedMap { imports: entries(&map.imports), scopes }
+    }
 }
 
 /// Install the module loader and the `import.meta` hook on a realm.
@@ -153,21 +187,13 @@ fn parse_url_like(spec: &str, base: &Url) -> Option<Url> {
 
 /// Resolve `normalized` through one specifier map (exact keys, then the
 /// longest matching prefix key ending in `/`).
-fn resolve_imports_match(normalized: &str, is_url: bool, map: &[(String, String)], base: &Url) -> Option<Result<Url, String>> {
-    let mut entries: Vec<(String, &String)> = map
-        .iter()
-        .map(|(k, v)| {
-            // Keys that are URL-like are normalised to absolute URLs.
-            let key = parse_url_like(k, base).map(|u| u.to_string()).unwrap_or_else(|| k.clone());
-            (key, v)
-        })
-        .collect();
-    entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+fn resolve_imports_match(normalized: &str, is_url: bool, entries: &[(String, String)], base: &Url) -> Option<Result<Url, String>> {
     for (key, addr) in entries {
+        let key = key.as_str();
         if key == normalized {
             return Some(parse_url_like(addr, base).ok_or_else(|| format!("Import map address \"{addr}\" for \"{key}\" is not a valid URL")));
         }
-        if key.ends_with('/') && normalized.starts_with(&key) && (!is_url || key.contains(':')) {
+        if key.ends_with('/') && normalized.starts_with(key) && (!is_url || key.contains(':')) {
             if !addr.ends_with('/') {
                 return Some(Err(format!("Import map address \"{addr}\" for prefix \"{key}\" must end with \"/\"")));
             }
@@ -181,14 +207,12 @@ fn resolve_imports_match(normalized: &str, is_url: bool, map: &[(String, String)
 
 /// HTML "resolve a module specifier": import map scopes (for the
 /// referrer), top-level imports, then URL-like specifiers.
-pub(crate) fn resolve_specifier(map: &ImportMap, specifier: &str, referrer: &Url, doc_base: &Url) -> Result<Url, String> {
+pub(crate) fn resolve_specifier(map: &NormalizedMap, specifier: &str, referrer: &Url, doc_base: &Url) -> Result<Url, String> {
     let as_url = parse_url_like(specifier, referrer);
     let normalized = as_url.as_ref().map(|u| u.to_string()).unwrap_or_else(|| specifier.to_string());
     let referrer_str = referrer.to_string();
-    let mut scopes: Vec<(String, &Vec<(String, String)>)> = map.scopes.iter().map(|(s, e)| (parse_url_like(s, doc_base).map(|u| u.to_string()).unwrap_or_else(|| s.clone()), e)).collect();
-    scopes.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-    for (prefix, entries) in scopes {
-        if prefix == referrer_str || (prefix.ends_with('/') && referrer_str.starts_with(&prefix)) {
+    for (prefix, entries) in &map.scopes {
+        if *prefix == referrer_str || (prefix.ends_with('/') && referrer_str.starts_with(prefix.as_str())) {
             if let Some(r) = resolve_imports_match(&normalized, as_url.is_some(), entries, doc_base) {
                 return r;
             }
@@ -215,9 +239,21 @@ fn referrer_base(referrer: &str) -> Url {
 fn resolve_from(referrer: &str, specifier: &str) -> Result<Url, String> {
     let base = referrer_base(referrer);
     let doc_base = with_env(|env| env.base_url());
-    let st = state();
-    let st = st.borrow();
-    resolve_specifier(&st.modules.import_map, specifier, &base, &doc_base)
+    let map = {
+        let st = state();
+        let mut st = st.borrow_mut();
+        let m = &mut st.modules;
+        let base_key = doc_base.to_string();
+        match &m.normalized {
+            Some((src, b, n)) if *b == base_key && *src == m.import_map => n.clone(),
+            _ => {
+                let n = Rc::new(NormalizedMap::new(&m.import_map, &doc_base));
+                m.normalized = Some((m.import_map.clone(), base_key, n.clone()));
+                n
+            }
+        }
+    };
+    resolve_specifier(&map, specifier, &base, &doc_base)
 }
 
 // ------------------------------------------------------------------ loader

@@ -1164,6 +1164,11 @@ fn import_maps_resolve_bare_specifiers() {
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out, vec!["pkg".to_string()]);
     assert!(host.set_import_map("not json").is_err());
+    // A map merged after resolutions were cached still applies.
+    host.set_import_map(r#"{"imports":{"pkg2":"https://example.test/pkg/index.js","pkg":"https://example.test/ignored.js"}}"#).unwrap();
+    let (out, r) = run_module(&mut env, &mut host, "console.log(import.meta.resolve('pkg2'), import.meta.resolve('pkg'));");
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, vec!["https://example.test/pkg/index.js https://example.test/pkg/index.js".to_string()]);
 }
 
 #[test]
