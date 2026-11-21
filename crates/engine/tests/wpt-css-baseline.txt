@@ -1,32 +1,32 @@
 # WPT reftest baseline: per-directory pass/total, then failing tests.
-dir css/CSS2 5705 6232
+dir css/CSS2 5782 6232
 dir css/compositing 37 60
 dir css/css-align 37 64
-dir css/css-backgrounds 603 718
+dir css/css-backgrounds 604 718
 dir css/css-borders 43 123
 dir css/css-box 38 42
 dir css/css-cascade 41 51
 dir css/css-color 291 311
 dir css/css-conditional 148 172
 dir css/css-contain 304 435
-dir css/css-display 178 223
-dir css/css-flexbox 874 1027
+dir css/css-display 179 223
+dir css/css-flexbox 875 1027
 dir css/css-fonts 262 387
-dir css/css-grid 1389 1763
+dir css/css-grid 1390 1763
 dir css/css-images 434 482
 dir css/css-masking 268 384
 dir css/css-nesting 13 17
-dir css/css-overflow 446 719
-dir css/css-position 154 251
+dir css/css-overflow 449 719
+dir css/css-position 156 251
 dir css/css-sizing 399 568
-dir css/css-text 1195 1550
+dir css/css-text 1201 1550
 dir css/css-text-decor 282 339
-dir css/css-transforms 747 794
+dir css/css-transforms 748 794
 dir css/css-ui 877 962
 dir css/css-values 115 192
 dir css/css-writing-modes 934 1162
 dir css/filter-effects 281 370
-dir css/selectors 201 229
+dir css/selectors 203 229
 fail css/CSS2/abspos/abspos-containing-block-initial-004a.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004b.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004c.xht
@@ -216,18 +216,6 @@ fail css/CSS2/floats/zero-width-floats-positioning.tentative.html
 fail css/CSS2/fonts/font-042.xht
 fail css/CSS2/fonts/font-family-008.xht
 fail css/CSS2/fonts/font-family-013.xht
-fail css/CSS2/fonts/font-family-applies-to-001.xht
-fail css/CSS2/fonts/font-family-applies-to-002.xht
-fail css/CSS2/fonts/font-family-applies-to-005.xht
-fail css/CSS2/fonts/font-family-applies-to-006.xht
-fail css/CSS2/fonts/font-family-applies-to-007.xht
-fail css/CSS2/fonts/font-family-applies-to-008.xht
-fail css/CSS2/fonts/font-family-applies-to-009.xht
-fail css/CSS2/fonts/font-family-applies-to-010.xht
-fail css/CSS2/fonts/font-family-applies-to-011.xht
-fail css/CSS2/fonts/font-family-applies-to-014.xht
-fail css/CSS2/fonts/font-family-applies-to-015.xht
-fail css/CSS2/fonts/font-family-applies-to-017.xht
 fail css/CSS2/fonts/font-family-invalid-characters-001.xht
 fail css/CSS2/fonts/font-family-invalid-characters-002.xht
 fail css/CSS2/fonts/font-family-invalid-characters-003.xht
@@ -238,7 +226,6 @@ fail css/CSS2/fonts/font-family-rule-002a.xht
 fail css/CSS2/fonts/font-family-valid-characters-002.xht
 fail css/CSS2/fonts/font-matching-rule-009.xht
 fail css/CSS2/fonts/font-size-121.xht
-fail css/CSS2/fonts/font-size-122.xht
 fail css/CSS2/fonts/font-size-123.xht
 fail css/CSS2/fonts/fonts-012.xht
 fail css/CSS2/fonts/fonts-013.xht
@@ -365,7 +352,6 @@ fail css/CSS2/positioning/toogle-abspos-on-relpos-inline-child.html
 fail css/CSS2/selectors/attribute-value-selector-007.html
 fail css/CSS2/selectors/attribute-value-selector-010.html
 fail css/CSS2/selectors/first-child-selector-003.xht
-fail css/CSS2/selectors/first-letter-selector-028.xht
 fail css/CSS2/selectors/first-line-floats-002.xht
 fail css/CSS2/selectors/first-line-pseudo-012.xht
 fail css/CSS2/selectors/first-line-pseudo-013.xht
@@ -434,33 +420,13 @@ fail css/CSS2/text/bidi-span-002.html
 fail css/CSS2/text/bidi-span-003.html
 fail css/CSS2/text/letter-spacing-080.xht
 fail css/CSS2/text/text-indent-014.xht
-fail css/CSS2/text/text-indent-103.xht
-fail css/CSS2/text/text-indent-104.xht
 fail css/CSS2/text/text-indent-applies-to-003.xht
 fail css/CSS2/text/text-indent-wrap-001.xht
 fail css/CSS2/text/text-indent-wrap-002.html
 fail css/CSS2/text/text-transform-bicameral-007.xht
 fail css/CSS2/text/text-transform-cap-002.xht
 fail css/CSS2/text/text-transform-cap-003.xht
-fail css/CSS2/text/white-space-001.xht
-fail css/CSS2/text/white-space-002.xht
-fail css/CSS2/text/white-space-003.xht
-fail css/CSS2/text/white-space-005.xht
-fail css/CSS2/text/white-space-006.xht
 fail css/CSS2/text/white-space-007.xht
-fail css/CSS2/text/white-space-applies-to-001.xht
-fail css/CSS2/text/white-space-applies-to-002.xht
-fail css/CSS2/text/white-space-applies-to-005.xht
-fail css/CSS2/text/white-space-applies-to-006.xht
-fail css/CSS2/text/white-space-applies-to-007.xht
-fail css/CSS2/text/white-space-applies-to-008.xht
-fail css/CSS2/text/white-space-applies-to-009.xht
-fail css/CSS2/text/white-space-applies-to-010.xht
-fail css/CSS2/text/white-space-applies-to-011.xht
-fail css/CSS2/text/white-space-applies-to-012.xht
-fail css/CSS2/text/white-space-applies-to-013.xht
-fail css/CSS2/text/white-space-applies-to-014.xht
-fail css/CSS2/text/white-space-applies-to-015.xht
 fail css/CSS2/text/white-space-bidirectionality-001.xht
 fail css/CSS2/text/white-space-collapsing-001.xht
 fail css/CSS2/text/white-space-collapsing-002.xht
@@ -476,43 +442,6 @@ fail css/CSS2/text/white-space-normal-008.xht
 fail css/CSS2/text/white-space-normal-009.xht
 fail css/CSS2/text/white-space-nowrap-005.xht
 fail css/CSS2/text/white-space-nowrap-006.xht
-fail css/CSS2/text/white-space-processing-001.xht
-fail css/CSS2/text/white-space-processing-002.xht
-fail css/CSS2/text/white-space-processing-003.xht
-fail css/CSS2/text/white-space-processing-004.xht
-fail css/CSS2/text/white-space-processing-008.xht
-fail css/CSS2/text/white-space-processing-009.xht
-fail css/CSS2/text/white-space-processing-010.xht
-fail css/CSS2/text/white-space-processing-011.xht
-fail css/CSS2/text/white-space-processing-012.xht
-fail css/CSS2/text/white-space-processing-019.xht
-fail css/CSS2/text/white-space-processing-020.xht
-fail css/CSS2/text/white-space-processing-021.xht
-fail css/CSS2/text/white-space-processing-022.xht
-fail css/CSS2/text/white-space-processing-023.xht
-fail css/CSS2/text/white-space-processing-024.xht
-fail css/CSS2/text/white-space-processing-025.xht
-fail css/CSS2/text/white-space-processing-026.xht
-fail css/CSS2/text/white-space-processing-027.xht
-fail css/CSS2/text/white-space-processing-028.xht
-fail css/CSS2/text/white-space-processing-029.xht
-fail css/CSS2/text/white-space-processing-030.xht
-fail css/CSS2/text/white-space-processing-031.xht
-fail css/CSS2/text/white-space-processing-032.xht
-fail css/CSS2/text/white-space-processing-033.xht
-fail css/CSS2/text/white-space-processing-034.xht
-fail css/CSS2/text/white-space-processing-035.xht
-fail css/CSS2/text/white-space-processing-036.xht
-fail css/CSS2/text/white-space-processing-037.xht
-fail css/CSS2/text/white-space-processing-038.xht
-fail css/CSS2/text/white-space-processing-039.xht
-fail css/CSS2/text/white-space-processing-040.xht
-fail css/CSS2/text/white-space-processing-041.xht
-fail css/CSS2/text/white-space-processing-042.xht
-fail css/CSS2/text/white-space-processing-050.xht
-fail css/CSS2/text/white-space-processing-051.xht
-fail css/CSS2/text/white-space-processing-054.xht
-fail css/CSS2/text/white-space-processing-055.xht
 fail css/CSS2/text/word-spacing-characters-001.xht
 fail css/CSS2/text/word-spacing-remove-space-002.xht
 fail css/CSS2/text/word-spacing-remove-space-004.xht
@@ -533,12 +462,6 @@ fail css/CSS2/ui/overflow-applies-to-001.xht
 fail css/CSS2/ui/overflow-applies-to-002.xht
 fail css/CSS2/ui/overflow-applies-to-003.xht
 fail css/CSS2/ui/overflow-applies-to-004.xht
-fail css/CSS2/values/numbers-units-007.xht
-fail css/CSS2/values/numbers-units-009.xht
-fail css/CSS2/values/numbers-units-010.xht
-fail css/CSS2/values/numbers-units-011.xht
-fail css/CSS2/values/numbers-units-012.xht
-fail css/CSS2/values/numbers-units-021.xht
 fail css/CSS2/visudet/content-height-005.html
 fail css/CSS2/visudet/inline-block-baseline-003.xht
 fail css/CSS2/visudet/inline-block-baseline-004.xht
@@ -642,7 +565,6 @@ fail css/css-backgrounds/background-clip/clip-text-fragmentation.html
 fail css/css-backgrounds/background-clip/clip-text-inline.html
 fail css/css-backgrounds/background-clip/clip-text-multiline-background-image.html
 fail css/css-backgrounds/background-clip/clip-text-multiline-linebreak.html
-fail css/css-backgrounds/background-clip/clip-text-on-body-not-propagated-to-root.html
 fail css/css-backgrounds/background-clip/clip-text-scaled.html
 fail css/css-backgrounds/background-clip/clip-text-stacking-context-child-002.html
 fail css/css-backgrounds/background-clip/clip-text-stacking-context-child.html
@@ -1014,7 +936,6 @@ fail css/css-display/display-inline-dynamic-001.html
 fail css/css-display/display-inline-on-block-container.html
 fail css/css-display/display-table-cell-on-button.html
 fail css/css-display/run-in/run-in-basic-004.xht
-fail css/css-display/run-in/run-in-basic-006.xht
 fail css/css-display/run-in/run-in-basic-018.xht
 fail css/css-display/run-in/run-in-breaking-002.xht
 fail css/css-display/run-in/run-in-clear-001.xht
@@ -1096,7 +1017,6 @@ fail css/css-flexbox/flexbox-align-self-baseline-horiz-006.xhtml
 fail css/css-flexbox/flexbox-align-self-baseline-horiz-008.xhtml
 fail css/css-flexbox/flexbox-align-self-horiz-002.xhtml
 fail css/css-flexbox/flexbox-align-self-stretch-vert-002.html
-fail css/css-flexbox/flexbox-align-self-vert-001.xhtml
 fail css/css-flexbox/flexbox-align-self-vert-rtl-001.xhtml
 fail css/css-flexbox/flexbox-align-self-vert-rtl-002.xhtml
 fail css/css-flexbox/flexbox-align-self-vert-rtl-003.xhtml
@@ -1495,7 +1415,6 @@ fail css/css-grid/grid-lanes/item-placement/dense-packing/column-dense-packing-m
 fail css/css-grid/grid-lanes/item-placement/dense-packing/column-dense-packing-multi-span-013.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/column-track-reverse-dense-packing-fit-tolerance-002.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/row-dense-packing-fit-tolerance-002.html
-fail css/css-grid/grid-lanes/item-placement/dense-packing/row-dense-packing-multi-span-005.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/row-dense-packing-multi-span-006.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/row-track-reverse-dense-packing-fit-tolerance-002.html
 fail css/css-grid/grid-lanes/item-placement/fit-tolerance/fit-tolerance-percentage-intrinsic-row-001.html
@@ -1955,9 +1874,7 @@ fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-first-character-0
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-first-line-001.html
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-grapheme-001.html
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-hanging-punctuation-001.html
-fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-005.html
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-007.html
-fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-009.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-014.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-027.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-035.html
@@ -2102,7 +2019,6 @@ fail css/css-overflow/text-overflow-026.html
 fail css/css-overflow/text-overflow-027.html
 fail css/css-overflow/text-overflow-028.html
 fail css/css-overflow/text-overflow-029.html
-fail css/css-overflow/text-overflow-ellipsis-002.html
 fail css/css-overflow/text-overflow-ellipsis-bidi-grapheme-001.html
 fail css/css-overflow/text-overflow-ellipsis-editable-div-with-caret.html
 fail css/css-overflow/text-overflow-ellipsis-first-line.html
@@ -2172,8 +2088,6 @@ fail css/css-position/position-absolute-semi-replaced-stretch-other.html
 fail css/css-position/position-fixed-overflow-print.html
 fail css/css-position/position-fixed-scroll-nested-fixed.html
 fail css/css-position/replaced-object-backdrop.html
-fail css/css-position/static-position/htb-ltr-ltr.html
-fail css/css-position/static-position/htb-ltr-rtl.tentative.html
 fail css/css-position/static-position/htb-rtl-ltr.tentative.html
 fail css/css-position/static-position/htb-rtl-rtl.html
 fail css/css-position/static-position/top-layer-box-uses-icb-htb-ltr.html
@@ -2624,9 +2538,7 @@ fail css/css-text/text-indent/below-float2.html
 fail css/css-text/text-indent/below-float3.html
 fail css/css-text/text-indent/text-indent-each-line-hanging.html
 fail css/css-text/text-indent/text-indent-length-002.html
-fail css/css-text/text-indent/text-indent-percentage-001.xht
 fail css/css-text/text-indent/text-indent-with-absolute-pos-child.html
-fail css/css-text/text-justify/text-justify-001.html
 fail css/css-text/text-justify/text-justify-and-trailing-spaces-003.html
 fail css/css-text/text-justify/text-justify-inter-character-atomic-inline.html
 fail css/css-text/text-spacing-trim/text-spacing-trim-001.html
@@ -2662,8 +2574,6 @@ fail css/css-text/white-space/hanging-whitespace-002.tentative.html
 fail css/css-text/white-space/hanging-whitespace-003.tentative.html
 fail css/css-text/white-space/object-replacement-1.html
 fail css/css-text/white-space/object-replacement-2.html
-fail css/css-text/white-space/pre-wrap-019.html
-fail css/css-text/white-space/pre-wrap-020.html
 fail css/css-text/white-space/pre-wrap-align-center-002.html
 fail css/css-text/white-space/pre-wrap-align-end-002.html
 fail css/css-text/white-space/pre-wrap-align-left-002.html
@@ -2671,7 +2581,6 @@ fail css/css-text/white-space/pre-wrap-align-right-002.html
 fail css/css-text/white-space/pre-wrap-align-start-002.html
 fail css/css-text/white-space/pre-wrap-float-001.html
 fail css/css-text/white-space/tab-bidi-001.html
-fail css/css-text/white-space/text-wrap-balance-005.html
 fail css/css-text/white-space/text-wrap-balance-float-001.html
 fail css/css-text/white-space/text-wrap-balance-float-002.html
 fail css/css-text/white-space/text-wrap-balance-float-003.html
@@ -2680,7 +2589,6 @@ fail css/css-text/white-space/text-wrap-balance-float-005.html
 fail css/css-text/white-space/text-wrap-balance-line-clamp-002.html
 fail css/css-text/white-space/text-wrap-balance-line-clamp-003.html
 fail css/css-text/white-space/text-wrap-balance-line-clamp-004.html
-fail css/css-text/white-space/text-wrap-balance-line-clamp-005.html
 fail css/css-text/white-space/text-wrap-balance-line-clamp-007.html
 fail css/css-text/white-space/text-wrap-balance-line-clamp-008.html
 fail css/css-text/white-space/text-wrap-balance-line-clamp-009.html
@@ -2820,7 +2728,6 @@ fail css/css-transforms/perspective-containing-block-dynamic-1a.html
 fail css/css-transforms/perspective-svg-child-001.html
 fail css/css-transforms/perspective-svg-child-002.html
 fail css/css-transforms/scale-animation-with-var-001.html
-fail css/css-transforms/scale-transform-filtered-text.html
 fail css/css-transforms/transform-3d-rotateY-stair-below-001.xht
 fail css/css-transforms/transform-background-005.html
 fail css/css-transforms/transform-background-006.html
@@ -3348,8 +3255,6 @@ fail css/selectors/has-visited.html
 fail css/selectors/invalidation/nth-child-of-attr-largedom.html
 fail css/selectors/invalidation/part-pseudo.html
 fail css/selectors/is-default-ns-001.html
-fail css/selectors/is-default-ns-003.html
-fail css/selectors/not-default-ns-003.html
 fail css/selectors/not-links.html
 fail css/selectors/of-type-selectors.xhtml
 fail css/selectors/popover-open-with-has-sibling-selector.html
