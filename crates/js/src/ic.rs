@@ -84,6 +84,17 @@ fn mega_index(shape: u32, key: u64) -> usize {
     (h >> (64 - MEGA_BITS)) as usize
 }
 
+/// The megamorphic cache's word for a read of `key`: a string name's
+/// handle word (the entry keeps the name alive), or for a symbol a word
+/// in the symbol tag space (symbol ids are never reused in a realm).
+#[inline(always)]
+pub(crate) fn mega_word(key: &PropertyKey) -> Option<u64> {
+    match key {
+        PropertyKey::String(k) => Some(k.bits()),
+        PropertyKey::Symbol(s) => Some(0xFFFA_0000_0000_0000 | (s.0 as u64) << 1),
+    }
+}
+
 /// Neither a receiver with shape `shape` and prototype `mid` (`NO_OBJ`:
 /// none) nor its prototype chain has the key: the read is `undefined`.
 /// Valid while the prototype epoch is `mid_shape`.
@@ -279,14 +290,17 @@ impl Realm {
         if ic.kind == IC_NONE || ic.kind == IC_LENGTH || ic.kind == IC_PRIM || ic_disabled(1) {
             return;
         }
-        let (Some(id), PropertyKey::String(k)) = (recv.as_object(), key) else { return };
+        let (Some(id), Some(kb)) = (recv.as_object(), mega_word(key)) else { return };
         let Some(o) = self.heap.try_get(id) else { return };
         let shape = o.props.shape_id();
         if self.mega.is_empty() {
             self.mega = vec![MegaEntry::default(); 1 << MEGA_BITS];
         }
-        let kb = k.bits();
-        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, name: Some(k.clone()), ic };
+        let name = match key {
+            PropertyKey::String(k) => Some(k.clone()),
+            PropertyKey::Symbol(_) => None,
+        };
+        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, name, ic };
     }
 
     /// Remember a filled store cache record in the megamorphic cache, under
@@ -377,7 +391,9 @@ impl Realm {
             }
         }
         let virtual_length = |k: &ObjectKind| len_key && matches!(k, ObjectKind::Array { .. } | ObjectKind::String(_));
-        if cacheable_key(key).is_none() {
+        // Symbols (element reads such as `o[Symbol.iterator]`) are cached
+        // by the megamorphic cache only.
+        if matches!(key, PropertyKey::String(_)) && cacheable_key(key).is_none() {
             return ic;
         }
         let (start, prim) = match recv.v() {

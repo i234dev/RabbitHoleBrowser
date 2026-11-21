@@ -4602,9 +4602,10 @@ impl Realm {
             V::Number(n) if (n as u32) as f64 == n && n < 4294967295.0 => PropertyKey::index(n as u32),
             other => self.to_property_key(other.to_value())?,
         };
-        if let (true, PropertyKey::String(k)) = (obj.is_object(), &key) {
-            // `obj[name]` with a string name: the shared cache by (shape, name).
-            if let Some(ic) = self.mega_get(&obj, k.bits()) {
+        if let (true, Some(kw)) = (obj.is_object(), crate::ic::mega_word(&key)) {
+            // `obj[name]` with a string or symbol name: the shared cache by
+            // (shape, name).
+            if let Some(ic) = self.mega_get(&obj, kw) {
                 if let Some(prop) = self.ic_get(&ic, &obj) {
                     if prop.flags & ACCESSOR == 0 {
                         return Ok(prop.value.clone());

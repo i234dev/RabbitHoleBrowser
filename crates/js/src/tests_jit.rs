@@ -799,3 +799,20 @@ out.join()
 "#, "undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,PP,PP,PP,undefinedundefined,PP,PP,PP,PP,ownown,protoproto,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,bAB,!");
 }
 
+#[test]
+fn element_reads_by_name_and_symbol() {
+    // `o[name]` and `o[symbol]` through the megamorphic cache: own,
+    // inherited, absent and accessor properties, then changes.
+    check(r#"
+var s = Symbol('s'), t = Symbol.iterator;
+var P = { [s]: 'ps' };
+var objs = [{ [s]: 1, a: 'x' }, Object.create(P), { b: 2 }, { get [s]() { return 'g' } }, [], 'str', { a: 'y', [s]: 3 }];
+function rd(o, k) { return String(o[k]) }
+var out = [];
+for (var r = 0; r < 30; r++) { out = []; for (var i = 0; i < objs.length; i++) out.push(rd(objs[i], s) + rd(objs[i], 'a') + (typeof rd(objs[i], t))); }
+P[s] = 'changed'; objs[2][s] = 'own'; Object.prototype.a = 'OP';
+for (var i = 0; i < objs.length; i++) out.push(rd(objs[i], s) + rd(objs[i], 'a'));
+delete Object.prototype.a;
+out.join()
+"#, "1xstring,psundefinedstring,undefinedundefinedstring,gundefinedstring,undefinedundefinedstring,undefinedundefinedstring,3ystring,1x,changedOP,ownOP,gOP,undefinedOP,undefinedOP,3y");
+}

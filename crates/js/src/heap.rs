@@ -1111,6 +1111,16 @@ pub struct ForInState {
 }
 
 /// Bytes of one heap slot (an object's inline part).
+/// A reference to a freed (or never allocated) object: a bug, reported
+/// with what is known about the object (kept out of line so that
+/// [`Heap::get`] inlines).
+#[cold]
+#[inline(never)]
+fn freed_object(id: ObjectId) -> ! {
+    let info = FREED_INFO.with(|m| m.borrow().get(&id.0).cloned()).unwrap_or_default();
+    panic!("use of freed object #{} {}", id.0, info)
+}
+
 pub const SLOT_BYTES: usize = std::mem::size_of::<Option<Object>>();
 
 // Colours of the collector (`Heap::marks`, meaningful during a cycle).
@@ -1315,13 +1325,11 @@ impl Heap {
         panic!("out of memory: the JavaScript heap cannot grow past {cap} objects");
     }
 
+    #[inline]
     pub fn get(&self, id: ObjectId) -> &Object {
-        match self.objects[id.0 as usize].as_ref() {
+        match self.objects.get(id.0 as usize).and_then(|o| o.as_ref()) {
             Some(o) => o,
-            None => {
-                let info = FREED_INFO.with(|m| m.borrow().get(&id.0).cloned()).unwrap_or_default();
-                panic!("use of freed object #{} {}", id.0, info)
-            }
+            None => freed_object(id),
         }
     }
 

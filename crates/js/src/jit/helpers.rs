@@ -610,8 +610,12 @@ pub(crate) unsafe extern "sysv64" fn h_get_elem(ctx: *mut Ctx, pc: u32) -> usize
             // `obj[name]`: the megamorphic cache by (shape, name), as
             // `get_elem` would consult it (it holds cacheable names only).
             None => {
-                let crate::value::V::String(name) = key.v() else { return false };
-                let Some(ic) = r.mega_get(obj, name.bits()) else { return false };
+                let word = match key.v() {
+                    crate::value::V::String(name) => name.bits(),
+                    crate::value::V::Symbol(s) => crate::ic::mega_word(&crate::value::PropertyKey::Symbol(s)).unwrap_or(0),
+                    _ => return false,
+                };
+                let Some(ic) = r.mega_get(obj, word) else { return false };
                 match r.ic_get(&ic, obj) {
                     Some(p) if p.flags & crate::heap::ACCESSOR == 0 => p.value.clone(),
                     _ => return false,
