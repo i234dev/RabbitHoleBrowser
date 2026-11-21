@@ -13,6 +13,7 @@ use std::rc::Rc;
 ///
 /// The handle is one word: the string tag of [`Value`] over the pointer of
 /// an `Rc<StrInner>`, so a string `Value` and a `JsStr` share their bits.
+/// Short strings keep their code units in that same allocation.
 #[repr(transparent)]
 pub struct JsStr(std::num::NonZeroU64);
 
@@ -23,8 +24,14 @@ pub(crate) struct StrBox {
     s: StrInner,
 }
 
+/// Longest string whose code units live in the string's own allocation
+/// (they fit in the space a rope needs anyway).
+const INLINE_UNITS: usize = 20;
+
 pub(crate) enum StrInner {
     Flat(Box<[u16]>),
+    /// A short string: no separate allocation for the units.
+    Inline { len: u8, units: [u16; INLINE_UNITS] },
     /// A concatenation, flattened on first read of its units; the parts
     /// are released then (`None` afterwards), so a string built by many
     /// `+=` does not keep every intermediate piece alive once used.
@@ -93,6 +100,29 @@ impl JsStr {
     }
 }
 
+// Inline units must not make strings bigger than ropes already are.
+const _: () = assert!(std::mem::size_of::<StrBox>() <= 56);
+
+impl StrInner {
+    /// The flat contents `units` (inline when short).
+    #[inline]
+    fn from_slice(units: &[u16]) -> StrInner {
+        if units.len() <= INLINE_UNITS {
+            let mut a = [0u16; INLINE_UNITS];
+            a[..units.len()].copy_from_slice(units);
+            return StrInner::Inline { len: units.len() as u8, units: a };
+        }
+        StrInner::Flat(units.into())
+    }
+    #[inline]
+    fn from_vec(units: Vec<u16>) -> StrInner {
+        if units.len() <= INLINE_UNITS {
+            return StrInner::from_slice(&units);
+        }
+        StrInner::Flat(units.into())
+    }
+}
+
 impl Drop for StrInner {
     fn drop(&mut self) {
         // Unlink deep ropes iteratively to avoid recursive drops. Only
@@ -157,8 +187,17 @@ pub fn escape_source(src: &str) -> std::borrow::Cow<'_, str> {
 
 impl JsStr {
     pub fn new(s: &str) -> JsStr {
-        // A UTF-8 string has at most as many UTF-16 units as bytes: one
-        // allocation, exact for ASCII (no growth, no shrink).
+        // A UTF-8 string has at most as many UTF-16 units as bytes.
+        if s.len() <= INLINE_UNITS {
+            let mut a = [0u16; INLINE_UNITS];
+            let mut n = 0;
+            for u in s.encode_utf16() {
+                a[n] = u;
+                n += 1;
+            }
+            return JsStr::from_inner(StrInner::Inline { len: n as u8, units: a });
+        }
+        // One allocation, exact for ASCII (no growth, no shrink).
         let mut v = Vec::with_capacity(s.len());
         v.extend(s.encode_utf16());
         JsStr::from_inner(StrInner::Flat(v.into()))
@@ -191,7 +230,7 @@ impl JsStr {
             }
             v.extend_from_slice(c.encode_utf16(&mut buf));
         }
-        JsStr::from_inner(StrInner::Flat(v.into()))
+        JsStr::from_inner(StrInner::from_vec(v))
     }
 
     /// [`JsStr::intern`] of source-escaped text.
@@ -219,10 +258,10 @@ impl JsStr {
         out
     }
     pub fn from_units(units: Vec<u16>) -> JsStr {
-        JsStr::from_inner(StrInner::Flat(units.into()))
+        JsStr::from_inner(StrInner::from_vec(units))
     }
     pub fn from_slice(units: &[u16]) -> JsStr {
-        JsStr::from_inner(StrInner::Flat(units.into()))
+        JsStr::from_inner(StrInner::from_slice(units))
     }
     /// One-code-unit string (Latin-1 range cached).
     pub fn from_unit(u: u16) -> JsStr {
@@ -282,7 +321,7 @@ impl JsStr {
     }
     pub fn empty() -> JsStr {
         thread_local! {
-            static EMPTY: JsStr = JsStr::from_inner(StrInner::Flat(Vec::new().into()));
+            static EMPTY: JsStr = JsStr::from_inner(StrInner::from_slice(&[]));
         }
         EMPTY.with(|e| e.clone())
     }
@@ -290,6 +329,7 @@ impl JsStr {
     pub fn as_units(&self) -> &[u16] {
         match self.inner() {
             StrInner::Flat(b) => b,
+            StrInner::Inline { len, units } => &units[..*len as usize],
             StrInner::Rope { flat, parts, .. } => {
                 if let Some(f) = flat.get() {
                     return f;
@@ -311,6 +351,7 @@ impl JsStr {
         while let Some(s) = stack.pop() {
             match s.inner() {
                 StrInner::Flat(b) => out.extend_from_slice(b),
+                StrInner::Inline { len, units } => out.extend_from_slice(&units[..*len as usize]),
                 StrInner::Rope { parts, flat, .. } => {
                     if let Some(f) = flat.get() {
                         out.extend_from_slice(f);
@@ -327,6 +368,7 @@ impl JsStr {
     pub fn len(&self) -> usize {
         match self.inner() {
             StrInner::Flat(b) => b.len(),
+            StrInner::Inline { len, .. } => *len as usize,
             StrInner::Rope { len, .. } => *len,
         }
     }
@@ -345,6 +387,13 @@ impl JsStr {
             return other.clone();
         }
         let len = self.len() + other.len();
+        if len <= INLINE_UNITS {
+            let (a, b) = (self.as_units(), other.as_units());
+            let mut units = [0u16; INLINE_UNITS];
+            units[..a.len()].copy_from_slice(a);
+            units[a.len()..len].copy_from_slice(b);
+            return JsStr::from_inner(StrInner::Inline { len: len as u8, units });
+        }
         if len < ROPE_MIN {
             let mut v = Vec::with_capacity(len);
             v.extend_from_slice(self.as_units());

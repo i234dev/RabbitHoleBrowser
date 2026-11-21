@@ -611,12 +611,11 @@ impl Realm {
             out.push(crate::value::names::length());
         }
         // private symbols are hidden
-        let private: Vec<bool> = rest.iter().map(|k| matches!(k, PropertyKey::Symbol(s) if self.is_private_symbol(*s))).collect();
-        for (k, p) in rest.into_iter().zip(private) {
-            if !p {
-                out.push(k);
-            }
+        rest.retain(|k| !matches!(k, PropertyKey::Symbol(s) if self.is_private_symbol(*s)));
+        if out.is_empty() {
+            return Ok(rest);
         }
+        out.append(&mut rest);
         Ok(out)
     }
 
