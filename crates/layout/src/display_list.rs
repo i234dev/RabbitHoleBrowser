@@ -1678,8 +1678,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // A poster is drawn like an image: object-fit leaves the rest of the
         // box transparent (HTML: the poster frame is the video's content).
         let poster = tag == "video" && b.image.as_ref().is_some_and(|i| !i.broken);
-        if tag == "video" && !poster {
-            // Letterbox like a real player.
+        let controls = is_media && b.node.map(|n| self.ctx.doc.attr(n, "controls").is_some()).unwrap_or(false);
+        if tag == "video" && !poster && controls {
+            // The native controls sit on a dark player surface.
             self.list.push(DisplayItem::Rect { rect: b.content_rect, color: Color::rgb(0, 0, 0), radius: 0.0 });
         }
         match &b.image {
@@ -1688,19 +1689,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             None if b.text.is_some() => self.paint_pending_image_alt(b),
             None => {}
         }
-        if is_media {
-            let controls = b.node.map(|n| self.ctx.doc.attr(n, "controls").is_some()).unwrap_or(false);
-            if controls || tag == "audio" {
-                self.paint_media_controls(b, tag == "audio");
-            } else {
-                // No native controls: a centred play affordance so the
-                // element does not look like an empty black box.
-                // A poster already shows what the element is.
-                let playing = b.node.and_then(|n| self.ctx.doc.media_ui.get(&n)).is_some_and(|u| !u.paused);
-                if !playing && !poster {
-                    self.paint_big_play(b);
-                }
-            }
+        // Without controls a video with neither a poster nor a frame
+        // represents nothing (HTML "the video element represents nothing"):
+        // it stays transparent, so what is behind it (often the page's
+        // fallback image) shows, as in browsers.
+        if is_media && (controls || tag == "audio") {
+            self.paint_media_controls(b, tag == "audio");
         }
     }
 
@@ -1880,18 +1874,6 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
         }
-    }
-
-    /// Centred round play button over a video without controls.
-    fn paint_big_play(&mut self, b: &LayoutBox) {
-        let r = b.content_rect;
-        let d = 56.0f32.min(r.w * 0.5).min(r.h * 0.5);
-        if d < 16.0 {
-            return;
-        }
-        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        self.list.push(DisplayItem::Rect { rect: Rect::new(cx - d / 2.0, cy - d / 2.0, d, d), color: Color::rgba(0, 0, 0, 150), radius: d / 2.0 });
-        self.push_triangle(cx - d * 0.15, cy, d * 0.4, Color::rgb(255, 255, 255));
     }
 
     /// Right-pointing triangle with its left edge at `x`, centred on `cy`.

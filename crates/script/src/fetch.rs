@@ -1709,10 +1709,53 @@ fn text_decoder_decode(realm: &mut Realm, this: Value, args: &[Value]) -> JsResu
     Ok(Value::str(&out))
 }
 
+/// Infra "forgiving-base64 decode": ASCII whitespace is ignored, one or
+/// two '=' may pad a multiple-of-4 input, and anything else outside the
+/// standard alphabet (including URL-safe '-' / '_' and '=' elsewhere) or a
+/// length of 4n+1 is a failure.
+pub(crate) fn forgiving_base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut data: Vec<u8> = Vec::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '\t' | '\n' | '\x0c' | '\r' | ' ' => {}
+            c if c.is_ascii() => data.push(c as u8),
+            _ => return None,
+        }
+    }
+    if data.len() % 4 == 0 {
+        for _ in 0..2 {
+            if data.last() == Some(&b'=') {
+                data.pop();
+            }
+        }
+    }
+    if data.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in data {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 fn atob(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let s = arg_str(realm, args, 0)?;
-    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    match rabbithole_net::base64_decode(&cleaned) {
+    match forgiving_base64_decode(&s) {
         Some(bytes) => Ok(Value::str(&bytes.iter().map(|b| *b as char).collect::<String>())),
         None => Err(crate::misc::dom_exception(realm, "InvalidCharacterError", "The string to be decoded is not correctly encoded.")),
     }

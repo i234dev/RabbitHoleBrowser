@@ -190,3 +190,35 @@ fn web_audio_decode_play_and_offline_render() {
     assert!(out.contains("offline:100:1.000"), "{out}");
     assert!(out.contains("ended"), "{out}");
 }
+
+/// `<source>` selection skips a resource whose only track cannot be decoded
+/// (H.264 where it is unavailable) and plays the next playable source.
+#[cfg(not(windows))]
+#[test]
+fn video_falls_back_from_undecodable_source() {
+    null_audio();
+    let bytes = |b: &[u8]| b.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+    let h264 = bytes(include_bytes!("../../media/tests/fixtures/green-h264-frag.mp4"));
+    let vp9 = bytes(include_bytes!("../../media/tests/fixtures/blue-vp9.webm"));
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    run(&mut env, &mut host, &format!(
+        r#"
+        const url = (a, type) => 'data:' + type + ';base64,' + btoa(String.fromCharCode(...a));
+        window.log = [];
+        const v = document.createElement('video');
+        v.muted = true;
+        const s1 = document.createElement('source');
+        s1.src = url([{h264}], 'video/mp4'); s1.type = 'video/mp4';
+        s1.addEventListener('error', () => log.push('source-error'));
+        const s2 = document.createElement('source');
+        s2.src = url([{vp9}], 'video/webm'); s2.type = 'video/webm';
+        v.append(s1, s2);
+        v.addEventListener('loadedmetadata', () => log.push('meta:' + v.currentSrc.slice(0, 15)));
+        v.addEventListener('error', () => log.push('error'));
+        document.body.append(v);
+        window.v = v;
+        "#
+    ));
+    let out = pump(&mut env, &mut host, 30.0, "log.some(e => e.startsWith('meta') || e === 'error')", "log.join(',') + '|' + v.canPlayType('video/mp4; codecs=\"avc1.42E01E\"') + '|' + v.canPlayType('video/webm; codecs=\"vp9\"')");
+    assert_eq!(out.trim_matches('\''), "source-error,meta:data:video/webm||probably", "{out}");
+}

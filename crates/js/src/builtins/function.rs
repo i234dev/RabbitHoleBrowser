@@ -136,6 +136,11 @@ fn bind(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Object(b))
 }
 
+/// Script names (`filename`) of the embedder's own built-in scripts: the
+/// functions they define implement platform APIs, so they print as
+/// built-in functions (see `Function.prototype.toString`).
+pub const BUILTIN_SCRIPT_PREFIX: &str = "rabbithole:";
+
 fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let id = match this.v() {
         V::Object(id) if realm.is_callable(&this) => id,
@@ -143,6 +148,14 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
     };
     let s = match &realm.obj(id).kind {
         ObjectKind::Function(c) => match (&c.code.source, c.code.source_span) {
+            // Functions of the host's own built-in scripts (`rabbithole:*`)
+            // are built-in functions to the page: NativeFunction syntax,
+            // never their implementation's source.
+            _ if c.code.filename.starts_with(BUILTIN_SCRIPT_PREFIX) => {
+                let name = c.code.name.to_rust_string();
+                let ok = name.chars().enumerate().all(|(i, ch)| ch == '$' || ch == '_' || ch.is_alphabetic() || (i > 0 && ch.is_alphanumeric()));
+                if ok { format!("function {name}() {{ [native code] }}") } else { "function () { [native code] }".to_string() }
+            }
             (Some(src), Some((a, b))) if src.get(a as usize..b as usize).is_some() => src[a as usize..b as usize].to_string(),
             _ if c.code.flags.is_class_constructor => format!("class {} {{ [native code] }}", c.code.name),
             _ => format!("function {}() {{ [native code] }}", c.code.name),
