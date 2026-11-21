@@ -509,3 +509,40 @@ fn a_fragment_navigation_during_load_does_not_reload_the_frame() {
     settle(&e, &mut page);
     assert_eq!(eval(&e, &mut page, "String(loads)"), "1");
 }
+
+/// A script keeps an element of a frame's first document and the frame
+/// then navigates to a smaller document: reading `isConnected` or the
+/// element's box (a ResizeObserver watching it does both every frame)
+/// must not index the new document with the old node id.
+#[test]
+fn nodes_of_a_replaced_frame_document_stay_usable() {
+    let mut e = engine();
+    let mut page = load(&mut e, "<p>parent</p>");
+    let r = eval(
+        &e,
+        &mut page,
+        "var i = document.createElement('iframe'); document.body.appendChild(i); var d = i.contentDocument; \
+         for (var k = 0; k < 40; k++) d.body.appendChild(d.createElement('div')); window.kept = d.body.lastChild; \
+         i.srcdoc = 'x'; typeof kept.isConnected",
+    );
+    assert_eq!(r, "boolean");
+    settle(&e, &mut page);
+    let r = eval(&e, &mut page, "try { [typeof kept.isConnected, typeof kept.getBoundingClientRect().width, document.querySelector('iframe').contentDocument.body.textContent].join() } catch (err) { 'threw ' + err.message }");
+    assert_eq!(r, "boolean,number,x");
+}
+
+/// A same-origin frame's WindowProxy is a Window: sandboxing libraries
+/// create a hidden about:blank iframe and check that its window's
+/// constructor is Window before taking pristine built-ins from it.
+#[test]
+fn same_origin_frame_window_is_a_window() {
+    let mut e = engine();
+    let mut page = load(&mut e, "<p>parent</p>");
+    let r = eval(
+        &e,
+        &mut page,
+        "var i = document.createElement('iframe'); i.style.display = 'none'; document.body.appendChild(i); var w = i.contentWindow; \
+         [w.constructor === w.Window, w.constructor.name, w instanceof w.Window, Object.getPrototypeOf(w) === w.Window.prototype, Object.prototype.toString.call(w), typeof w.JSON.stringify].join()",
+    );
+    assert_eq!(r, "true,Window,true,true,[object Window],function");
+}

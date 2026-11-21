@@ -544,6 +544,27 @@ fn e_part(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(token_list(realm, w, n, "part"))
 }
 
+// `[PutForwards=value]`: assigning a string to `classList` / `relList` /
+// `part` sets the attribute (and must not throw in strict code).
+fn e_class_list_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    put_forward(realm, this, args, "classList", "class")
+}
+
+fn e_rel_list_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    put_forward(realm, this, args, "relList", "rel")
+}
+
+fn e_part_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    put_forward(realm, this, args, "part", "part")
+}
+
+fn put_forward(realm: &mut Realm, this: Value, args: &[Value], what: &str, attr: &str) -> JsResult<Value> {
+    let n = this_node(realm, &this, what)?;
+    let v = arg_str(realm, args, 0)?;
+    set_attribute(n, attr, Some(&v));
+    Ok(Value::Undefined)
+}
+
 // dataset -------------------------------------------------------------------
 
 fn camel_to_data(name: &str) -> String {
@@ -921,8 +942,12 @@ fn e_closest(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
         let matcher = rabbithole_css::selector::SelectorMatcher::new(doc, &state);
         let mut cur = Some(n.node);
         while let Some(c) = cur {
-            if doc.element(c).is_some() && list.iter().any(|sel| matcher.matches(sel, c)) {
-                return Some(c);
+            match doc.element(c) {
+                // Inclusive ancestor *elements* only: a fragment or shadow
+                // root ends the walk.
+                Some(e) if e.tag == "#fragment" || e.tag == "#shadow-root" => break,
+                Some(_) if list.iter().any(|sel| matcher.matches(sel, c)) => return Some(c),
+                _ => {}
             }
             cur = doc.parent(c);
         }
@@ -2513,8 +2538,8 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "prefix", e_prefix, None);
     acc(realm, "id", e_id_get, Some(id_set));
     acc(realm, "className", e_class_name_get, Some(e_class_name_set));
-    acc(realm, "classList", e_class_list, None);
-    acc(realm, "part", e_part, None);
+    acc(realm, "classList", e_class_list, Some(e_class_list_set));
+    acc(realm, "part", e_part, Some(e_part_set));
     acc(realm, "attributes", e_attributes, None);
     acc(realm, "innerHTML", e_inner_html_get, Some(e_inner_html_set));
     acc(realm, "outerHTML", e_outer_html_get, Some(e_outer_html_set));
@@ -2691,7 +2716,7 @@ pub(crate) fn install(realm: &mut Realm) {
     for (p, at) in [("target", "target"), ("rel", "rel"), ("download", "download"), ("hreflang", "hreflang"), ("type", "type"), ("referrerPolicy", "referrerpolicy"), ("ping", "ping"), ("name", "name")] {
         reflect(realm, a, p, at, Reflect::Str);
     }
-    realm.define_accessor(a, "relList", Some(e_rel_list), None, ACC);
+    realm.define_accessor(a, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
     realm.define_accessor(a, "text", Some(e_inner_text_get), Some(n_text_set_alias), ACC);
 
     // --- HTMLInputElement
@@ -2847,9 +2872,10 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, style, "disabled", "disabled", Reflect::Bool);
     let link = define_class(realm, "HTMLLinkElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(link, "sheet", Some(style_sheet), None, ACC);
-    realm.define_accessor(link, "relList", Some(e_rel_list), None, ACC);
+    realm.define_accessor(link, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
     reflect(realm, link, "href", "href", Reflect::Url);
-    for (p, at) in [("rel", "rel"), ("type", "type"), ("media", "media"), ("as", "as"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("hreflang", "hreflang"), ("referrerPolicy", "referrerpolicy"), ("sizes", "sizes"), ("imageSrcset", "imagesrcset")] {
+    for (p, at) in [("rel", "rel"), ("type", "type"), ("media", "media"), ("as", "as"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("hreflang", "hreflang"), ("referrerPolicy", "referrerpolicy"), ("imageSrcset", "imagesrcset")] {
+        // (`sizes` is a DOMTokenList, reflected from the table in html.js.)
         reflect(realm, link, p, at, Reflect::Str);
     }
     reflect(realm, link, "disabled", "disabled", Reflect::Bool);
@@ -2858,7 +2884,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(iframe, "contentWindow", Some(iframe_content_window), None, ACC);
     realm.define_accessor(iframe, "contentDocument", Some(iframe_content_document), None, ACC);
     reflect(realm, iframe, "src", "src", Reflect::Url);
-    for (p, at) in [("name", "name"), ("allow", "allow"), ("sandbox", "sandbox"), ("srcdoc", "srcdoc"), ("loading", "loading"), ("referrerPolicy", "referrerpolicy"), ("width", "width"), ("height", "height"), ("title", "title")] {
+    // (`sandbox` is a DOMTokenList, reflected from the table in html.js.)
+    for (p, at) in [("name", "name"), ("allow", "allow"), ("srcdoc", "srcdoc"), ("loading", "loading"), ("referrerPolicy", "referrerpolicy"), ("width", "width"), ("height", "height"), ("title", "title")] {
         reflect(realm, iframe, p, at, Reflect::Str);
     }
     reflect(realm, iframe, "allowFullscreen", "allowfullscreen", Reflect::Bool);

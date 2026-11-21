@@ -180,6 +180,10 @@
           const child = info(id, 'child', Number(key));
           return child < 0 ? undefined : windowFor(child);
         }
+        // A same-origin frame's window is a Window: this realm's interface
+        // stands in for the frame's (see below), so code that checks
+        // `frame.contentWindow.constructor` sees Window, not Object.
+        if (key === 'constructor' && typeof g.Window === 'function' && sameOrigin(id)) return g.Window;
         if (key in t) return t[key];
         // A same-origin frame's own globals (JSON, Array, ...): the frame
         // runs in another realm, so this realm's pristine built-ins stand
@@ -205,6 +209,9 @@
           }
         }
         return undefined;
+      },
+      getPrototypeOf(t) {
+        return typeof g.Window === 'function' && sameOrigin(id) ? g.Window.prototype : Object.getPrototypeOf(t);
       },
       has(t, key) {
         return key in t || ((BUILTINS.has(key) || (typeof key === 'string' && /^[A-Z]/.test(key) && typeof g[key] === 'function')) && sameOrigin(id));

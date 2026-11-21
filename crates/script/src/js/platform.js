@@ -29,6 +29,22 @@
   const setNav = (name, value) => { try { delete nav[name]; } catch (e) {} Object.defineProperty(g.Navigator.prototype, name, { get() { return value; }, configurable: true, enumerable: true }); };
   const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, fn); };
   const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true }); };
+  // Navigator members are accessors and operations of Navigator.prototype
+  // (Web IDL), not own properties of navigator: consent managers and
+  // fingerprinting guards read Object.getOwnPropertyDescriptor(
+  // Navigator.prototype, 'languages').get and crash on undefined.
+  for (const k of Object.getOwnPropertyNames(nav)) {
+    const d = Object.getOwnPropertyDescriptor(nav, k);
+    if (!d || !d.configurable) continue;
+    if (!Object.prototype.hasOwnProperty.call(g.Navigator.prototype, k)) {
+      let nd;
+      if (d.get || d.set) nd = { get: d.get, set: d.set, configurable: true, enumerable: true };
+      else if (typeof d.value === 'function') nd = { value: d.value, writable: true, configurable: true, enumerable: true };
+      else { const v = d.value; nd = { get: Object.getOwnPropertyDescriptor({ get [k]() { return v; } }, k).get, configurable: true, enumerable: true }; }
+      Object.defineProperty(g.Navigator.prototype, k, nd);
+    }
+    delete nav[k];
+  }
 
   // ----------------------------------------------------------- Permissions
   const PERMS = { geolocation: 'denied', notifications: 'denied', push: 'denied', midi: 'denied', camera: 'denied', microphone: 'denied', 'background-fetch': 'denied', 'background-sync': 'granted', 'persistent-storage': 'denied', 'screen-wake-lock': 'denied', 'storage-access': 'granted', 'clipboard-read': 'denied', 'clipboard-write': 'granted', 'local-fonts': 'denied', 'idle-detection': 'denied', 'window-management': 'denied', accelerometer: 'granted', gyroscope: 'granted', magnetometer: 'granted', 'payment-handler': 'denied', 'display-capture': 'denied' };
@@ -117,6 +133,46 @@
   define('GeolocationCoordinates', GeolocationCoordinates);
   define('GeolocationPositionError', GeolocationPositionError);
   setNav('geolocation', make(Geolocation));
+
+  // ------------------------- NetworkInformation, BatteryManager, MediaDevices
+  // Event targets in browsers: pages subscribe to `change` /
+  // `levelchange` / `devicechange` on them right away.
+  class NetworkInformation extends g.EventTarget {
+    constructor() { super(); ILLEGAL(); }
+    get effectiveType() { return '4g'; }
+    get downlink() { return 10; }
+    get rtt() { return 50; }
+    get saveData() { return false; }
+  }
+  tag(NetworkInformation, 'NetworkInformation');
+  N.installHandlers(NetworkInformation.prototype, ['change']);
+  define('NetworkInformation', NetworkInformation);
+  setNav('connection', make(NetworkInformation));
+  class BatteryManager extends g.EventTarget {
+    constructor() { super(); ILLEGAL(); }
+    get charging() { return true; }
+    get chargingTime() { return 0; }
+    get dischargingTime() { return Infinity; }
+    get level() { return 1; }
+  }
+  tag(BatteryManager, 'BatteryManager');
+  N.installHandlers(BatteryManager.prototype, ['chargingchange', 'chargingtimechange', 'dischargingtimechange', 'levelchange']);
+  define('BatteryManager', BatteryManager);
+  const battery = make(BatteryManager);
+  hidden(g.Navigator.prototype, 'getBattery', function getBattery() { return Promise.resolve(battery); });
+  try { delete nav.getBattery; } catch (e) {}
+  const oldDevices = nav.mediaDevices;
+  class MediaDevices extends g.EventTarget {
+    constructor() { super(); ILLEGAL(); }
+    enumerateDevices() { return Promise.resolve([]); }
+    getSupportedConstraints() { return { aspectRatio: true, deviceId: true, echoCancellation: true, facingMode: true, frameRate: true, groupId: true, height: true, sampleRate: true, sampleSize: true, width: true }; }
+    getUserMedia(c) { return oldDevices && oldDevices.getUserMedia ? oldDevices.getUserMedia(c) : Promise.reject(domError('Requested device not found', 'NotFoundError')); }
+    getDisplayMedia() { return Promise.reject(domError('Permission denied', 'NotAllowedError')); }
+  }
+  tag(MediaDevices, 'MediaDevices');
+  N.installHandlers(MediaDevices.prototype, ['devicechange']);
+  define('MediaDevices', MediaDevices);
+  setNav('mediaDevices', make(MediaDevices));
 
   // ----------------------------------------------------- ScreenOrientation
   class ScreenOrientation extends g.EventTarget {

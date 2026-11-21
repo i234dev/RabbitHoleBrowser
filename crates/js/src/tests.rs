@@ -1028,6 +1028,9 @@ fn intl_number_format() {
     eq("new Intl.NumberFormat('en-US', {signDisplay: 'always'}).format(5) + ',' + new Intl.NumberFormat('en-US', {signDisplay: 'exceptZero'}).format(0) + ',' + new Intl.NumberFormat('en-US').format(-5)", "+5,0,-5");
     eq("new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3}).format(123456) + ',' + new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3}).format(0.00012345)", "123,000,0.000123");
     eq("new Intl.NumberFormat('en-US', {style: 'unit', unit: 'kilometer'}).format(12) + '|' + new Intl.NumberFormat('en-US', {style: 'unit', unit: 'kilometer', unitDisplay: 'long'}).format(12)", "12 km|12 kilometers");
+    // Plural forms follow the whole value, not the scaled mantissa: Intl
+    // polyfills replace a NumberFormat that formats 1E4 "bit".
+    eq("new Intl.NumberFormat('en', {style: 'unit', unit: 'bit', unitDisplay: 'long', notation: 'scientific'}).format(10000) + '|' + new Intl.NumberFormat('en', {style: 'unit', unit: 'bit', unitDisplay: 'long'}).format(1) + '|' + new Intl.NumberFormat('en', {style: 'unit', unit: 'byte', unitDisplay: 'long', notation: 'compact'}).format(1000)", "1E4 bits|1 bit|1K bytes");
     eq("new Intl.NumberFormat('en-US').format(Infinity) + ',' + new Intl.NumberFormat('en-US').format(NaN) + ',' + new Intl.NumberFormat('en-US').format(12345678901234567890n)", "∞,NaN,12,345,678,901,234,567,890");
     eq("new Intl.NumberFormat('en-US').formatToParts(-1234.5).map(p => p.type + ':' + p.value).join('|')", "minusSign:-|integer:1|group:,|integer:234|decimal:.|fraction:5");
     eq("var f = new Intl.NumberFormat('en-US').format; [1000, 2000].map(f).join('|')", "1,000|2,000");

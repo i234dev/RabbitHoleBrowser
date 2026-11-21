@@ -1617,3 +1617,165 @@ fn dom_token_list_indexed_getter() {
         r#"'tab|first||tab|2|true|true|true|false|0,1|{"value":"first","writable":false,"enumerable":true,"configurable":true}|tab+first|1|tab+first|z|3|x|w|x y z w|TypeError|x|,decorated,||x y z w|true'"#
     );
 }
+
+/// `navigator.connection`, the battery manager and `navigator.mediaDevices`
+/// are event targets: media players subscribe to connection `change` at
+/// startup, and a plain object there aborted their whole bundle.
+#[test]
+fn navigator_connection_battery_and_media_devices_are_event_targets() {
+    let out = result_of(
+        "<html><body></body></html>",
+        r#"
+        const r = [];
+        const c = navigator.connection;
+        r.push(c instanceof EventTarget, c instanceof NetworkInformation, c.effectiveType, c.downlink, String(c));
+        let changes = 0;
+        c.addEventListener('change', () => changes++);
+        c.dispatchEvent(new Event('change'));
+        c.onchange = () => changes++;
+        c.dispatchEvent(new Event('change'));
+        r.push(changes);
+        const m = navigator.mediaDevices;
+        m.addEventListener('devicechange', () => {});
+        r.push(m instanceof EventTarget, typeof m.enumerateDevices, 'ondevicechange' in m);
+        let threw = '';
+        try { new NetworkInformation(); } catch (e) { threw = e.name; }
+        r.push(threw);
+        navigator.getBattery().then((b) => {
+          b.addEventListener('levelchange', () => {});
+          r.push(b instanceof BatteryManager, b instanceof EventTarget, b.level, b.charging);
+          window.result = r.join('|');
+        });
+        "#,
+    );
+    assert_eq!(out, "'true|true|4g|10|[object NetworkInformation]|3|true|function|true|TypeError|true|true|1|true'");
+}
+
+/// `parentElement` is the parent only when it is an element: children of a
+/// shadow root or a document fragment have none, and `closest()` stops at
+/// those roots. Telemetry code walks `el.parentElement` and calls
+/// `closest()` on it, falling back to the shadow host when it is null.
+#[test]
+fn parent_element_skips_fragments_and_shadow_roots() {
+    let out = result_of(
+        "<html><body><div id=h class=c></div><template id=tp><span>x</span></template></body></html>",
+        r#"
+        const r = [];
+        const h = document.getElementById('h');
+        const root = h.attachShadow({ mode: 'open' });
+        root.innerHTML = '<b><i>x</i></b>';
+        const b = root.firstChild;
+        r.push(b.parentElement, b.parentNode === root, root.querySelector('i').parentElement === b);
+        const f = document.createDocumentFragment();
+        const s = f.appendChild(document.createElement('s'));
+        r.push(s.parentElement, document.getElementById('tp').content.firstChild.parentElement);
+        r.push(document.documentElement.parentElement, document.body.parentElement === document.documentElement);
+        r.push(b.closest('*') === b, root.querySelector('i').closest('.c'), s.closest('*') === s);
+        const t = document.createTextNode('t');
+        root.appendChild(t);
+        r.push(t.parentElement);
+        window.result = r.map(String).join('|');
+        "#,
+    );
+    assert_eq!(out, "'null|true|true|null|null|null|true|true|null|true|null'");
+}
+
+/// `iframe.sandbox` and `link.sizes` are DOMTokenLists (players add
+/// sandbox flags with `iframe.sandbox.add(...)`); assigning a string
+/// forwards to the attribute.
+#[test]
+fn iframe_sandbox_and_link_sizes_are_token_lists() {
+    let out = result_of(
+        "<html><body><iframe sandbox='allow-forms'></iframe><link rel=icon sizes='16x16 32x32'></body></html>",
+        r#"
+        const r = [];
+        const f = document.querySelector('iframe');
+        r.push(f.sandbox instanceof DOMTokenList, f.sandbox.length, f.sandbox.contains('allow-forms'), f.sandbox === f.sandbox);
+        f.sandbox.add('allow-scripts', 'allow-same-origin');
+        r.push(f.getAttribute('sandbox'));
+        f.sandbox = 'allow-popups';
+        r.push(f.sandbox.value, f.sandbox.length);
+        const l = document.querySelector('link');
+        r.push(l.sizes instanceof DOMTokenList, l.sizes.length, l.sizes.item(1), String(l.sizes));
+        r.push(document.createElement('img').sizes === '', typeof document.createElement('source').sizes);
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(out, "'true|1|true|true|allow-forms allow-scripts allow-same-origin|allow-popups|1|true|2|32x32|16x16 32x32|true|string'");
+}
+
+/// `classList`, `relList` and `part` are `[PutForwards=value]`: assigning a
+/// string sets the attribute, also from strict code (component libraries
+/// assign `el.part = 'label'`).
+#[test]
+fn token_list_attributes_forward_assignments() {
+    let out = result_of(
+        "<html><body><div id=d class=a></div><a id=l rel=x></a></body></html>",
+        r#"
+        'use strict';
+        const r = [];
+        const d = document.getElementById('d');
+        const list = d.classList;
+        d.classList = 'b c';
+        r.push(d.className, d.classList === list, list.length);
+        d.part = 'label icon';
+        r.push(d.getAttribute('part'), d.part.length, d.part.contains('icon'));
+        const a = document.getElementById('l');
+        a.relList = 'noopener noreferrer';
+        r.push(a.rel, a.relList.length);
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(out, "'b c|true|2|label icon|2|true|noopener noreferrer|2'");
+}
+
+/// Navigator attributes are accessors of Navigator.prototype and its
+/// operations are prototype methods (Web IDL), as consent managers expect
+/// when they read `Object.getOwnPropertyDescriptor(Navigator.prototype,
+/// 'languages').get`.
+#[test]
+fn navigator_members_live_on_the_prototype() {
+    let out = result_of(
+        "<html><body></body></html>",
+        r#"
+        const r = [];
+        const P = Navigator.prototype;
+        r.push(Object.getOwnPropertyNames(navigator).length);
+        for (const k of ['userAgent', 'languages', 'language', 'platform', 'onLine', 'cookieEnabled', 'hardwareConcurrency', 'webdriver']) {
+          const d = Object.getOwnPropertyDescriptor(P, k);
+          r.push(k + ':' + (d && typeof d.get) + ':' + (d && d.enumerable));
+        }
+        r.push(typeof P.sendBeacon, typeof P.javaEnabled, navigator.javaEnabled(), navigator.language, navigator.languages[0]);
+        r.push(Object.getOwnPropertyDescriptor(P, 'languages').get.call(navigator)[0], 'userAgent' in navigator, navigator.onLine);
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(out, "'0|userAgent:function:true|languages:function:true|language:function:true|platform:function:true|onLine:function:true|cookieEnabled:function:true|hardwareConcurrency:function:true|webdriver:function:true|function|function|false|en-US|en-US|en-US|true|true'");
+}
+
+/// The URL components of `<a>` are settable (HTMLHyperlinkElementUtils):
+/// video blocks strip a flag from `a.hash` before decorating the link.
+#[test]
+fn anchor_url_components_are_settable() {
+    let out = result_of(
+        "<html><body><a id=a href='https://example.test/v/clip.mp4?x=1#_autoplay'>v</a><a id=n>none</a></body></html>",
+        r#"
+        'use strict';
+        const r = [];
+        const a = document.getElementById('a');
+        a.hash = a.hash.replace('#_autoplay', '');
+        r.push(a.getAttribute('href'), a.hash);
+        a.hash = '#autoplay';
+        a.search = '?y=2';
+        a.pathname = '/w/other.mp4';
+        a.hostname = 'cdn.example.test';
+        a.protocol = 'http:';
+        r.push(a.href, a.host);
+        const n = document.getElementById('n');
+        n.hash = '#x';
+        r.push(n.getAttribute('href'), n.hash);
+        window.result = r.map(String).join('|');
+        "#,
+    );
+    assert_eq!(out, "'https://example.test/v/clip.mp4?x=1||http://cdn.example.test/w/other.mp4?y=2#autoplay|cdn.example.test|null|'");
+}

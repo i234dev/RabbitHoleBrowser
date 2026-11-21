@@ -1284,6 +1284,9 @@ fn partition(o: &NfOptions, v: &MathValue) -> Formatted {
     let ld = locale_data(o);
     let lang = o.lang.as_str();
     let mut f = Formatted::default();
+    // The power of ten a scientific / engineering / compact notation took
+    // out of the number: plural forms follow the whole value (1E4 bits).
+    let mut scaled_out = 0;
     let (negative, is_nan, is_zero, digits) = match v {
         MathValue::NaN => {
             f.number.push(("nan", ld.nan.to_string()));
@@ -1304,6 +1307,7 @@ fn partition(o: &NfOptions, v: &MathValue) -> Formatted {
                 x = x.scale(-exponent);
             }
             let (r, s) = format_numeric_to_string(o, *neg, &x);
+            scaled_out = exponent;
             let mut compact_post = Vec::new();
             match o.notation {
                 Notation::Compact if exponent != 0 => {
@@ -1356,7 +1360,7 @@ fn partition(o: &NfOptions, v: &MathValue) -> Formatted {
             }
         }
     };
-    let one = digits == "1";
+    let one = digits == "1" && scaled_out == 0;
     let accounting = sign == Some(true)
         && o.style == NfStyle::Currency
         && o.currency_sign == "accounting"

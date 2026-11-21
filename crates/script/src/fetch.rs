@@ -1205,8 +1205,20 @@ fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
         if req.mode == Some(rabbithole_net::RequestMode::SameOrigin) && req.referer.as_ref().is_some_and(|client| client.origin() != req.url.origin()) {
             return Err(realm.throw_type_error("Cross-origin fetch is forbidden in same-origin mode"));
         }
-        if req.mode == Some(rabbithole_net::RequestMode::NoCors) && (!matches!(req.method.as_str(), "GET" | "HEAD" | "POST") || !rabbithole_net::cors::unsafe_request_header_names(&req.headers).is_empty() || req.body.as_ref().is_some_and(|b| !rabbithole_net::cors::unsafe_request_header_names(&[("content-type".into(), b.content_type.clone())]).is_empty())) {
-            return Err(realm.throw_type_error("Unsafe request method or headers are unsupported in no-cors mode"));
+        if req.mode == Some(rabbithole_net::RequestMode::NoCors) {
+            // Fetch §5.4 (Request constructor): a no-cors request needs a
+            // CORS-safelisted method; its headers have the "request-no-cors"
+            // guard, which silently drops the ones that are not safelisted.
+            if !matches!(req.method.as_str(), "GET" | "HEAD" | "POST") {
+                return Err(realm.throw_type_error("Unsafe request method is unsupported in no-cors mode"));
+            }
+            let dropped = rabbithole_net::cors::unsafe_request_header_names(&req.headers);
+            if !dropped.is_empty() {
+                req.headers.retain(|(name, _)| !dropped.iter().any(|d| d.eq_ignore_ascii_case(name)));
+            }
+            if let Some(b) = req.body.as_mut().filter(|b| !rabbithole_net::cors::unsafe_request_header_names(&[("content-type".into(), b.content_type.clone())]).is_empty()) {
+                b.content_type = "text/plain;charset=UTF-8".into();
+            }
         }
         Ok(req)
     })();

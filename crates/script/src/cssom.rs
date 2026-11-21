@@ -356,6 +356,10 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     if n.doc != 0 {
         return None;
     }
+    if prop.starts_with("--") {
+        let tokens = with_env(|env| env.computed_custom_property(n.node, prop))?;
+        return Some(tokens_to_css(&tokens).trim().to_string());
+    }
     // Style first (cheap: computed on demand when the DOM changed); the
     // layout box only when the value actually depends on it, so scripts
     // that interleave style writes and reads don't force full layouts.
