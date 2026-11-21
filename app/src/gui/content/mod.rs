@@ -133,6 +133,9 @@ pub enum ToContent {
     ContextMessage { id: u64, ticket: u64, message: rabbithole_engine::script::WindowMessage },
     /// Show generated HTML (internal pages) as if loaded from `url`.
     LoadHtml { html: String, url: Url, push_history: bool },
+    /// Back/forward to another session history entry of the current
+    /// document (fragment or `pushState` entry): no reload.
+    TraverseSameDocument(Url),
     /// Cancel the load in progress.
     Stop,
     Resize(ViewSize),
@@ -208,8 +211,15 @@ pub enum FromContent {
     /// Load progress after the commit (None = finished).
     Loading(Option<&'static str>),
     Title(String),
-    /// Same-document navigation (fragment links).
+    /// Same-document navigation (fragment links and fragment navigations
+    /// by scripts, `pushState`/`replaceState`): the document stays.
     UrlChanged { url: Url, push_history: bool },
+    /// `history.back()`/`forward()`/`go(n)` from the page, to entries of
+    /// other documents: the UI traverses its back/forward list.
+    HistoryGo(i32),
+    /// The page's scripts already moved `delta` entries within its own
+    /// document, now at `url`: the UI follows without reloading.
+    HistoryTraversed { delta: i32, url: Url },
     Favicon(Option<Arc<Image>>),
     Hover { cursor: &'static str, link: Option<Url> },
     State(PageState),

@@ -21,6 +21,7 @@ mod selection;
 mod service_workers;
 mod sso;
 mod scroll_events;
+mod spa;
 
 /// Messages received by the fake UI: (when, tab id, message).
 type Received = Receiver<(Instant, u64, FromContent)>;

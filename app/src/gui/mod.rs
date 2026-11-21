@@ -1236,11 +1236,12 @@ impl App {
             tab.title = title.clone();
             tab.current_url = Some(url.clone());
             tab.loading = None;
+            tab.new_document();
             if push_history || tab.history.is_empty() {
                 tab.push_history(url.clone());
-            } else if let Some(h) = tab.history.get_mut(tab.index) {
+            } else {
                 // Redirects: keep the final URL in the history entry.
-                *h = url.clone();
+                tab.replace_history(url.clone());
             }
             tab.zoom = zoom;
         }
@@ -1270,15 +1271,36 @@ impl App {
     }
 
     pub(crate) fn go_history(&mut self, delta: isize) {
-        let Some(tab) = self.tab() else { return };
+        self.go_history_tab(self.active, delta);
+    }
+
+    /// Move a tab `delta` entries through its history. Entries of the
+    /// document shown (fragments, `pushState`) are reached without
+    /// reloading it (`popstate`/`hashchange` instead).
+    pub(crate) fn go_history_tab(&mut self, idx: usize, delta: isize) {
+        let Some(tab) = self.tabs.get(idx) else { return };
         let target = tab.index as isize + delta;
         if target < 0 || target as usize >= tab.history.len() {
             return;
         }
-        let idx = self.active;
-        self.tabs[idx].index = target as usize;
-        let url = self.tabs[idx].history[target as usize].to_string();
-        self.navigate_tab(idx, &url, false);
+        let target = target as usize;
+        let same_document = tab.same_document_entry(target);
+        self.tabs[idx].index = target;
+        let url = self.tabs[idx].history[target].clone();
+        if same_document {
+            if let Some(id) = self.tabs[idx].content.as_ref().and_then(ContentHandle::context_id) { self.browsing_contexts.same_document_url(id, url.clone()); }
+            let tab = &mut self.tabs[idx];
+            tab.current_url = Some(url.clone());
+            tab.send(ToContent::TraverseSameDocument(url));
+            self.session_dirty = true;
+            if idx == self.active {
+                self.url_edited = false;
+                self.sync_url_field();
+                self.request_redraw();
+            }
+            return;
+        }
+        self.navigate_tab(idx, &url.to_string(), false);
     }
 
     pub(crate) fn reload(&mut self, bypass_cache: bool) {
@@ -1525,7 +1547,19 @@ impl App {
                 tab.current_url = Some(url.clone());
                 if push_history {
                     tab.push_history(url);
+                } else {
+                    tab.replace_history(url);
                 }
+                self.session_dirty = true;
+                if active {
+                    self.sync_url_field();
+                    self.request_redraw();
+                }
+            }
+            FromContent::HistoryGo(delta) => self.go_history_tab(idx, delta as isize),
+            FromContent::HistoryTraversed { delta, url } => {
+                if let Some(id) = self.tabs[idx].content.as_ref().and_then(ContentHandle::context_id) { self.browsing_contexts.same_document_url(id, url.clone()); }
+                self.tabs[idx].follow_traversal(delta as isize, url);
                 self.session_dirty = true;
                 if active {
                     self.sync_url_field();

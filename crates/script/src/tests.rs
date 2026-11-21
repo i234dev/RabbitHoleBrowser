@@ -693,6 +693,40 @@ fn fetch_and_xhr() {
     assert!(out.contains(&"aGk= hi ñ".to_string()));
 }
 
+/// Fragment navigations of the current document (`location.href`,
+/// `assign`, `replace`, `location = ...`, fragment links) stay in it: the
+/// embedder only hears about the new URL and session entries; other URLs
+/// and reloads still navigate.
+#[test]
+fn fragment_navigations_stay_in_the_document() {
+    let (mut env, mut host) = setup(r##"<a id="l" href="#sec">sec</a>"##);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        location.href = '#inbox';
+        location.assign(location.pathname + location.search + '#inbox/1');
+        location.replace('#inbox/2');
+        location = '#inbox';
+        document.getElementById('l').click();
+        history.pushState({n: 1}, '', 'other');
+        history.replaceState({n: 2}, '', '#x');
+        console.log(location.hash, history.state.n, history.length);
+        history.go(-9);
+        location.reload();
+    "#,
+    );
+    assert_eq!(out, ["#x 2 6"]);
+    let changes: Vec<String> = host.take_session_changes().into_iter().map(|c| match c {
+        SessionChange::Url { url, replace } => format!("{} {replace}", url.trim_start_matches("https://example.test/dir/")),
+        SessionChange::Go(d) => format!("go {d}"),
+        SessionChange::Traversed { delta, url } => format!("traversed {delta} {url}"),
+    }).collect();
+    assert_eq!(changes, ["page.html?q=1#inbox false", "page.html?q=1#inbox/1 false", "page.html?q=1#inbox/2 true", "page.html?q=1#inbox false", "page.html?q=1#sec false", "other false", "other#x true", "go -9"]);
+    // Only the reload reached the embedder as a navigation.
+    assert_eq!(env.navigations, vec![("https://example.test/dir/other#x".to_string(), true)]);
+}
+
 #[test]
 fn storage_cookie_location_and_navigation() {
     let (mut env, mut host) = setup(r#"<a id="l" href="/go?x=1">go</a><form id="f" action="/post" method="post"><input name="q" value="v"><button id="s">ok</button></form>"#);

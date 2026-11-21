@@ -314,6 +314,7 @@ impl Worker {
                 self.tick_deferred = true;
             }
             self.consent_tick();
+            self.send_session_changes();
             let t3 = Instant::now();
             self.flush();
             if debug_content() && t0.elapsed() > Duration::from_millis(100) {
@@ -457,6 +458,7 @@ impl Worker {
                 self.pending = None;
                 self.show_html(&html, url, push_history);
             }
+            ToContent::TraverseSameDocument(url) => self.traverse_same_document(url),
             ToContent::Stop => {
                 self.service_worker_navigation = None;
                 self.navigation_client = None;
@@ -1344,6 +1346,12 @@ impl Worker {
             self.scroll_event_pending = pending;
         }
         if let Some(nav) = out.navigation {
+            // A fragment of the current document stays in it (HTML
+            // "navigate to a fragment"): no reload.
+            // The same URL again is a reload (`location.reload()`).
+            if self.navigate_to_fragment(&nav.request, !nav.replace, false) {
+                return;
+            }
             self.end_edit();
             self.send(FromContent::Navigate { request: nav.request, push_history: !nav.replace });
             return;
@@ -1628,15 +1636,73 @@ impl Worker {
             return;
         }
         let Some(page) = self.page.as_ref() else { return };
-        let same_doc = page.url.without_fragment() == link.without_fragment();
-        if let (Some(fragment), true) = (link.fragment.clone(), same_doc) {
-            self.scroll_to_fragment(&fragment);
-            self.send(FromContent::UrlChanged { url: link, push_history: true });
-            self.dispatch_window("hashchange");
+        let request = Request::get(link).with_referer(page.url.clone()).with_referrer_policy(page.referrer_policy);
+        if self.navigate_to_fragment(&request, true, true) {
             return;
         }
-        let request = Request::get(link).with_referer(page.url.clone()).with_referrer_policy(page.referrer_policy);
         self.send(FromContent::Navigate { request, push_history: true });
+    }
+
+    /// Navigate the current document to a fragment of itself when
+    /// `request` is one (a GET of the document's current URL with a
+    /// fragment): scroll, `hashchange`, and the new URL for the UI.
+    /// Returns false for any other navigation, and for the current URL
+    /// itself unless `same_url` (a link to the fragment already shown).
+    fn navigate_to_fragment(&mut self, request: &Request, push_history: bool, same_url: bool) -> bool {
+        let Some(page) = self.page.as_mut() else { return false };
+        let url = request.url.clone();
+        let current = page.location_url();
+        if request.method != "GET" || request.body.is_some() || url.fragment.is_none() || url.without_fragment() != current.without_fragment() || (!same_url && url == current) {
+            return false;
+        }
+        // Navigating to the URL already shown replaces its entry.
+        let push = push_history && url != current;
+        let Some(out) = self.engine.navigate_fragment(page, url.clone(), push, false) else { return false };
+        self.dirty = true;
+        if let Some(f) = &url.fragment {
+            self.scroll_to_fragment(f);
+        }
+        self.send(FromContent::UrlChanged { url, push_history: push });
+        self.apply_outcome(out);
+        true
+    }
+
+    /// Back/forward between entries of the current document.
+    fn traverse_same_document(&mut self, url: Url) {
+        let Some(page) = self.page.as_mut() else { return };
+        match self.engine.navigate_fragment(page, url.clone(), false, true) {
+            Some(out) => {
+                self.dirty = true;
+                if let Some(f) = &url.fragment {
+                    self.scroll_to_fragment(f);
+                }
+                self.apply_outcome(out);
+            }
+            // Not this document after all: load the entry.
+            None => self.send(FromContent::Navigate { request: Request::get(url), push_history: false }),
+        }
+    }
+
+    /// Tell the UI where the page's scripts moved the document
+    /// (`pushState`, fragment navigations) and which history traversals
+    /// they asked for.
+    fn send_session_changes(&mut self) {
+        let Some(page) = self.page.as_mut() else { return };
+        for change in page.take_session_changes() {
+            match change {
+                rabbithole_engine::script::SessionChange::Url { url, replace } => {
+                    if let Some(url) = Url::parse(&url) {
+                        self.send(FromContent::UrlChanged { url, push_history: !replace });
+                    }
+                }
+                rabbithole_engine::script::SessionChange::Go(delta) => self.send(FromContent::HistoryGo(delta)),
+                rabbithole_engine::script::SessionChange::Traversed { delta, url } => {
+                    if let Some(url) = Url::parse(&url) {
+                        self.send(FromContent::HistoryTraversed { delta, url });
+                    }
+                }
+            }
+        }
     }
 
     fn open_select_dropdown(&mut self, select: NodeId) {

@@ -52,6 +52,12 @@ pub struct Tab {
     pub current_url: Option<Url>,
     pub history: Vec<Url>,
     pub index: usize,
+    /// The document each history entry belongs to (`document` values;
+    /// 0 or missing: unknown, e.g. restored entries). Entries of the
+    /// current document are traversed without reloading it.
+    pub history_docs: Vec<u64>,
+    /// The document currently shown (incremented per commit; 0: none).
+    pub document: u64,
     /// Scroll position in CSS px (the UI is the authority; the content
     /// thread follows).
     pub scroll: (f32, f32),
@@ -100,6 +106,8 @@ impl Tab {
             current_url: None,
             history: Vec::new(),
             index: 0,
+            history_docs: Vec::new(),
+            document: 0,
             scroll: (0.0, 0.0),
             zoom: 1.0,
             loading: None,
@@ -171,9 +179,11 @@ impl Tab {
         (self.content_size().0 - viewport_w).max(0.0)
     }
 
-    /// Push a URL onto the history, truncating any forward entries.
+    /// Push a URL onto the history, truncating any forward entries. The
+    /// entry belongs to the current document.
     pub fn push_history(&mut self, url: Url) {
         if self.history.get(self.index) == Some(&url) && !self.history.is_empty() {
+            self.set_entry_document(self.index);
             return;
         }
         if !self.history.is_empty() {
@@ -181,6 +191,54 @@ impl Tab {
         }
         self.history.push(url);
         self.index = self.history.len() - 1;
+        self.set_entry_document(self.index);
+    }
+
+    /// Replace the current entry's URL (redirects, `replaceState`); it now
+    /// belongs to the current document.
+    pub fn replace_history(&mut self, url: Url) {
+        if self.history.is_empty() {
+            return self.push_history(url);
+        }
+        let i = self.index.min(self.history.len() - 1);
+        self.history[i] = url;
+        self.set_entry_document(i);
+    }
+
+    fn set_entry_document(&mut self, i: usize) {
+        self.history_docs.resize(self.history.len(), 0);
+        if let Some(d) = self.history_docs.get_mut(i) {
+            *d = self.document;
+        }
+    }
+
+    /// The document moved itself `delta` entries through its own history,
+    /// now showing `url`. Entries the list does not have for this document
+    /// become a replacement of the current one.
+    pub fn follow_traversal(&mut self, delta: isize, url: Url) {
+        let target = self.index as isize + delta;
+        if target >= 0 && self.same_document_entry(target as usize) {
+            self.index = target as usize;
+            self.history[self.index] = url.clone();
+        } else {
+            self.replace_history(url.clone());
+        }
+        self.current_url = Some(url);
+    }
+
+    /// A new document was committed.
+    pub fn new_document(&mut self) {
+        self.document += 1;
+    }
+
+    /// Whether history entry `target` belongs to the document shown, so
+    /// going there is a same-document traversal (no reload).
+    pub fn same_document_entry(&self, target: usize) -> bool {
+        self.document != 0
+            && self.loading.is_none()
+            && self.history.len() == self.history_docs.len()
+            && self.history_docs.get(target) == Some(&self.document)
+            && self.history_docs.get(self.index) == Some(&self.document)
     }
 
     /// Clear per-page UI state when a new document replaces the old one.

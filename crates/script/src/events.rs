@@ -1708,7 +1708,7 @@ fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target
             }
             let href = with_doc(0, |doc| doc.attr(n.node, "href").map(|s| s.to_string()));
             if let Some(u) = href.and_then(|h| resolve_url(&h)) {
-                with_env(|env| env.navigate(u, false));
+                crate::window::navigate_to(realm, u, false);
             }
         }
         Activation::Summary => {

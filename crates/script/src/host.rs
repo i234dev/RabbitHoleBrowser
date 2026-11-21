@@ -136,6 +136,12 @@ pub struct HostState {
     pub location_override: Option<String>,
     pub history_len: u32,
     pub history_state: Value,
+    /// This document's session history entries (URL, state) once a script
+    /// changed the URL in place, and the current one.
+    pub history_entries: Vec<(String, Value)>,
+    pub history_index: usize,
+    /// Same-document URL changes and traversal requests for the embedder.
+    pub session_changes: Vec<SessionChange>,
     pub event_stack: Vec<ObjectId>,
     pub time_origin: f64,
     pub console_marks: HashMap<String, f64>,
@@ -460,6 +466,23 @@ pub(crate) fn this_node(realm: &mut Realm, this: &Value, what: &str) -> JsResult
 
 /// Keep a JS value alive for the lifetime of the page (listener callbacks,
 /// timer callbacks, observers).
+/// What a document's scripts did to its session history, for the embedder
+/// (address bar and back/forward list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionChange {
+    /// The document's URL changed in place (fragment navigation,
+    /// `pushState`, `replaceState`): a new entry, or the current one
+    /// replaced.
+    Url { url: String, replace: bool },
+    /// `history.back()`, `forward()`, `go(delta)` beyond this document's
+    /// entries: the embedder traverses its session history.
+    Go(i32),
+    /// The document's scripts traversed its own entries (`history.back()`
+    /// between `pushState` entries): the embedder moves its current entry
+    /// by `delta`, now showing `url`, without touching the document.
+    Traversed { delta: i32, url: String },
+}
+
 pub(crate) fn root_value(realm: &mut Realm, v: &Value) {
     if !v.is_object() {
         return;
