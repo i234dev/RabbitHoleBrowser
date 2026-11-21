@@ -4,7 +4,7 @@
 # change without updating this record, the page shows the new counts with an
 # unrecorded date rather than attributing them to an older run.
 test262	JavaScript / test262	46017/46064	2026-11-18 (Europe/Madrid)	Executed ECMAScript files; 0.1.34 JavaScript code (fe3d71e), JIT on (default), normal GC, 8 workers; Linux x86-64 WSL2, profile ci; corpus 2e58f87; 99.93% excluding Intl	docs/benchmarks/test262-2026-11-18-v0.1.34.json	computed
-css	CSS / WPT pixel tests	16391/19627	2026-11-21	Reference-image comparisons across the committed CSS corpus; source 0a940094 (0.1.41 CSS/layout code), 12 workers; any-match multiple-reference rule since 0.1.36	docs/benchmarks/wpt-css-2026-11-21-v0.1.41.md	computed
+css	CSS / WPT pixel tests	16395/19627	2026-11-21	Reference-image comparisons across the committed CSS corpus; source 3bb98823 (0.1.42 CSS/layout code), 12 workers; any-match multiple-reference rule since 0.1.36	docs/benchmarks/wpt-css-2026-11-21-v0.1.42.md	computed
 dom	DOM / WPT dom/*	55772/65775	2026-11-13	DOM directory and its subdirectories; other web APIs are counted below	tools/wpt/summary.txt	computed
 wpt	Web platform / WPT	107993/131464	2026-11-13	DOM, HTML, URL, Encoding, IndexedDB and other tested APIs	tools/wpt/summary.txt	computed
 html	HTML / html5lib	1,935 / 1,945	2026-11-13	Tree-construction tests	README conformance record	recorded

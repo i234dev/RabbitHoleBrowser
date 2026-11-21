@@ -2,12 +2,12 @@
 dir css/CSS2 5782 6232
 dir css/compositing 37 60
 dir css/css-align 37 64
-dir css/css-backgrounds 604 718
+dir css/css-backgrounds 606 718
 dir css/css-borders 43 123
 dir css/css-box 38 42
 dir css/css-cascade 41 51
 dir css/css-color 291 311
-dir css/css-conditional 148 172
+dir css/css-conditional 149 172
 dir css/css-contain 304 435
 dir css/css-display 179 223
 dir css/css-flexbox 875 1027
@@ -20,7 +20,7 @@ dir css/css-overflow 449 719
 dir css/css-position 156 251
 dir css/css-sizing 399 568
 dir css/css-text 1201 1550
-dir css/css-text-decor 282 339
+dir css/css-text-decor 283 339
 dir css/css-transforms 748 794
 dir css/css-ui 877 962
 dir css/css-values 115 192
@@ -562,10 +562,8 @@ fail css/css-backgrounds/background-clip/clip-text-blend-mode.html
 fail css/css-backgrounds/background-clip/clip-text-constrain-geometry.html
 fail css/css-backgrounds/background-clip/clip-text-descendants.html
 fail css/css-backgrounds/background-clip/clip-text-fragmentation.html
-fail css/css-backgrounds/background-clip/clip-text-inline.html
 fail css/css-backgrounds/background-clip/clip-text-multiline-background-image.html
 fail css/css-backgrounds/background-clip/clip-text-multiline-linebreak.html
-fail css/css-backgrounds/background-clip/clip-text-scaled.html
 fail css/css-backgrounds/background-clip/clip-text-stacking-context-child-002.html
 fail css/css-backgrounds/background-clip/clip-text-stacking-context-child.html
 fail css/css-backgrounds/background-clip/clip-text-text-decorations.html
@@ -758,7 +756,6 @@ fail css/css-color/t44-currentcolor-inherited-c.xht
 fail css/css-conditional/at-media-002.html
 fail css/css-conditional/at-media-003.html
 fail css/css-conditional/at-media-content-003.html
-fail css/css-conditional/at-media-dynamic-001.html
 fail css/css-conditional/at-supports-045.html
 fail css/css-conditional/at-supports-content-003.html
 fail css/css-conditional/at-supports-namespace-001.html
@@ -2330,7 +2327,6 @@ fail css/css-text-decor/text-decoration-inset-svg-fragment-001.html
 fail css/css-text-decor/text-decoration-propagation-display-contents-002.html
 fail css/css-text-decor/text-decoration-propagation-display-contents-003.html
 fail css/css-text-decor/text-decoration-propagation-display-contents.html
-fail css/css-text-decor/text-decoration-propagation-dynamic-001.html
 fail css/css-text-decor/text-decoration-skip-ink-upright-002.html
 fail css/css-text-decor/text-decoration-skip-ink-vertical-002.html
 fail css/css-text-decor/text-decoration-skip-spaces-001.html
