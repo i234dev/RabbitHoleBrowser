@@ -222,7 +222,7 @@ fn controlled_window_fetch_intercepts_real_cache_bytes_and_uses_worker_network_f
 }
 
 #[test]
-fn intercepted_fetch_preserves_credentials_and_rejects_unsafe_no_cors_before_network() {
+fn intercepted_fetch_preserves_credentials_and_strips_unsafe_no_cors_headers() {
     let cross = Server::new(&[("/unsafe","text/plain","must not reach",&[])]);
     let html = r#"<!doctype html><script>
       var controlled=false; navigator.serviceWorker.register('sw.js');
@@ -245,17 +245,24 @@ fn intercepted_fetch_preserves_credentials_and_rejects_unsafe_no_cors_before_net
         assert!(!omit.to_ascii_lowercase().contains("cookie:"),"{omit}");
         assert!(include.contains("sw-secret=present"),"{include}");
     }
-    let source=format!(r#"var rejected; Promise.all([
-      fetch('{}/unsafe',{{mode:'no-cors',headers:{{'x-custom':'unsafe'}}}}),
-      fetch('{}/unsafe',{{mode:'no-cors',method:'POST',body:'{{}}',headers:{{'content-type':'application/json'}}}}),
+    // No-cors requests drop the headers that are not CORS-safelisted (the
+    // "request-no-cors" guard) instead of failing; only an unsafe method
+    // rejects before the network.
+    let source=format!(r#"var outcome; Promise.all([
+      fetch('{}/unsafe',{{mode:'no-cors',headers:{{'x-custom':'unsafe'}}}}).then(r=>r.type),
+      fetch('{}/unsafe',{{mode:'no-cors',method:'POST',body:'{{}}',headers:{{'content-type':'application/json'}}}}).then(r=>r.type),
+      fetch('{}/unsafe',{{mode:'no-cors',method:'PUT'}}),
       fetch('{}/unsafe',{{mode:'same-origin'}}),
       fetch('{}/unsafe')
-    ].map(p=>p.then(()=>false,e=>e instanceof TypeError))).then(v=>rejected=v.every(Boolean));"#,cross.origin,cross.origin,cross.origin,cross.origin);
+    ].map(p=>p.then(v=>String(v),e=>e instanceof TypeError))).then(v=>outcome=v.join());"#,cross.origin,cross.origin,cross.origin,cross.origin,cross.origin);
     engine.eval_in_page(&mut page,&source);
-    wait(&engine,&mut page,"rejected===true");
+    wait(&engine,&mut page,"outcome==='opaque,opaque,true,true,true'");
     let requests=cross.requests.lock().unwrap();
-    assert_eq!(requests.len(),1,"only the ordinary CORS fetch may reach the cross-origin server: {requests:?}");
-    assert!(!requests[0].1.to_ascii_lowercase().contains("x-custom:"));
+    assert_eq!(requests.len(),3,"the two no-cors fetches and the ordinary CORS fetch reach the cross-origin server: {requests:?}");
+    for (_, head) in requests.iter() {
+        let head=head.to_ascii_lowercase();
+        assert!(!head.contains("x-custom:") && !head.contains("application/json"),"{head}");
+    }
 }
 
 #[test]
