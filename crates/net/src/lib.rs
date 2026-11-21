@@ -11,6 +11,7 @@
 pub mod url;
 mod idna_table;
 pub mod fetch;
+pub mod coding;
 pub mod charset;
 pub mod encoding;
 pub mod cookies;

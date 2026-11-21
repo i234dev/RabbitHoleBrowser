@@ -736,65 +736,7 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// Wrap a body reader with the decoders for its `Content-Encoding`
-/// (gzip, deflate (zlib or raw), br, zstd; applied in reverse order).
-pub fn decode_content(headers: &[(String, String)], body: Box<dyn Read + Send>) -> Box<dyn Read + Send> {
-    let Some(ce) = headers.iter().find(|(k, _)| k == "content-encoding").map(|(_, v)| v.to_ascii_lowercase()) else {
-        return body;
-    };
-    let mut r = body;
-    for coding in ce.split(',').map(|c| c.trim().to_string()).rev() {
-        r = match coding.as_str() {
-            "gzip" | "x-gzip" | "deflate" | "br" | "zstd" => Box::new(LazyDecoder { coding, inner: Some(r), dec: None }),
-            _ => r, // identity / unknown: pass through
-        };
-    }
-    r
-}
-
-/// Defers building the decoder until the first read, so empty bodies
-/// (204, HEAD, redirects) labelled with a coding read as empty.
-struct LazyDecoder {
-    coding: String,
-    inner: Option<Box<dyn Read + Send>>,
-    dec: Option<Box<dyn Read + Send>>,
-}
-
-impl Read for LazyDecoder {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.dec.is_none() {
-            let Some(inner) = self.inner.take() else { return Ok(0) };
-            let mut br = std::io::BufReader::with_capacity(16 * 1024, inner);
-            let first = {
-                use std::io::BufRead;
-                let b = br.fill_buf()?;
-                if b.is_empty() {
-                    return Ok(0);
-                }
-                b.to_vec()
-            };
-            self.dec = Some(match self.coding.as_str() {
-                "gzip" | "x-gzip" => Box::new(flate2::read::MultiGzDecoder::new(br)),
-                "deflate" => {
-                    // RFC says zlib; some servers send raw deflate.
-                    let zlib = first.len() >= 2 && first[0] & 0x0f == 8 && ((first[0] as u16) << 8 | first[1] as u16) % 31 == 0;
-                    if zlib {
-                        Box::new(flate2::read::ZlibDecoder::new(br))
-                    } else {
-                        Box::new(flate2::read::DeflateDecoder::new(br))
-                    }
-                }
-                "br" => Box::new(brotli_decompressor::Decompressor::new(br, 64 * 1024)),
-                "zstd" => match ruzstd::decoding::StreamingDecoder::new(br) {
-                    Ok(d) => Box::new(d),
-                    Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("zstd: {e}"))),
-                },
-                _ => Box::new(br),
-            });
-        }
-        self.dec.as_mut().unwrap().read(buf)
-    }
-}
+pub use crate::coding::decode_content;
 
 /// Copies the body into the HTTP cache once it was read completely.
 struct CacheTee {
@@ -1203,7 +1145,7 @@ impl Fetcher {
                 }
             }
         }
-        let encoded = resp.headers.iter().any(|(k, v)| k == "content-encoding" && !v.trim().eq_ignore_ascii_case("identity"));
+        let encoded = !crate::coding::content_codings(&resp.headers).is_empty();
         let content_length = if encoded { None } else { resp.headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.trim().parse::<u64>().ok()) };
         let decoded = if method == "HEAD" { resp.body } else { decode_content(&resp.headers, resp.body) };
         let body: Box<dyn Read + Send> = match &cache {
