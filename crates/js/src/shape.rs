@@ -18,7 +18,7 @@
 
 use crate::heap::Property;
 use crate::value::{FxBuild, JsStr, PropertyKey};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
@@ -165,7 +165,8 @@ pub fn lazy_fn_shape(ln: &Rc<Shape>) -> Rc<Shape> {
                 keys: ln.keys.clone(),
                 parent: ln.parent.clone(),
                 transitions: RefCell::new(Transitions::default()),
-                index: OnceCell::new(),
+                // Same key vector as `ln`: share its key index.
+                index: ln.index.clone(),
             })
         })
         .clone()
