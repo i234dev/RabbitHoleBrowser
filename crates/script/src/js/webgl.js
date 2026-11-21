@@ -2,6 +2,10 @@
 // Unsupported commands set GL errors; extensions remain unavailable.
 (function () {
   'use strict';
+  // The engine's own timers, bound now: internal tasks (port messages,
+  // idle callbacks, observer deliveries, ...) must not go through a page's
+  // replacement of these globals, which may wrap, delay or drop them.
+  const { setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame, cancelAnimationFrame, queueMicrotask } = globalThis;
   const g = globalThis, N = g.__rhNative;
   const invoke = Reflect.apply;
   const UniformFloats = Float32Array, UniformInts = Int32Array;

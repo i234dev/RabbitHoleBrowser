@@ -602,6 +602,29 @@ fn messaging_workers_and_blob_urls() {
     assert_eq!(rest, vec!["bc hi c", "blob-fetch true true", "port {\"a\":[1,2]} 0", "win 7 true https://example.test", "worker 42"]);
 }
 
+/// A page that replaces the timer globals (with wrappers that only queue
+/// the callbacks, as some app frameworks do until their scheduler starts)
+/// must not hold up the engine's own tasks: port messages, idle callbacks,
+/// scheduler tasks and AbortSignal.timeout.
+#[test]
+fn engine_tasks_ignore_replaced_timer_globals() {
+    let mut out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const parked = [];
+        window.setTimeout = window.setInterval = window.requestAnimationFrame = window.queueMicrotask = (f) => { parked.push(f); return 1; };
+        const ch = new MessageChannel();
+        ch.port1.onmessage = () => console.log('port');
+        ch.port2.postMessage(null);
+        requestIdleCallback(() => console.log('idle'));
+        scheduler.postTask(() => console.log('task'));
+        AbortSignal.timeout(0).onabort = () => console.log('abort');
+        "#,
+    );
+    out.sort();
+    assert_eq!(out, ["abort", "idle", "port", "task"]);
+}
+
 #[test]
 fn performance_timeline_and_idle_callbacks() {
     let out = logs_of(
