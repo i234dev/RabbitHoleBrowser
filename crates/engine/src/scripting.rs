@@ -1099,14 +1099,25 @@ impl Engine {
     /// Navigate an existing document to a fragment without replacing DOM,
     /// realm, child contexts or service-worker client. The embedder chooses
     /// history push/traversal; this method refuses a different resource URL.
+    ///
+    /// The document's current URL is the one scripts moved it to
+    /// (`pushState`, fragment navigations) when they did. A traversal
+    /// (back/forward between entries of this document) may also return to
+    /// an entry `pushState` created with another path.
     pub fn navigate_fragment(&self, page: &mut Page, url: Url, push: bool, traversal: bool) -> Option<ScriptOutcome> {
-        if page.url.without_fragment() != url.without_fragment() { return None; }
-        let old = page.url.to_string();
+        let current = page.location_url();
+        if !traversal && current.without_fragment() != url.without_fragment() { return None; }
+        if traversal && current.origin() != url.origin() { return None; }
+        let old = current.to_string();
         if self.scripting {
             self.ensure_script_host(page);
             if page.script.host.is_none() { return None; }
         }
-        page.url = url.clone();
+        // The loaded resource keeps its URL (base URL, reloads) unless only
+        // the fragment changed.
+        if page.url.without_fragment() == url.without_fragment() {
+            page.url = url.clone();
+        }
         if self.scripting {
             if let Some(mut host) = page.script.host.take() {
                 {
@@ -1279,6 +1290,19 @@ impl Engine {
 }
 
 impl Page {
+    /// The document's current URL: where scripts moved it (`pushState`,
+    /// fragment navigations), else the URL it was loaded from.
+    pub fn location_url(&self) -> Url {
+        self.script.host.as_ref().and_then(|h| h.location_override()).and_then(|u| Url::parse(&u)).unwrap_or_else(|| self.url.clone())
+    }
+
+    /// Same-document URL changes and `history` traversals the page's
+    /// scripts made since the last call (for the embedder's address bar
+    /// and session history).
+    pub fn take_session_changes(&mut self) -> Vec<rabbithole_script::SessionChange> {
+        self.script.host.as_mut().map(|h| h.take_session_changes()).unwrap_or_default()
+    }
+
     /// Earliest time (engine ms) a timer or animation frame is due.
     pub fn next_script_due(&self) -> Option<f64> {
         let scripts = self.script.host.as_ref().and_then(|h| h.next_due());

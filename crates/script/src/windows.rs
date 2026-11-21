@@ -174,7 +174,7 @@ pub(crate) fn open(realm: &mut Realm, args: &[Value]) -> JsResult<Value> {
             }
         }
         if let Some(url) = url {
-            with_env(|env| if target == own { env.navigate(url, false); } else { env.navigate_frame(target, &url.to_string()); });
+            if target == own { crate::window::navigate_to(realm, url, false); } else { with_env(|env| env.navigate_frame(target, &url.to_string())); }
         }
         return crate::frames::window_for(realm, Some(target));
     }

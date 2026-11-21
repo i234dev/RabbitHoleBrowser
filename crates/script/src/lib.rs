@@ -70,7 +70,7 @@ mod tests_webgl_facing;
 mod tests_webgl_color_types;
 
 pub use env::HostEnv;
-pub use host::{NodeRef, TargetKey};
+pub use host::{NodeRef, SessionChange, TargetKey};
 pub use rabbithole_js::exclude_from_watchdog;
 pub use rabbithole_js as js;
 
@@ -341,6 +341,9 @@ impl ScriptHost {
             location_override: None,
             history_len: 1,
             history_state: Value::Null,
+            history_entries: Vec::new(),
+            history_index: 0,
+            session_changes: Vec::new(),
             event_stack: Vec::new(),
             time_origin: now,
             console_marks: HashMap::default(),
@@ -938,6 +941,18 @@ impl ScriptHost {
     /// handling) without dispatching events.
     pub fn set_focused(&mut self, node: Option<NodeId>) {
         self.state.borrow_mut().focused = node;
+    }
+
+    /// Same-document URL changes and traversal requests made by scripts
+    /// since the last call, oldest first.
+    pub fn take_session_changes(&mut self) -> Vec<SessionChange> {
+        std::mem::take(&mut self.state.borrow_mut().session_changes)
+    }
+
+    /// The URL scripts moved the document to (fragment navigation,
+    /// `pushState`), when it differs from the loaded one.
+    pub fn location_override(&self) -> Option<String> {
+        self.state.borrow().location_override.clone()
     }
 
     /// The location `href` as scripts see it (after pushState).

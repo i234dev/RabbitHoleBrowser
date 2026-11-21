@@ -36,7 +36,7 @@ fn loc_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     match which.as_str() {
         "href" => {
             match base_url().join(&v) {
-                Some(nu) => navigate_to(nu, false),
+                Some(nu) => navigate_to(realm, nu, false),
                 None => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to set the 'href' property on 'Location': '{v}' is not a valid URL."))),
             }
             return Ok(Value::Undefined);
@@ -56,15 +56,7 @@ fn loc_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
             if nu.fragment.as_deref().unwrap_or("") == u.fragment.as_deref().unwrap_or("") {
                 return Ok(Value::Undefined);
             }
-            u = nu;
-            // Same-document navigation: update the override and fire events.
-            let old = current_href();
-            state().borrow_mut().location_override = Some(u.to_string());
-            if let Some(frag) = &u.fragment {
-                scroll_to_fragment(frag);
-            }
-            let new = u.to_string();
-            fire_hashchange(realm, &old, &new);
+            navigate_fragment_in_script(realm, &u, nu, false);
             return Ok(Value::Undefined);
         }
         // The URL setters (URL Standard state overrides).
@@ -76,7 +68,7 @@ fn loc_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
         "port" => u.set_port(&v),
         _ => {}
     }
-    navigate_to(u, false);
+    navigate_to(realm, u, false);
     Ok(Value::Undefined)
 }
 
@@ -123,7 +115,31 @@ pub(crate) fn navigate_fragment(realm: &mut Realm, old_url: &str, new_url: &str,
         let st = state();
         let mut st = st.borrow_mut();
         st.location_override = Some(new_url.to_string());
-        if push { st.history_len += 1; }
+        if traversal {
+            // Back/forward within this document: restore the entry's state
+            // (the nearest entry with this URL; a fragment the embedder
+            // reached on its own has none).
+            let here = st.history_index;
+            let found = (0..st.history_entries.len())
+                .filter(|&i| st.history_entries[i].0 == new_url)
+                .min_by_key(|&i| (i as isize - here as isize).unsigned_abs());
+            match found {
+                Some(i) => {
+                    st.history_index = i;
+                    st.history_state = st.history_entries[i].1.clone();
+                }
+                None => st.history_state = Value::Null,
+            }
+        } else if push {
+            st.history_len += 1;
+            if !st.history_entries.is_empty() {
+                let i = st.history_index.min(st.history_entries.len() - 1);
+                st.history_entries.truncate(i + 1);
+                st.history_entries.push((new_url.to_string(), Value::Null));
+                st.history_index = i + 1;
+            }
+            st.history_state = Value::Null;
+        }
     }
     if traversal {
         let id = crate::events::create_event(realm, "PopStateEvent", "popstate", &crate::EventInit::simple(false, false), true);
@@ -139,14 +155,69 @@ pub(crate) fn navigate_fragment(realm: &mut Realm, old_url: &str, new_url: &str,
     if old_fragment != new_fragment { fire_hashchange(realm, &old, new_url); }
 }
 
-pub(crate) fn navigate_to(u: Url, replace: bool) {
+/// Navigate this browsing context to `u` (Location setters, `assign`,
+/// `replace`, link activation). A URL that differs from the current one
+/// only by a present fragment is a same-document fragment navigation
+/// (HTML "navigate", step "navigate to a fragment"): the document, its
+/// realm and its state stay; only the URL, history entry, scroll and
+/// `hashchange` change. Everything else goes to the embedder.
+pub(crate) fn navigate_to(realm: &mut Realm, u: Url, replace: bool) {
+    let current = current_url();
+    if u.fragment.is_some() && u.without_fragment() == current.without_fragment() {
+        navigate_fragment_in_script(realm, &current, u, replace);
+        return;
+    }
     with_env(|env| env.navigate(u, replace));
+}
+
+/// Same-document fragment navigation started by a script: update the
+/// location, record the history entry for the embedder, scroll to the
+/// fragment and queue `hashchange` when the fragment changed.
+fn navigate_fragment_in_script(realm: &mut Realm, current: &Url, u: Url, replace: bool) {
+    let old = current.to_string();
+    let new = u.to_string();
+    // Navigating to the URL already shown replaces its entry.
+    let replace = replace || old == new;
+    record_url_change(realm, &new, replace, Value::Null);
+    state().borrow_mut().location_override = Some(new.clone());
+    if let Some(frag) = &u.fragment {
+        scroll_to_fragment(frag);
+    }
+    if current.fragment != u.fragment {
+        fire_hashchange(realm, &old, &new);
+    }
+}
+
+/// Record a same-document URL change (fragment navigation, `pushState`,
+/// `replaceState`) in the document's session history and queue it for the
+/// embedder (address bar, back/forward list).
+fn record_url_change(realm: &mut Realm, url: &str, replace: bool, value: Value) {
+    root_value(realm, &value);
+    let st = state();
+    let mut st = st.borrow_mut();
+    if st.history_entries.is_empty() {
+        let first = st.location_override.clone().unwrap_or_else(|| with_env(|env| env.document_url().to_string()));
+        let first_state = st.history_state.clone();
+        st.history_entries.push((first, first_state));
+        st.history_index = 0;
+    }
+    let i = st.history_index.min(st.history_entries.len() - 1);
+    if replace {
+        st.history_entries[i] = (url.to_string(), value.clone());
+    } else {
+        st.history_entries.truncate(i + 1);
+        st.history_entries.push((url.to_string(), value.clone()));
+        st.history_index = i + 1;
+        st.history_len += 1;
+    }
+    st.history_state = value;
+    push_session_change(&mut st.session_changes, SessionChange::Url { url: url.to_string(), replace });
 }
 
 fn loc_assign(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg_str(realm, args, 0)?;
     if let Some(u) = current_url().join(&v) {
-        navigate_to(u, false);
+        navigate_to(realm, u, false);
     }
     Ok(Value::Undefined)
 }
@@ -154,14 +225,15 @@ fn loc_assign(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
 fn loc_replace(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg_str(realm, args, 0)?;
     if let Some(u) = current_url().join(&v) {
-        navigate_to(u, true);
+        navigate_to(realm, u, true);
     }
     Ok(Value::Undefined)
 }
 
 fn loc_reload(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    // A reload is never a fragment navigation, even with a fragment.
     let u = current_url();
-    navigate_to(u, true);
+    with_env(|env| env.navigate(u, true));
     Ok(Value::Undefined)
 }
 
@@ -181,7 +253,7 @@ pub(crate) fn location_getter(_realm: &mut Realm, _this: Value, _: &[Value]) -> 
 fn location_setter(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg_str(realm, args, 0)?;
     if let Some(u) = current_url().join(&v) {
-        navigate_to(u, false);
+        navigate_to(realm, u, false);
     }
     Ok(Value::Undefined)
 }
@@ -227,26 +299,78 @@ fn hist_replace(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
 fn hist_update(realm: &mut Realm, args: &[Value], push: bool) -> JsResult<Value> {
     let st_val = arg(args, 0);
     let url = arg_str_opt(realm, args, 2)?;
-    root_value(realm, &st_val);
-    {
-        let st = state();
-        let mut st = st.borrow_mut();
-        st.history_state = st_val;
-        if push {
-            st.history_len += 1;
-        }
-    }
-    if let Some(u) = url {
-        if let Some(nu) = current_url().join(&u) {
-            state().borrow_mut().location_override = Some(nu.to_string());
-        }
-    }
+    let current = current_url();
+    let target = match url {
+        Some(u) => current.join(&u).unwrap_or(current),
+        None => current,
+    };
+    let href = target.to_string();
+    record_url_change(realm, &href, !push, st_val);
+    state().borrow_mut().location_override = Some(href);
     Ok(Value::Undefined)
 }
 
-fn hist_go(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    // Traversal is the embedder's job; logged for visibility.
-    log("info", "history navigation requested (not supported from script)");
+/// `__rhNative.historyTraverse(delta, state, url)`: the session history
+/// script (navigation.js) moved to another entry of this document: set the
+/// location and state, and tell the embedder. Events are the caller's.
+pub(crate) fn history_traverse_native(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let delta = match arg(args, 0).v() {
+        V::Number(n) if n.is_finite() => n.trunc().clamp(-1e6, 1e6) as i32,
+        _ => return Ok(Value::Undefined),
+    };
+    let value = arg(args, 1);
+    let url = arg_str(realm, args, 2)?;
+    let Some(target) = current_url().join(&url) else { return Ok(Value::Undefined) };
+    root_value(realm, &value);
+    let href = target.to_string();
+    let st = state();
+    let mut st = st.borrow_mut();
+    if !st.history_entries.is_empty() {
+        let i = (st.history_index as i64 + delta as i64).clamp(0, st.history_entries.len() as i64 - 1) as usize;
+        st.history_index = i;
+        st.history_entries[i] = (href.clone(), value.clone());
+    }
+    st.history_state = value;
+    st.location_override = Some(href.clone());
+    push_session_change(&mut st.session_changes, SessionChange::Traversed { delta, url: href });
+    Ok(Value::Undefined)
+}
+
+/// Queue a session change; an embedder that never drains them keeps only
+/// the latest few.
+fn push_session_change(queue: &mut Vec<SessionChange>, change: SessionChange) {
+    const MAX: usize = 256;
+    if queue.len() >= MAX {
+        queue.drain(..queue.len() + 1 - MAX);
+    }
+    queue.push(change);
+}
+
+fn hist_back(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    traverse(realm, -1)
+}
+
+fn hist_forward(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    traverse(realm, 1)
+}
+
+fn hist_go(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let delta = match arg(args, 0).v() {
+        V::Number(n) if n.is_finite() => n.trunc().clamp(-1e6, 1e6) as i32,
+        _ => 0,
+    };
+    traverse(realm, delta)
+}
+
+/// Traversal belongs to the embedder's session history: queue it. `go(0)`
+/// reloads the document.
+fn traverse(_realm: &mut Realm, delta: i32) -> JsResult<Value> {
+    if delta == 0 {
+        let u = current_url();
+        with_env(|env| env.navigate(u, true));
+    } else {
+        push_session_change(&mut state().borrow_mut().session_changes, SessionChange::Go(delta));
+    }
     Ok(Value::Undefined)
 }
 
@@ -258,8 +382,8 @@ fn make_history(realm: &mut Realm) -> ObjectId {
     realm.define_property(o, "scrollRestoration", Value::str("auto"), ALL);
     realm.define_method(o, "pushState", 3, hist_push);
     realm.define_method(o, "replaceState", 3, hist_replace);
-    realm.define_method(o, "back", 0, hist_go);
-    realm.define_method(o, "forward", 0, hist_go);
+    realm.define_method(o, "back", 0, hist_back);
+    realm.define_method(o, "forward", 0, hist_forward);
     realm.define_method(o, "go", 1, hist_go);
     realm.extra_roots.push(Value::Object(o));
     o

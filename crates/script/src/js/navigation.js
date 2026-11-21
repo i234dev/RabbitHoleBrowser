@@ -65,7 +65,7 @@
       const oldURL = location.href;
       index = target;
       const to = entries[index];
-      nativeReplace(to[S].histState, '', to.url);
+      N.historyTraverse(target - entries.indexOf(from), to[S].histState, to.url);
       fireCurrentChange(from, 'traverse');
       g.dispatchEvent(new g.PopStateEvent('popstate', { state: to[S].histState }));
       if (oldURL !== to.url && sameDoc(oldURL, to.url) && new URL(oldURL).hash !== new URL(to.url).hash) g.dispatchEvent(new g.HashChangeEvent('hashchange', { oldURL, newURL: to.url }));
@@ -74,6 +74,17 @@
   hidden(H, 'back', function back() { traverse(-1); });
   hidden(H, 'forward', function forward() { traverse(1); });
   hidden(H, 'go', function go(delta = 0) { traverse(delta | 0); });
+  // The embedder traversed to another entry of this document (back
+  // button): follow it before the page's own popstate listeners run.
+  g.addEventListener('popstate', () => {
+    if (entries[index].url === location.href) return;
+    let best = -1;
+    entries.forEach((e, i) => { if (e.url === location.href && (best < 0 || Math.abs(i - index) < Math.abs(best - index))) best = i; });
+    if (best < 0) return;
+    const from = entries[index];
+    index = best;
+    fireCurrentChange(from, 'traverse');
+  });
   // Hash navigations (location.hash = ...) add entries too.
   g.addEventListener('hashchange', (e) => {
     if (entries[index].url === location.href) return;
