@@ -689,11 +689,12 @@ pub const CALL_ARROW: u8 = 32;
 pub const CALL_SIMPLE: u8 = 64;
 
 impl FunctionCode {
-    /// A copy of `code` and of every function nested in it with nothing
-    /// a run has filled in: empty inline caches, no native code, no
+    /// A copy of `code` and of every function nested in it without what
+    /// running it filled in: empty inline caches, no native code, no
     /// compiled lazy functions. Lazy functions of the copy compile through
     /// the original (see `LazyCode::shared`): the bytecode of a function
-    /// is compiled once and copied for every copy that runs it.
+    /// is compiled once and copied for every copy that runs it. The
+    /// original may have run (its caches are left out).
     ///
     /// Compiled code holds no heap references (its constants are strings
     /// and numbers), only caches tied to the heap that ran it, so a copy

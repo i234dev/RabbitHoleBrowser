@@ -1340,23 +1340,27 @@ impl Realm {
     }
 
     /// [`Realm::eval`] of a script built into the program (the same text
-    /// for every realm): it is compiled once per thread and each realm
-    /// runs a fresh copy of the code (see [`FunctionCode::fresh_copy`]).
+    /// for every realm): it is compiled once per thread. The first realm
+    /// runs that code; the next ones run fresh copies of it (see
+    /// [`FunctionCode::fresh_copy`]), which also share the functions it
+    /// compiled lazily.
     pub fn eval_builtin(&mut self, source: &'static str, filename: &str) -> Result<Value, Value> {
         thread_local! {
             static BUILTIN_CODE: std::cell::RefCell<HashMap<(usize, usize), Rc<FunctionCode>>> = Default::default();
         }
         let key = (source.as_ptr() as usize, source.len());
-        let template = match BUILTIN_CODE.with(|c| c.borrow().get(&key).cloned()) {
-            Some(t) => t,
+        let code = match BUILTIN_CODE.with(|c| c.borrow().get(&key).cloned()) {
+            Some(t) => {
+                let code = FunctionCode::fresh_copy(&t);
+                self.adopt_code(&code);
+                code
+            }
             None => {
                 let t = self.compile(source, filename, false)?;
                 BUILTIN_CODE.with(|c| c.borrow_mut().insert(key, t.clone()));
                 t
             }
         };
-        let code = FunctionCode::fresh_copy(&template);
-        self.adopt_code(&code);
         self.run_script(code)
     }
 
