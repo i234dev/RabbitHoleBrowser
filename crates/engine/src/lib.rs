@@ -1282,16 +1282,25 @@ impl Engine {
         let base = page.base_url.clone();
         let mut links = HashSet::new();
         if !visited.is_empty() {
+            // Destinations by `href` text, kept while the base URL is the
+            // same (most links are unchanged from one restyle to the next).
+            let (resolved_base, resolved) = &mut page.incr.link_targets;
+            if *resolved_base != key.2 || resolved.len() > 20_000 {
+                *resolved_base = key.2.clone();
+                resolved.clear();
+            }
             for n in page.doc.descendants(Document::ROOT) {
                 let Some(el) = page.doc.element(n) else { continue };
                 if !matches!(el.tag.as_str(), "a" | "area") {
                     continue;
                 }
                 let Some(href) = el.attr("href") else { continue };
-                if let Some(u) = base.join(href.trim()) {
-                    if visited.contains(&u.without_fragment().to_string()) {
-                        links.insert(n);
-                    }
+                if !resolved.contains_key(href) {
+                    resolved.insert(href.to_string(), base.join(href.trim()).map(|u| u.without_fragment().to_string()));
+                }
+                let target = &resolved[href];
+                if target.as_ref().is_some_and(|t| visited.contains(t)) {
+                    links.insert(n);
                 }
             }
         }
@@ -1883,8 +1892,18 @@ fn resolve_url(base: &str, raw: &str) -> Option<String> {
     if raw.is_empty() || raw.starts_with("data:") {
         return if raw.is_empty() { None } else { Some(raw.to_string()) };
     }
-    let base = Url::parse_absolute(base)?;
-    base.join(raw).map(|u| u.to_string())
+    // Every `url()` of a cascade resolves against the same few bases:
+    // keep the last one parsed.
+    thread_local! {
+        static LAST_BASE: std::cell::RefCell<Option<(String, Option<Url>)>> = const { std::cell::RefCell::new(None) };
+    }
+    LAST_BASE.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.as_ref().is_none_or(|(b, _)| b != base) {
+            *last = Some((base.to_string(), Url::parse_absolute(base)));
+        }
+        last.as_ref().and_then(|(_, u)| u.as_ref()).and_then(|u| u.join(raw)).map(|u| u.to_string())
+    })
 }
 
 /// Properties whose computed values the loader's resource discovery reads

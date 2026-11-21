@@ -55,6 +55,9 @@ pub struct IncrementalState {
     /// (DOM epoch, visited history size, base URL) the `:visited` link set
     /// was computed for.
     pub(crate) visited_key: Option<(u64, usize, String)>,
+    /// Base URL and the destination (without fragment) of each link
+    /// `href` resolved against it, for the `:visited` link set.
+    pub(crate) link_targets: (String, HashMap<String, Option<String>>),
     /// Lay out from scratch next time.
     layout_full: bool,
     /// Elements whose boxes must be rebuilt.
