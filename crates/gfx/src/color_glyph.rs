@@ -93,8 +93,9 @@ impl FontContext {
         let data = self.face_bytes(idx)?;
         let face = ttf_parser::Face::parse(&data, 0).ok()?;
         if let Some(layers) = colr_layers(&face, glyph) {
-            // Composite the layer outlines.
-            let bitmaps: Vec<_> = layers.iter().map(|(g, c)| (self.rasterize(FontId(idx), *g, size), *c)).collect();
+            // Composite the layer outlines (unfitted: layers fitted one by
+            // one would no longer line up).
+            let bitmaps: Vec<_> = layers.iter().map(|(g, c)| (self.rasterize_unhinted(FontId(idx), *g, size), *c)).collect();
             let x0 = bitmaps.iter().filter(|(b, _)| !b.is_empty()).map(|(b, _)| b.left).min()?;
             let x1 = bitmaps.iter().filter(|(b, _)| !b.is_empty()).map(|(b, _)| b.left + b.width as i32).max()?;
             let top = bitmaps.iter().filter(|(b, _)| !b.is_empty()).map(|(b, _)| b.top).max()?;
