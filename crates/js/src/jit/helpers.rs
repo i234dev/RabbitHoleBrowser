@@ -604,13 +604,22 @@ pub(crate) unsafe extern "sysv64" fn h_store_completion(ctx: *mut Ctx, pc: u32) 
 pub(crate) unsafe extern "sysv64" fn h_get_elem(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |r, code, slots| {
         let Op::GetElemR(d, o, k) = *code.ops.get_unchecked(pc as usize) else { return false };
-        match r.get_elem_fast(&*slots.add(o as usize), &*slots.add(k as usize)) {
-            Some(v) => {
-                *slots.add(d as usize) = v;
-                true
+        let (obj, key) = (&*slots.add(o as usize), &*slots.add(k as usize));
+        let v = match r.get_elem_fast(obj, key) {
+            Some(v) => v,
+            // `obj[name]`: the megamorphic cache by (shape, name), as
+            // `get_elem` would consult it (it holds cacheable names only).
+            None => {
+                let crate::value::V::String(name) = key.v() else { return false };
+                let Some(ic) = r.mega_get(obj, name.bits()) else { return false };
+                match r.ic_get(&ic, obj) {
+                    Some(p) if p.flags & crate::heap::ACCESSOR == 0 => p.value.clone(),
+                    _ => return false,
+                }
             }
-            None => false,
-        }
+        };
+        *slots.add(d as usize) = v;
+        true
     })
 }
 

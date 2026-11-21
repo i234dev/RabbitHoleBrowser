@@ -2677,7 +2677,13 @@ impl Realm {
                     return Ok(Flow::Reload);
                 }
             }
-            if self.try_fast_call(fi, b as usize, argc as usize)? {
+            if self.native_callee(cb) {
+                // A built-in or host function: none of the closure or
+                // indirect paths apply.
+                if self.try_native_call(fi, b as usize, argc as usize)? {
+                    return Ok(if self.frames.len() != fi + 1 { Flow::Reload } else { Flow::Next });
+                }
+            } else if self.try_fast_call(fi, b as usize, argc as usize)? {
                 self.fill_call_ic(cell, callee);
                 return Ok(Flow::Reload);
             }
@@ -2692,6 +2698,15 @@ impl Realm {
         }
         let op = code.ops[pc - 1];
         self.exec_in(fi, op)
+    }
+
+    /// Is the value in stack slot `cb` a native function that
+    /// [`Realm::try_native_call`] calls directly (not `call` / `apply`,
+    /// which [`Realm::try_call_indirect`] forwards)?
+    #[inline(always)]
+    fn native_callee(&self, cb: usize) -> bool {
+        let Some(id) = self.vstack[cb].as_object() else { return false };
+        matches!(self.heap.try_get(id).map(|o| &o.kind), Some(ObjectKind::Native(n)) if n.intrinsic != INTRINSIC_FN_CALL && n.intrinsic != INTRINSIC_FN_APPLY)
     }
 
     /// `NewR`: plain function constructors, else the general path.

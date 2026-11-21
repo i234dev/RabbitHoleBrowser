@@ -714,3 +714,88 @@ mod disable_cached_execution {
         assert_drained(&realm);
     }
 }
+
+#[test]
+fn inline_equality_of_mixed_values() {
+    // Identical bits, values of different types, strings and BigInts by
+    // content, undefined against null (loose), objects by identity.
+    let src = r#"
+function eq(a, b) { return [a === b, a !== b, a == b, a != b] }
+function br(a, b) { var n = 0; if (a === b) n += 1; if (a !== b) n += 2; if (a == b) n += 4; if (a != b) n += 8; return n }
+var o = {}, s1 = 'ab', s2 = 'a' + 'b', big = 10n;
+var cases = [[o, o], [o, {}], [undefined, null], [null, null], [undefined, undefined], [true, true], [true, false],
+  [s1, s2], [s1, 'ac'], [1, '1'], [big, 10n], [big, 10], [Symbol.iterator, Symbol.iterator], [Symbol(), Symbol()],
+  [o, 'x'], [NaN, NaN], [0, -0], [void 0, 0], [null, 0], ['', 0], [true, 1], [o, null], [[1], '1']];
+var out = '';
+for (var r = 0; r < 3; r++) for (var i = 0; i < cases.length; i++) out += eq(cases[i][0], cases[i][1]).map(Number).join('') + br(cases[i][0], cases[i][1]) + ',';
+out
+"#;
+    let r = same(src);
+    assert!(r.starts_with("ok 10105,010110,"), "{r}");
+}
+
+#[test]
+fn inline_property_cache_extensions() {
+    // Two-level prototype reads, array lengths and polymorphic reads served
+    // by the megamorphic cache, with invalidations after warming up.
+    check(r#"
+class A { m() { return 'a' } get g() { return 'g' } }
+class B extends A {}
+function call(x) { return x.m() + x.g }
+var b = new B(), out = '';
+for (var i = 0; i < 20; i++) out = call(b);
+B.prototype.m = function () { return 'b' };
+out += call(b);
+delete B.prototype.m;
+A.prototype.m = function () { return 'c' };
+out += call(b);
+Object.setPrototypeOf(b, { m() { return 'd' }, g: 'e' });
+out += call(b);
+out
+"#, "agbgcgde");
+    check(r#"
+function len(a) { return a.length }
+var arrs = [[], [1, 2, 3], 'four', new Array(5), { length: 'six' }, function (a, b) {}], out = [];
+for (var r = 0; r < 4; r++) for (var i = 0; i < arrs.length; i++) out.push(len(arrs[i]));
+var a = [1]; for (var i = 0; i < 10; i++) { a.push(i); out.push(len(a)); }
+a.length = 2; out.push(len(a));
+out.join()
+"#, "0,3,4,5,six,2,0,3,4,5,six,2,0,3,4,5,six,2,0,3,4,5,six,2,2,3,4,5,6,7,8,9,10,11,2");
+    check(r#"
+function get(o) { return o.a }
+var P = { a: 'proto' };
+var objs = [{ a: 1 }, { b: 0, a: 2 }, { c: 0, d: 0, a: 3 }, Object.create(P), { get a() { return 'getter' } }, { x: 1, a: 4 }, [], 7, 'str'];
+var d = { a: 5, z: 0 }; delete d.z; objs.push(d);
+var out = [];
+for (var r = 0; r < 30; r++) { out = []; for (var i = 0; i < objs.length; i++) out.push(get(objs[i])); }
+objs[0].a = 'changed'; P.a = 'proto2'; objs[1].a = 'x';
+for (var i = 0; i < objs.length; i++) out.push(get(objs[i]));
+out.join()
+"#, "1,2,3,proto,getter,4,,,,5,changed,x,3,proto2,getter,4,,,,5");
+}
+
+#[test]
+fn absent_property_caches() {
+    // Absent reads through one prototype (plain objects), then the
+    // prototype, the receiver or the chain gains the key.
+    check(r#"
+function get(o) { return o.ref }
+function key(o, k) { return o[k] }
+var objs = [{ a: 1 }, { b: 2, c: 3 }, {}, Object.create(null), [], function () {}, 'str', 5];
+var out = [];
+for (var r = 0; r < 30; r++) for (var i = 0; i < objs.length; i++) { get(objs[i]); key(objs[i], 'ref'); }
+for (var i = 0; i < objs.length; i++) out.push(String(get(objs[i])) + key(objs[i], 'ref'));
+Object.prototype.ref = 'P';
+for (var i = 0; i < objs.length; i++) out.push(String(get(objs[i])) + key(objs[i], 'ref'));
+delete Object.prototype.ref;
+objs[0].ref = 'own';
+Object.setPrototypeOf(objs[1], { ref: 'proto' });
+for (var i = 0; i < objs.length; i++) out.push(String(get(objs[i])) + key(objs[i], 'ref'));
+var s = 'ab', t = 'x';
+for (var r = 0; r < 30; r++) t = s.charAt(1) + s.toUpperCase();
+String.prototype.charAt = function () { return '!' };
+out.push(t, s.charAt(0));
+out.join()
+"#, "undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,PP,PP,PP,undefinedundefined,PP,PP,PP,PP,ownown,protoproto,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,undefinedundefined,bAB,!");
+}
+

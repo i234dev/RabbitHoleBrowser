@@ -52,6 +52,11 @@ pub(crate) struct Layout {
     pub array_tag_value: u8,
     pub array_elems_ptr: i32,
     pub array_elems_len: i32,
+    /// In an object table entry holding an array: its `length` (u32).
+    pub array_length: i32,
+    /// In `Realm`: the megamorphic cache's buffer pointer and length.
+    pub mega_ptr: i32,
+    pub mega_len: i32,
     /// In `ScopeData`: slots pointer and length, parent id and tag.
     pub sd_slots_ptr: i32,
     pub sd_slots_len: i32,
@@ -134,6 +139,8 @@ fn probe() -> Result<Layout, u32> {
     };
     let (fp, fl) = vec_words::<crate::vm::Frame>(Vec::new(), frame).ok_or(5u32)?;
     let frames = std::mem::offset_of!(Realm, frames);
+    let (gp, gl) = vec_words::<crate::ic::MegaEntry>(Vec::new(), crate::ic::MegaEntry::default()).ok_or(42u32)?;
+    let mega = std::mem::offset_of!(Realm, mega);
     // Scope objects: where the variant's tag byte and its box are.
     let kind = obj + std::mem::offset_of!(Object, kind);
     let ksize = std::mem::size_of::<ObjectKind>();
@@ -192,6 +199,14 @@ fn probe() -> Result<Layout, u32> {
     if [ep, el].iter().any(|&o| o <= tag && tag < o + w) {
         return Err(1000 + line!());
     }
+    // Arrays: `length` is the one 32-bit word that is 3 in the first
+    // probe array and 0x7fff_ffff in the second.
+    let u32_at = |k: &[u8], i: usize| u32::from_ne_bytes(k[i..i + 4].try_into().unwrap());
+    let alen = (0..=ksize - 4).step_by(4).filter(|&i| u32_at(&ka, i) == 3 && u32_at(&ka2, i) == 0x7fff_ffff).collect::<Vec<_>>();
+    let [alen] = alen[..] else { return Err(1000 + line!()) };
+    if [ep, el, tag].iter().any(|&o| alen < o + w && o < alen + 4) {
+        return Err(1000 + line!());
+    }
     let sd = std::mem::offset_of!(crate::heap::ScopeData, slots);
     let (sp, sl) = crate::heap::ScopeSlots::WORDS;
     // Check them on the probe scope.
@@ -229,6 +244,9 @@ fn probe() -> Result<Layout, u32> {
         array_tag_value: if tag_niche { 0 } else { ka[tag] },
         array_elems_ptr: i32_of(kind + ep).ok_or(30u32)?,
         array_elems_len: i32_of(kind + el).ok_or(31u32)?,
+        array_length: i32_of(kind + alen).ok_or(41u32)?,
+        mega_ptr: i32_of(mega + gp * w).ok_or(43u32)?,
+        mega_len: i32_of(mega + gl * w).ok_or(44u32)?,
         sd_slots_ptr: i32_of(sd + sp * w).ok_or(32u32)?,
         sd_slots_len: i32_of(sd + sl * w).ok_or(33u32)?,
         sd_parent_id: i32_of(parent + id_word * 4).ok_or(34u32)?,

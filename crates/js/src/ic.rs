@@ -68,11 +68,19 @@ pub struct MegaEntry {
     ic: PropIc,
 }
 
-const MEGA_BITS: u32 = 12;
+pub(crate) const MEGA_BITS: u32 = 12;
+/// Multipliers of [`mega_index`] (native code computes it as well).
+pub(crate) const MEGA_MUL_SHAPE: u64 = 0x9E37_79B9_7F4A_7C15;
+pub(crate) const MEGA_MUL_KEY: u64 = 0xC2B2_AE3D_27D4_EB4F;
+/// `MegaEntry` field offsets and size, for native code.
+pub(crate) const MEGA_SHAPE: i32 = std::mem::offset_of!(MegaEntry, shape) as i32;
+pub(crate) const MEGA_KEY: i32 = std::mem::offset_of!(MegaEntry, key) as i32;
+pub(crate) const MEGA_IC: i32 = std::mem::offset_of!(MegaEntry, ic) as i32;
+pub(crate) const MEGA_SIZE: i32 = std::mem::size_of::<MegaEntry>() as i32;
 
 #[inline(always)]
 fn mega_index(shape: u32, key: u64) -> usize {
-    let h = (shape as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ key.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    let h = (shape as u64).wrapping_mul(MEGA_MUL_SHAPE) ^ key.wrapping_mul(MEGA_MUL_KEY);
     (h >> (64 - MEGA_BITS)) as usize
 }
 
@@ -424,7 +432,19 @@ impl Realm {
             ic.slot = slot;
             return ic;
         }
-        let Some(p2) = h1.proto else { return ic };
+        let Some(p2) = h1.proto else {
+            // A single prototype without the key (a plain object's
+            // `Object.prototype`): the read is absent while the prototype's
+            // key set stays (the walk marks it).
+            let epoch = crate::shape::proto_epoch();
+            if plain_kind(&o.kind) && self.deep_absent(Some(p1), key) {
+                ic.kind = IC_ABSENT;
+                ic.shape = o.props.shape_id();
+                ic.mid = p1.0;
+                ic.mid_shape = epoch;
+            }
+            return ic;
+        };
         let h2 = self.obj(p2);
         if !plain_kind(&h2.kind) || virtual_length(&h2.kind) {
             return ic;
