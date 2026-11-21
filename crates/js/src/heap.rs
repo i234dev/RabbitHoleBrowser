@@ -1412,6 +1412,9 @@ impl Heap {
         while self.sweep_at < self.sweep_end {
             let i = self.sweep_at;
             self.sweep_at += 1;
+            // The slots themselves, further ahead (the look-ahead above
+            // reads them).
+            crate::alloc::prefetch(self.objects.as_ptr().wrapping_add(i + 2 * AHEAD));
             if i + AHEAD < self.sweep_end && self.marks[i + AHEAD] == WHITE {
                 if let Some(o) = &self.objects[i + AHEAD] {
                     o.prefetch_parts();
