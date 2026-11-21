@@ -917,6 +917,9 @@ pub struct MatchState {
     /// Query containers measured by the last layout (`@container`, `cq*`
     /// units).
     pub containers: std::sync::Arc<std::collections::HashMap<NodeId, crate::container::ContainerInfo>>,
+    /// The scoping root `:scope` matches: the element `querySelector(All)`,
+    /// `matches` or `closest` was called on. None: the root element.
+    pub scope: Option<NodeId>,
 }
 
 impl MatchState {
@@ -1312,7 +1315,10 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
             Pseudo::Open => matches!(el.tag.as_str(), "details" | "dialog") && el.attr("open").is_some(),
             Pseudo::Modal => doc.top_layer.contains(&node),
             Pseudo::NeverState => false,
-            Pseudo::Scope => doc.parent(node).map(|p| matches!(doc.node(p).data, NodeData::Document)).unwrap_or(false),
+            Pseudo::Scope => match state.scope {
+                Some(scope) => node == scope,
+                None => doc.parent(node).map(|p| matches!(doc.node(p).data, NodeData::Document)).unwrap_or(false),
+            },
             Pseudo::Hover => MatchState::is_or_contains(doc, state.hovered, node),
             Pseudo::Active => MatchState::is_or_contains(doc, state.active, node),
             Pseudo::Focus => state.focused == Some(node),

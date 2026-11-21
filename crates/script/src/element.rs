@@ -607,20 +607,15 @@ fn proxy_target_node(realm: &mut Realm, args: &[Value]) -> JsResult<NodeRef> {
 fn dataset_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let key = arg(args, 1);
-    let V::String(k) = key.v() else { return Ok(Value::Undefined) };
-    let k = k.to_rust_string();
-    if k == "toJSON" {
-        let f = realm.new_native_function("toJSON", 0, dataset_to_json);
-        return Ok(Value::Object(f));
+    if let V::String(k) = key.v() {
+        if let Some(v) = get_attribute(n, &camel_to_data(&k.to_rust_string())) {
+            return Ok(Value::str(&v));
+        }
     }
-    Ok(match get_attribute(n, &camel_to_data(&k)) {
-        Some(v) => Value::str(&v),
-        None => Value::Undefined,
-    })
-}
-
-fn dataset_to_json(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    Ok(Value::Undefined)
+    // Not a named property: the ordinary lookup (Object.prototype members
+    // such as hasOwnProperty, symbols).
+    let key = realm.to_property_key(key)?;
+    realm.get(arg(args, 0), key)
 }
 
 fn dataset_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -938,7 +933,7 @@ fn e_closest(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     let s = arg_str(realm, args, 0)?;
     let list = node::parse_selectors(realm, &s)?;
     let found = with_doc(n.doc, |doc| {
-        let state = rabbithole_css::MatchState::default();
+        let state = node::scoped_state(doc, n.node);
         let matcher = rabbithole_css::selector::SelectorMatcher::new(doc, &state);
         let mut cur = Some(n.node);
         while let Some(c) = cur {
