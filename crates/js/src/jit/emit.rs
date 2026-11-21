@@ -31,6 +31,7 @@ const CONSTS: u8 = R15;
 
 const TAG_BIGINT: u64 = 0xFFFC_0000_0000_0000;
 const TAG_OBJECT: u64 = 0xFFFB_0000_0000_0000;
+const TAG_STRING: u64 = 0xFFFD_0000_0000_0000;
 /// `PropIc` field offsets (`repr(C)`).
 const IC_KIND: i32 = std::mem::offset_of!(crate::bytecode::PropIc, kind) as i32;
 const IC_SHAPE: i32 = std::mem::offset_of!(crate::bytecode::PropIc, shape) as i32;
@@ -252,6 +253,11 @@ enum Stub {
     /// receiver's entry (shape checked), `r9` = the kind; continues at
     /// `own` with `rax` = the holder's entry, or at `miss`.
     ProtoGet { from: Label, own: Label, miss: Label, l: super::layout::Layout },
+    /// `GetPropR` whose receiver (`rax` = its entry, `edx` = its shape,
+    /// `r8` = realm) does not have the site's shape: the megamorphic
+    /// cache's entry for (shape, `key`), when it holds an own or prototype
+    /// record, becomes the record (`rcx`, kind in `r9`) at `checked`.
+    MegaGet { from: Label, checked: Label, miss: Label, l: super::layout::Layout, key: u64 },
 }
 
 struct Gen<'a> {
@@ -575,19 +581,7 @@ impl Gen<'_> {
             self.a.jcc(CC_E, eq);
             self.a.jmp(ne);
             self.a.bind(generic);
-            self.a.mov_rr64(RDI, CTX);
-            self.a.mov_rr64(RSI, RAX);
-            self.a.mov_rr64(RDX, RCX);
-            if kd >= 6 {
-                self.a.call_abs(h_loose_eq as *const () as usize, "h_loose_eq");
-                self.a.alu_ri32(Alu::Cmp, RAX, 2);
-                self.a.jcc(CC_E, slow);
-            } else {
-                self.a.call_abs(h_strict_eq as *const () as usize, "h_strict_eq");
-            }
-            self.a.test_rr32(RAX, RAX);
-            self.a.jcc(CC_NE, eq);
-            self.a.jmp(ne);
+            self.eq_generic(kd < 6, eq, ne, slow);
         } else {
             if !self.operands(a, b, slow) {
                 self.a.jmp(slow);
@@ -620,6 +614,48 @@ impl Gen<'_> {
         self.a.lea(RAX, Mem::base(TAGMIN, FALSE));
         self.a.bind(done);
         self.store(d, slow);
+    }
+
+    /// Equality of `rax` and `rcx` when at least one is not a number:
+    /// identical bits are equal (the same string, object, symbol or
+    /// special value); for strict equality, different bits are unequal
+    /// unless both are strings or BigInts (contents) or one is the hole
+    /// (equal to undefined). Anything undecided calls the runtime
+    /// (`h_strict_eq`, or `h_loose_eq`, whose 2 takes `slow`).
+    fn eq_generic(&mut self, strict: bool, eq: Label, ne: Label, slow: Label) {
+        self.a.cmp_rr64(RAX, RCX);
+        self.a.jcc(CC_E, eq);
+        let call = self.a.label();
+        if strict {
+            let small = self.a.label();
+            self.a.cmp_rr64(RAX, RCMIN);
+            self.a.jcc(CC_B, small);
+            self.a.cmp_rr64(RCX, RCMIN);
+            self.a.jcc(CC_B, ne);
+            self.a.jmp(call);
+            self.a.bind(small);
+            self.a.cmp_rr64(RCX, RCMIN);
+            self.a.jcc(CC_AE, ne);
+            self.a.lea(RDX, Mem::base(TAGMIN, EMPTY));
+            self.a.cmp_rr64(RAX, RDX);
+            self.a.jcc(CC_E, call);
+            self.a.cmp_rr64(RCX, RDX);
+            self.a.jcc(CC_NE, ne);
+        }
+        self.a.bind(call);
+        self.a.mov_rr64(RDI, CTX);
+        self.a.mov_rr64(RSI, RAX);
+        self.a.mov_rr64(RDX, RCX);
+        if strict {
+            self.a.call_abs(h_strict_eq as *const () as usize, "h_strict_eq");
+        } else {
+            self.a.call_abs(h_loose_eq as *const () as usize, "h_loose_eq");
+            self.a.alu_ri32(Alu::Cmp, RAX, 2);
+            self.a.jcc(CC_E, slow);
+        }
+        self.a.test_rr32(RAX, RAX);
+        self.a.jcc(CC_NE, eq);
+        self.a.jmp(ne);
     }
 
     /// Fused compare-and-jump: `jump_when` true jumps when the relation
@@ -655,15 +691,8 @@ impl Gen<'_> {
         self.a.jcc(CC_E, yes);
         self.a.jmp(no);
         self.a.bind(generic);
-        // Identical bits of non-strings are equal (strings compare by
-        // content, and NaN is handled above).
-        self.a.mov_rr64(RDI, CTX);
-        self.a.mov_rr64(RSI, RAX);
-        self.a.mov_rr64(RDX, RCX);
-        self.a.call_abs(h_strict_eq as *const () as usize, "h_strict_eq");
-        self.a.test_rr32(RAX, RAX);
-        self.a.jcc(CC_NE, yes);
-        self.a.jmp(no);
+        // NaN is handled above.
+        self.eq_generic(true, yes, no, yes);
         let (taken, fall) = if eq { (yes, no) } else { (no, yes) };
         self.a.bind(taken);
         self.jump(pc, t as usize);
@@ -1010,7 +1039,7 @@ impl Gen<'_> {
             return;
         };
         let miss = self.slow(h_access as *const () as usize, "h_access", pc, next);
-        let (own, recv) = (self.a.label(), self.a.label());
+        let recv = self.a.label();
         self.a.mov_imm64(RCX, cell as *const std::cell::Cell<crate::bytecode::PropIc> as u64);
         self.a.movzx8(RDX, Mem::base(RCX, IC_KIND));
         self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_OWN as i32);
@@ -1018,14 +1047,82 @@ impl Gen<'_> {
         self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PROTO as i32);
         self.a.jcc(CC_E, recv);
         self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PROTO_DEEP as i32);
+        self.a.jcc(CC_E, recv);
+        // A string primitive's property, found on `String.prototype`.
+        let (have, own, not_prim) = (self.a.label(), self.a.label(), self.a.label());
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PRIM as i32);
+        self.a.jcc(CC_NE, not_prim);
+        self.a.load64(RAX, slot(o));
+        self.a.shr_ri64(RAX, 48);
+        self.a.alu_ri32(Alu::Cmp, RAX, (TAG_STRING >> 48) as i32);
         self.a.jcc(CC_NE, other);
+        let sp = (std::mem::offset_of!(crate::realm::Realm, intrinsics) + std::mem::offset_of!(crate::realm::Intrinsics, string_proto)) as i32;
+        self.a.load64(R8, Mem::base(CTX, CTX_REALM));
+        self.a.load32(RDX, Mem::base(R8, sp));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER));
+        self.a.jcc(CC_NE, other);
+        self.object_at(&l, RAX, RDX, other);
+        self.a.load32(RDX, Mem::base(RAX, l.sid));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER_SHAPE));
+        self.a.jcc(CC_NE, other);
+        self.a.jmp(own);
+        self.a.bind(not_prim);
+        // A property absent from the receiver (shape) and its prototype
+        // chain (prototype `mid`, unchanged while the epoch is `mid_shape`).
+        let not_absent = self.a.label();
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_ABSENT as i32);
+        self.a.jcc(CC_NE, not_absent);
+        self.object_entry(&l, o, other);
+        self.a.load32(RDX, Mem::base(RAX, l.sid));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_SHAPE));
+        self.a.jcc(CC_NE, other);
+        self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_SHAPE), crate::shape::ROOT_SHAPE_ID as i32);
+        self.a.jcc(CC_E, other);
+        self.a.mov_imm64(RDX, crate::shape::proto_epoch_addr() as u64);
+        self.a.load32(RDX, Mem::base(RDX, 0));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID_SHAPE));
+        self.a.jcc(CC_NE, other);
+        let (no_proto, absent) = (self.a.label(), self.a.label());
+        self.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
+        self.a.jcc(CC_NE, no_proto);
+        self.a.load32(RDX, Mem::base(RAX, l.proto_id));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID));
+        self.a.jcc(CC_NE, other);
+        self.a.jmp(absent);
+        self.a.bind(no_proto);
+        self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_MID), crate::ic::NO_OBJ as i32);
+        self.a.jcc(CC_NE, other);
+        self.a.bind(absent);
+        self.a.mov_rr64(RAX, TAGMIN);
+        self.a.jmp(have);
+        self.a.bind(not_absent);
+        // `length` of an array (strings and anything else: the helper).
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_LENGTH as i32);
+        self.a.jcc(CC_NE, other);
+        self.object_entry(&l, o, other);
+        self.is_kind(&l, false);
+        self.a.jcc(CC_NE, other);
+        self.a.load32(RAX, Mem::base(RAX, l.array_length));
+        self.a.cvtsi2sd64(XMM0, RAX);
+        self.a.movq_r_x(RAX, XMM0);
+        self.a.jmp(have);
         self.a.bind(recv);
         // r9 = kind; rax = the receiver's entry with the cached shape
         self.a.mov_rr64(R9, RDX);
         self.object_entry(&l, o, other);
         self.a.load32(RDX, Mem::base(RAX, l.sid));
         self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_SHAPE));
-        self.a.jcc(CC_NE, miss);
+        // Another shape: the megamorphic cache's record for it, if any.
+        let checked = self.a.label();
+        match self.site_key(ic) {
+            Some(key) => {
+                let from = self.a.label();
+                self.a.jcc(CC_NE, from);
+                self.stubs.push(Stub::MegaGet { from, checked, miss, l, key });
+            }
+            None => self.a.jcc(CC_NE, miss),
+        }
+        self.a.bind(checked);
         self.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_OWN as i32);
         let proto = self.a.label();
         self.a.jcc(CC_NE, proto);
@@ -1042,7 +1139,16 @@ impl Gen<'_> {
         self.a.jcc(CC_NE, miss);
         self.a.load64(RAX, Mem::base(RDX, l.prop_value));
         self.retain_if_counted(RAX, RCX);
+        self.a.bind(have);
         self.store(d, miss);
+    }
+
+    /// The identity word of the name of property cache `ic` (the
+    /// megamorphic cache's key), when it is a string constant.
+    fn site_key(&self, ic: u32) -> Option<u64> {
+        let k = *self.code.ic_keys.get(ic as usize)?;
+        let v = self.code.constants.get(k as usize)?;
+        v.is_string().then(|| v.bits())
     }
 
     /// `SetPropR` through the site's cache: writable own data properties
@@ -1465,10 +1571,22 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
         g.a.jcc(CC_NE, miss);
         g.a.load32(RDX, Mem::base(RCX, IC_HOLDER));
         g.a.jmp(holder);
-        // IC_PROTO (one level, no `mid`): receiver's prototype is `holder`.
+        // IC_PROTO: receiver's prototype is `holder`, or (two levels)
+        // `mid` with shape `mid_shape`, whose prototype is `holder`.
         g.a.bind(proto);
+        let one = g.a.label();
         g.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_MID), crate::ic::NO_OBJ as i32);
+        g.a.jcc(CC_E, one);
+        g.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID));
         g.a.jcc(CC_NE, miss);
+        g.object_at(&l, RAX, RDX, miss);
+        g.a.load32(RDX, Mem::base(RAX, l.sid));
+        g.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID_SHAPE));
+        g.a.jcc(CC_NE, miss);
+        g.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
+        g.a.jcc(CC_NE, miss);
+        g.a.load32(RDX, Mem::base(RAX, l.proto_id));
+        g.a.bind(one);
         g.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER));
         g.a.jcc(CC_NE, miss);
         // rdx = holder id: its entry, with the cached shape.
@@ -1478,6 +1596,36 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
         g.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER_SHAPE));
         g.a.jcc(CC_NE, miss);
                 g.a.jmp(own);
+            }
+            Stub::MegaGet { from, checked, miss, l, key } => {
+                g.a.bind(from);
+                g.a.alu_mi64(Alu::Cmp, Mem::base(R8, l.mega_len), 0);
+                g.a.jcc(CC_E, miss);
+                // rdx = &mega[index(shape, key)]
+                g.a.mov_imm64(R9, crate::ic::MEGA_MUL_SHAPE);
+                g.a.imul_rr64(RDX, R9);
+                g.a.mov_imm64(R9, key.wrapping_mul(crate::ic::MEGA_MUL_KEY));
+                g.a.alu_rr64(Alu::Xor, RDX, R9);
+                g.a.shr_ri64(RDX, (64 - crate::ic::MEGA_BITS) as u8);
+                g.a.imul_rri64(RDX, RDX, crate::ic::MEGA_SIZE);
+                g.a.alu_rm64(Alu::Add, RDX, Mem::base(R8, l.mega_ptr));
+                g.a.load32(R9, Mem::base(RAX, l.sid));
+                g.a.alu_rm32(Alu::Cmp, R9, Mem::base(RDX, crate::ic::MEGA_SHAPE));
+                g.a.jcc(CC_NE, miss);
+                g.a.mov_imm64(R9, key);
+                g.a.alu_rm64(Alu::Cmp, R9, Mem::base(RDX, crate::ic::MEGA_KEY));
+                g.a.jcc(CC_NE, miss);
+                g.a.lea(RCX, Mem::base(RDX, crate::ic::MEGA_IC));
+                // Its record is for this shape (filled for such a receiver).
+                g.a.load32(R9, Mem::base(RAX, l.sid));
+                g.a.alu_rm32(Alu::Cmp, R9, Mem::base(RCX, IC_SHAPE));
+                g.a.jcc(CC_NE, miss);
+                g.a.movzx8(R9, Mem::base(RCX, IC_KIND));
+                for k in [crate::ic::IC_OWN, crate::ic::IC_PROTO, crate::ic::IC_PROTO_DEEP] {
+                    g.a.alu_ri32(Alu::Cmp, R9, k as i32);
+                    g.a.jcc(CC_E, checked);
+                }
+                g.a.jmp(miss);
             }
             Stub::Release { from, reg, resume } => {
                 // Last reference: restore the count and let Rust free it.

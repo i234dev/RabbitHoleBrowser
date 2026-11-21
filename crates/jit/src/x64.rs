@@ -493,6 +493,12 @@ impl Asm {
         }
         self.note(at, || format!("{} qword {}, {imm:#x}", alu_name(op), mem_str(m)));
     }
+    /// `imul dst64, src64`
+    pub fn imul_rr64(&mut self, dst: u8, src: u8) {
+        let at = self.pos();
+        self.op_rr(None, true, &[0x0f, 0xaf], dst, src);
+        self.note(at, || format!("imul {}, {}", r64(dst), r64(src)));
+    }
     /// `imul dst64, src64, imm32`
     pub fn imul_rri64(&mut self, dst: u8, src: u8, imm: i32) {
         let at = self.pos();
