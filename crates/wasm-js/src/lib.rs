@@ -1411,7 +1411,7 @@ pub fn install(realm: &mut Realm) {
     // reachable from the constructors) and the state object itself.
     realm.define_global("WebAssembly", Value::Object(ns));
 
-    if let Ok(f) = realm.eval(PRELUDE, "rabbithole:wasm.js") {
+    if let Ok(f) = realm.eval_builtin(PRELUDE, "rabbithole:wasm.js") {
         let _ = realm.call(f, Value::Undefined, &[Value::Object(ns)]);
     }
     let mut errors = Vec::new();

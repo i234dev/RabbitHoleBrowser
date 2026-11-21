@@ -277,3 +277,59 @@ fn function_prototype_created_on_demand_is_observably_eager() {
         assert_eq!(evaluate(src), *want, "{src}");
     }
 }
+
+#[test]
+fn property_descriptors_read_inherited_and_accessor_fields() {
+    // Plain literals, then fields from Object.prototype, getters and
+    // other prototypes: every field is read through [[HasProperty]] /
+    // [[Get]] in specification order.
+    let source = r#"
+      const log = [];
+      const o = {};
+      Object.defineProperty(o, 'a', { value: 1, enumerable: true });
+      const d1 = JSON.stringify(Object.getOwnPropertyDescriptor(o, 'a'));
+      Object.prototype.enumerable = true;
+      Object.defineProperty(o, 'b', { value: 2 });
+      delete Object.prototype.enumerable;
+      const d2 = Object.getOwnPropertyDescriptor(o, 'b').enumerable;
+      const desc = { get value() { log.push('value'); return 3; }, get writable() { log.push('writable'); return true; }, get enumerable() { log.push('enumerable'); return 0; } };
+      Object.defineProperty(o, 'c', desc);
+      const d3 = JSON.stringify(Object.getOwnPropertyDescriptor(o, 'c'));
+      Object.defineProperty(o, 'd', Object.create({ get: function () { return 4; } }));
+      const d4 = o.d;
+      let e1 = '';
+      try { Object.defineProperty(o, 'e', { get: 1 }); } catch (e) { e1 = e.constructor.name; }
+      let e2 = '';
+      try { Object.defineProperty(o, 'f', { get() {}, value: 1 }); } catch (e) { e2 = e.constructor.name; }
+      const arr = [];
+      arr.value = 5;
+      Object.defineProperty(o, 'g', arr);
+      [d1, d2, log.join(), d3, d4, e1, e2, o.g].join('|')
+    "#;
+    assert_eq!(
+        evaluate(source),
+        r#"{"value":1,"writable":false,"enumerable":true,"configurable":false}|true|enumerable,value,writable|{"value":3,"writable":true,"enumerable":false,"configurable":false}|4|TypeError|TypeError|5"#
+    );
+}
+
+#[test]
+fn shapes_sharing_a_key_chain_find_only_their_own_keys() {
+    // Objects built through the same transitions share the key vector
+    // and its index; branches and deletions start their own.
+    let source = r#"
+      const make = (n, tag) => { const o = {}; for (let i = 0; i < n; i++) o['k' + i] = tag + i; return o; };
+      const big = make(40, 'b');
+      const small = make(12, 's');
+      const out = [];
+      out.push('k30' in small, small.k11, big.k39, Object.keys(small).length);
+      delete big.k39;
+      big.other = 1;
+      const again = make(40, 'a');
+      out.push('k39' in big, big.other, again.k39, 'other' in again);
+      const branch = make(20, 'x');
+      branch.z = 'z';
+      out.push(branch.z, 'z' in make(30, 'y'), make(30, 'y').k25);
+      out.join()
+    "#;
+    assert_eq!(evaluate(source), "false,s11,b39,12,false,1,a39,false,z,false,y25");
+}

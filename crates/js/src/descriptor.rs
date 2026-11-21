@@ -117,6 +117,68 @@ impl Realm {
             V::Object(id) => id,
             _ => return self.type_error("Property description must be an object"),
         };
+        let d = match self.plain_prop_desc(id) {
+            Some(d) => d,
+            None => self.prop_desc_fields(id)?,
+        };
+        if let Some(g) = &d.get {
+            if !g.is_undefined() && !self.is_callable(g) {
+                return self.type_error("Getter must be a function");
+            }
+        }
+        if let Some(s) = &d.set {
+            if !s.is_undefined() && !self.is_callable(s) {
+                return self.type_error("Setter must be a function");
+            }
+        }
+        if d.is_accessor() && d.is_data() {
+            return self.type_error("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
+        }
+        Ok(d)
+    }
+
+    /// The fields of descriptor object `id` read without side effects: an
+    /// ordinary object inheriting from an unmodified `Object.prototype`
+    /// (none of the six field names), whose own fields are data
+    /// properties — the `{ value, enumerable: true }` literals of most
+    /// `Object.defineProperty` calls. `None`: read them through
+    /// [[HasProperty]] / [[Get]].
+    fn plain_prop_desc(&self, id: ObjectId) -> Option<PropDesc> {
+        let o = self.obj(id);
+        let op = self.intrinsics.object_proto;
+        if !matches!(o.kind, ObjectKind::Ordinary) || o.indexed || o.proto != Some(op) {
+            return None;
+        }
+        let p = self.obj(op);
+        if !matches!(p.kind, ObjectKind::Ordinary) || p.proto.is_some() {
+            return None;
+        }
+        use crate::value::names;
+        let keys = [names::enumerable(), names::configurable(), names::value(), names::writable(), names::get(), names::set()];
+        if keys.iter().any(|k| p.props.contains(k)) {
+            return None;
+        }
+        let mut fields: [Option<Value>; 6] = Default::default();
+        for (k, f) in keys.iter().zip(fields.iter_mut()) {
+            match o.props.get(k) {
+                None => {}
+                Some(prop) if !prop.is_accessor() => *f = Some(prop.value.clone()),
+                Some(_) => return None,
+            }
+        }
+        let [enumerable, configurable, value, writable, get, set] = fields;
+        Some(PropDesc {
+            enumerable: enumerable.map(|v| self.to_boolean(&v)),
+            configurable: configurable.map(|v| self.to_boolean(&v)),
+            value,
+            writable: writable.map(|v| self.to_boolean(&v)),
+            get,
+            set,
+        })
+    }
+
+    /// ToPropertyDescriptor's field reads (in specification order).
+    fn prop_desc_fields(&mut self, id: ObjectId) -> JsResult<PropDesc> {
         let mut d = PropDesc::default();
         let o = Value::Object(id);
         if self.has_property(id, &PropertyKey::str("enumerable"))? {
@@ -144,9 +206,6 @@ impl Realm {
                 return self.type_error("Setter must be a function");
             }
             d.set = Some(s);
-        }
-        if d.is_accessor() && d.is_data() {
-            return self.type_error("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
         }
         Ok(d)
     }

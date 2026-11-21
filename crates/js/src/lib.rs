@@ -63,6 +63,8 @@ mod tests_semantics;
 #[cfg(test)]
 mod tests_constructor_realms;
 #[cfg(test)]
+mod tests_builtin_code;
+#[cfg(test)]
 mod tests_vm;
 #[cfg(test)]
 mod tests_panic;

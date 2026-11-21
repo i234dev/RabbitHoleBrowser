@@ -617,7 +617,19 @@ pub struct StyleEngine {
     state_chains: [Vec<NodeId>; 3],
     /// Styles exist for the document (a full pass ran).
     ready: bool,
+    /// Style sharing between elements with the same inputs, kept from one
+    /// pass to the next: an element inserted again (a re-rendered list, a
+    /// route change) gets the style an element with the same parent style
+    /// and rules got before. Cleared when an input the key does not hold
+    /// changes (see [`StyleEngine::reuse_share`]).
+    share: ShareCache,
+    /// Document base URL and query containers `share` was filled with.
+    share_inputs: Option<(String, std::sync::Arc<std::collections::HashMap<NodeId, rabbithole_css::container::ContainerInfo>>)>,
 }
+
+/// Entries of the style sharing cache kept between passes (a pass can add
+/// many more; the next pass starts over past this).
+const SHARE_KEEP: usize = 20_000;
 
 fn state_chain(doc: &Document, node: Option<NodeId>) -> Vec<NodeId> {
     let mut chain = Vec::new();
@@ -672,6 +684,22 @@ impl StyleEngine {
             state: MatchState::default(),
             state_chains: Default::default(),
             ready: false,
+            share: ShareCache::default(),
+            share_inputs: None,
+        }
+    }
+
+    /// Keep the style sharing cache for a pass with `opts` when it was
+    /// filled with the same document base URL (relative `url()`s) and the
+    /// same query containers (container-relative units); every other
+    /// input of a shared style is in its key, or replaces the engine (media
+    /// environment, fonts) or clears the cache (sheets, `@font-feature-
+    /// values`) when it changes.
+    fn reuse_share(&mut self, opts: &StyleOptions) {
+        let same = self.share_inputs.as_ref().is_some_and(|(base, containers)| base == opts.document_base && std::sync::Arc::ptr_eq(containers, &opts.state.containers));
+        if !same || self.share.len() > SHARE_KEEP {
+            self.share.clear();
+            self.share_inputs = Some((opts.document_base.to_string(), opts.state.containers.clone()));
         }
     }
 
@@ -718,6 +746,8 @@ impl StyleEngine {
 
     /// `@font-face` rules and `@keyframes` of `author`.
     fn collect_aux(&mut self, tree: &mut StyledTree, author: &[Stylesheet], opts: &StyleOptions) {
+        // Shared styles depend on `@font-feature-values`.
+        self.share.clear();
         tree.font_faces = collect_font_faces(author, &self.env, opts);
         let mut fv: std::collections::HashMap<String, Vec<(String, String, Vec<u32>)>> = std::collections::HashMap::new();
         for sheet in author {
@@ -766,6 +796,8 @@ impl StyleEngine {
         if !doc_sources.eq(self.index.doc_sources.iter().copied()) {
             return false;
         }
+        // Shared styles are keyed by rule index addresses and positions.
+        self.share.clear();
         let old = std::mem::take(&mut self.index.root_sources);
         let added = self.index.rebuild_shadow(author, &self.env);
         self.inval.add_groups(&self.index, &added);
@@ -1161,7 +1193,8 @@ impl StyleEngine {
         let mut candidates = Vec::new();
         let mut matched: Vec<Matched> = Vec::new();
         let mut decls = std::mem::take(&mut self.decls);
-        let mut share = ShareCache::default();
+        self.reuse_share(opts);
+        let mut share = std::mem::take(&mut self.share);
         let root_parent = Rc::new(ComputedStyle::initial());
         let mut stack = vec![Step::Enter { node: html, parent: root_parent, pvars: Vars::empty(), root_fs: 16.0, force: all, pchange: 0 }];
         let mut recomputed = 0;
@@ -1294,6 +1327,7 @@ impl StyleEngine {
             }
         }
         self.decls = decls;
+        self.share = share;
         self.need.iter_mut().for_each(|f| *f = 0);
         recomputed
     }

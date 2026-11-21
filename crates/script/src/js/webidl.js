@@ -24,7 +24,8 @@
       }
     }
   };
-  for (const name of Object.getOwnPropertyNames(g)) {
+  const N = g.__rhNative;
+  if (!(N && N.webidlEnumerable && N.webidlEnumerable([...ES]))) for (const name of Object.getOwnPropertyNames(g)) {
     if (ES.has(name) || name.startsWith('__') || !/^[A-Z]/.test(name)) continue;
     const d = Object.getOwnPropertyDescriptor(g, name);
     const C = d && d.value;

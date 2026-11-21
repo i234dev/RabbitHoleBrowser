@@ -414,18 +414,18 @@ impl ScriptHost {
             }
             // Web APIs written in JavaScript (DOMMatrix, CSSOM, ...).
             for (name, src) in JS_APIS {
-                if let Err(e) = realm.eval(src, name) {
+                if let Err(e) = realm.eval_builtin(src, name) {
                     let msg = realm.error_to_string(&e);
                     eprintln!("[rabbithole] {name} failed: {msg}");
                 }
             }
             if worker.is_some() {
-                if let Err(e) = realm.eval(WORKER_JS, "rabbithole:worker.js") {
+                if let Err(e) = realm.eval_builtin(WORKER_JS, "rabbithole:worker.js") {
                     let msg = realm.error_to_string(&e);
                     eprintln!("[rabbithole] worker.js failed: {msg}");
                 }
                 if service_scope {
-                    if let Err(e) = realm.eval(include_str!("js/service_worker.js"), "rabbithole:service_worker.js") {
+                    if let Err(e) = realm.eval_builtin(include_str!("js/service_worker.js"), "rabbithole:service_worker.js") {
                         eprintln!("[rabbithole] service_worker.js failed: {}", realm.error_to_string(&e));
                     }
                 }

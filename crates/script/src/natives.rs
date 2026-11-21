@@ -378,8 +378,91 @@ fn native_deflate(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
     }
 }
 
+/// `webidlEnumerable(esNames)` (webidl.js): make the regular operations
+/// and attributes of the platform interfaces enumerable, on their
+/// prototype objects and constructors — the global's capitalised
+/// constructors outside `esNames` whose prototype has an own
+/// @@toStringTag. Same steps as the script loop it replaces, without
+/// building a descriptor object per property. Returns false (nothing
+/// done) when a proxy is involved: the script does it then.
+fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    use rabbithole_js::value::PropertyKey;
+    let mut skip: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(V::Object(list)) = args.first().map(|a| a.v()) {
+        let n = realm.get(Value::Object(list), PropertyKey::str("length"))?;
+        let n = match n.v() { V::Number(n) => n as u32, _ => 0 };
+        for i in 0..n {
+            let v = realm.get(Value::Object(list), PropertyKey::index(i))?;
+            if let V::String(s) = v.v() {
+                skip.insert(s.to_rust_string());
+            }
+        }
+    }
+    let is_proxy = |realm: &Realm, id| matches!(realm.obj(id).kind, rabbithole_js::ObjectKind::Proxy { .. });
+    let g = realm.global();
+    if is_proxy(realm, g) {
+        return Ok(Value::Bool(false));
+    }
+    let mut targets = Vec::new();
+    for key in realm.own_keys(g)? {
+        let PropertyKey::String(name) = &key else { continue };
+        let units = name.as_units();
+        if units.first().is_none_or(|&c| !(u16::from(b'A')..=u16::from(b'Z')).contains(&c)) || units.starts_with(&[95, 95]) || skip.contains(&name.to_rust_string()) {
+            continue;
+        }
+        let Some(d) = realm.get_own_property(g, &key) else { continue };
+        if d.is_accessor() {
+            continue;
+        }
+        let c = d.value.clone();
+        let V::Object(cid) = c.v() else { continue };
+        if !realm.is_callable(&c) || realm.obj(cid).htmldda || is_proxy(realm, cid) {
+            if is_proxy(realm, cid) {
+                return Ok(Value::Bool(false));
+            }
+            continue;
+        }
+        let p = realm.get(c.clone(), PropertyKey::str("prototype"))?;
+        let V::Object(pid) = p.v() else { continue };
+        if is_proxy(realm, pid) {
+            return Ok(Value::Bool(false));
+        }
+        if realm.is_callable(&p) || realm.obj(pid).htmldda {
+            continue;
+        }
+        if realm.get_own_property(pid, &PropertyKey::Symbol(rabbithole_js::realm::SYM_TO_STRING_TAG)).is_none() {
+            continue;
+        }
+        targets.push(pid);
+        targets.push(cid);
+    }
+    for o in targets {
+        for key in realm.own_keys(o)? {
+            let PropertyKey::String(k) = &key else { continue };
+            if k.eq_str("constructor") || k.eq_str("prototype") || k.eq_str("length") || k.eq_str("name") || k.as_units().starts_with(&[95, 95]) {
+                continue;
+            }
+            let Some(d) = realm.get_own_property(o, &key) else { continue };
+            if d.enumerable() || !d.configurable() {
+                continue;
+            }
+            let wanted = if d.is_accessor() {
+                d.getter().is_some_and(|v| !v.is_undefined()) || d.setter().is_some_and(|v| !v.is_undefined())
+            } else {
+                matches!(d.value.v(), V::Object(f) if !realm.obj(f).htmldda) && realm.is_callable(&d.value)
+            };
+            if wanted {
+                let desc = rabbithole_js::descriptor::PropDesc { enumerable: Some(true), ..Default::default() };
+                let _ = realm.define_own_desc(o, key.clone(), desc);
+            }
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
 pub(crate) fn install(realm: &mut Realm) {
     let o = realm.new_object();
+    realm.define_method(o, "webidlEnumerable", 1, webidl_enumerable);
     realm.define_method(o, "inflate", 2, native_inflate);
     realm.define_method(o, "deflate", 2, native_deflate);
     crate::sockets::install(realm, o);
