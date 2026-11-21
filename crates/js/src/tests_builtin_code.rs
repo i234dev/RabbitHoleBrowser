@@ -55,3 +55,17 @@ fn copies_run_independently_in_each_realm() {
     assert_eq!(run(&mut a, "lib.getX({x: 'a'}) + (new lib.Point(6, 8).norm())"), "a10");
     assert_eq!(run(&mut a, "lib.tag`a${1}b${2}c`"), "a|b|c1,2");
 }
+
+/// Functions of the embedder's built-in scripts print as built-in
+/// functions; page functions keep their source text.
+#[test]
+fn builtin_script_functions_print_as_native_code() {
+    let src: &'static str = builtin();
+    let mut r = Realm::new();
+    r.eval_builtin(src, "rabbithole:test-builtin.js").unwrap();
+    assert_eq!(run(&mut r, "Function.prototype.toString.call(lib.getX)"), "function getX() { [native code] }");
+    assert_eq!(run(&mut r, "String(lib.Point)"), "function Point() { [native code] }");
+    assert_eq!(run(&mut r, "String(lib.tag)"), "function tag() { [native code] }");
+    assert_eq!(run(&mut r, "String(new lib.Point(1, 2).norm)"), "function norm() { [native code] }");
+    assert_eq!(run(&mut r, "function page(a) { return a; } String(page)"), "function page(a) { return a; }");
+}
