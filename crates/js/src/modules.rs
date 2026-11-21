@@ -373,7 +373,7 @@ impl Realm {
             rec.local_exports.push(LocalExport { export_name: name.clone(), local_name: name });
             values.push(value);
         }
-        let env = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: values, parent: None, names: None }))));
+        let env = self.alloc(Object::new(None, ObjectKind::Scope(ScopeBox::from_values(values, None, None))));
         rec.env = Some(env);
         let id = ModuleId(self.modules.records.len() as u32);
         self.modules.records.push(rec);

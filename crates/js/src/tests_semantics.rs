@@ -232,3 +232,48 @@ fn use_strict_is_a_directive_only_when_it_is_the_whole_statement() {
     assert!(crate::parser::parse_program("'\\1';'use strict';", false).is_err());
     assert!(crate::parser::parse_program("'\\1'\n+1;'use strict';", false).is_ok());
 }
+
+/// Plain functions get their `prototype` object on first need; every way
+/// of observing it must see the object the function was created with.
+#[test]
+fn function_prototype_created_on_demand_is_observably_eager() {
+    let cases: &[(&str, &str)] = &[
+        // Key order and attributes.
+        ("function f(){} Reflect.ownKeys(f).join()", "length,name,prototype"),
+        ("function f(){} f.x=1; Object.getOwnPropertyNames(f).join()", "length,name,prototype,x"),
+        ("function f(){} Object.defineProperty(f,'y',{value:2}); Reflect.ownKeys(f).join()", "length,name,prototype,y"),
+        ("function f(){} delete f.name; Reflect.ownKeys(f).join()", "length,prototype"),
+        ("function f(){} delete f.length; f.z=1; Reflect.ownKeys(f).join()", "name,prototype,z"),
+        ("function f(){} var d=Object.getOwnPropertyDescriptor(f,'prototype'); [d.writable,d.enumerable,d.configurable,typeof d.value].join()", "true,false,false,object"),
+        // Identity, constructor link, realm prototype.
+        ("function f(){} f.prototype===f.prototype && f.prototype.constructor===f && Object.getPrototypeOf(f.prototype)===Object.prototype", "true"),
+        ("function f(){} var o=new f(); Object.getPrototypeOf(o)===f.prototype", "true"),
+        ("function f(){} var o=new f(); o instanceof f", "true"),
+        ("function f(){} ({}) instanceof f", "false"),
+        ("function f(){} 'prototype' in f && f.hasOwnProperty('prototype') && Object.hasOwn(f,'prototype')", "true"),
+        ("function f(){} var o=Object.create(f); [o.prototype===f.prototype, 'prototype' in o].join()", "true,true"),
+        ("function f(){} var o=Object.create(f); o.prototype=5; [o.prototype, typeof f.prototype, Object.getOwnPropertyNames(o).join()].join()", "5,object,prototype"),
+        // Stores and deletes.
+        ("function f(){} f.prototype={a:1}; new f().a", "1"),
+        ("function f(){} f.prototype=7; Object.getPrototypeOf(new f())===Object.prototype", "true"),
+        ("function f(){} [delete f.prototype, 'prototype' in f].join()", "false,true"),
+        ("'use strict'; function f(){} Object.freeze(f); Object.isFrozen(f) && Object.getOwnPropertyDescriptor(f,'prototype').writable===false", "true"),
+        ("function f(){} Object.preventExtensions(f); [Object.isFrozen(f), typeof f.prototype, Object.isExtensible(f)].join()", "false,object,false"),
+        ("function f(){} Object.seal(f); Object.getOwnPropertyDescriptor(f,'prototype').configurable", "false"),
+        // Enumeration and inline caches.
+        ("function f(){} var k=[]; for (var p in f) k.push(p); k.length + ':' + Object.keys(f).length", "0:0"),
+        ("function mk(){ return function(){}; } var r=[]; for (var i=0;i<20;i++){ var g=mk(); r.push(g.length, g.name===''); if (i%3==0) r.push(typeof g.prototype); } r.join().length > 0 && mk().prototype !== mk().prototype", "true"),
+        ("function mk(){ return function(){}; } var s=0; for (var i=0;i<50;i++){ var g=mk(); g.k=i; s+=g.k; if (i>40) s+=Object.keys(g).length; } s", "1234"),
+        ("function mk(){ return function(){}; } var ok=true; for (var i=0;i<50;i++){ var g=mk(); var p=g.prototype; ok = ok && p.constructor===g && Reflect.ownKeys(g).join()==='length,name,prototype'; } ok", "true"),
+        ("var fs=[]; for (var i=0;i<30;i++) fs.push(function(){}); fs.map(function(f,i){ return i%2 ? f.prototype.constructor===f : f.call.length; }).join().length > 0 && fs.every(function(f){ return Reflect.ownKeys(f).length===3; })", "true"),
+        // Names set from keys keep the function lazy but observable.
+        ("var o={['k'+1]: function(){}}; [o.k1.name, Reflect.ownKeys(o.k1).join()].join(':')", "k1:length,name,prototype"),
+        // Private fields stamped on a function through a returning base.
+        ("class B { constructor(o){ return o; } } class S extends B { #x=1; static has(o){ return #x in o; } } var f=function(){}; new S(f); [S.has(f), Reflect.ownKeys(f).join()].join(':')", "true:length,name,prototype"),
+        // Generators keep their eager prototype; arrows and methods have none.
+        ("function* g(){} [Object.getPrototypeOf(g.prototype)===Object.getPrototypeOf(g).prototype, (()=>1).hasOwnProperty('prototype'), ({m(){}}).m.hasOwnProperty('prototype')].join()", "true,false,false"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(evaluate(src), *want, "{src}");
+    }
+}

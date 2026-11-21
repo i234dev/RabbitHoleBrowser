@@ -245,7 +245,7 @@ pub struct Realm {
     /// Prototype epoch at which `Array.prototype` and `Object.prototype`
     /// were last seen without indexed properties (0: not known).
     pub(crate) array_protos_index_free: u32,
-    pub(crate) closure_shapes: Option<(Rc<crate::shape::Shape>, Rc<crate::shape::Shape>, Rc<crate::shape::Shape>)>,
+    pub(crate) closure_shapes: Option<crate::vm::ClosureShapes>,
     /// `new.target` for the innermost native constructor call.
     pub new_target_stack: Vec<Value>,
     pub gc_threshold: usize,
@@ -740,6 +740,7 @@ impl Realm {
 
     /// Define a data property (own) with the given flags.
     pub fn define_property(&mut self, obj: ObjectId, key: impl Into<PropertyKey>, value: Value, flags: u8) {
+        self.unlazy(obj);
         self.obj_mut(obj).props.insert(key.into(), Property::data(value, flags));
     }
 
@@ -764,10 +765,12 @@ impl Realm {
         };
         let g = getter.map(|f| Value::Object(self.new_native_function(&format!("get {}", name), 0, f)));
         let s = setter.map(|f| Value::Object(self.new_native_function(&format!("set {}", name), 1, f)));
+        self.unlazy(obj);
         self.obj_mut(obj).props.insert(key, Property::accessor(g, s, flags));
     }
 
     pub fn define_accessor_values(&mut self, obj: ObjectId, key: impl Into<PropertyKey>, getter: Option<Value>, setter: Option<Value>, flags: u8) {
+        self.unlazy(obj);
         self.obj_mut(obj).props.insert(key.into(), Property::accessor(getter, setter, flags));
     }
 

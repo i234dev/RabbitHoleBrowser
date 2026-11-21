@@ -21,6 +21,9 @@ pub struct JsStr(std::num::NonZeroU64);
 /// hash (property names are hashed on every dictionary / shape lookup).
 pub(crate) struct StrBox {
     hash: Cell<u32>,
+    /// The thread's shared instance of its text (see [`JsStr::intern`]):
+    /// two interned strings are equal only if they are the same instance.
+    interned: Cell<bool>,
     s: StrInner,
 }
 
@@ -70,6 +73,13 @@ impl JsStr {
     pub fn bits(&self) -> u64 {
         self.0.get()
     }
+    /// Is this the thread's interned instance of its text? Two interned
+    /// strings with different handles have different contents.
+    #[inline(always)]
+    pub fn is_interned(&self) -> bool {
+        // SAFETY: the handle holds a strong reference.
+        unsafe { (*self.ptr()).interned.get() }
+    }
     /// Hash of the code units (FxHash-style), computed once per string.
     #[inline]
     pub fn hash32(&self) -> u32 {
@@ -88,7 +98,7 @@ impl JsStr {
         h
     }
     fn from_inner(i: StrInner) -> JsStr {
-        let p = Rc::into_raw(Rc::new(StrBox { hash: Cell::new(0), s: i })) as u64;
+        let p = Rc::into_raw(Rc::new(StrBox { hash: Cell::new(0), interned: Cell::new(false), s: i })) as u64;
         assert!(p & TAG_MASK == 0, "pointer beyond 48 bits");
         // SAFETY: the tag is non-zero.
         JsStr(unsafe { std::num::NonZeroU64::new_unchecked(TAG_STRING | p) })
@@ -649,21 +659,90 @@ thread_local! {
     static INTERNED: std::cell::RefCell<std::collections::HashMap<Box<str>, JsStr, FxBuild>> = std::cell::RefCell::new(std::collections::HashMap::default());
 }
 
+/// Longest name [`JsStr::intern`] shares.
+const INTERN_MAX: usize = 32;
+const INTERN_CACHE: usize = 512;
+
+/// A recently interned name, with its text kept inline (a hit reads no
+/// other memory).
+struct InternEntry {
+    len: u8,
+    text: [u8; INTERN_MAX],
+    s: Option<JsStr>,
+}
+
+thread_local! {
+    /// Direct-mapped cache in front of [`INTERNED`]: the interner's table is
+    /// large (every identifier compiled), so a lookup there usually misses
+    /// the CPU caches, while the names native code asks for again and
+    /// again (descriptor fields, event and result properties) are few.
+    static INTERN_HOT: std::cell::UnsafeCell<[InternEntry; INTERN_CACHE]> =
+        const { std::cell::UnsafeCell::new([const { InternEntry { len: 0, text: [0; INTERN_MAX], s: None } }; INTERN_CACHE]) };
+}
+
+/// Cache index of a name of at most [`INTERN_MAX`] bytes.
+#[inline(always)]
+fn intern_slot(b: &[u8]) -> usize {
+    let n = b.len();
+    let word = |i: usize| -> u64 {
+        let mut w = [0u8; 8];
+        let e = (i + 8).min(n);
+        if i < e {
+            w[..e - i].copy_from_slice(&b[i..e]);
+        }
+        u64::from_le_bytes(w)
+    };
+    let mut h = (n as u64).wrapping_mul(FX_SEED);
+    let mut i = 0;
+    while i < n {
+        h = (h.rotate_left(5) ^ word(i)).wrapping_mul(FX_SEED);
+        i += 8;
+    }
+    (h >> 40) as usize % INTERN_CACHE
+}
+
 impl JsStr {
     /// A shared instance for short names (property keys, identifiers), so
     /// that equal names compare by pointer in property lookups.
     pub fn intern(s: &str) -> JsStr {
-        if s.len() > 32 {
+        if s.len() > INTERN_MAX {
             return JsStr::new(s);
         }
-        INTERNED.with(|m| {
+        let b = s.as_bytes();
+        let slot = intern_slot(b);
+        let hit = INTERN_HOT.try_with(|c| {
+            // SAFETY: the cache is only touched by its own thread, and no
+            // reference into it outlives this closure.
+            let e = unsafe { &(*c.get())[slot] };
+            match &e.s {
+                Some(j) if e.len as usize == b.len() && &e.text[..b.len()] == b => Some(j.clone()),
+                _ => None,
+            }
+        });
+        if let Ok(Some(j)) = hit {
+            return j;
+        }
+        let j = INTERNED.with(|m| {
             if let Some(j) = m.borrow().get(s) {
                 return j.clone();
             }
             let j = JsStr::new(s);
+            // SAFETY: the handle holds a strong reference.
+            unsafe { (*j.ptr()).interned.set(true) };
             m.borrow_mut().insert(s.into(), j.clone());
             j
-        })
+        });
+        let _ = INTERN_HOT.try_with(|c| {
+            // SAFETY: as above; the old entry's string is dropped after the
+            // entry is overwritten (dropping a string runs no other code
+            // that could reach the cache).
+            let e = unsafe { &mut (*c.get())[slot] };
+            e.len = b.len() as u8;
+            e.text[..b.len()].copy_from_slice(b);
+            let old = e.s.replace(j.clone());
+            drop(old);
+        });
+        j
     }
 }
 impl fmt::Debug for JsStr {
