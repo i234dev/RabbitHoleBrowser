@@ -184,6 +184,10 @@ impl Realm {
                     }
                 }
                 _ => {
+                    if obj.props.is_lazy_fn() && crate::shape::is_prototype_key(key) {
+                        self.materialize_prototype(cur);
+                        continue;
+                    }
                     // Ordinary storage: no Property clone on the common path.
                     if let Some(p) = obj.props.get(key) {
                         if p.flags & ACCESSOR == 0 {
@@ -262,6 +266,8 @@ impl Realm {
     }
 
     pub fn set_on_object(&mut self, id: ObjectId, key: PropertyKey, value: Value, receiver: Value) -> JsResult<bool> {
+        // A store into a function settles its key set first.
+        self.unlazy(id);
         if receiver.as_object() == Some(id) {
             if let Some(m) = self.mapped_arg(id, &key) {
                 self.mapped_arg_write(m, value.clone());
@@ -373,6 +379,7 @@ impl Realm {
                     }
                 }
             }
+            self.unlazy_for(c, &key);
             if let Some(p) = self.get_own_property(c, &key) {
                 if p.is_accessor() {
                     return match p.setter_cloned() {
@@ -407,6 +414,7 @@ impl Realm {
                 None => self.define_own_desc(rid, key, crate::descriptor::PropDesc::from_property(&Property::data(value, ALL))),
             };
         }
+        self.unlazy(rid);
         if let Some(existing) = self.get_own_property(rid, &key) {
             if existing.is_accessor() || !existing.writable() {
                 return Ok(false);
@@ -439,6 +447,7 @@ impl Realm {
 
     /// Create or replace an own property; returns false if not allowed.
     pub fn define_own(&mut self, id: ObjectId, key: PropertyKey, prop: Property) -> JsResult<bool> {
+        self.unlazy(id);
         if self.obj(id).indexed && key.as_array_index().is_some() {
             // No indexed setter: index keys cannot be defined.
             return Ok(false);
@@ -499,6 +508,7 @@ impl Realm {
                 return Ok(self.obj(id).indexed_item(i).is_none());
             }
         }
+        self.unlazy(id);
         let obj = self.obj_mut(id);
         if let ObjectKind::Array { elements, .. } = &mut obj.kind {
             if let Some(i) = key.as_array_index() {
@@ -553,6 +563,7 @@ impl Realm {
                     return Ok(crate::builtins::typed_array::ta_valid_index(self, t, n).is_some());
                 }
             }
+            self.unlazy_for(c, key);
             if self.has_own_property(c, key) {
                 return Ok(true);
             }
@@ -566,6 +577,7 @@ impl Realm {
         if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
             return self.proxy_own_keys(id);
         }
+        self.unlazy(id);
         let obj = self.obj(id);
         let mut out = Vec::new();
         match &obj.kind {
@@ -652,6 +664,7 @@ impl Realm {
             ObjectKind::ModuleNamespace => return self.namespace_get_own(id, key),
             _ => {}
         }
+        self.unlazy_for(id, key);
         Ok(self.get_own_property(id, key))
     }
 

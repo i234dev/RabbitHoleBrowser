@@ -211,6 +211,7 @@ impl Realm {
     /// [[DefineOwnProperty]] with a possibly partial descriptor, for every
     /// kind of object.
     pub fn define_own_desc(&mut self, id: ObjectId, key: PropertyKey, desc: PropDesc) -> JsResult<bool> {
+        self.unlazy(id);
         if self.obj(id).indexed && key.as_array_index().is_some() {
             return Ok(false);
         }
@@ -276,6 +277,7 @@ impl Realm {
 
     /// OrdinaryDefineOwnProperty on a non-proxy object.
     fn ordinary_define_own(&mut self, id: ObjectId, key: PropertyKey, desc: PropDesc) -> JsResult<bool> {
+        self.unlazy(id);
         let current = self.get_own_property(id, &key);
         let extensible = self.obj(id).extensible;
         if !self.desc_is_compatible(extensible, &desc, current.as_ref()) {

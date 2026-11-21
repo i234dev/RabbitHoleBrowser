@@ -38,11 +38,16 @@ fn fresh_values() -> Vec<Property> {
 pub const MAX_SHAPED: usize = 128;
 /// Id of the empty root shape.
 pub const ROOT_SHAPE_ID: u32 = 1;
+/// Id of the shape of plain functions whose `prototype` object is not
+/// created yet (see [`lazy_fn_shape`]).
+pub const LAZY_FN_SHAPE_ID: u32 = 2;
+/// First id handed out by [`fresh_id`].
+const FIRST_FRESH_ID: u32 = 3;
 /// Shapes up to this size are searched linearly (larger ones use an index).
 const LINEAR_LOOKUP: usize = 8;
 
 thread_local! {
-    static NEXT_ID: Cell<u32> = const { Cell::new(2) };
+    static NEXT_ID: Cell<u32> = const { Cell::new(FIRST_FRESH_ID) };
     static ROOT: Rc<Shape> = Rc::new(Shape {
         id: ROOT_SHAPE_ID,
         len: 0,
@@ -58,7 +63,7 @@ thread_local! {
 pub fn fresh_id() -> u32 {
     NEXT_ID.with(|n| {
         let id = n.get();
-        n.set(if id == u32::MAX { 2 } else { id + 1 });
+        n.set(if id == u32::MAX { FIRST_FRESH_ID } else { id + 1 });
         id
     })
 }
@@ -95,6 +100,39 @@ fn key_eq(a: &PropertyKey, b: &PropertyKey) -> bool {
         (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => x == y,
         _ => false,
     }
+}
+
+thread_local! {
+    static LAZY_FN: OnceCell<Rc<Shape>> = const { OnceCell::new() };
+}
+
+/// The shape of a plain function whose `prototype` property is pending:
+/// the keys of `ln` (`length`, `name`) under the reserved id
+/// [`LAZY_FN_SHAPE_ID`], reached by no transition. Such a function must be
+/// given its prototype (`Realm::materialize_prototype`) before its key set
+/// is read or changed, or `prototype` is looked up on it; everything else
+/// (its `length` and `name`, inherited properties, inline caches for other
+/// keys) works on this shape as on any other.
+pub fn lazy_fn_shape(ln: &Rc<Shape>) -> Rc<Shape> {
+    LAZY_FN.with(|c| {
+        c.get_or_init(|| {
+            Rc::new(Shape {
+                id: LAZY_FN_SHAPE_ID,
+                len: ln.len,
+                keys: ln.keys.clone(),
+                parent: ln.parent.clone(),
+                transitions: RefCell::new(Transitions::default()),
+                index: OnceCell::new(),
+            })
+        })
+        .clone()
+    })
+}
+
+/// Is `key` the string `prototype`?
+#[inline]
+pub fn is_prototype_key(key: &PropertyKey) -> bool {
+    matches!(key, PropertyKey::String(s) if s.eq_str("prototype"))
 }
 
 impl Shape {
@@ -372,6 +410,29 @@ impl PropertyMap {
         matches!(self.repr, Repr::Dict(_))
     }
 
+    /// A plain function's map whose `prototype` is still pending (see
+    /// [`lazy_fn_shape`]).
+    #[inline(always)]
+    pub fn is_lazy_fn(&self) -> bool {
+        self.sid == LAZY_FN_SHAPE_ID
+    }
+
+    /// End the pending state: switch to `full` (the lazy shape's keys plus
+    /// `prototype`) with `prototype` as the new last value.
+    pub fn end_lazy_fn(&mut self, full: Rc<Shape>, prototype: Property) {
+        debug_assert!(self.is_lazy_fn() && full.len() == self.values.len() + 1);
+        self.repr = Repr::Shaped(full);
+        self.values.push(prototype);
+        self.resync();
+    }
+
+    /// Checks (debug builds) that a pending function map is not asked about
+    /// `prototype` before it has one.
+    #[inline(always)]
+    fn check_lazy_key(&self, key: &PropertyKey) {
+        debug_assert!(!(self.is_lazy_fn() && is_prototype_key(key)), "`prototype` looked up on a function before it was created");
+    }
+
     pub fn shape(&self) -> Option<&Rc<Shape>> {
         match &self.repr {
             Repr::Shaped(shape) => Some(shape),
@@ -393,6 +454,7 @@ impl PropertyMap {
     /// Slot of `key`: value index (shape mode) or entry index (dictionary).
     #[inline]
     pub fn find_slot(&self, key: &PropertyKey) -> Option<u32> {
+        self.check_lazy_key(key);
         match &self.repr {
             Repr::Shaped(shape) => shape.find(key),
             Repr::Dict(d) => d.index.get(key).map(|&i| i as u32),
@@ -443,6 +505,7 @@ impl PropertyMap {
 
     #[inline]
     pub fn get(&self, key: &PropertyKey) -> Option<&Property> {
+        self.check_lazy_key(key);
         match &self.repr {
             Repr::Shaped(shape) => shape.find(key).map(|i| &self.values[i as usize]),
             Repr::Dict(d) => d.index.get(key).and_then(|&i| d.entries[i].as_ref().map(|(_, p)| p)),
@@ -450,6 +513,7 @@ impl PropertyMap {
     }
 
     pub fn get_mut(&mut self, key: &PropertyKey) -> Option<&mut Property> {
+        self.check_lazy_key(key);
         match &mut self.repr {
             Repr::Shaped(shape) => match shape.find(key) {
                 Some(i) => Some(&mut self.values[i as usize]),
@@ -479,6 +543,7 @@ impl PropertyMap {
                     values[i as usize] = prop;
                     return;
                 }
+                debug_assert!(shape.id != LAZY_FN_SHAPE_ID, "property added to a function before its `prototype`");
                 if values.len() < MAX_SHAPED {
                     *shape = shape.add(&key);
                     if values.capacity() == 0 {
@@ -508,6 +573,7 @@ impl PropertyMap {
     /// adding exactly this key.
     #[inline]
     pub fn push_with_shape(&mut self, next: Rc<Shape>, prop: Property) {
+        debug_assert!(!self.is_lazy_fn(), "property added to a function before its `prototype`");
         if let Repr::Shaped(shape) = &mut self.repr {
             let values = &mut self.values;
             if self.in_chain.get() {
@@ -548,6 +614,7 @@ impl PropertyMap {
     }
 
     fn remove_inner(&mut self, key: &PropertyKey) -> Option<Property> {
+        debug_assert!(!self.is_lazy_fn(), "property deleted from a function before its `prototype` exists");
         if let Repr::Shaped(shape) = &mut self.repr {
             let values = &mut self.values;
             let i = shape.find(key)? as usize;
@@ -597,6 +664,7 @@ impl PropertyMap {
     /// Keys in spec order: integer indices ascending, then strings in
     /// insertion order, then symbols in insertion order.
     pub fn keys(&self) -> Vec<PropertyKey> {
+        debug_assert!(!self.is_lazy_fn(), "keys of a function listed before its `prototype` exists");
         // Usually every key is a plain string name: insertion order is
         // already the answer.
         let plain = |k: &PropertyKey| matches!(k, PropertyKey::String(s) if s.as_array_index().is_none());

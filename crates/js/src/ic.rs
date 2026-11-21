@@ -570,9 +570,11 @@ impl Realm {
 
     /// Snapshot taken before a slow store, used to recognise a cacheable
     /// outcome afterwards: (shape id, slot of the key if present).
-    pub(crate) fn ic_before_set(&self, recv: &Value, key: &PropertyKey) -> Option<(u32, Option<u32>)> {
+    pub(crate) fn ic_before_set(&mut self, recv: &Value, key: &PropertyKey) -> Option<(u32, Option<u32>)> {
         let id = recv.as_object()?;
         cacheable_key(key)?;
+        // The store will settle a pending function prototype first.
+        self.unlazy(id);
         let o = self.heap.try_get(id)?;
         if !plain_kind(&o.kind) {
             return None;

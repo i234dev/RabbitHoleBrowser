@@ -953,6 +953,10 @@ impl Realm {
             }
             return Ok(false);
         }
+        if obj.props.is_lazy_fn() {
+            self.materialize_prototype(id);
+            return self.try_fast_construct(fi, b, argc);
+        }
         let proto = match obj.props.get(&names::prototype()) {
             Some(p) if p.flags & ACCESSOR == 0 => match p.value.v() {
                 V::Object(p) => p,
@@ -5195,6 +5199,7 @@ impl Realm {
     pub(crate) fn private_define(&mut self, obj: &Value, key: &Value, prop: Property) -> JsResult<()> {
         let (k, name) = self.private_key(key)?;
         let Some(id) = obj.as_object() else { return self.type_error(&format!("Cannot define private member {name} on a non-object")) };
+        self.unlazy(id);
         if self.obj(id).props.contains(&k) {
             return self.type_error(&format!("Cannot initialize {name} twice on the same object"));
         }
@@ -5246,11 +5251,17 @@ impl Realm {
                 }
             };
             let name = if prefix.is_empty() { base } else { format!("{} {}", prefix, base) };
-            let existing = self.obj(id).props.get(&PropertyKey::str("name")).map(|p| p.value.clone());
+            let existing = self.obj(id).props.get(&names::name()).map(|p| p.value.clone());
             // (An accessor is always renamed: its static name lacks the prefix.)
             let keep = prefix.is_empty() && matches!(existing.as_ref().map(Value::v), Some(V::String(s)) if !s.is_empty());
             if !keep {
-                self.define_property(id, "name", Value::str(&name), CONFIGURABLE);
+                // Every function has its own `name` (replaced in place, so
+                // a function whose prototype is pending stays so); one
+                // whose `name` was deleted gets it back at the end.
+                if existing.is_none() {
+                    self.unlazy(id);
+                }
+                self.obj_mut(id).props.insert(names::name(), Property::data(Value::str(&name), CONFIGURABLE));
             }
         }
     }
@@ -5325,35 +5336,72 @@ impl Realm {
             self.define_property(id, "prototype", Value::Object(p), WRITABLE);
             id
         } else if !flags.is_arrow && !flags.is_method && !flags.is_async && !flags.is_class_constructor {
-            // Layouts known in advance (the same shapes the property
-            // definitions would reach): no transitions per closure.
+            // Most functions are never used as constructors and nothing
+            // reads their `prototype`: it is created on first need (see
+            // `materialize_prototype`). The layouts are known in advance:
+            // no transitions per closure.
             let shapes = self.closure_shapes();
             let mut obj = Object::new(Some(proto), ObjectKind::Function(Box::new(closure)));
-            let p = self.new_object();
-            obj.props = PropertyMap::with_shape(shapes.1, &[length, name, Property::data(Value::Object(p), WRITABLE)]);
-            let id = self.alloc(obj);
-            self.obj_mut(p).props = PropertyMap::with_shape(shapes.2, &[Property::data(Value::Object(id), HIDDEN)]);
-            id
+            obj.props = PropertyMap::with_shape(shapes.lazy.clone(), &[length, name]);
+            self.alloc(obj)
         } else {
             let shapes = self.closure_shapes();
             let mut obj = Object::new(Some(proto), ObjectKind::Function(Box::new(closure)));
-            obj.props = PropertyMap::with_shape(shapes.0, &[length, name]);
+            obj.props = PropertyMap::with_shape(shapes.ln.clone(), &[length, name]);
             self.alloc(obj)
         }
     }
 
-    /// Shapes of closures: (length, name), (length, name, prototype) and
-    /// their prototype objects' (constructor).
-    fn closure_shapes(&mut self) -> (Rc<crate::shape::Shape>, Rc<crate::shape::Shape>, Rc<crate::shape::Shape>) {
-        if let Some(s) = &self.closure_shapes {
-            return s.clone();
+    /// Shapes of closures (built once per realm).
+    fn closure_shapes(&mut self) -> &ClosureShapes {
+        if self.closure_shapes.is_none() {
+            let root = crate::shape::Shape::root();
+            let ln = root.add(&names::length()).add(&names::name());
+            let lnp = ln.add(&names::prototype());
+            let constructor = root.add(&names::constructor());
+            let lazy = crate::shape::lazy_fn_shape(&ln);
+            self.closure_shapes = Some(ClosureShapes { ln, lnp, constructor, lazy });
         }
-        let root = crate::shape::Shape::root();
-        let ln = root.add(&names::length()).add(&names::name());
-        let lnp = ln.add(&names::prototype());
-        let c = root.add(&names::constructor());
-        self.closure_shapes = Some((ln.clone(), lnp.clone(), c.clone()));
-        (ln, lnp, c)
+        self.closure_shapes.as_ref().expect("closure shapes")
+    }
+
+    /// Create the `prototype` object of a plain function made without one
+    /// (see `make_closure`): an object of the function's realm whose
+    /// `constructor` is the function, in the last own property slot the
+    /// function's layout reserves for it. Observably the same as creating
+    /// it with the function.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn materialize_prototype(&mut self, id: ObjectId) {
+        let realm = match &self.obj(id).kind {
+            ObjectKind::Function(c) => c.code.realm.get(),
+            _ => self.current_realm,
+        };
+        let object_proto = self.realm_intrinsics(realm).object_proto;
+        let (lnp, constructor) = {
+            let s = self.closure_shapes();
+            (s.lnp.clone(), s.constructor.clone())
+        };
+        let p = self.alloc(Object::new(Some(object_proto), ObjectKind::Ordinary));
+        self.obj_mut(p).props = PropertyMap::with_shape(constructor, &[Property::data(Value::Object(id), HIDDEN)]);
+        self.obj_mut(id).props.end_lazy_fn(lnp, Property::data(Value::Object(p), WRITABLE));
+    }
+
+    /// Give `id` its pending `prototype` (if it is a plain function without
+    /// one yet) before its key set is read or changed.
+    #[inline(always)]
+    pub(crate) fn unlazy(&mut self, id: ObjectId) {
+        if self.heap.try_get(id).is_some_and(|o| o.props.is_lazy_fn()) {
+            self.materialize_prototype(id);
+        }
+    }
+
+    /// [`Realm::unlazy`] when `key` is `prototype`.
+    #[inline(always)]
+    pub(crate) fn unlazy_for(&mut self, id: ObjectId, key: &PropertyKey) {
+        if self.heap.try_get(id).is_some_and(|o| o.props.is_lazy_fn()) && crate::shape::is_prototype_key(key) {
+            self.materialize_prototype(id);
+        }
     }
 
     fn make_class(&mut self, fi: usize, code: Rc<FunctionCode>, superclass: Value) -> JsResult<(ObjectId, ObjectId)> {
@@ -5793,4 +5841,16 @@ fn on_await_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
         realm.async_step_dispatch(g, ResumeMode::Throw, v);
     }
     Ok(Value::Undefined)
+}
+
+/// Shapes of closures: (length, name) for functions without a prototype,
+/// (length, name, prototype) for constructors, (constructor) for their
+/// prototype objects, and the pending layout of plain functions whose
+/// prototype is created on demand.
+#[derive(Clone)]
+pub(crate) struct ClosureShapes {
+    pub ln: Rc<crate::shape::Shape>,
+    pub lnp: Rc<crate::shape::Shape>,
+    pub constructor: Rc<crate::shape::Shape>,
+    pub lazy: Rc<crate::shape::Shape>,
 }
