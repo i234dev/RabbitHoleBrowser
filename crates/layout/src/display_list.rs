@@ -1345,6 +1345,46 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             .collect()
     }
 
+    /// The glyphs (opaque) of a line's text fragments inside the inline
+    /// element `node`, as a layer mask for its `background-clip: text`.
+    fn inline_text_mask(&self, line: &crate::tree::LineBox, node: Option<NodeId>) -> Vec<DisplayItem> {
+        let Some(node) = node else { return Vec::new() };
+        let doc = self.ctx.doc;
+        let inside = |t: NodeId| {
+            let mut p = doc.flat_parent(t).or_else(|| doc.parent(t));
+            while let Some(n) = p {
+                if n == node {
+                    return true;
+                }
+                p = doc.flat_parent(n).or_else(|| doc.parent(n));
+            }
+            false
+        };
+        line.fragments
+            .iter()
+            .filter_map(|g| match &g.kind {
+                FragmentKind::Text { text, font, size, letter_spacing, word_spacing, hidden: false, small_caps, oblique, src, .. }
+                    if crate::tree::text_src(*src).is_some_and(inside) =>
+                {
+                    Some(DisplayItem::Text {
+                        x: g.rect.x,
+                        y: g.baseline,
+                        font: *font,
+                        size: *size,
+                        color: Color::BLACK,
+                        text: text.to_string(),
+                        letter_spacing: *letter_spacing,
+                        word_spacing: *word_spacing,
+                        shadows: Vec::new(),
+                        small_caps: *small_caps,
+                        oblique: *oblique,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn paint_float_or_atomic(&mut self, c: &'t LayoutBox) {
         self.paint_stacking_context(c, c.content_rect);
     }
@@ -1455,24 +1495,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             // `background-clip: text` / `border-area`: those layers (and the
             // color when the last layer is one) show only through the glyphs
             // or the painted border. (Mixing both kinds masks by the first.)
-            let by_text = style.background_layers.iter().any(|l| l.clip_text);
-            let masked = |l: &rabbithole_style::BackgroundLayer| if by_text { l.clip_text } else { l.clip_border_area };
-            let mut boxed = (**style).clone();
-            let mut texty = (**style).clone();
-            let text_color = style.background_layers.last().is_some_and(|l| masked(l));
-            boxed.background_layers.retain(|l| !masked(l));
-            texty.background_layers.retain(|l| masked(l));
-            for l in &mut texty.background_layers {
-                l.clip = rabbithole_style::BoxArea::BorderBox;
-            }
-            if text_color {
-                boxed.background_color = Color::TRANSPARENT;
-            } else {
-                texty.background_color = Color::TRANSPARENT;
-            }
-            if let Some(last) = boxed.background_layers.last_mut().filter(|_| text_color) {
-                last.clip = rabbithole_style::BoxArea::BorderBox;
-            }
+            let (boxed, texty, by_text) = split_masked_backgrounds(style);
             background::paint_backgrounds(self.list, &geom, &boxed, self.ctx.background_images, vp);
             let mask = if by_text {
                 self.text_mask_items(b)
@@ -2002,7 +2025,20 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         };
                         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
                         background::paint_box_shadows(self.list, &geom, &style.box_shadow, false);
-                        background::paint_backgrounds(self.list, &geom, style, self.ctx.background_images, vp);
+                        if style.background_layers.iter().any(|l| l.clip_text) {
+                            // `background-clip: text` on an inline box: the
+                            // masked layers show only through the glyphs of
+                            // the element's text on this line.
+                            let (boxed, texty, _) = split_masked_backgrounds(style);
+                            background::paint_backgrounds(self.list, &geom, &boxed, self.ctx.background_images, vp);
+                            let mask = self.inline_text_mask(line, f.node);
+                            self.list.push(DisplayItem::PushLayer(f.rect));
+                            background::paint_backgrounds(self.list, &geom, &texty, self.ctx.background_images, vp);
+                            self.list.push(DisplayItem::LayerMask(mask));
+                            self.list.push(DisplayItem::PopLayer(1.0));
+                        } else {
+                            background::paint_backgrounds(self.list, &geom, style, self.ctx.background_images, vp);
+                        }
                         background::paint_box_shadows(self.list, &geom, &style.box_shadow, true);
                         if style.has_visible_border() {
                             let bs = style.border_style;
@@ -2496,4 +2532,31 @@ fn emphasis_skips(c: char) -> bool {
     use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
     c.is_whitespace()
         || matches!(c.general_category_group(), GeneralCategoryGroup::Punctuation | GeneralCategoryGroup::Separator | GeneralCategoryGroup::Other)
+}
+
+/// Split a style's backgrounds for `background-clip: text` /
+/// `border-area`: (the layers painted normally, the masked layers clipped
+/// to the border box, whether the mask is the text). The background color
+/// goes with the masked part when the last layer is masked. (Mixing both
+/// kinds masks by the first.)
+fn split_masked_backgrounds(style: &rabbithole_style::ComputedStyle) -> (rabbithole_style::ComputedStyle, rabbithole_style::ComputedStyle, bool) {
+    let by_text = style.background_layers.iter().any(|l| l.clip_text);
+    let masked = |l: &rabbithole_style::BackgroundLayer| if by_text { l.clip_text } else { l.clip_border_area };
+    let mut boxed = style.clone();
+    let mut texty = style.clone();
+    let text_color = style.background_layers.last().is_some_and(|l| masked(l));
+    boxed.background_layers.retain(|l| !masked(l));
+    texty.background_layers.retain(|l| masked(l));
+    for l in &mut texty.background_layers {
+        l.clip = rabbithole_style::BoxArea::BorderBox;
+    }
+    if text_color {
+        boxed.background_color = Color::TRANSPARENT;
+    } else {
+        texty.background_color = Color::TRANSPARENT;
+    }
+    if let Some(last) = boxed.background_layers.last_mut().filter(|_| text_color) {
+        last.clip = rabbithole_style::BoxArea::BorderBox;
+    }
+    (boxed, texty, by_text)
 }
