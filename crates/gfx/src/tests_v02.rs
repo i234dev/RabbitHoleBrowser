@@ -495,7 +495,9 @@ fn system_fonts_and_fallback() {
     let g = glyphs[0].glyph;
     let b0 = fonts.rasterize_subpixel(sans, g, 16.0, 0);
     let b2 = fonts.rasterize_subpixel(sans, g, 16.0, 2);
-    assert_eq!(b2.width, b0.width + 1);
+    // (Shifted outlines span the same columns or one more.)
+    assert!(b2.width == b0.width || b2.width == b0.width + 1);
+    assert_ne!(b2.coverage, b0.coverage);
     assert!(std::rc::Rc::ptr_eq(&b2, &fonts.rasterize_subpixel(sans, g, 16.0, 2)));
 }
 

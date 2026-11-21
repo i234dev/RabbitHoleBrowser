@@ -164,6 +164,9 @@ pub struct FontContext {
     pub(crate) shaping: Rc<crate::shaping::ShapingState>,
     /// (face, glyph, size×4) → color rendering (None: not a color glyph).
     pub(crate) color_cache: Rc<RefCell<HashMap<(usize, u16, u32), Option<Rc<crate::color_glyph::ColorGlyph>>>>>,
+    /// Face → outline data for grid-fitted rasterization (None: rasterize
+    /// with fontdue, unfitted).
+    hint_faces: Rc<RefCell<HashMap<usize, Option<Rc<crate::glyph_raster::HintFace>>>>>,
 }
 
 impl Default for FontContext {
@@ -300,6 +303,7 @@ impl FontContext {
             system_loaded: Rc::new(Cell::new(false)),
             shaping: Default::default(),
             color_cache: Rc::new(RefCell::new(HashMap::new())),
+            hint_faces: Rc::new(RefCell::new(HashMap::new())),
         };
         // Bundled faces are parsed on first use (`try_face`): fontdue builds
         // every glyph outline when parsing, and a page usually needs one or
@@ -353,6 +357,7 @@ impl FontContext {
             system_loaded: self.system_loaded.clone(),
             shaping: self.shaping.clone(),
             color_cache: self.color_cache.clone(),
+            hint_faces: self.hint_faces.clone(),
         }
     }
 
@@ -946,17 +951,28 @@ impl FontContext {
         out
     }
 
-    /// Rasterize (cached) a glyph at a given size.
+    /// Rasterize (cached) a glyph at a given size, grid-fitted vertically.
     pub fn rasterize(&self, font: FontId, glyph: u16, size: f32) -> Rc<GlyphBitmap> {
         self.rasterize_subpixel(font, glyph, size, 0)
     }
 
+    /// Rasterize a glyph without grid fitting, for glyphs drawn rotated or
+    /// skewed (the pixel grid is not the glyph's).
+    pub fn rasterize_unhinted(&self, font: FontId, glyph: u16, size: f32) -> Rc<GlyphBitmap> {
+        self.rasterize_key(font, glyph, size, 0, false)
+    }
+
     /// Rasterize a glyph shifted right by `quarter`/4 px (subpixel
-    /// positioning; the coverage is resampled horizontally).
+    /// positioning), grid-fitted vertically like FreeType's "slight"
+    /// hinting: horizontal edges land on whole pixels relative to the
+    /// baseline, horizontal positions are untouched.
     pub fn rasterize_subpixel(&self, font: FontId, glyph: u16, size: f32, quarter: u8) -> Rc<GlyphBitmap> {
+        self.rasterize_key(font, glyph, size, quarter % 4, true)
+    }
+
+    fn rasterize_key(&self, font: FontId, glyph: u16, size: f32, quarter: u8, hinted: bool) -> Rc<GlyphBitmap> {
         let face_idx = self.resolve_index(font.0);
-        let quarter = quarter % 4;
-        let key = (face_idx, glyph, (size * 4.0).round().max(0.0) as u32, quarter);
+        let key = (face_idx, glyph, (size * 4.0).round().max(0.0) as u32, quarter | if hinted { 0 } else { 0x80 });
         if let Some(b) = self.cache.borrow().get(&key) {
             return Rc::clone(b);
         }
@@ -968,6 +984,8 @@ impl FontContext {
                 top: 0,
                 coverage: Vec::new(),
             }
+        } else if let Some(b) = self.rasterize_outline(face_idx, glyph, size, quarter, hinted) {
+            b
         } else {
             let (m, coverage) = self.face(face_idx).rasterize_indexed(glyph, size);
             let base = GlyphBitmap {
@@ -986,6 +1004,38 @@ impl FontContext {
         let rc = Rc::new(bitmap);
         self.cache.borrow_mut().insert(key, Rc::clone(&rc));
         rc
+    }
+
+    /// Rasterize a glyph from its outline (None: no outline data, use
+    /// fontdue). Glyphs without contours give an empty bitmap.
+    fn rasterize_outline(&self, face_idx: usize, glyph: u16, size: f32, quarter: u8, hinted: bool) -> Option<GlyphBitmap> {
+        let hf = self.hint_face(face_idx)?;
+        // fontdue substitutes glyph 0 for out-of-range ids; so do we by
+        // falling back to it.
+        let cmds = hf.outline(glyph)?;
+        let scale = size / hf.upem;
+        let knots = if hinted { crate::glyph_raster::fit_knots(&cmds, hf.upem, &hf.zones, scale) } else { Vec::new() };
+        let r = crate::glyph_raster::rasterize(&cmds, scale, quarter as f32 / 4.0, &knots);
+        Some(GlyphBitmap { width: r.width, height: r.height, left: r.left, top: r.top, coverage: r.coverage })
+    }
+
+    /// Outline data of a face (cached; None when its bytes do not parse).
+    fn hint_face(&self, face_idx: usize) -> Option<Rc<crate::glyph_raster::HintFace>> {
+        if let Some(h) = self.hint_faces.borrow().get(&face_idx) {
+            return h.clone();
+        }
+        let bytes = {
+            let faces = self.faces.borrow();
+            match faces.get(face_idx).map(|s| &s.source) {
+                Some(FaceSource::Bytes(b)) => Some(Rc::clone(b)),
+                Some(FaceSource::Path(..)) => None,
+                None => None,
+            }
+        };
+        let bytes = bytes.or_else(|| self.face_bytes(face_idx));
+        let made = bytes.and_then(crate::glyph_raster::HintFace::new).map(Rc::new);
+        self.hint_faces.borrow_mut().insert(face_idx, made.clone());
+        made
     }
 
     /// Advance width of a single char (used for tab stops / list markers).

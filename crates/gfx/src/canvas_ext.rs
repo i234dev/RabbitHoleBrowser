@@ -653,7 +653,9 @@ impl Canvas {
                             }
                         }
                     } else {
-                        let bm = fonts.rasterize(g.font, g.glyph, rsize);
+                        // Rotated or skewed: the device grid is not the
+                        // glyph's, so no grid fitting.
+                        let bm = fonts.rasterize_unhinted(g.font, g.glyph, rsize);
                         if !bm.is_empty() {
                             // Glyph origin on the baseline in device space.
                             let along = Point::new(pen + g.x + g.dx, 0.0);
