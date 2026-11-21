@@ -1601,7 +1601,23 @@ fn attrs_active() -> bool {
 /// Does `value` hold a function substituted at computed-value time
 /// (`attrs`: `attr()` too)?
 fn needs_substitution(value: &[Token], attrs: bool) -> bool {
-    value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || (attrs && f.eq_ignore_ascii_case("attr"))))
+    value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || (attrs && f.eq_ignore_ascii_case("attr"))))
+}
+
+/// The value of an environment variable (`env()`, CSS Environment
+/// Variables 1) on this rectangular, keyboard-less screen; None for names
+/// the user agent does not define (the fallback applies).
+fn env_value(name: &str) -> Option<Token> {
+    let name = name.to_ascii_lowercase();
+    let zero = |side: &str| matches!(side, "top" | "right" | "bottom" | "left");
+    match name.strip_prefix("safe-area-inset-").or_else(|| name.strip_prefix("safe-area-max-inset-")) {
+        Some(side) if zero(side) => return Some(Token::Dimension(0.0, "px".into())),
+        _ => {}
+    }
+    match name.strip_prefix("keyboard-inset-") {
+        Some(side) if zero(side) || side == "width" || side == "height" => Some(Token::Dimension(0.0, "px".into())),
+        _ => None,
+    }
 }
 
 /// Does a value parse as one of the types of an `attr()` `type(...)`
@@ -1705,7 +1721,7 @@ fn substitute_attr(inner: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token
     }
 }
 
-fn substitute_vars(value: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token>> {
+pub(crate) fn substitute_vars(value: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token>> {
     if depth > 8 {
         return None;
     }
@@ -1734,6 +1750,40 @@ fn substitute_vars(value: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token
                 let inner = &value[start + 1..end.min(value.len())];
                 i = end + 1;
                 out.extend(substitute_attr(inner, vars, depth)?);
+            }
+            Token::Function(f) if f.eq_ignore_ascii_case("env") => {
+                let start = i;
+                let mut depth_p = 0i32;
+                let mut end = value.len();
+                while i < value.len() {
+                    match value[i] {
+                        Token::Function(_) | Token::OpenParen => depth_p += 1,
+                        Token::CloseParen => {
+                            depth_p -= 1;
+                            if depth_p == 0 {
+                                end = i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let inner = &value[(start + 1).min(value.len())..end.min(value.len())];
+                i = end + 1;
+                let mut it = inner.iter().skip_while(|t| **t == Token::Whitespace);
+                let known = match it.next() {
+                    Some(Token::Ident(n)) => env_value(n),
+                    _ => return None,
+                };
+                match known {
+                    Some(v) => out.push(v),
+                    None => {
+                        let rest: Vec<Token> = it.cloned().collect();
+                        let fb = rest.iter().position(|t| *t == Token::Comma).map(|p| rest[p + 1..].to_vec())?;
+                        out.extend(substitute_vars(&fb, vars, depth + 1)?);
+                    }
+                }
             }
             Token::Function(f) if f.eq_ignore_ascii_case("var") => {
                 // find matching close paren
@@ -4300,6 +4350,26 @@ mod tests {
         assert_eq!(p.margin.top, Length::Px(8.0));
         assert_eq!(p.padding.top, Length::Px(2.0));
         assert_eq!(p.width, Length::Auto);
+    }
+
+    /// `env()`: the safe-area and keyboard insets are 0px on this screen
+    /// (the fallback is not used), unknown names take the fallback, and
+    /// custom properties holding env() substitute through var(). Fixed
+    /// badges placed with `bottom: max(3vw, var(--safe-area-bottom))`
+    /// otherwise lost their offsets and sat in the corner.
+    #[test]
+    fn env_variables() {
+        let (doc, t) = styled(
+            "<div><p>x</p></div>",
+            ":root { --sab: env(safe-area-inset-bottom, 9px) } p { margin-top: env(safe-area-inset-top, 7px); margin-right: env(no-such-variable, 5px); margin-bottom: max(3px, var(--sab)); margin-left: calc(env(keyboard-inset-height) + 4px); padding-top: env(no-such-variable); padding-left: env(safe-area-inset-left, ) }",
+        );
+        let p = style_of(&doc, &t, "p");
+        assert_eq!(p.margin.top, Length::Px(0.0));
+        assert_eq!(p.margin.right, Length::Px(5.0));
+        assert_eq!(p.margin.bottom.resolve_or_zero(100.0), 3.0);
+        assert_eq!(p.margin.left.resolve_or_zero(100.0), 4.0);
+        assert_eq!(p.padding.top, Length::Px(0.0));
+        assert_eq!(p.padding.left, Length::Px(0.0));
     }
 
     #[test]
