@@ -405,8 +405,20 @@ impl Loader {
             // Only the properties that reference resources (and `display`,
             // which hides them) are needed here: the other declarations
             // are left out of this cascade.
-            let discovery = discovery_sheets(&doc, &sheets);
-            rabbithole_style::style_tree_with(&doc, &discovery, &env, &opts)
+            let cascade = |prune: bool| match discovery_sheets(&doc, &sheets, prune) {
+                Some(discovery) => rabbithole_style::style_tree_with(&doc, &discovery, &env, &opts),
+                // Nothing to discover: no element is looked at.
+                None => StyledTree { styles: Vec::new(), before: Vec::new(), after: Vec::new(), marker: Vec::new(), first_letter: Vec::new(), first_line: Vec::new(), any_first_letter: false, any_first_line: false, font_faces: Vec::new(), keyframes: HashMap::new(), root_font_size: 16.0 },
+            };
+            let styles = cascade(true);
+            if verify_discovery() {
+                let all = cascade(false);
+                let (a, b) = (discovered(&doc, &styles), discovered(&doc, &all));
+                if a != b {
+                    panic!("RH_VERIFY_DISCOVERY: {url}: pruned discovery found {a:?}, complete discovery {b:?}");
+                }
+            }
+            styles
         };
         if debug {
             eprintln!("[load] discovery cascade {:?}", t.elapsed());
@@ -1877,50 +1889,190 @@ fn resolve_url(base: &str, raw: &str) -> Option<String> {
 
 /// Properties whose computed values the loader's resource discovery reads
 /// (images, generated content, fonts) or that decide whether an element
-/// is rendered at all.
-fn discovery_property(name: &str) -> bool {
+/// is rendered at all, by group: a group's declarations are kept or left
+/// out together, so the cascade of a kept property is unchanged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiscoveryGroup {
+    /// `display`, `all`: whether an element (and so what it references)
+    /// is rendered.
+    Rendered,
+    /// `content`: generated content (and whether `::before` / `::after`
+    /// exist at all).
+    Content,
+    Font,
+    Background,
+    Mask,
+    /// `border-image*` and `border`, which resets it.
+    BorderImage,
+    /// `list-style*`: kept only when nothing is left out.
+    ListStyle,
+}
+
+fn discovery_group(name: &str) -> Option<DiscoveryGroup> {
     let name = name.strip_prefix("-webkit-").unwrap_or(name);
-    matches!(name, "display" | "all" | "content" | "font" | "font-family" | "list-style" | "list-style-image")
-        || name.starts_with("background")
-        || name.starts_with("mask")
-        || name.starts_with("border-image")
-        || (name.starts_with("border") && !name.contains('-'))
+    Some(match name {
+        "display" | "all" => DiscoveryGroup::Rendered,
+        "content" => DiscoveryGroup::Content,
+        "font" | "font-family" => DiscoveryGroup::Font,
+        "list-style" | "list-style-image" => DiscoveryGroup::ListStyle,
+        _ if name.starts_with("background") => DiscoveryGroup::Background,
+        _ if name.starts_with("mask") => DiscoveryGroup::Mask,
+        _ if name.starts_with("border-image") || name == "border" => DiscoveryGroup::BorderImage,
+        _ => return None,
+    })
+}
+
+/// Could a declaration value reference a resource: a URL, or a function
+/// other than colours, math and gradients (`var()`, `image-set()`,
+/// `attr()`... and anything unknown)?
+fn may_reference_resource(value: &[rabbithole_css::Token]) -> bool {
+    use rabbithole_css::Token;
+    value.iter().any(|t| match t {
+        Token::Url(_) | Token::BadUrl => true,
+        Token::Function(f) => {
+            let f = f.to_ascii_lowercase();
+            let f = f.strip_prefix("-webkit-").unwrap_or(&f);
+            !matches!(
+                f,
+                "rgb" | "rgba" | "hsl" | "hsla" | "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color" | "color-mix" | "calc" | "min" | "max" | "clamp"
+                    | "linear-gradient" | "radial-gradient" | "conic-gradient" | "repeating-linear-gradient" | "repeating-radial-gradient" | "repeating-conic-gradient"
+            )
+        }
+        _ => false,
+    })
+}
+
+/// The groups resource discovery needs for `doc` styled by `sheets`
+/// (indexed by `DiscoveryGroup as usize`): a group whose declarations
+/// cannot reference a resource can only produce values discovery ignores,
+/// and `display` / `content` matter only when something they decide on
+/// is looked at. `None`: keep every group (a `style` attribute uses a
+/// function, so the sheets alone do not say which groups reference what).
+fn discovery_groups(doc: &Document, sheets: &[Stylesheet]) -> Option<[bool; 7]> {
+    fn scan(rules: &[Rule], res: &mut [bool; 7], font_faces: &mut bool) {
+        for r in rules {
+            match r {
+                Rule::Style(sr) => {
+                    for d in &sr.declarations {
+                        if let Some(g) = discovery_group(&d.name) {
+                            if !res[g as usize] && may_reference_resource(&d.value) {
+                                res[g as usize] = true;
+                            }
+                        }
+                    }
+                }
+                Rule::Media { rules, .. } | Rule::Supports { rules, .. } => scan(rules, res, font_faces),
+                Rule::FontFace(_) => *font_faces = true,
+                _ => {}
+            }
+        }
+    }
+    let mut images = false;
+    for n in doc.shadow_including_descendants(Document::ROOT) {
+        let Some(el) = doc.element(n) else { continue };
+        if el.attr("style").is_some_and(|v| v.contains('(')) {
+            return None;
+        }
+        images |= images::is_image_element(doc, n);
+    }
+    let mut res = [false; 7];
+    let mut font_faces = false;
+    for s in sheets {
+        scan(&s.rules, &mut res, &mut font_faces);
+    }
+    let background_attr = (0..doc.node_count()).any(|n| doc.attr(n, "background").is_some());
+    use DiscoveryGroup as G;
+    let mut keep = [false; 7];
+    keep[G::Font as usize] = font_faces;
+    keep[G::Background as usize] = res[G::Background as usize] || background_attr;
+    keep[G::Mask as usize] = res[G::Mask as usize];
+    keep[G::BorderImage as usize] = res[G::BorderImage as usize];
+    // Generated content is looked at for its images and, with web fonts,
+    // its characters; it decides whether `::before` / `::after` (and
+    // their backgrounds) exist.
+    keep[G::Content as usize] = res[G::Content as usize] || keep[G::Font as usize] || keep[G::Background as usize] || keep[G::Mask as usize] || keep[G::BorderImage as usize];
+    keep[G::Rendered as usize] = images || keep.iter().any(|&k| k);
+    Some(keep)
+}
+
+/// `RH_VERIFY_DISCOVERY=1`: check every pruned discovery cascade against
+/// the one with every group kept.
+fn verify_discovery() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_VERIFY_DISCOVERY").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// What resource discovery reads from `styles` (for [`verify_discovery`]):
+/// the rendered image elements, the resources the rendered elements and
+/// their `::before` / `::after` reference, and (with web fonts) their
+/// font families and generated text.
+fn discovered(doc: &Document, styles: &StyledTree) -> Vec<String> {
+    let mut out = Vec::new();
+    for n in doc.shadow_including_descendants(Document::ROOT) {
+        if images::is_image_element(doc, n) {
+            out.push(format!("img {n} {}", styles.get(n).is_some()));
+        }
+    }
+    let fonts = !styles.font_faces.is_empty();
+    for (kind, list) in [("el", &styles.styles), ("before", &styles.before), ("after", &styles.after)] {
+        for (n, s) in list.iter().enumerate() {
+            let Some(s) = s else { continue };
+            let border = s.border_image.as_deref().map(|b| &b.source);
+            let images: Vec<String> = s.background_layers.iter().chain(s.mask_layers.iter()).map(|l| &l.image).chain(border).filter(|i| matches!(i, rabbithole_style::BackgroundImage::Url(_))).map(|i| format!("{i:?}")).collect();
+            let content = if fonts || matches!(&s.content, rabbithole_style::Content::Items(items) if items.iter().any(|i| matches!(i, rabbithole_style::ContentItem::Url(_)))) { format!("{:?}", s.content) } else { String::new() };
+            let families = if fonts { format!("{:?}", s.font_family_list) } else { String::new() };
+            if !images.is_empty() || !content.is_empty() || !families.is_empty() {
+                out.push(format!("{kind} {n} {images:?} {content} {families}"));
+            }
+        }
+    }
+    out.push(format!("faces {}", styles.font_faces.len()));
+    out
 }
 
 /// `sheets` reduced to the declarations resource discovery needs (see
-/// [`discovery_property`]); custom properties are kept when a kept
+/// [`discovery_groups`]); custom properties are kept when a kept
 /// declaration or a `style` attribute uses `var()`. Rules left without declarations keep only
-/// their place in the cascade layer order.
-fn discovery_sheets(doc: &Document, sheets: &[Stylesheet]) -> Vec<Stylesheet> {
-    fn uses_var(rules: &[Rule]) -> bool {
+/// their place in the cascade layer order. `None`: discovery needs no
+/// style at all (no image element, nothing that can reference a resource).
+fn discovery_sheets(doc: &Document, sheets: &[Stylesheet], prune: bool) -> Option<Vec<Stylesheet>> {
+    let groups = if prune { discovery_groups(doc, sheets) } else { None };
+    if groups.is_some_and(|g| !g.iter().any(|&k| k)) {
+        return None;
+    }
+    let keep = |name: &str| match discovery_group(name) {
+        Some(g) => groups.is_none_or(|k| k[g as usize]),
+        None => false,
+    };
+    fn uses_var(rules: &[Rule], keep: &dyn Fn(&str) -> bool) -> bool {
         rules.iter().any(|r| match r {
-            Rule::Style(sr) => sr.declarations.iter().any(|d| discovery_property(&d.name) && d.value.iter().any(|t| matches!(t, rabbithole_css::Token::Function(f) if f.eq_ignore_ascii_case("var")))),
-            Rule::Media { rules, .. } | Rule::Supports { rules, .. } => uses_var(rules),
+            Rule::Style(sr) => sr.declarations.iter().any(|d| keep(&d.name) && d.value.iter().any(|t| matches!(t, rabbithole_css::Token::Function(f) if f.eq_ignore_ascii_case("var")))),
+            Rule::Media { rules, .. } | Rule::Supports { rules, .. } => uses_var(rules, keep),
             _ => false,
         })
     }
-    fn filter(rules: &[Rule], vars: bool) -> Vec<Rule> {
+    fn filter(rules: &[Rule], vars: bool, keep: &dyn Fn(&str) -> bool) -> Vec<Rule> {
         let mut out = Vec::with_capacity(rules.len());
         for r in rules {
             match r {
                 Rule::Style(sr) => {
-                    let declarations: Vec<rabbithole_css::Declaration> = sr.declarations.iter().filter(|d| discovery_property(&d.name) || (vars && d.name.starts_with("--"))).cloned().collect();
+                    let declarations: Vec<rabbithole_css::Declaration> = sr.declarations.iter().filter(|d| keep(&d.name) || (vars && d.name.starts_with("--"))).cloned().collect();
                     if !declarations.is_empty() {
                         out.push(Rule::Style(rabbithole_css::StyleRule { selectors: sr.selectors.clone(), declarations, layer: sr.layer.clone(), container: sr.container.clone(), flags: sr.flags }));
                     } else if sr.layer.is_some() {
                         out.push(Rule::Style(rabbithole_css::StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: sr.layer.clone(), container: None, flags: 0 }));
                     }
                 }
-                Rule::Media { query, rules } => out.push(Rule::Media { query: query.clone(), rules: filter(rules, vars) }),
-                Rule::Supports { matches, rules } => out.push(Rule::Supports { matches: *matches, rules: filter(rules, vars) }),
+                Rule::Media { query, rules } => out.push(Rule::Media { query: query.clone(), rules: filter(rules, vars, keep) }),
+                Rule::Supports { matches, rules } => out.push(Rule::Supports { matches: *matches, rules: filter(rules, vars, keep) }),
                 Rule::Keyframes { .. } => {}
                 other => out.push(other.clone()),
             }
         }
         out
     }
-    let vars = sheets.iter().any(|s| uses_var(&s.rules)) || (0..doc.node_count()).any(|n| doc.attr(n, "style").is_some_and(|v| v.contains("var(")));
-    sheets.iter().map(|s| Stylesheet { rules: filter(&s.rules, vars), base_url: s.base_url.clone(), shadow_scopes: s.shadow_scopes.clone(), source_id: s.source_id }).collect()
+    let vars = sheets.iter().any(|s| uses_var(&s.rules, &keep)) || (0..doc.node_count()).any(|n| doc.attr(n, "style").is_some_and(|v| v.contains("var(")));
+    Some(sheets.iter().map(|s| Stylesheet { rules: filter(&s.rules, vars, &keep), base_url: s.base_url.clone(), shadow_scopes: s.shadow_scopes.clone(), source_id: s.source_id }).collect())
 }
 
 fn wrap_media(sheet: Stylesheet, media: Option<&str>) -> Stylesheet {
