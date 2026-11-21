@@ -18,7 +18,7 @@
 
 use crate::heap::Property;
 use crate::value::{FxBuild, JsStr, PropertyKey};
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
@@ -49,7 +49,7 @@ thread_local! {
         keys: Rc::new(RefCell::new(Vec::new())),
         parent: None,
         transitions: RefCell::new(Transitions::default()),
-        index: OnceCell::new(),
+        index: Rc::default(),
     });
 }
 
@@ -79,7 +79,19 @@ pub struct Shape {
     #[allow(dead_code)]
     parent: Option<Rc<Shape>>,
     transitions: RefCell<Transitions>,
-    index: OnceCell<HashMap<PropertyKey, u32, FxBuild>>,
+    /// Slot of each key of `keys` (shared with it along the chain, so an
+    /// object built one property at a time indexes each key once).
+    index: Rc<RefCell<KeyIndex>>,
+}
+
+/// Hash index of a shared key vector: the slots of its first `built`
+/// keys. A key appears once in the vector (it is appended only to the
+/// shape at the end of it, for a key that shape lacks), so a shape of
+/// length `len` has the key iff its slot is below `len`.
+#[derive(Default)]
+struct KeyIndex {
+    map: HashMap<PropertyKey, u32, FxBuild>,
+    built: usize,
 }
 
 impl std::fmt::Debug for Shape {
@@ -123,15 +135,17 @@ impl Shape {
             }
             return keys[..n].iter().position(|x| key_eq(x, key)).map(|i| i as u32);
         }
-        let index = self.index.get_or_init(|| {
+        let mut index = self.index.borrow_mut();
+        if index.built < n {
             let keys = self.keys.borrow();
-            let mut m = HashMap::with_capacity_and_hasher(n, FxBuild::default());
-            for (i, k) in keys[..n].iter().enumerate() {
-                m.insert(k.clone(), i as u32);
+            let KeyIndex { map, built } = &mut *index;
+            map.reserve(keys.len() - *built);
+            for (i, k) in keys.iter().enumerate().skip(*built) {
+                map.insert(k.clone(), i as u32);
             }
-            m
-        });
-        index.get(key).copied()
+            *built = keys.len();
+        }
+        index.map.get(key).copied().filter(|&i| i < self.len)
     }
 
     pub fn key_at(&self, slot: usize) -> PropertyKey {
@@ -148,16 +162,16 @@ impl Shape {
             return s;
         }
         let n = self.len as usize;
-        let keys = {
+        let (keys, index) = {
             let mut shared = self.keys.borrow_mut();
             if shared.len() == n {
                 shared.push(key.clone());
-                self.keys.clone()
+                (self.keys.clone(), self.index.clone())
             } else {
                 let mut v = Vec::with_capacity(n + 4);
                 v.extend_from_slice(&shared[..n]);
                 v.push(key.clone());
-                Rc::new(RefCell::new(v))
+                (Rc::new(RefCell::new(v)), Rc::default())
             }
         };
         let child = Rc::new(Shape {
@@ -166,7 +180,7 @@ impl Shape {
             keys,
             parent: Some(self.clone()),
             transitions: RefCell::new(Transitions::default()),
-            index: OnceCell::new(),
+            index,
         });
         let mut t = self.transitions.borrow_mut();
         let weak = Rc::downgrade(&child);
