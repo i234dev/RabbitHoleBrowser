@@ -1838,3 +1838,20 @@ fn blob_and_fetch_decode_one_leading_utf8_signature() {
     "#);
     assert_eq!(out, ["true true 1"]);
 }
+
+#[test]
+fn blob_parts_follow_webidl_iteration_and_copy_buffer_views() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const data = new Uint8Array([48, 65, 49]);
+        const parts = [{toString() { parts.pop(); return 'x'; }}, new DataView(data.buffer, 1, 1), null, undefined, 'ignored'];
+        class Packet extends Blob {}
+        const blob = new Packet(parts, {type:'TEXT/PLAIN'});
+        data[1] = 66;
+        const response = new Response(blob);
+        console.log(blob instanceof Packet, response.headers.get('content-type'), blob.slice(0, 1, 'X/Y').type);
+        Promise.all([blob.text(), response.text(), new Response(new DataView(data.buffer, 1, 1)).text()])
+            .then(values => console.log(values.join('|')));
+    "#);
+    assert_eq!(out, ["true text/plain x/y", "xAnullundefined|xAnullundefined|B"]);
+}

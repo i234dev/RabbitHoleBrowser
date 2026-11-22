@@ -572,6 +572,11 @@ pub(crate) struct BodyData {
     pub navigation: Option<Request>,
 }
 
+struct BlobData {
+    bytes: Vec<u8>,
+    mime: String,
+}
+
 pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(Vec<u8>, Option<String>)> {
     match v.v() {
         V::Undefined | V::Null => Ok((Vec::new(), None)),
@@ -585,20 +590,15 @@ pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(V
                 let b = Body::multipart(&fields, &[]);
                 return Ok((b.data, Some(b.content_type)));
             }
+            if let Some(blob) = realm.host_data::<BlobData>(o) {
+                return Ok((blob.bytes.clone(), (!blob.mime.is_empty()).then(|| blob.mime.clone())));
+            }
             if let Some(b) = realm.host_data::<BodyData>(o) {
                 return Ok((b.bytes.clone(), None));
             }
             match &realm.obj(o).kind {
-                rabbithole_js::ObjectKind::ArrayBuffer(buf) => Ok((buf.bytes.borrow().clone(), None)),
-                rabbithole_js::ObjectKind::TypedArray(t) => {
-                    let buf = realm.obj(t.buffer);
-                    if let rabbithole_js::ObjectKind::ArrayBuffer(b) = &buf.kind {
-                        let b = b.bytes.borrow();
-                        let start = t.byte_offset.min(b.len());
-                        let end = (t.byte_offset + rabbithole_js::builtins::typed_array::typed_array_length(realm, t) * t.kind.element_size()).min(b.len());
-                        return Ok((b[start..end].to_vec(), None));
-                    }
-                    Ok((Vec::new(), None))
+                rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_) | rabbithole_js::ObjectKind::DataView(_) => {
+                    Ok((buffer_source_bytes(realm, v, "BodyInit")?, None))
                 }
                 _ => {
                     let s = realm.to_rust_string(v.clone())?;
@@ -1385,49 +1385,56 @@ fn fd_for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 // ---------------------------------------------------------------- Blob
 
+fn normalize_blob_type(ty: &str) -> String {
+    if ty.bytes().all(|b| (0x20..=0x7e).contains(&b)) { ty.to_ascii_lowercase() } else { String::new() }
+}
+
 pub(crate) fn make_blob(realm: &mut Realm, bytes: Vec<u8>, ty: &str) -> Value {
-    let p = proto("Blob");
-    let o = realm.new_object_with_proto(Some(p));
-    let len = bytes.len();
-    realm.set_host_data(o, Box::new(BodyData { bytes, used: false, navigation: None }));
+    let o = realm.new_object_with_proto(Some(proto("Blob")));
+    realm.set_host_data(o, Box::new(BlobData { bytes, mime: normalize_blob_type(ty) }));
     realm.set_class_name(o, "Blob");
-    realm.define_property(o, "size", Value::Number(len as f64), ACC);
-    realm.define_property(o, "type", Value::str(ty), ACC);
     Value::Object(o)
 }
 
+fn blob_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a BlobData> {
+    let Some(id) = this.as_object().filter(|&id| realm.host_data::<BlobData>(id).is_some()) else {
+        return Err(realm.throw_type_error("Illegal invocation"));
+    };
+    Ok(realm.host_data::<BlobData>(id).unwrap())
+}
+
+fn blob_size(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::Number(blob_data(realm, &this)?.bytes.len() as f64))
+}
+
+fn blob_type(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::str(&blob_data(realm, &this)?.mime))
+}
+
 fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if realm.new_target().is_undefined() {
+        return Err(realm.throw_type_error("Blob requires new"));
+    }
     let parts = arg(args, 0);
     let opts = arg(args, 1);
     if !(parts.is_undefined() || parts.is_object()) {
         return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value cannot be converted to a sequence."));
     }
-    // Web IDL converts arguments from left to right: coerce the sequence's
-    // string parts before reading any member of the options dictionary.
-    // Keep binary parts as references until processing the constructor's
-    // body (an options getter may still mutate an ArrayBuffer).
+    // Convert each part before advancing the iterator. Binary sources are
+    // copied after conversion of the dictionary, whose getters can alter them.
     let mut converted = Vec::new();
     if parts.is_object() {
-        let sequence = realm.iterate_to_vec(parts)?;
-        for p in &sequence {
-            realm.native_root(p.clone());
-        }
-        for p in sequence {
-            let binary = match p.v() {
-                V::Object(o) => realm.host_data::<BodyData>(o).is_some()
-                    || realm.host_data::<ParamsData>(o).is_some()
-                    || realm.host_data::<FormDataData>(o).is_some()
-                    || matches!(&realm.obj(o).kind, rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_)),
-                _ => false,
-            };
-            let p = if binary || matches!(p.v(), V::String(_) | V::Null | V::Undefined) {
-                p
-            } else {
-                Value::str(&realm.to_rust_string(p)?)
-            };
-            realm.native_root(p.clone());
-            converted.push(p);
-        }
+        let (it, next) = realm.get_iterator(parts)?;
+        realm.native_root(it.clone());
+        realm.native_root(next.clone());
+        realm.for_each_step(it, next, |realm, part, _| {
+            let binary = part.as_object().is_some_and(|o| realm.host_data::<BlobData>(o).is_some()
+                || matches!(realm.obj(o).kind, rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_) | rabbithole_js::ObjectKind::DataView(_)));
+            let value = if binary { part } else { Value::str(&realm.to_rust_string(part)?) };
+            realm.native_root(value.clone());
+            converted.push(value);
+            Ok(())
+        })?;
     }
     if !(opts.is_undefined() || opts.is_null() || opts.is_object()) {
         return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value is not of type 'BlobPropertyBag'."));
@@ -1452,37 +1459,30 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         let (b, _) = body_bytes_from_value(realm, &p)?;
         bytes.extend(b);
     }
-    // The type: lower-cased, or empty when not printable ASCII.
-    let ty = if ty.chars().all(|c| ('\u{20}'..='\u{7e}').contains(&c)) { ty.to_ascii_lowercase() } else { String::new() };
-    Ok(make_blob(realm, bytes, &ty))
+    let blob = make_blob(realm, bytes, &ty);
+    let p = realm.proto_from_new_target(proto("Blob"));
+    realm.obj_mut(blob.as_object().unwrap()).set_proto(Some(p));
+    Ok(blob)
 }
 
 fn blob_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let V::Object(o) = this.v() else {
-        return Err(realm.throw_type_error("Illegal invocation"));
-    };
-    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
-    resolved(realm, Value::str(&decode_utf8(&bytes)))
+    let text = Value::str(&decode_utf8(&blob_data(realm, &this)?.bytes));
+    resolved(realm, text)
 }
 
 fn blob_array_buffer(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let V::Object(o) = this.v() else {
-        return Err(realm.throw_type_error("Illegal invocation"));
-    };
-    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
+    let bytes = blob_data(realm, &this)?.bytes.clone();
     let ab = make_array_buffer(realm, bytes);
     resolved(realm, ab)
 }
 
 fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let V::Object(o) = this.v() else {
-        return Err(realm.throw_type_error("Illegal invocation"));
-    };
-    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
-    let start = realm.relative_index(arg(args, 0), bytes.len(), 0)?;
-    let end = realm.relative_index(arg(args, 1), bytes.len(), bytes.len())?;
+    let len = blob_data(realm, &this)?.bytes.len();
+    let start = realm.relative_index(arg(args, 0), len, 0)?;
+    let end = realm.relative_index(arg(args, 1), len, len)?;
     let ty = arg_str_opt(realm, args, 2)?.unwrap_or_default();
-    Ok(make_blob(realm, bytes[start.min(end)..end].to_vec(), &ty))
+    let bytes = blob_data(realm, &this)?.bytes[start.min(end)..end].to_vec();
+    Ok(make_blob(realm, bytes, &ty))
 }
 
 /// `URL.createObjectURL(blob)`: `blob:<origin>/<uuid>` resolving to the
@@ -1490,10 +1490,9 @@ fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
 fn url_create_object_url(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     let (bytes, ty) = match v.v() {
-        V::Object(o) if realm.host_data::<BodyData>(o).is_some() => {
-            let b = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
-            let t = realm.get_str(v.clone(), "type").ok().and_then(|t| realm.to_rust_string(t).ok()).unwrap_or_default();
-            (b, t)
+        V::Object(o) if realm.host_data::<BlobData>(o).is_some() => {
+            let blob = blob_data(realm, &v)?;
+            (blob.bytes.clone(), blob.mime.clone())
         }
         // MediaSource and other objects: an opaque URL.
         V::Object(_) => (Vec::new(), String::new()),
@@ -2127,6 +2126,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_symbol_method(fd, rabbithole_js::realm::SYM_ITERATOR, "[Symbol.iterator]", 0, fd_entries);
     // Blob / File
     let blob = define_class(realm, "Blob", None, blob_ctor);
+    realm.define_accessor(blob, "size", Some(blob_size), None, ACC);
+    realm.define_accessor(blob, "type", Some(blob_type), None, ACC);
     realm.define_method(blob, "text", 0, blob_text);
     realm.define_method(blob, "arrayBuffer", 0, blob_array_buffer);
     realm.define_method(blob, "slice", 2, blob_slice);
