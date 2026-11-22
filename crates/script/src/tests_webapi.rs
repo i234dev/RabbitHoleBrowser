@@ -1855,3 +1855,14 @@ fn blob_parts_follow_webidl_iteration_and_copy_buffer_views() {
     "#);
     assert_eq!(out, ["true text/plain x/y", "xAnullundefined|xAnullundefined|B"]);
 }
+
+#[test]
+fn blob_slice_clamps_fractional_offsets_to_even() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const b = new Blob(['abcdef']);
+        Promise.all([b.slice(0.5, 1.5), b.slice(-3.5, -0.5), b.slice(-Infinity, Infinity),
+            b.slice(NaN, 2.5)].map(part => part.text())).then(parts => console.log(parts.join('|')));
+    "#);
+    assert_eq!(out, ["ab||abcdef|ab"]);
+}

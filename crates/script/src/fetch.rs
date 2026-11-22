@@ -1476,10 +1476,20 @@ fn blob_array_buffer(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
     resolved(realm, ab)
 }
 
+/// Blob.slice takes [Clamp] long long offsets, rounded to nearest-even.
+fn blob_offset(realm: &mut Realm, value: Value, len: usize, default: usize) -> JsResult<usize> {
+    if value.is_undefined() {
+        return Ok(default);
+    }
+    let offset = realm.to_number(value)?.round_ties_even() as i64;
+    Ok(if offset < 0 { len.saturating_sub(usize::try_from(offset.unsigned_abs()).unwrap_or(usize::MAX)) }
+        else { len.min(usize::try_from(offset).unwrap_or(usize::MAX)) })
+}
+
 fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let len = blob_data(realm, &this)?.bytes.len();
-    let start = realm.relative_index(arg(args, 0), len, 0)?;
-    let end = realm.relative_index(arg(args, 1), len, len)?;
+    let start = blob_offset(realm, arg(args, 0), len, 0)?;
+    let end = blob_offset(realm, arg(args, 1), len, len)?;
     let ty = arg_str_opt(realm, args, 2)?.unwrap_or_default();
     let bytes = blob_data(realm, &this)?.bytes[start.min(end)..end].to_vec();
     Ok(make_blob(realm, bytes, &ty))
