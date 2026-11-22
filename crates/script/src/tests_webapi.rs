@@ -1826,3 +1826,15 @@ fn anchor_url_components_are_settable() {
     );
     assert_eq!(out, "'https://example.test/v/clip.mp4?x=1||http://cdn.example.test/w/other.mp4?y=2#autoplay|cdn.example.test|null|'");
 }
+
+#[test]
+fn blob_and_fetch_decode_one_leading_utf8_signature() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const bytes = new Uint8Array([239,187,191,239,187,191,97]);
+        Promise.all([new Blob([bytes]).text(), new Response(bytes).text(),
+            new Response(new Uint8Array([239,187,191,49])).json()])
+            .then(([a, b, n]) => console.log(a === '\uFEFFa', a === b, n));
+    "#);
+    assert_eq!(out, ["true true 1"]);
+}

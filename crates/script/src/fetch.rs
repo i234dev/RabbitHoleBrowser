@@ -682,6 +682,11 @@ fn rejected(realm: &mut Realm, kind: &str, msg: &str) -> JsResult<Value> {
     Ok(Value::Object(p))
 }
 
+/// Encoding Standard UTF-8 decode consumes one leading signature.
+fn decode_utf8(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
+}
+
 fn body_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let bytes = match take_body(realm, &this) {
         Ok(b) => b,
@@ -690,7 +695,7 @@ fn body_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
             return rejected(realm, "TypeError", &msg);
         }
     };
-    let s = String::from_utf8_lossy(&bytes).into_owned();
+    let s = decode_utf8(&bytes);
     resolved(realm, Value::str(&s))
 }
 
@@ -702,7 +707,7 @@ fn body_json(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
             return rejected(realm, "TypeError", &msg);
         }
     };
-    let s = String::from_utf8_lossy(&bytes).into_owned();
+    let s = decode_utf8(&bytes);
     let json = realm.get_str(Value::Object(realm.global()), "JSON")?;
     let parse = realm.get_str(json.clone(), "parse")?;
     match realm.call(parse, json, &[Value::str(&s)]) {
@@ -1457,7 +1462,7 @@ fn blob_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
     let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
-    resolved(realm, Value::str(&String::from_utf8_lossy(&bytes)))
+    resolved(realm, Value::str(&decode_utf8(&bytes)))
 }
 
 fn blob_array_buffer(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
