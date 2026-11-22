@@ -35,22 +35,13 @@
   }, true);
   method(Blob, 'textStream', function () { return this.stream().pipeThrough(new g.TextDecoderStream()); });
 
-  // File: a Blob with a name and modification time.
-  class File extends Blob {
-    constructor(bits, name, options = {}) {
-      if (arguments.length < 2) throw new TypeError(`Failed to construct 'File': 2 arguments required, but only ${arguments.length} present.`);
-      super(bits, options);
-      Object.setPrototypeOf(this, new.target.prototype);
-      hidden(this, S, { name: String(name).replace(/\//g, ':'), lastModified: options.lastModified !== undefined ? Number(options.lastModified) : Date.now(), relPath: '' });
-    }
-    get name() { return this[S] ? this[S].name : ''; }
-    get lastModified() { return this[S] ? this[S].lastModified : 0; }
-    get lastModifiedDate() { return new Date(this.lastModified); }
-    get webkitRelativePath() { return this[S] ? this[S].relPath : ''; }
-  }
-  tag(File, 'File');
-  define('File', File);
-  N.registerProto('File', File.prototype);
+  const File = g.File;
+  Object.setPrototypeOf(File, Blob);
+  Object.defineProperty(File, 'length', { value: 2, configurable: true });
+  defaults(File, {
+    lastModifiedDate() { return new Date(this.lastModified); },
+    webkitRelativePath: '',
+  });
   class FileList {
     constructor() { ILLEGAL(); }
     get length() { return this[S].length; }

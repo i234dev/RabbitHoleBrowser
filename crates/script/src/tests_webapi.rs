@@ -569,7 +569,7 @@ fn attrs_forms_validation_and_misc_dom() {
             "dom 8 8 12 html t function true",
             "cls true true true true",
             "table thead 1 0 0",
-            "file b:c.txt true 1 number windows-1252",
+            "file b/c.txt true 1 number windows-1252",
             "reflect true true true",
             "fr héllo 2 2",
         ]
@@ -1865,4 +1865,21 @@ fn blob_slice_clamps_fractional_offsets_to_even() {
             b.slice(NaN, 2.5)].map(part => part.text())).then(parts => console.log(parts.join('|')));
     "#);
     assert_eq!(out, ["ab||abcdef|ab"]);
+}
+
+#[test]
+fn file_metadata_uses_webidl_conversion_order() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        class DocumentFile extends File {}
+        const log = [], parts = [{toString() { log.push('part'); return 'body'; }}];
+        const name = {toString() { log.push('name'); return 'dir/\uD800'; }};
+        const f = new DocumentFile(parts, name, {
+            get type() { log.push('type'); return 'TEXT/PLAIN'; },
+            get lastModified() { log.push('time'); return -4.75; }
+        });
+        console.log(log.join(','), f.name === 'dir/\uFFFD', f.lastModified, f instanceof DocumentFile, f.type);
+        console.log(new File([], 'a', null).name, new File([], 'b', {lastModified:Infinity}).lastModified);
+    "#);
+    assert_eq!(out, ["part,name,type,time true -4 true text/plain", "a 0"]);
 }

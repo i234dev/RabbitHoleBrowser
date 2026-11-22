@@ -572,7 +572,14 @@ pub(crate) struct BodyData {
     pub navigation: Option<Request>,
 }
 
+#[derive(Clone)]
+struct FileInfo {
+    name: String,
+    last_modified: i64,
+}
+
 struct BlobData {
+    file: Option<FileInfo>,
     bytes: Vec<u8>,
     mime: String,
 }
@@ -1390,9 +1397,14 @@ fn normalize_blob_type(ty: &str) -> String {
 }
 
 pub(crate) fn make_blob(realm: &mut Realm, bytes: Vec<u8>, ty: &str) -> Value {
-    let o = realm.new_object_with_proto(Some(proto("Blob")));
-    realm.set_host_data(o, Box::new(BlobData { bytes, mime: normalize_blob_type(ty) }));
-    realm.set_class_name(o, "Blob");
+    make_blob_object(realm, BlobData { bytes, mime: normalize_blob_type(ty), file: None }, proto("Blob"))
+}
+
+fn make_blob_object(realm: &mut Realm, data: BlobData, prototype: ObjectId) -> Value {
+    let class = if data.file.is_some() { "File" } else { "Blob" };
+    let o = realm.new_object_with_proto(Some(prototype));
+    realm.set_host_data(o, Box::new(data));
+    realm.set_class_name(o, class);
     Value::Object(o)
 }
 
@@ -1412,12 +1424,24 @@ fn blob_type(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 }
 
 fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    construct_blob(realm, args, false)
+}
+
+fn file_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if args.len() < 2 {
+        return Err(realm.throw_type_error("File requires fileBits and fileName"));
+    }
+    construct_blob(realm, args, true)
+}
+
+fn construct_blob(realm: &mut Realm, args: &[Value], file: bool) -> JsResult<Value> {
+    let class = if file { "File" } else { "Blob" };
     if realm.new_target().is_undefined() {
-        return Err(realm.throw_type_error("Blob requires new"));
+        return Err(realm.throw_type_error(&format!("{class} requires new")));
     }
     let parts = arg(args, 0);
-    let opts = arg(args, 1);
-    if !(parts.is_undefined() || parts.is_object()) {
+    let opts = arg(args, if file { 2 } else { 1 });
+    if !(parts.is_object() || (!file && parts.is_undefined())) {
         return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value cannot be converted to a sequence."));
     }
     // Convert each part before advancing the iterator. Binary sources are
@@ -1436,6 +1460,7 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
             Ok(())
         })?;
     }
+    let name = if file { Some(arg_str(realm, args, 1)?) } else { None };
     if !(opts.is_undefined() || opts.is_null() || opts.is_object()) {
         return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value is not of type 'BlobPropertyBag'."));
     }
@@ -1446,6 +1471,19 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         Some(other) => return Err(realm.throw_type_error(&format!("Failed to construct 'Blob': The provided value '{other}' is not a valid enum value of type EndingType."))),
     };
     let ty = dict_str(realm, &opts, "type")?.unwrap_or_default();
+    let info = if let Some(name) = name {
+        let modified = dict_value(realm, &opts, "lastModified")?;
+        let last_modified = if modified.is_undefined() {
+            rabbithole_js::builtins::date::now_ms() as i64
+        } else {
+            // Web IDL long long truncates and wraps modulo 2^64.
+            let n = realm.to_number(modified)?.trunc() % 18446744073709551616.0;
+            if n < 0.0 { ((-n) as u64).wrapping_neg() as i64 } else { n as u64 as i64 }
+        };
+        Some(FileInfo { name, last_modified })
+    } else {
+        None
+    };
     let mut bytes = Vec::new();
     for p in converted {
         if native {
@@ -1459,10 +1497,22 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         let (b, _) = body_bytes_from_value(realm, &p)?;
         bytes.extend(b);
     }
-    let blob = make_blob(realm, bytes, &ty);
-    let p = realm.proto_from_new_target(proto("Blob"));
-    realm.obj_mut(blob.as_object().unwrap()).set_proto(Some(p));
-    Ok(blob)
+    let prototype = realm.proto_from_new_target(proto(class));
+    Ok(make_blob_object(realm, BlobData { bytes, mime: normalize_blob_type(&ty), file: info }, prototype))
+}
+
+fn file_name(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    if let Some(info) = &blob_data(realm, &this)?.file {
+        return Ok(Value::str(&info.name));
+    }
+    Err(realm.throw_type_error("Illegal invocation"))
+}
+
+fn file_last_modified(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    if let Some(info) = &blob_data(realm, &this)?.file {
+        return Ok(Value::Number(info.last_modified as f64));
+    }
+    Err(realm.throw_type_error("Illegal invocation"))
 }
 
 fn blob_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -2142,7 +2192,9 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(blob, "arrayBuffer", 0, blob_array_buffer);
     realm.define_method(blob, "slice", 2, blob_slice);
     realm.define_method(blob, "stream", 0, blob_text);
-    define_class(realm, "File", Some("Blob"), blob_ctor);
+    let file = define_class(realm, "File", Some("Blob"), file_ctor);
+    realm.define_accessor(file, "name", Some(file_name), None, ACC);
+    realm.define_accessor(file, "lastModified", Some(file_last_modified), None, ACC);
     define_class(realm, "FileReader", Some("EventTarget"), file_reader_ctor);
     // TextEncoder / TextDecoder
     let te = define_class(realm, "TextEncoder", None, text_encoder_ctor);
