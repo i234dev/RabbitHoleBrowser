@@ -1937,3 +1937,19 @@ fn restarting_a_file_read_from_abort_suppresses_stale_events() {
     let output: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, text)| text.as_str()).collect();
     assert_eq!(output, ["abort,load,end"]);
 }
+
+#[test]
+fn xhr_validates_methods_and_headers_before_sending() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const x = new XMLHttpRequest();
+        for (const operation of [
+            () => x.setRequestHeader('Accept', '*/*'), () => x.open('two words', '/'),
+            () => x.open('TrAcE', '/'), () => x.open('get', '/'),
+            () => x.setRequestHeader('bad name', 'x'), () => x.setRequestHeader('Accept', 'a\nb'),
+            () => x.setRequestHeader('Accept', '\u0100'), () => x.setRequestHeader('Accept', ' value '),
+            () => x.setRequestHeader('Accept')
+        ]) { try { operation(); console.log('ok'); } catch (e) { console.log(e.name); } }
+    "#);
+    assert_eq!(out, ["InvalidStateError","SyntaxError","SecurityError","ok","SyntaxError","SyntaxError","TypeError","ok","TypeError"]);
+}

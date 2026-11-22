@@ -2001,10 +2001,38 @@ fn xhr_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Object(o))
 }
 
+fn byte_string(realm: &mut Realm, args: &[Value], index: usize) -> JsResult<String> {
+    let Some(value) = args.get(index) else {
+        return Err(realm.throw_type_error("Missing required argument"));
+    };
+    let text = realm.to_rust_string(value.clone())?;
+    if text.chars().any(|c| c > '\u{ff}') {
+        return Err(realm.throw_type_error("Cannot convert value to ByteString"));
+    }
+    Ok(text)
+}
+
+fn http_token(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_|~".contains(&b) || b == 0x60)
+}
+
+fn forbidden_method(method: &str) -> bool {
+    ["CONNECT", "TRACE", "TRACK"].iter().any(|m| method.eq_ignore_ascii_case(m))
+}
+
 fn xhr_open(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = xhr_of(realm, &this)?;
-    let method = arg_str(realm, args, 0)?.to_ascii_uppercase();
+    if args.len() < 2 { return Err(realm.throw_type_error("open requires a method and URL")); }
+    let method = byte_string(realm, args, 0)?;
     let url = arg_str(realm, args, 1)?;
+    if !http_token(&method) {
+        return Err(crate::misc::dom_exception(realm, "SyntaxError", "Invalid HTTP method"));
+    }
+    if forbidden_method(&method) {
+        return Err(crate::misc::dom_exception(realm, "SecurityError", "Forbidden HTTP method"));
+    }
+    let upper = method.to_ascii_uppercase();
+    let method = if matches!(upper.as_str(), "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT") { upper } else { method };
     let url = match resolve_url(&url) {
         Some(u) => u.to_string(),
         None => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to execute 'open' on 'XMLHttpRequest': Invalid URL '{url}'"))),
@@ -2026,9 +2054,26 @@ fn xhr_open(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 
 fn xhr_set_request_header(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = xhr_of(realm, &this)?;
-    let k = arg_str(realm, args, 0)?.to_ascii_lowercase();
-    let v = arg_str(realm, args, 1)?;
-    realm.host_data_mut::<XhrData>(o).unwrap().headers.push((k, v));
+    let name = byte_string(realm, args, 0)?.to_ascii_lowercase();
+    let value = byte_string(realm, args, 1)?;
+    let value = value.trim_matches([' ', '\t', '\r', '\n']);
+    let d = realm.host_data_mut::<XhrData>(o).unwrap();
+    if d.ready_state != 1 || d.sent {
+        return Err(crate::misc::dom_exception(realm, "InvalidStateError", "Request headers require an open, unsent request"));
+    }
+    if !http_token(&name) || value.contains(['\0', '\r', '\n']) {
+        return Err(crate::misc::dom_exception(realm, "SyntaxError", "Invalid HTTP header"));
+    }
+    let method_override = matches!(name.as_str(), "x-http-method" | "x-http-method-override" | "x-method-override");
+    if rabbithole_net::cors::is_forbidden_request_header(&name) || (method_override && value.split(',').any(|m| forbidden_method(m.trim()))) {
+        return Ok(Value::Undefined);
+    }
+    if let Some((_, current)) = d.headers.iter_mut().find(|(key, _)| *key == name) {
+        current.push_str(", ");
+        current.push_str(value);
+    } else {
+        d.headers.push((name, value.to_string()));
+    }
     Ok(Value::Undefined)
 }
 
