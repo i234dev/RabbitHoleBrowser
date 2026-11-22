@@ -1589,7 +1589,10 @@ fn construct_blob(realm: &mut Realm, args: &[Value], file: bool) -> JsResult<Val
         let (it, next) = realm.get_iterator(parts)?;
         realm.native_root(it.clone());
         realm.native_root(next.clone());
-        realm.for_each_step(it, next, |realm, part, _| {
+        realm.for_each_step(it, next, |realm, part, index| {
+            if index >= rabbithole_js::interop::MAX_LIST_LENGTH {
+                return Err(realm.out_of_memory());
+            }
             let binary = part.as_object().is_some_and(|o| realm.host_data::<BlobData>(o).is_some()
                 || matches!(realm.obj(o).kind, rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_) | rabbithole_js::ObjectKind::DataView(_)));
             let value = if binary { part } else { Value::str(&realm.to_rust_string(part)?) };

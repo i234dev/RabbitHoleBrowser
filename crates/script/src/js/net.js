@@ -114,7 +114,8 @@
   N.installHandlers(FileReader.prototype, ['loadstart', 'progress', 'load', 'abort', 'error', 'loadend']);
   const fire = (target, type, init) => target.dispatchEvent(new g.ProgressEvent(type, init || {}));
   function read(fr, blob, kind, encoding) {
-    if (!(blob instanceof Blob)) throw new TypeError(`Failed to execute 'readAs...' on 'FileReader': parameter 1 is not of type 'Blob'.`);
+    blobMime.call(blob);
+    if (encoding !== undefined) encoding = `${encoding}`;
     const st = fr[S];
     if (st.state === 1) throw domError("Failed to execute 'readAs...' on 'FileReader': The object is already busy reading Blobs.", 'InvalidStateError');
     st.state = 1; st.result = null; st.error = null;
@@ -131,7 +132,7 @@
         if (gen !== st.gen) return;
         st.state = 2; st.result = result;
         fire(fr, 'load', { lengthComputable: true, loaded, total: loaded });
-        if (st.state === 2) fire(fr, 'loadend', { lengthComputable: true, loaded, total: loaded });
+        if (gen === st.gen) fire(fr, 'loadend', { lengthComputable: true, loaded, total: loaded });
       }, (e) => {
         if (gen !== st.gen) return;
         st.state = 2; st.error = domError(String(e && e.message || e), 'NotReadableError');

@@ -1988,3 +1988,16 @@ fn structured_clone_preserves_blob_and_file_slots_and_shared_references() {
     "#);
     assert_eq!(out, ["true true true dir/name image/png -123","true 255"]);
 }
+
+#[test]
+fn file_conversions_close_iterators_and_leave_failed_reads_empty() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const fail={}, parts={*[Symbol.iterator]() { try { yield {toString() { throw fail; }}; } finally { console.log('closed'); } }};
+        try { new File(parts, 'doc'); } catch(e) { console.log(e === fail); }
+        const reader = new FileReader();
+        try { reader.readAsText(new Blob(), {toString(){throw fail;}}); } catch(e) { console.log(e === fail, reader.readyState); }
+        try { reader.readAsText(Object.create(Blob.prototype)); } catch(e) { console.log(e.name, reader.readyState); }
+    "#);
+    assert_eq!(out, ["closed","true","true 0","TypeError 0"]);
+}
