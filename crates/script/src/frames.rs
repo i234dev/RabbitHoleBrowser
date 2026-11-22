@@ -35,7 +35,10 @@ pub(crate) fn install(realm: &mut Realm) {
             return;
         }
     };
-    match realm.call(factory, Value::Undefined, &[Value::Object(post), Value::Object(info), Value::str(&namespace)]) {
+    let encode_blob = realm.new_native_function("serializeBlob", 1, crate::fetch::serialize_blob);
+    let decode_blob = realm.new_native_function("deserializeBlob", 4, crate::fetch::deserialize_blob);
+    let args = [Value::Object(post), Value::Object(info), Value::str(&namespace), Value::Object(encode_blob), Value::Object(decode_blob)];
+    match realm.call(factory, Value::Undefined, &args) {
         Ok(api) if api.is_object() => {
             let id = api.as_object().unwrap();
             root_value(realm, &api);

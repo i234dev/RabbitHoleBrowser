@@ -3,7 +3,7 @@
 // `event.source`), cross-realm `postMessage` with structured cloning.
 // Evaluated once per realm; `post(targetId, data, targetOrigin)` and
 // `info(id, what, index)` are natives implemented by the engine.
-(function (post, info, bridgeNamespace) {
+(function (post, info, bridgeNamespace, encodeBlob, decodeBlob) {
   'use strict';
   if (typeof bridgeNamespace !== 'string' || !bridgeNamespace) throw new TypeError('Missing frame bridge namespace');
   const SELF = info(-1, 'self', 0);
@@ -53,6 +53,8 @@
       if (seen.has(v)) return { t: 'ref', id: seen.get(v) };
       const id = next++;
       seen.set(v, id);
+      const blob = encodeBlob(v);
+      if (blob !== null) return { t: 'blob', id, v: blob };
       const tag = Object.prototype.toString.call(v).slice(8, -1);
       switch (tag) {
         case 'Array': return { t: 'a', id, v: Array.prototype.map.call(v, enc), l: v.length };
@@ -73,7 +75,6 @@
         return { t: 'port', i: ports.get(v) };
       }
       if (typeof Node === 'function' && v instanceof Node) throw cloneError(tag);
-      if (typeof Blob === 'function' && v instanceof Blob) throw cloneError(tag);
       const props = [];
       for (const k of Object.keys(v)) append(props, [k, enc(v[k])]);
       return { t: 'o', id, v: props };
@@ -101,6 +102,7 @@
         case 'w': out = Object(dec(x.v)); break;
         case 'm': out = new Map(); objs.set(x.id, out); for (const [k, v] of x.v) out.set(dec(k), dec(v)); return out;
         case 's': out = new Set(); objs.set(x.id, out); for (const v of x.v) out.add(dec(v)); return out;
+        case 'blob': out = decodeBlob(x.v[0], x.v[1], x.v[2], x.v[3]); break;
         case 'ab': out = new Uint8Array(x.v).buffer; break;
         case 'ta': {
           const C = globalThis[x.k] || Uint8Array;

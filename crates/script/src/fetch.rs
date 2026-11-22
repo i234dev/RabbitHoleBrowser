@@ -1639,6 +1639,36 @@ fn construct_blob(realm: &mut Realm, args: &[Value], file: bool) -> JsResult<Val
     Ok(make_blob_object(realm, BlobData { bytes, mime: normalize_blob_type(&ty), file: info }, prototype))
 }
 
+/// Serialize the native payload without consulting any page-defined properties.
+pub(crate) fn serialize_blob(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(blob) = args.first().and_then(Value::as_object).and_then(|o| realm.host_data::<BlobData>(o)) else {
+        return Ok(Value::Null);
+    };
+    let bytes = Value::str(&base64_encode(&blob.bytes));
+    let mime = Value::str(&blob.mime);
+    let (name, modified) = match &blob.file {
+        Some(f) => (Value::str(&f.name), Value::str(&f.last_modified.to_string())),
+        None => (Value::Null, Value::Null),
+    };
+    Ok(realm.new_array_value(vec![bytes, mime, name, modified]))
+}
+
+pub(crate) fn deserialize_blob(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let [encoded, mime, name, modified] = args else { return Err(realm.throw_type_error("Invalid serialized Blob")); };
+    let (V::String(encoded), V::String(mime)) = (encoded.v(), mime.v()) else { return Err(realm.throw_type_error("Invalid serialized Blob")); };
+    let Some(bytes) = rabbithole_net::base64_decode(&encoded.to_rust_string()) else { return Err(realm.throw_type_error("Invalid serialized Blob bytes")); };
+    let file = match (name.v(), modified.v()) {
+        (V::Null, V::Null) => None,
+        (V::String(name), V::String(modified)) => {
+            let last_modified = modified.to_rust_string().parse().map_err(|_| realm.throw_type_error("Invalid serialized File timestamp"))?;
+            Some(FileInfo { name: name.to_rust_string(), last_modified })
+        }
+        _ => return Err(realm.throw_type_error("Invalid serialized File metadata")),
+    };
+    let prototype = proto(if file.is_some() { "File" } else { "Blob" });
+    Ok(make_blob_object(realm, BlobData { bytes, mime: normalize_blob_type(&mime.to_rust_string()), file }, prototype))
+}
+
 fn file_name(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     if let Some(info) = &blob_data(realm, &this)?.file {
         return Ok(Value::str(&info.name));

@@ -1973,3 +1973,18 @@ fn query_and_form_iterators_follow_mutations_until_exhaustion() {
     "#);
     assert_eq!(out, ["a1","c3 true","true","ad","a1","c3 true","true","ad"]);
 }
+
+#[test]
+fn structured_clone_preserves_blob_and_file_slots_and_shared_references() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const file = new File([new Uint8Array([0,255])], 'dir/name', {type:'image/png',lastModified:-123});
+        const blob = file.slice(1);
+        Object.defineProperty(file, 'name', {get(){throw Error('observable getter')}});
+        Object.setPrototypeOf(blob, null);
+        const result = structuredClone([file, blob, file]);
+        console.log(result[0] !== file, result[0] === result[2], result[0] instanceof File, result[0].name, result[0].type, result[0].lastModified);
+        result[1].arrayBuffer().then(b => console.log(result[1] instanceof Blob, new Uint8Array(b)[0]));
+    "#);
+    assert_eq!(out, ["true true true dir/name image/png -123","true 255"]);
+}
