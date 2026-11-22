@@ -1901,3 +1901,39 @@ fn form_data_preserves_files_and_serializes_entries_in_order() {
     "#);
     assert_eq!(out, ["true", "true b 5 1 file,text", "true true blob"]);
 }
+
+#[test]
+fn synchronous_file_readers_are_scoped_to_workers_and_copy_blob_bytes() {
+    let (mut env, mut page) = setup("<body></body>");
+    assert_eq!(run(&mut env, &mut page, "console.log(typeof FileReaderSync)"), ["undefined"]);
+    for shared in [false, true] {
+        let mut worker = crate::ScriptHost::new_inner(&mut env, Some(("reader".into(), shared, 1)));
+        let out = run(&mut env, &mut worker, r#"
+            const r = new FileReaderSync(), b = new Blob([new Uint8Array([0xff,0xfe,65,0])]);
+            const copy = new Uint8Array(r.readAsArrayBuffer(b));
+            copy.fill(0);
+            console.log(r.readAsText(b), r.readAsBinaryString(b).charCodeAt(0), r.readAsDataURL(b));
+            try { r.readAsText({}); } catch(e) { console.log(e.name); }
+        "#);
+        assert_eq!(out, ["A 255 data:application/octet-stream;base64,//5BAA==", "TypeError"]);
+    }
+}
+
+#[test]
+fn restarting_a_file_read_from_abort_suppresses_stale_events() {
+    let (mut env, mut host) = setup("<body></body>");
+    run(&mut env, &mut host, r#"
+        const reader = new FileReader();
+        const events = [];
+        reader.onabort = () => { events.push('abort'); reader.readAsText(new Blob([])); };
+        reader.onprogress = () => events.push('progress');
+        reader.onload = () => events.push('load');
+        reader.onloadend = () => { events.push('end'); console.log(events.join(',')); };
+        reader.readAsText(new Blob(['discarded']));
+        reader.abort();
+    "#);
+    host.run_timers(&mut env, 1010.0);
+    host.run_jobs(&mut env);
+    let output: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, text)| text.as_str()).collect();
+    assert_eq!(output, ["abort,load,end"]);
+}

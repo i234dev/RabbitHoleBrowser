@@ -489,6 +489,14 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "isShadowRoot", 1, is_shadow_root);
     realm.define_method(o, "nodeKey", 1, node_key);
     realm.define_method(o, "documentNode", 0, document_root);
+    let dedicated_or_shared = {
+        let state = state();
+        let host = state.borrow();
+        host.worker_info.is_some() && !crate::service_worker::is_worker(&host.service_worker)
+    };
+    if dedicated_or_shared {
+        realm.define_method(o, "readBlobBufferSync", 1, crate::fetch::read_blob_buffer_sync);
+    }
     crate::workers::install_natives(realm, o);
     crate::live::install(realm, o);
     realm.define_method(o, "createDoctype", 4, crate::document::create_doctype);

@@ -1628,6 +1628,11 @@ fn blob_offset(realm: &mut Realm, value: Value, len: usize, default: usize) -> J
         else { len.min(usize::try_from(offset).unwrap_or(usize::MAX)) })
 }
 
+pub(crate) fn read_blob_buffer_sync(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let bytes = blob_data(realm, &arg(args, 0))?.bytes.clone();
+    Ok(make_array_buffer(realm, bytes))
+}
+
 fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let len = blob_data(realm, &this)?.bytes.len();
     let start = blob_offset(realm, arg(args, 0), len, 0)?;
