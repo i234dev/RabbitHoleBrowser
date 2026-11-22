@@ -1883,3 +1883,21 @@ fn file_metadata_uses_webidl_conversion_order() {
     "#);
     assert_eq!(out, ["part,name,type,time true -4 true text/plain", "a 0"]);
 }
+
+#[test]
+fn form_data_preserves_files_and_serializes_entries_in_order() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const fd = Object.freeze(new FormData()), original = new File(['body'], 'a', {lastModified:5});
+        fd.append('file', original);
+        fd.append('text', 'one');
+        fd.append('file', 'duplicate');
+        console.log(fd.get('file') === original);
+        fd.set('file', original, 'b');
+        const renamed = fd.get('file');
+        console.log(renamed !== original, renamed.name, renamed.lastModified, fd.getAll('file').length, [...fd.keys()].join(','));
+        fd.append('plain', new Blob(['two']));
+        new Response(fd).text().then(s => console.log(s.includes('filename="b"'), s.indexOf('body') < s.indexOf('one'), fd.get('plain').name));
+    "#);
+    assert_eq!(out, ["true", "true b 5 1 file,text", "true true blob"]);
+}

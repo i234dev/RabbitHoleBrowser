@@ -593,8 +593,17 @@ pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(V
                 return Ok((serialize_query(&p.pairs).into_bytes(), Some("application/x-www-form-urlencoded;charset=UTF-8".into())));
             }
             if let Some(f) = realm.host_data::<FormDataData>(o) {
-                let fields: Vec<(String, String)> = f.fields.clone();
-                let b = Body::multipart(&fields, &[]);
+                use rabbithole_net::fetch::MultipartValue;
+                let b = Body::multipart_entries(f.fields.iter().map(|(name, entry)| {
+                    let part = match entry {
+                        FormValue::Text(text) => MultipartValue::Text(text),
+                        FormValue::File(id) => {
+                            let blob = realm.host_data::<BlobData>(*id).unwrap();
+                            MultipartValue::File { filename: &blob.file.as_ref().unwrap().name, mime: &blob.mime, bytes: &blob.bytes }
+                        }
+                    };
+                    (name.as_str(), part)
+                }));
                 return Ok((b.data, Some(b.content_type)));
             }
             if let Some(blob) = realm.host_data::<BlobData>(o) {
@@ -1278,13 +1287,29 @@ fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
 
 // ------------------------------------------------------------ FormData
 
+#[derive(Clone)]
+enum FormValue {
+    Text(String),
+    File(ObjectId),
+}
+
+impl FormValue {
+    fn as_value(&self) -> Value {
+        match self {
+            Self::Text(text) => Value::str(text),
+            Self::File(id) => Value::Object(*id),
+        }
+    }
+}
+
 pub(crate) struct FormDataData {
-    pub fields: Vec<(String, String)>,
+    fields: Vec<(String, FormValue)>,
 }
 
 pub(crate) fn make_form_data(realm: &mut Realm, fields: Vec<(String, String)>) -> ObjectId {
     let p = proto("FormData");
     let o = realm.new_object_with_proto(Some(p));
+    let fields = fields.into_iter().map(|(k, v)| (k, FormValue::Text(v))).collect();
     realm.set_host_data(o, Box::new(FormDataData { fields }));
     realm.set_class_name(o, "FormData");
     o
@@ -1306,34 +1331,100 @@ fn fd_of(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
     }
 }
 
+// File identities in native data need a traced edge for as long as their
+// entries exist. The private array stays writable when script freezes the form.
+fn fd_file_roots(realm: &mut Realm, o: ObjectId) -> ObjectId {
+    let slot = state().borrow().form_data_files;
+    if let Some(array) = realm.obj(o).props.get(&PropertyKey::Symbol(slot)).and_then(|p| p.value.as_object()) {
+        return array;
+    }
+    let array = realm.new_array(Vec::new());
+    realm.define_property(o, slot, Value::Object(array), 0);
+    array
+}
+
+fn fd_refresh_roots(realm: &mut Realm, o: ObjectId) {
+    let slot = state().borrow().form_data_files;
+    let Some(array) = realm.obj(o).props.get(&PropertyKey::Symbol(slot)).and_then(|p| p.value.as_object()) else { return };
+    let files: Vec<_> = realm.host_data::<FormDataData>(o).unwrap().fields.iter().filter_map(|(_, v)| match v {
+        FormValue::File(id) => Some(Value::Object(*id)),
+        FormValue::Text(_) => None,
+    }).collect();
+    if let rabbithole_js::ObjectKind::Array { elements, length } = &mut realm.obj_mut(array).kind {
+        *length = files.len() as u32;
+        *elements = files;
+    }
+}
+
+fn fd_entry(realm: &mut Realm, args: &[Value]) -> JsResult<(String, FormValue)> {
+    if args.len() < 2 {
+        return Err(realm.throw_type_error("FormData requires a name and value"));
+    }
+    let name = arg_str(realm, args, 0)?;
+    let Some(id) = args[1].as_object().filter(|&id| realm.host_data::<BlobData>(id).is_some()) else {
+        if args.len() > 2 {
+            return Err(realm.throw_type_error("A filename requires a Blob"));
+        }
+        return Ok((name, FormValue::Text(arg_str(realm, args, 1)?)));
+    };
+    let filename = arg_str_opt(realm, args, 2)?;
+    let blob = realm.host_data::<BlobData>(id).unwrap();
+    if filename.is_none() && blob.file.is_some() {
+        return Ok((name, FormValue::File(id)));
+    }
+    let file = FileInfo {
+        name: filename.unwrap_or_else(|| "blob".into()),
+        last_modified: blob.file.as_ref().map_or_else(|| rabbithole_js::builtins::date::now_ms() as i64, |f| f.last_modified),
+    };
+    let data = BlobData { bytes: blob.bytes.clone(), mime: blob.mime.clone(), file: Some(file) };
+    let file = make_blob_object(realm, data, proto("File"));
+    realm.native_root(file.clone());
+    Ok((name, FormValue::File(file.as_object().unwrap())))
+}
+
 fn fd_append(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
-    let k = arg_str(realm, args, 0)?;
-    let v = arg_str(realm, args, 1)?;
-    realm.host_data_mut::<FormDataData>(o).unwrap().fields.push((k, v));
+    let entry = fd_entry(realm, args)?;
+    if let FormValue::File(id) = entry.1 {
+        let roots = fd_file_roots(realm, o);
+        if let rabbithole_js::ObjectKind::Array { elements, length } = &mut realm.obj_mut(roots).kind {
+            elements.push(Value::Object(id));
+            *length = elements.len() as u32;
+        }
+    }
+    realm.host_data_mut::<FormDataData>(o).unwrap().fields.push(entry);
     Ok(Value::Undefined)
 }
 
 fn fd_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
-    let k = arg_str(realm, args, 0)?;
-    let v = arg_str(realm, args, 1)?;
-    let d = realm.host_data_mut::<FormDataData>(o).unwrap();
-    d.fields.retain(|(kk, _)| *kk != k);
-    d.fields.push((k, v));
+    let (key, value) = fd_entry(realm, args)?;
+    if matches!(value, FormValue::File(_)) { fd_file_roots(realm, o); }
+    let fields = &mut realm.host_data_mut::<FormDataData>(o).unwrap().fields;
+    let mut replacement = Some(value);
+    fields.retain_mut(|(name, old)| {
+        if *name != key { return true }
+        if let Some(new) = replacement.take() {
+            *old = new;
+            return true;
+        }
+        false
+    });
+    if let Some(value) = replacement { fields.push((key, value)); }
+    fd_refresh_roots(realm, o);
     Ok(Value::Undefined)
 }
 
 fn fd_get(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
     let k = arg_str(realm, args, 0)?;
-    Ok(realm.host_data::<FormDataData>(o).unwrap().fields.iter().find(|(kk, _)| *kk == k).map(|(_, v)| Value::str(v)).unwrap_or(Value::Null))
+    Ok(realm.host_data::<FormDataData>(o).unwrap().fields.iter().find(|(kk, _)| *kk == k).map(|(_, v)| v.as_value()).unwrap_or(Value::Null))
 }
 
 fn fd_get_all(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
     let k = arg_str(realm, args, 0)?;
-    let vals: Vec<Value> = realm.host_data::<FormDataData>(o).unwrap().fields.iter().filter(|(kk, _)| *kk == k).map(|(_, v)| Value::str(v)).collect();
+    let vals: Vec<Value> = realm.host_data::<FormDataData>(o).unwrap().fields.iter().filter(|(kk, _)| *kk == k).map(|(_, v)| v.as_value()).collect();
     Ok(realm.new_array_value(vals))
 }
 
@@ -1347,6 +1438,7 @@ fn fd_delete(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     let o = fd_of(realm, &this)?;
     let k = arg_str(realm, args, 0)?;
     realm.host_data_mut::<FormDataData>(o).unwrap().fields.retain(|(kk, _)| *kk != k);
+    fd_refresh_roots(realm, o);
     Ok(Value::Undefined)
 }
 
@@ -1360,8 +1452,8 @@ fn fd_iter(realm: &mut Realm, this: Value, kind: u8) -> JsResult<Value> {
         .into_iter()
         .map(|(k, v)| match kind {
             0 => Value::str(&k),
-            1 => Value::str(&v),
-            _ => realm.new_array_value(vec![Value::str(&k), Value::str(&v)]),
+            1 => v.as_value(),
+            _ => realm.new_array_value(vec![Value::str(&k), v.as_value()]),
         })
         .collect();
     let arr = realm.new_array_value(items);
@@ -1385,7 +1477,7 @@ fn fd_for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     let f = arg(args, 0);
     let fields = realm.host_data::<FormDataData>(o).unwrap().fields.clone();
     for (k, v) in fields {
-        realm.call(f.clone(), arg(args, 1), &[Value::str(&v), Value::str(&k), this.clone()])?;
+        realm.call(f.clone(), arg(args, 1), &[v.as_value(), Value::str(&k), this.clone()])?;
     }
     Ok(Value::Undefined)
 }

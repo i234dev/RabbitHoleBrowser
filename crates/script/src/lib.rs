@@ -313,6 +313,7 @@ impl ScriptHost {
             child_lists: HashMap::default(),
             protos: HashMap::default(),
             url_links,
+            form_data_files: realm.new_private_symbol(rabbithole_js::JsStr::new("FormData.files")),
             listeners: HashMap::default(),
             listener_counts: HashMap::default(),
             timers: Vec::new(),
