@@ -97,8 +97,10 @@ pub struct HostState {
     pub protos: HashMap<&'static str, ObjectId>,
     /// Private property keys for URL <-> query-list GC edges. The keys do
     /// not root any instances; the owning objects hold the traced values.
-    pub form_data_files: rabbithole_js::SymbolId,
     pub url_links: (rabbithole_js::SymbolId, rabbithole_js::SymbolId),
+    /// Private GC edges for files in form entries and the source of each iterator.
+    pub form_data_files: rabbithole_js::SymbolId,
+    pub pair_iterator_owner: rabbithole_js::SymbolId,
     pub listeners: HashMap<TargetKey, Vec<Listener>>,
     /// Count of listeners per (node, type) for fast existence checks.
     pub listener_counts: HashMap<(TargetKey, String), usize>,

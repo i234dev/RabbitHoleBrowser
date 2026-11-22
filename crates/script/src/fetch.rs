@@ -401,18 +401,73 @@ fn params_for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     Ok(Value::Undefined)
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum PairList { Query, Form }
+
+#[derive(Clone, Copy)]
+struct PairCursor {
+    owner: Option<ObjectId>,
+    list: PairList,
+    kind: u8,
+    index: usize,
+}
+
+impl PairList {
+    fn at(self, realm: &Realm, owner: ObjectId, index: usize) -> Option<(Value, Value)> {
+        match self {
+            Self::Query => realm.host_data::<ParamsData>(owner)?.pairs.get(index).map(|(k, v)| (Value::str(k), Value::str(v))),
+            Self::Form => realm.host_data::<FormDataData>(owner)?.fields.get(index).map(|(k, v)| (Value::str(k), v.as_value())),
+        }
+    }
+
+    fn iterator(self, realm: &mut Realm, owner: ObjectId, kind: u8) -> Value {
+        let (name, next): (_, rabbithole_js::NativeFn) = match self {
+            Self::Query => ("URLSearchParams Iterator", params_next),
+            Self::Form => ("FormData Iterator", fd_next),
+        };
+        let cached = state().borrow().protos.get(name).copied();
+        let prototype = cached.unwrap_or_else(|| {
+            let p = realm.new_object_with_proto(Some(realm.intrinsics.iterator_proto));
+            realm.extra_roots.push(Value::Object(p));
+            realm.define_method(p, "next", 0, next);
+            realm.define_property(p, rabbithole_js::realm::SYM_TO_STRING_TAG, Value::str(name), CONFIGURABLE);
+            state().borrow_mut().protos.insert(name, p);
+            p
+        });
+        let it = realm.new_object_with_proto(Some(prototype));
+        realm.set_host_data(it, Box::new(PairCursor { owner: Some(owner), list: self, kind, index: 0 }));
+        realm.define_property(it, state().borrow().pair_iterator_owner, Value::Object(owner), 0);
+        Value::Object(it)
+    }
+
+    fn next(self, realm: &mut Realm, this: Value) -> JsResult<Value> {
+        let Some((id, cursor)) = this.as_object().and_then(|id| Some((id, *realm.host_data::<PairCursor>(id)?))).filter(|(_, c)| c.list == self) else {
+            return Err(realm.throw_type_error("Illegal invocation"));
+        };
+        if let Some(owner) = cursor.owner {
+            if let Some((key, value)) = self.at(realm, owner, cursor.index) {
+                realm.host_data_mut::<PairCursor>(id).unwrap().index += 1;
+                let item = match cursor.kind { 0 => key, 1 => value, _ => realm.new_array_value(vec![key, value]) };
+                return Ok(realm.create_iter_result(item, false));
+            }
+            realm.host_data_mut::<PairCursor>(id).unwrap().owner = None;
+            realm.define_property(id, state().borrow().pair_iterator_owner, Value::Null, 0);
+        }
+        Ok(realm.create_iter_result(Value::Undefined, true))
+    }
+}
+
+fn params_next(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    PairList::Query.next(realm, this)
+}
+
+fn fd_next(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    PairList::Form.next(realm, this)
+}
+
 fn params_iter(realm: &mut Realm, this: Value, kind: u8) -> JsResult<Value> {
     let o = params_of(realm, &this)?;
-    let items: Vec<Value> = params_pairs(realm, o)
-        .into_iter()
-        .map(|(k, v)| match kind {
-            0 => Value::str(&k),
-            1 => Value::str(&v),
-            _ => realm.new_array_value(vec![Value::str(&k), Value::str(&v)]),
-        })
-        .collect();
-    let arr = realm.new_array_value(items);
-    realm.invoke(arr, "values", &[])
+    Ok(PairList::Query.iterator(realm, o, kind))
 }
 
 fn params_entries(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1444,20 +1499,7 @@ fn fd_delete(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
 
 fn fd_iter(realm: &mut Realm, this: Value, kind: u8) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
-    let items: Vec<Value> = realm
-        .host_data::<FormDataData>(o)
-        .unwrap()
-        .fields
-        .clone()
-        .into_iter()
-        .map(|(k, v)| match kind {
-            0 => Value::str(&k),
-            1 => v.as_value(),
-            _ => realm.new_array_value(vec![Value::str(&k), v.as_value()]),
-        })
-        .collect();
-    let arr = realm.new_array_value(items);
-    realm.invoke(arr, "values", &[])
+    Ok(PairList::Form.iterator(realm, o, kind))
 }
 
 fn fd_entries(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1475,9 +1517,13 @@ fn fd_values(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 fn fd_for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
     let f = arg(args, 0);
-    let fields = realm.host_data::<FormDataData>(o).unwrap().fields.clone();
-    for (k, v) in fields {
-        realm.call(f.clone(), arg(args, 1), &[v.as_value(), Value::str(&k), this.clone()])?;
+    if !realm.is_callable(&f) {
+        return Err(realm.throw_type_error("FormData.forEach requires a callable"));
+    }
+    let mut i = 0;
+    while let Some((key, value)) = PairList::Form.at(realm, o, i) {
+        realm.call(f.clone(), arg(args, 1), &[value, key, this.clone()])?;
+        i += 1;
     }
     Ok(Value::Undefined)
 }

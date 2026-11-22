@@ -1953,3 +1953,23 @@ fn xhr_validates_methods_and_headers_before_sending() {
     "#);
     assert_eq!(out, ["InvalidStateError","SyntaxError","SecurityError","ok","SyntaxError","SyntaxError","TypeError","ok","TypeError"]);
 }
+
+#[test]
+fn query_and_form_iterators_follow_mutations_until_exhaustion() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        for (const list of [new FormData(), new URLSearchParams()]) {
+            list.append('a','1'); list.append('b','2');
+            const it = list.entries();
+            console.log(it.next().value.join(''));
+            list.delete('b'); list.append('c','3');
+            console.log(it.next().value.join(''), it.next().done);
+            list.append('d','4');
+            console.log(it.next().done);
+            const keys = [];
+            list.forEach((v,k) => { keys.push(k); if (k === 'a') list.delete('c'); });
+            console.log(keys.join(''));
+        }
+    "#);
+    assert_eq!(out, ["a1","c3 true","true","ad","a1","c3 true","true","ad"]);
+}
