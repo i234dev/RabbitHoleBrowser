@@ -2200,3 +2200,21 @@ fn enumerated_attributes_preserve_raw_values_and_reflect_canonical_states() {
     "#);
     assert_eq!(out, "'|rtl|same-origin|anonymous|true|ltr|LtR'");
 }
+
+#[test]
+fn declarative_shadow_takeover_preserves_options_and_nested_parsing() {
+    let (mut env, mut host) = setup("<!doctype html><body><div id=host></div>");
+    let out = run(&mut env, &mut host, r#"
+        const outer = document.querySelector('#host').attachShadow({mode:'open'});
+        outer.setHTMLUnsafe('<section><template shadowrootmode=closed shadowrootserializable shadowrootdelegatesfocus shadowrootclonable><b>old</b></template></section>');
+        const el = outer.firstElementChild;
+        const root = el.attachShadow({mode:'closed'});
+        console.log(root.mode, root.delegatesFocus, root.clonable, root.serializable, root.childNodes.length, el.shadowRoot === null);
+        root.innerHTML = '<i>new</i>';
+        console.log(outer.getHTML({serializableShadowRoots:true}));
+        for (const host of [el, document.createElementNS('http://www.w3.org/2000/svg','div'), document.createElement('font-face')]) {
+            try { host.attachShadow({mode:'closed'}); } catch (e) { console.log(e.name); }
+        }
+    "#);
+    assert_eq!(out, ["closed true true true 0 true", "<section><template shadowrootmode=\"closed\" shadowrootdelegatesfocus=\"\" shadowrootserializable=\"\" shadowrootclonable=\"\"><i>new</i></template></section>", "NotSupportedError", "NotSupportedError", "NotSupportedError"]);
+}

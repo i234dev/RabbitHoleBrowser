@@ -210,6 +210,27 @@ impl<T> std::ops::DerefMut for Tracked<T> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShadowInfo {
+    pub open: bool,
+    pub delegates_focus: bool,
+    pub manual: bool,
+    pub clonable: bool,
+    pub serializable: bool,
+    pub declarative: bool,
+}
+
+/// The HTML PotentialCustomElementName production and its reserved names.
+pub fn valid_custom_element_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('a'..='z')) && name.contains('-')
+        && !matches!(name, "annotation-xml" | "color-profile" | "font-face" | "font-face-src" | "font-face-uri" | "font-face-format" | "font-face-name" | "missing-glyph")
+        && chars.all(|c| matches!(c, '-' | '.' | '_' | '0'..='9' | 'a'..='z') || matches!(c as u32,
+            0xB7 | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0x37D | 0x37F..=0x1FFF | 0x200C..=0x200D |
+            0x203F..=0x2040 | 0x2070..=0x218F | 0x2C00..=0x2FEF | 0x3001..=0xD7FF |
+            0xF900..=0xFDCF | 0xFDF0..=0xFFFD | 0x10000..=0xEFFFF))
+}
+
 /// Identity of one live document incarnation. A rendering/DOM clone owns a
 /// fresh identity, so snapshots cannot keep the original incarnation alive.
 struct DocumentIdentity(std::sync::Arc<()>);
@@ -258,13 +279,8 @@ pub struct Document {
     /// `<template>` element → its content (a parentless `#fragment` node):
     /// a template's children live there, not in the tree.
     pub template_contents: HashMap<NodeId, NodeId>,
-    /// Shadow roots created by declarative shadow DOM
-    /// (`<template shadowrootmode>`), with whether they are open; the
-    /// first `attachShadow()` on the host takes such a root over.
-    pub declarative_shadow: HashMap<NodeId, bool>,
-    /// Options of declarative shadow roots: bit 1 clonable, 2 serializable,
-    /// 4 delegatesFocus (absent: none set).
-    pub declarative_shadow_flags: HashMap<NodeId, u8>,
+    /// Attachment options belong to the root for its entire lifetime.
+    pub shadow_info: HashMap<NodeId, ShadowInfo>,
     /// Text nodes that are CDATA sections (`CDATASection`).
     pub cdata: std::collections::HashSet<NodeId>,
     /// Comment nodes that are processing instructions, with their target
@@ -387,8 +403,7 @@ impl Document {
             sheet_overrides: Tracked::default(),
             defined_custom: std::collections::HashSet::new(),
             template_contents: HashMap::new(),
-            declarative_shadow: HashMap::new(),
-            declarative_shadow_flags: HashMap::new(),
+            shadow_info: HashMap::new(),
             cdata: std::collections::HashSet::new(),
             pi_targets: HashMap::new(),
             script_started: std::collections::HashSet::new(),
@@ -986,11 +1001,17 @@ impl Document {
         // Innermost first, so nested templates end up in their parent's content.
         for t in templates.into_iter().rev() {
             let mode = if declarative_shadow { self.attr(t, "shadowrootmode").map(|m| m.to_ascii_lowercase()) } else { None };
-            let host = self.parent(t).filter(|&p| self.element(p).is_some() && !self.shadow_roots.contains_key(&p));
+            let host = self.parent(t).filter(|&p| self.can_host_shadow(p) && !self.shadow_roots.contains_key(&p));
             let target = match (mode.as_deref(), host) {
                 (Some(m @ ("open" | "closed")), Some(h)) => {
                     let r = self.attach_shadow(h);
-                    self.declarative_shadow.insert(r, m == "open");
+                    let info = ShadowInfo {
+                        open: m == "open", declarative: true, manual: false,
+                        clonable: self.attr(t, "shadowrootclonable").is_some(),
+                        serializable: self.attr(t, "shadowrootserializable").is_some(),
+                        delegates_focus: self.attr(t, "shadowrootdelegatesfocus").is_some(),
+                    };
+                    self.shadow_info.insert(r, info);
                     r
                 }
                 _ => self.template_content(t),
@@ -1007,6 +1028,12 @@ impl Document {
     }
 
     // ---------------------------------------------------------- shadow DOM
+
+    pub fn can_host_shadow(&self, host: NodeId) -> bool {
+        let Some(el) = self.element(host) else { return false };
+        el.ns == Namespace::Html && (valid_custom_element_name(&el.tag) || matches!(el.tag.as_str(),
+            "article" | "aside" | "blockquote" | "body" | "div" | "footer" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header" | "main" | "nav" | "p" | "section" | "span"))
+    }
 
     /// Attach a shadow root to `host` (or return the existing one).
     pub fn attach_shadow(&mut self, host: NodeId) -> NodeId {

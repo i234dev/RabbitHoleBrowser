@@ -531,7 +531,6 @@ impl ScriptHost {
         st.child_lists.retain(|k, _| k.doc != doc);
         st.ce_upgraded.retain(|k| k.doc != doc);
         st.ce_failed.retain(|k| k.doc != doc);
-        st.shadow.info.retain(|k, _| k.doc != doc);
         st.shadow.slot_cache.retain(|k, _| k.doc != doc);
         st.shadow.manual.retain(|k, _| k.doc != doc);
         st.listeners.retain(|k, _| !matches!(k, TargetKey::Node(n) if n.doc == doc));
