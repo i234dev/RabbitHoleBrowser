@@ -1029,6 +1029,7 @@
 
   const pendingPopoverToggles = new WeakMap();
   const changingPopovers = new WeakSet();
+  const closingPopoverStacks = new WeakSet();
   const previousPopoverFocus = new WeakMap();
   const ToggleEventCtor = g.ToggleEvent;
   function queuePopoverToggle(element, oldState, newState, source) {
@@ -1060,6 +1061,11 @@
   function changePopover(element, open, source) {
     if (!checkPopover(element, open) || changingPopovers.has(element)) return;
     const oldState = open ? 'closed' : 'open', newState = open ? 'open' : 'closed';
+    const doc = element.ownerDocument;
+    if (open && element.popover !== 'manual' && closingPopoverStacks.has(doc))
+      throw domError('The popover stack is being dismissed.', 'InvalidStateError');
+    const markClosing = !open && element.popover !== 'manual' && !closingPopoverStacks.has(doc);
+    if (markClosing) closingPopoverStacks.add(doc);
     changingPopovers.add(element);
     try {
       if (!element.dispatchEvent(new ToggleEventCtor('beforetoggle', {oldState,newState,source,cancelable:open}))) return;
@@ -1097,7 +1103,10 @@
         if (previous && popoverContains(element, focused)) previous.focus();
       }
       queuePopoverToggle(element, oldState, newState, source);
-    } finally { changingPopovers.delete(element); }
+    } finally {
+      changingPopovers.delete(element);
+      if (markClosing) closingPopoverStacks.delete(doc);
+    }
   }
   N.setFactory('popoverAction', (element, dismiss) => {
     if (dismiss) { changePopover(element, false, null); return true; }

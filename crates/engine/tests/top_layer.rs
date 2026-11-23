@@ -166,3 +166,21 @@ fn toggle_event_converts_dictionary_states_and_retargets_its_source() {
     })()"#);
     assert_eq!(result,"42|null|string|true|true|true|true");
 }
+
+#[test]
+fn opening_a_dialog_hides_unrelated_popovers_and_preserves_its_ancestor() {
+    let mut e = engine();
+    let mut page = e.load_html(
+        "<div id=menu popover><dialog id=inner></dialog><div id=sub popover=hint></div></div><dialog id=outside></dialog><div id=manual popover=manual></div>",
+        Url::parse("https://example.test/").unwrap(), Viewport { width: 800.0, height: 600.0 });
+    assert_eq!(eval(&e,&mut page,r#"(() => {
+        menu.showPopover(); sub.showPopover(); manual.showPopover();
+        inner.showModal();
+        const keep=[menu.matches(':popover-open'),sub.matches(':popover-open')];
+        inner.close();
+        let nested;
+        menu.onbeforetoggle=() => { try { sub.showPopover(); } catch (e) { nested=e.name; } };
+        outside.show();
+        return [...keep,menu.matches(':popover-open'),manual.matches(':popover-open'),nested].join('|');
+    })()"#),"true|false|false|true|InvalidStateError");
+}

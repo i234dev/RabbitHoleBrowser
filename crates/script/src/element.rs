@@ -3082,9 +3082,32 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(rect, "toJSON", 0, dom_rect_to_json);
 }
 
+/// Opening a dialog closes auto and hint popovers above its highest
+/// popover ancestor. Dismiss through the normal event path, outside the
+/// document borrow, because beforetoggle can synchronously modify the DOM.
+fn dismiss_popovers_for_dialog(realm: &mut Realm, dialog: NodeRef) {
+    let popovers: Vec<_> = with_doc(dialog.doc, |doc| {
+        doc.light_dismiss_popovers().rev().take_while(|&popover| {
+            !std::iter::successors(doc.flat_parent(dialog.node), |&n| doc.flat_parent(n)).any(|n| n == popover)
+        }).collect()
+    });
+    for node in popovers {
+        if with_doc(dialog.doc, |doc| doc.popover_open(node)) {
+            crate::events::popover_action(realm, NodeRef { doc: dialog.doc, node }, true);
+        }
+    }
+}
+
 fn dialog_show(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "show")?;
+    if with_doc(n.doc, |doc| doc.attr(n.node, "open").is_some()) {
+        if with_doc(n.doc, |doc| doc.is_modal(n.node)) {
+            return Err(crate::misc::dom_exception(realm, "InvalidStateError", "The dialog is already open as a modal dialog."));
+        }
+        return Ok(Value::Undefined);
+    }
     set_attribute(n, "open", Some(""));
+    dismiss_popovers_for_dialog(realm, n);
     Ok(Value::Undefined)
 }
 
@@ -3107,6 +3130,7 @@ fn dialog_show_modal(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
     }
     with_doc(n.doc, |doc| doc.top_layer.push(n.node));
     set_attribute(n, "open", Some(""));
+    dismiss_popovers_for_dialog(realm, n);
     Ok(Value::Undefined)
 }
 
