@@ -2001,3 +2001,17 @@ fn file_conversions_close_iterators_and_leave_failed_reads_empty() {
     "#);
     assert_eq!(out, ["closed","true","true 0","TypeError 0"]);
 }
+
+#[test]
+fn text_decoder_uses_standard_labels_and_converts_options_once() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        let count = 0;
+        class Decoder extends TextDecoder {}
+        const d = new Decoder(' 866 ', { get fatal() { ++count; return true; } });
+        console.log(d.encoding, d.fatal, d instanceof Decoder, count);
+        try { new TextDecoder('\u2029sjis\u2029'); } catch(e) { console.log(e.name); }
+        try { TextDecoder(); } catch(e) { console.log(e.name); }
+    "#);
+    assert_eq!(out, ["ibm866 true true 1", "RangeError", "TypeError"]);
+}

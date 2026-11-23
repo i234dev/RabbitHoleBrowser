@@ -1850,6 +1850,9 @@ pub(crate) struct TextDecoderData {
 }
 
 fn text_decoder_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if realm.new_target().is_undefined() {
+        return Err(realm.throw_type_error("TextDecoder requires new"));
+    }
     let label = match args.first().map(|v| v.v()) {
         None | Some(V::Undefined) => "utf-8".to_string(),
         Some(_) => arg_str(realm, args, 0)?,

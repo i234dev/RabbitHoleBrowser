@@ -157,7 +157,7 @@
   }
 
   // --------------------------------------------------------- TextEncoder
-  const TE = g.TextEncoder, TD = g.TextDecoder;
+  const TE = g.TextEncoder;
   defaults(TE, { encoding: 'utf-8' });
   method(TE, 'encodeInto', function (src, dest) {
     if (!(dest instanceof Uint8Array)) throw new TypeError("Failed to execute 'encodeInto' on 'TextEncoder': parameter 2 is not of type 'Uint8Array'.");
@@ -172,45 +172,6 @@
     }
     return { read, written };
   });
-  if (TD) {
-    const ctor = TD;
-    const labels = new WeakMap();
-    const Wrapped = function TextDecoder(label = 'utf-8', options = {}) {
-      if (!new.target) throw new TypeError("Failed to construct 'TextDecoder': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
-      const norm = normalizeLabel(label);
-      if (!norm) throw new RangeError(`Failed to construct 'TextDecoder': The encoding label provided ('${label}') is invalid.`);
-      const d = new ctor(norm, options);
-      Object.setPrototypeOf(d, new.target.prototype);
-      labels.set(d, { encoding: norm, fatal: !!(options && options.fatal), ignoreBOM: !!(options && options.ignoreBOM) });
-      return d;
-    };
-    Wrapped.prototype = ctor.prototype;
-    Object.defineProperty(ctor.prototype, 'constructor', { value: Wrapped, writable: true, configurable: true });
-    defaults(ctor, { encoding: function () { return (labels.get(this) || { encoding: 'utf-8' }).encoding; }, fatal: function () { return !!(labels.get(this) || {}).fatal; }, ignoreBOM: function () { return !!(labels.get(this) || {}).ignoreBOM; } });
-    define('TextDecoder', Wrapped);
-  }
-  function normalizeLabel(label) {
-    const l = String(label).trim().toLowerCase();
-    const MAP = {
-      'utf-8': ['unicode-1-1-utf-8', 'unicode11utf8', 'unicode20utf8', 'utf-8', 'utf8', 'x-unicode20utf8'],
-      'utf-16le': ['csunicode', 'iso-10646-ucs-2', 'ucs-2', 'unicode', 'unicodefeff', 'utf-16', 'utf-16le'],
-      'utf-16be': ['unicodefffe', 'utf-16be'],
-      'windows-1252': ['ansi_x3.4-1968', 'ascii', 'cp1252', 'cp819', 'csisolatin1', 'ibm819', 'iso-8859-1', 'iso-ir-100', 'iso8859-1', 'iso88591', 'iso_8859-1', 'iso_8859-1:1987', 'l1', 'latin1', 'us-ascii', 'windows-1252', 'x-cp1252'],
-      'iso-8859-2': ['csisolatin2', 'iso-8859-2', 'iso-ir-101', 'iso8859-2', 'iso88592', 'iso_8859-2', 'l2', 'latin2'],
-      'iso-8859-15': ['csisolatin9', 'iso-8859-15', 'iso8859-15', 'iso885915', 'iso_8859-15', 'l9'],
-      'windows-1251': ['cp1251', 'windows-1251', 'x-cp1251'],
-      'koi8-r': ['cskoi8r', 'koi', 'koi8', 'koi8-r', 'koi8_r'],
-      'shift_jis': ['csshiftjis', 'ms932', 'ms_kanji', 'shift-jis', 'shift_jis', 'sjis', 'windows-31j', 'x-sjis'],
-      'euc-jp': ['cseucpkdfmtjapanese', 'euc-jp', 'x-euc-jp'],
-      'gbk': ['chinese', 'csgb2312', 'csiso58gb231280', 'gb2312', 'gb_2312', 'gb_2312-80', 'gbk', 'iso-ir-58', 'x-gbk'],
-      'gb18030': ['gb18030'],
-      'big5': ['big5', 'big5-hkscs', 'cn-big5', 'csbig5', 'x-x-big5'],
-      'euc-kr': ['cseuckr', 'csksc56011987', 'euc-kr', 'iso-ir-149', 'korean', 'ks_c_5601-1987', 'ks_c_5601-1989', 'ksc5601', 'ksc_5601', 'windows-949'],
-    };
-    for (const [name, list] of Object.entries(MAP)) if (list.includes(l)) return name;
-    return /^(windows-12\d\d|iso-8859-\d+|ibm866|macintosh|x-mac-cyrillic|koi8-u|iso-2022-jp|x-user-defined)$/.test(l) ? l : null;
-  }
-
   // ------------------------------------------------------------------ URL
   defaults(g.URL, { username: function () { const m = /^[a-z][a-z0-9+.-]*:\/\/([^@/?#]*)@/i.exec(this.href); return m ? decodeURIComponent(m[1].split(':')[0]) && m[1].split(':')[0] : ''; }, password: function () { const m = /^[a-z][a-z0-9+.-]*:\/\/([^@/?#]*)@/i.exec(this.href); return m && m[1].includes(':') ? m[1].slice(m[1].indexOf(':') + 1) : ''; } });
 
