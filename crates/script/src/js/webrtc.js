@@ -115,4 +115,63 @@
   }
   expose(RTCIceCandidate, candidates, ['candidate', 'sdpMid', 'sdpMLineIndex', ...parsedFields,
     'usernameFragment', 'relayProtocol', 'url']);
+
+  const iceEvents = new WeakMap();
+  class RTCPeerConnectionIceEvent extends Event {
+    constructor(type, init = {}) {
+      if (!arguments.length) throw new TypeError('An event type is required');
+      const dict = dictionary(init);
+      super(type, dict);
+      const candidate = dict.candidate ?? null;
+      if (candidate !== null && !candidates.has(candidate)) throw new TypeError('Expected an RTCIceCandidate');
+      const url = nullableString(dict.url);
+      iceEvents.set(this, { candidate, url: url === null ? null : url.toWellFormed() });
+    }
+  }
+  expose(RTCPeerConnectionIceEvent, iceEvents, ['candidate', 'url']);
+
+  const iceErrors = new WeakMap();
+  class RTCPeerConnectionIceErrorEvent extends Event {
+    constructor(type, init) {
+      const dict = dictionary(init);
+      super(type, dict);
+      const address = nullableString(dict.address), code = dict.errorCode;
+      if (code === undefined) throw new TypeError('An ICE error code is required');
+      const errorCode = +code & 65535;
+      const text = dict.errorText, errorText = text === undefined ? '' : string(text).toWellFormed();
+      const portValue = dict.port, port = portValue == null ? null : (+portValue & 65535);
+      const urlValue = dict.url, url = urlValue === undefined ? '' : string(urlValue).toWellFormed();
+      iceErrors.set(this, { address, port, url, errorCode, errorText });
+    }
+  }
+  expose(RTCPeerConnectionIceErrorEvent, iceErrors, ['address', 'port', 'url', 'errorCode', 'errorText']);
+
+  const errors = new WeakMap();
+  const detailTypes = ['data-channel-failure', 'dtls-failure', 'fingerprint-failure', 'sctp-failure',
+    'sdp-syntax-error', 'hardware-encoder-not-available', 'hardware-encoder-error'];
+  const optionalLong = value => value === undefined ? null : (+value | 0);
+  const optionalUnsigned = value => value === undefined ? null : (+value >>> 0);
+  class RTCError extends DOMException {
+    constructor(init, message = '') {
+      const dict = dictionary(init);
+      const errorDetail = enumeration(dict.errorDetail, detailTypes);
+      const receivedAlert = optionalUnsigned(dict.receivedAlert), sctpCauseCode = optionalLong(dict.sctpCauseCode);
+      const sdpLineNumber = optionalLong(dict.sdpLineNumber), sentAlert = optionalUnsigned(dict.sentAlert);
+      super(string(message), 'OperationError');
+      errors.set(this, { errorDetail, receivedAlert, sctpCauseCode, sdpLineNumber, sentAlert });
+    }
+  }
+  expose(RTCError, errors, ['errorDetail', 'sdpLineNumber', 'sctpCauseCode', 'receivedAlert', 'sentAlert']);
+
+  const errorEvents = new WeakMap();
+  class RTCErrorEvent extends Event {
+    constructor(type, init) {
+      const dict = dictionary(init);
+      super(type, dict);
+      const error = dict.error;
+      if (!errors.has(error)) throw new TypeError('Expected an RTCError');
+      errorEvents.set(this, { error });
+    }
+  }
+  expose(RTCErrorEvent, errorEvents, ['error']);
 })();

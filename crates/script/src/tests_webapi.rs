@@ -2218,3 +2218,20 @@ fn declarative_shadow_takeover_preserves_options_and_nested_parsing() {
     "#);
     assert_eq!(out, ["closed true true true 0 true", "<section><template shadowrootmode=\"closed\" shadowrootdelegatesfocus=\"\" shadowrootserializable=\"\" shadowrootclonable=\"\"><i>new</i></template></section>", "NotSupportedError", "NotSupportedError", "NotSupportedError"]);
 }
+
+#[test]
+fn rtc_events_dispatch_candidates_and_structured_errors() {
+    let (mut env, mut host) = setup("<!doctype html><body>");
+    let out = run(&mut env, &mut host, r#"
+        const c = new RTCIceCandidate({sdpMid:'audio'});
+        document.addEventListener('icecandidate', e => console.log(e.candidate === c, e.bubbles, e.url));
+        document.dispatchEvent(new RTCPeerConnectionIceEvent('icecandidate', {candidate:c, bubbles:true, url:'stun:localhost'}));
+        const err = new RTCError({errorDetail:'sdp-syntax-error', sdpLineNumber:3}, 'invalid media line');
+        const e = new RTCErrorEvent('error', {error:err});
+        console.log(e.error === err, err instanceof DOMException, err.name, err.message, err.sdpLineNumber, err.sentAlert);
+        const fail = new RTCPeerConnectionIceErrorEvent('icecandidateerror', {port:65537, errorCode:701, errorText:'unreachable'});
+        console.log(fail.port, fail.errorCode, fail.errorText, fail.address);
+        try { new RTCErrorEvent('error', {error:{}}) } catch(e) { console.log(e.name) }
+    "#);
+    assert_eq!(out, ["true true stun:localhost", "true true OperationError invalid media line 3 null", "1 701 unreachable null", "TypeError"]);
+}
