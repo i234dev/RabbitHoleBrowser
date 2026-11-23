@@ -76,7 +76,9 @@ impl Operation {
                     size: self.size(av, bv),
                 },
                 (Repeat { count, auto_fit, tracks }, Repeat { count: n, auto_fit: fit, tracks: other })
-                    if count == n && auto_fit == fit => Repeat {
+                    // Auto-repeat counts depend on layout. Only equal fixed
+                    // repetition counts can be combined before layout.
+                    if count.is_some() && count == n && auto_fit == fit => Repeat {
                         count: *count,
                         auto_fit: *auto_fit,
                         tracks: self.tracks(tracks, other)?,

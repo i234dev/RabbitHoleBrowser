@@ -268,3 +268,17 @@ fn grid_track_effects_reach_layout_and_preserve_repeat_structure() {
         </script>"#);
     assert_eq!(logs(&mut page), ["40", "12px 5fr", "repeat(2, [end] 25px 2fr)", "repeat(3, 10px)"]);
 }
+
+#[test]
+fn auto_repeated_grid_lists_switch_as_a_whole() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<!doctype html><div id=sample></div><script>
+        const effect = sample.animate({gridTemplateColumns:[
+            '10px repeat(auto-fill, 20px)', '40px repeat(auto-fill, 60px)']}, 1000);
+        effect.pause(); effect.currentTime = 250;
+        console.log(getComputedStyle(sample).gridTemplateColumns);
+        effect.currentTime = 750;
+        console.log(getComputedStyle(sample).gridTemplateColumns);
+        </script>"#);
+    assert_eq!(logs(&mut page), ["10px repeat(auto-fill, 20px)", "40px repeat(auto-fill, 60px)"]);
+}
