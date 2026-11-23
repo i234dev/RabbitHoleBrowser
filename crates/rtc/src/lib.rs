@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn peers_exchange_binary_data_over_dtls_sctp() {
+    fn peers_exchange_ordered_empty_and_nonempty_data_over_dtls_sctp() {
         let interfaces = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
         let mut a = Peer::bind(&interfaces).unwrap();
         let mut b = Peer::bind(&interfaces).unwrap();
@@ -394,6 +394,8 @@ mod tests {
         assert!(offer.contains("a=fingerprint:"));
         let answer = b.answer_offer(&offer).unwrap();
         a.accept_answer(&answer).unwrap();
+        let messages: [(bool, &[u8]); 4] = [(false, b""), (true, &[]), (false, b"\0"), (true, &[1, 0, 255])];
+        let mut received = messages.iter();
         let start = Instant::now();
         loop {
             assert!(
@@ -403,14 +405,16 @@ mod tests {
             for event in a.poll().unwrap() {
                 if let PeerEvent::Open { handle, .. } = event {
                     assert_eq!(handle, channel);
-                    assert!(a.send(handle, true, &[1, 0, 255]).unwrap());
+                    for &(binary, data) in &messages {
+                        assert!(a.send(handle, binary, data).unwrap());
+                    }
                 }
             }
             for event in b.poll().unwrap() {
                 if let PeerEvent::Message { binary, data, .. } = event {
-                    assert!(binary);
-                    assert_eq!(data, [1, 0, 255]);
-                    return;
+                    let &(expected_binary, expected_data) = received.next().unwrap();
+                    assert_eq!((binary, data.as_slice()), (expected_binary, expected_data));
+                    if received.len() == 0 { return; }
                 }
             }
             std::thread::sleep(Duration::from_millis(1));
