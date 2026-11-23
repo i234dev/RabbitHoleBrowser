@@ -5,8 +5,8 @@
 # unrecorded date rather than attributing them to an older run.
 test262	JavaScript / test262	46017/46064	2026-11-18 (Europe/Madrid)	Executed ECMAScript files; 0.1.34 JavaScript code (fe3d71e), JIT on (default), normal GC, 8 workers; Linux x86-64 WSL2, profile ci; corpus 2e58f87; 99.93% excluding Intl	docs/benchmarks/test262-2026-11-18-v0.1.34.json	computed
 css	CSS / WPT pixel tests	16398/19627	2026-11-21	Reference-image comparisons across the committed CSS corpus; source 0935148c (0.1.44 CSS/layout code), 12 workers; any-match multiple-reference rule since 0.1.36	docs/benchmarks/wpt-css-2026-11-21-v0.1.44.md	computed
-dom	DOM / WPT dom/*	58877/66251	2026-11-23 (Europe/Madrid)	DOM directory and generated browser variants; WPT 831baf28, engine d9db0456, local HTTP on TheOtherSide; empty pages counted once	docs/benchmarks/wpt-apis-2026-11-23.md	computed
-wpt	Web platform / WPT	1338622/1773649	2026-11-23 (Europe/Madrid)	All 40,172 browser testharness URLs in the pinned WPT manifest; WPT 831baf28, engine d9db0456, local HTTP on TheOtherSide; empty pages counted once	docs/benchmarks/wpt-apis-2026-11-23.md	computed
+dom	DOM / WPT dom/*	58877/66251	2026-11-23 (Europe/Madrid)	DOM directory and generated browser variants; WPT 831baf28, engine 367874b4, local HTTP on TheOtherSide; empty pages counted once	docs/benchmarks/wpt-apis-2026-11-23-367874b4.md	computed
+wpt	Web platform / WPT	1467543/1776087	2026-11-23 (Europe/Madrid)	All 40,172 browser testharness URLs in the pinned WPT manifest; WPT 831baf28, engine 367874b4, local HTTP on TheOtherSide; empty pages counted once	docs/benchmarks/wpt-apis-2026-11-23-367874b4.md	computed
 html	HTML / html5lib	1,935 / 1,945	2026-11-13	Tree-construction tests	README conformance record	recorded
 wasm	WebAssembly spec	66,747 / 66,757 (99.99%)	Date not recorded	Latest recorded spec-suite result; not rerun for every browser build	README conformance record	recorded
 url	WHATWG URL	899 / 899; 278 / 278 setters	Date not recorded	Latest recorded URL parsing and setter tests	README conformance record	recorded
