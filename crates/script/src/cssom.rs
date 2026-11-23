@@ -700,6 +700,15 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
             rabbithole_style::Overflow::Clip => "clip",
         }
         .to_string(),
+        "list-style-type" => {
+            use rabbithole_style::ListStyleType::*;
+            match s.list_style_type {
+                None => "none", Disc => "disc", Circle => "circle", Square => "square",
+                Decimal => "decimal", DecimalLeadingZero => "decimal-leading-zero",
+                LowerAlpha => "lower-alpha", UpperAlpha => "upper-alpha",
+                LowerRoman => "lower-roman", UpperRoman => "upper-roman",
+            }.into()
+        }
         "text-align" => match s.text_align {
             rabbithole_style::TextAlign::Start => "start",
             rabbithole_style::TextAlign::End => "end",

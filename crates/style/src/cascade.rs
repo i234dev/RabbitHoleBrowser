@@ -2148,10 +2148,10 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
             }
         }
     }
-    if tag == "ul" {
+    if tag == "ul" || tag == "li" {
         if let Some(t) = el.attr("type") {
             let t = t.to_ascii_lowercase();
-            if matches!(t.as_str(), "disc" | "circle" | "square") {
+            if matches!(t.as_str(), "disc" | "circle" | "square" | "none") {
                 css.push_str(&format!("list-style-type:{t};"));
             }
         }

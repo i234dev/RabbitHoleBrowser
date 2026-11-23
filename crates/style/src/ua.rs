@@ -19,7 +19,7 @@ legend, listing, main, p, plaintext, pre, search, xmp, article, aside, h1, h2,
 h3, h4, h5, h6, hgroup, nav, section, dir, dd, dl, dt, menu, ol, ul, details,
 summary, fieldset, optgroup, option, marquee, frameset, frame { display: block; }
 
-li { display: list-item; }
+html|li { display: list-item; text-align: match-parent; }
 summary { cursor: pointer; }
 
 blockquote, figure, dl, listing, plaintext, pre, xmp, ol, ul, menu, dir,
@@ -31,10 +31,9 @@ dd { margin-inline-start: 40px; }
 ol, ul, menu, dir { padding-inline-start: 40px; }
 ol { list-style-type: decimal; }
 ul, menu, dir { list-style-type: disc; }
-ul ul, ol ul, menu ul, dir ul { list-style-type: circle; }
-ul ul ul, ol ul ul, ul ol ul, ol ol ul { list-style-type: square; }
-ol ol, ul ol { list-style-type: decimal; }
-ul ul, ol ul, ul ol, ol ol, menu menu { margin-block: 0; }
+:is(dir, menu, ol, ul) :is(dir, menu, ul) { list-style-type: circle; }
+:is(dir, menu, ol, ul) :is(dir, menu, ol, ul) :is(dir, menu, ul) { list-style-type: square; }
+:is(dir, dl, menu, ol, ul) :is(dir, dl, menu, ol, ul) { margin-block: 0; }
 
 h1 { font-size: 2em; font-weight: bold; margin-block: 0.67em; }
 h2 { font-size: 1.5em; font-weight: bold; margin-block: 0.83em; }
@@ -42,7 +41,6 @@ h3 { font-size: 1.17em; font-weight: bold; margin-block: 1em; }
 h4 { font-size: 1em; font-weight: bold; margin-block: 1.33em; }
 h5 { font-size: 0.83em; font-weight: bold; margin-block: 1.67em; }
 h6 { font-size: 0.67em; font-weight: bold; margin-block: 2.33em; }
-article h1, aside h1, nav h1, section h1 { font-size: 1.5em; margin-block: 0.83em; }
 
 hr { color: gray; border-style: solid; border-width: 1px; margin: 0.5em auto; overflow: hidden; }
 fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 2px solid #c0c0c0; }
@@ -107,6 +105,7 @@ input, select, button, textarea {
   color: black; appearance: auto; text-overflow: clip;
 }
 input, select, textarea { white-space: nowrap; overflow: hidden; }
+html|input:not([type=range i], [type=checkbox i], [type=radio i]) { overflow: clip; }
 input { border: 1px solid #767676; padding: 2px 3px; background-color: white; width: 11em; cursor: text; }
 input[type=search i] { box-sizing: border-box; width: calc(11em + 8px); }
 input[type=hidden i] { display: none; }
@@ -176,7 +175,7 @@ audio[controls] { display: inline-block; width: 300px; height: 54px; background-
 /* ---- misc ---- */
 details > summary:first-of-type { display: list-item; list-style-type: none; }
 details:not([open]) > :not(summary) { display: none; }
-marquee { display: block; overflow: hidden; white-space: nowrap; }
+marquee { display: block; overflow: hidden; white-space: nowrap; text-align: initial; }
 dialog[open] { display: block; position: absolute; left: 0; right: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 1em; background-color: white; color: black; }
 dialog:modal { position: fixed; top: 0; bottom: 0; max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em); overflow: auto; }
 html|*[popover]:not(:popover-open):not(:modal) { display: none; }

@@ -1162,3 +1162,17 @@ fn inherited_currentcolor_values_use_the_childs_color() {
     let (doc, t) = styled("<p>x</p>", "p { color: rgb(255, 0, 0); background-color: color-mix(in srgb, currentColor, rgb(0, 0, 255)) }");
     assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(128, 0, 128));
 }
+
+#[test]
+fn html_headings_list_alignment_and_input_clipping_use_their_ua_defaults() {
+    let (doc, tree) = styled("<article><section><h1>Title</h1></section></article><dir><ul dir=rtl><li type=sQuArE>item</li></ul></dir><input type=text>", "");
+    let heading = style_of(&doc,&tree,"h1");
+    assert_eq!(heading.font_size,32.0);
+    assert_eq!(style_of(&doc,&tree,"li").text_align,TextAlign::Right);
+    assert_eq!(style_of(&doc,&tree,"li").list_style_type,ListStyleType::Square);
+    assert_eq!(style_of(&doc,&tree,"ul").margin.top,Length::Px(0.0));
+    let (markers, styles) = styled("<ul type=NoNe><li>marker</li></ul>", "");
+    assert_eq!(style_of(&markers,&styles,"li").list_style_type,ListStyleType::None);
+    let input = style_of(&doc,&tree,"input");
+    assert_eq!((input.overflow_x,input.overflow_y),(Overflow::Clip,Overflow::Clip));
+}
