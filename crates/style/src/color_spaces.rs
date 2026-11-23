@@ -180,6 +180,46 @@ fn polar(c: f64, h: f64) -> (f64, f64) {
     (c * r.cos(), c * r.sin())
 }
 
+const P3_TO_XYZ65: [f64; 9] = [0.4865709486482162, 0.26566769316909306, 0.1982172852343625, 0.2289745640697488, 0.6917385218365064, 0.079286914093745, 0.0, 0.04511338185890264, 1.043944368900976];
+const A98_TO_XYZ65: [f64; 9] = [0.5766690429101305, 0.1855582379065463, 0.1882286462349947, 0.29734497525053605, 0.6273635662554661, 0.0752914584939978, 0.02703136138641234, 0.07068885253582723, 0.9913375368376388];
+const REC2020_TO_XYZ65: [f64; 9] = [0.6369580483012914, 0.14461690358620832, 0.1688809751641721, 0.2627002120112671, 0.6779980715188708, 0.05930171646986196, 0.0, 0.028072693049087428, 1.060985057710791];
+const PROPHOTO_TO_XYZ50: [f64; 9] = [0.7977604896723027, 0.13518583717574031, 0.0313493495815248, 0.2880711282292934, 0.7118432178101014, 0.00008565396060525902, 0.0, 0.0, 0.8251046025104601];
+
+// All profile matrices are fixed, nonsingular RGB/XYZ transforms. Compute
+// the inverse at compile time from the same primaries used for decoding.
+const fn inverse(m: [f64; 9]) -> [f64; 9] {
+    let [a,b,c,d,e,f,g,h,i] = m;
+    let det = a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g);
+    [(e*i-f*h)/det,(c*h-b*i)/det,(b*f-c*e)/det,
+     (f*g-d*i)/det,(a*i-c*g)/det,(c*d-a*f)/det,
+     (d*h-e*g)/det,(b*g-a*h)/det,(a*e-b*d)/det]
+}
+
+fn predefined_coordinates(space: &str, linear: Rgb) -> Option<Rgb> {
+    const TO_P3: [f64; 9] = inverse(P3_TO_XYZ65);
+    const TO_A98: [f64; 9] = inverse(A98_TO_XYZ65);
+    const TO_REC2020: [f64; 9] = inverse(REC2020_TO_XYZ65);
+    const TO_PROPHOTO: [f64; 9] = inverse(PROPHOTO_TO_XYZ50);
+    let xyz = || mul(&LSRGB_TO_XYZ65,linear);
+    Some(match space {
+        "srgb" => linear.map(gamma_encode),
+        "srgb-linear" => linear,
+        "xyz" | "xyz-d65" => xyz(),
+        "xyz-d50" => mul(&D65_TO_D50,xyz()),
+        "display-p3" => mul(&TO_P3,xyz()).map(gamma_encode),
+        "display-p3-linear" => mul(&TO_P3,xyz()),
+        "a98-rgb" => mul(&TO_A98,xyz()).map(|v| v.signum()*v.abs().powf(256.0/563.0)),
+        "prophoto-rgb" => mul(&TO_PROPHOTO,mul(&D65_TO_D50,xyz())).map(|v| {
+            if v.abs() <= 1.0/512.0 { 16.0*v } else { v.signum()*v.abs().powf(1.0/1.8) }
+        }),
+        "rec2020" => mul(&TO_REC2020,xyz()).map(|v| {
+            let a = 1.09929682680944;
+            if v.abs() < 0.018053968510807 { 4.5*v } else { v.signum()*(a*v.abs().powf(0.45)-(a-1.0)) }
+        }),
+        _ => return None,
+    })
+}
+
 /// `color(<space> r g b)`: linear-light sRGB of the color.
 fn predefined(space: &str, v: Rgb) -> Option<Rgb> {
     let rgb_space = |m: &[f64; 9], decode: &dyn Fn(f64) -> f64| mul(&XYZ65_TO_LSRGB, mul(m, [decode(v[0]), decode(v[1]), decode(v[2])]));
@@ -187,19 +227,19 @@ fn predefined(space: &str, v: Rgb) -> Option<Rgb> {
         "srgb" => [gamma_decode(v[0]), gamma_decode(v[1]), gamma_decode(v[2])],
         "srgb-linear" => v,
         "display-p3" => rgb_space(
-            &[0.4865709486482162, 0.26566769316909306, 0.1982172852343625, 0.2289745640697488, 0.6917385218365064, 0.079286914093745, 0.0, 0.04511338185890264, 1.043944368900976],
+            &P3_TO_XYZ65,
             &gamma_decode,
         ),
         "display-p3-linear" => rgb_space(
-            &[0.4865709486482162, 0.26566769316909306, 0.1982172852343625, 0.2289745640697488, 0.6917385218365064, 0.079286914093745, 0.0, 0.04511338185890264, 1.043944368900976],
+            &P3_TO_XYZ65,
             &|x: f64| x,
         ),
         "a98-rgb" => rgb_space(
-            &[0.5766690429101305, 0.1855582379065463, 0.1882286462349947, 0.29734497525053605, 0.6273635662554661, 0.0752914584939978, 0.02703136138641234, 0.07068885253582723, 0.9913375368376388],
+            &A98_TO_XYZ65,
             &|x: f64| x.signum() * x.abs().powf(563.0 / 256.0),
         ),
         "rec2020" => rgb_space(
-            &[0.6369580483012914, 0.14461690358620832, 0.1688809751641721, 0.2627002120112671, 0.6779980715188708, 0.05930171646986196, 0.0, 0.028072693049087428, 1.060985057710791],
+            &REC2020_TO_XYZ65,
             &|x: f64| {
                 let (a, b) = (1.09929682680944, 0.018053968510807);
                 let s = x.signum();
@@ -214,7 +254,7 @@ fn predefined(space: &str, v: Rgb) -> Option<Rgb> {
                 s * if x <= 16.0 / 512.0 { x / 16.0 } else { x.powf(1.8) }
             };
             let xyz50 = mul(
-                &[0.7977604896723027, 0.13518583717574031, 0.0313493495815248, 0.2880711282292934, 0.7118432178101014, 0.00008565396060525902, 0.0, 0.0, 0.8251046025104601],
+                &PROPHOTO_TO_XYZ50,
                 [d(v[0]), d(v[1]), d(v[2])],
             );
             mul(&XYZ65_TO_LSRGB, mul(&D50_TO_D65, xyz50))
@@ -411,6 +451,16 @@ impl ComputedColor {
         let [Token::Function(f), rest @ ..] = c else { return None };
         let f = f.to_ascii_lowercase();
         if f == "alpha" { return replace_alpha(c).map(|(_, color)| std::rc::Rc::new(color)); }
+        if f == "color-mix" {
+            let (linear, alpha, mut space) = color_mix(c)?;
+            // Polar sRGB mixes have an sRGB computed value. Other spaces
+            // retain their coordinates, including values outside the gamut.
+            if matches!(space, InterpSpace::Hsl | InterpSpace::Hwb) { space = InterpSpace::Srgb; }
+            let (hue, v) = to_interp(linear, space);
+            let mut channels = v.map(|n| Some(n as f32));
+            if matches!(space, InterpSpace::Lch | InterpSpace::Oklch) { channels[2] = hue.map(|h| h as f32); }
+            return Some(std::rc::Rc::new(Self { space: space.css_name(), channels, alpha: Some(alpha as f32) }));
+        }
         let relative = rest.iter().find(|t| !matches!(t, Token::Whitespace))
             .is_some_and(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from")));
         let resolved;
@@ -507,7 +557,7 @@ fn lightness_ends(lin: Rgb, l: f64, max: f64) -> Rgb {
 }
 
 fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
-    if f == "color-mix" { return color_mix(c); }
+    if f == "color-mix" { return color_mix(c).map(|(color,alpha,_)| (color,alpha)); }
     let (vals, a) = args(c)?;
     Some(match f {
         "hwb" => {
@@ -633,13 +683,7 @@ fn relative_components(f: &str, c: &[Token]) -> Option<Vec<Token>> {
         "color" => {
             let [[Token::Ident(space)], rest @ ..] = rest else { return None };
             let space = space.to_ascii_lowercase();
-            let v = match space.as_str() {
-                "srgb" => srgb,
-                "srgb-linear" => lin,
-                "xyz" | "xyz-d65" => mul(&LSRGB_TO_XYZ65, lin),
-                "xyz-d50" => mul(&D65_TO_D50, mul(&LSRGB_TO_XYZ65, lin)),
-                _ => return None,
-            };
+            let v = predefined_coordinates(&space,lin)?;
             let names = if space.starts_with("xyz") { ["x", "y", "z"] } else { ["r", "g", "b"] };
             (names, v, rest)
         }
@@ -708,6 +752,12 @@ pub enum InterpSpace {
     #[default]
     Srgb,
     SrgbLinear,
+    DisplayP3,
+    DisplayP3Linear,
+    A98Rgb,
+    ProPhotoRgb,
+    Rec2020,
+    XyzD50,
     Oklab,
     Lab,
     Xyz,
@@ -732,6 +782,18 @@ pub struct ColorInterp {
     pub hue: HueMethod,
 }
 
+impl InterpSpace {
+    pub fn css_name(self) -> &'static str {
+        match self {
+            Self::Srgb => "srgb", Self::SrgbLinear => "srgb-linear",
+            Self::DisplayP3 => "display-p3", Self::DisplayP3Linear => "display-p3-linear",
+            Self::A98Rgb => "a98-rgb", Self::ProPhotoRgb => "prophoto-rgb", Self::Rec2020 => "rec2020",
+            Self::Xyz => "xyz-d65", Self::XyzD50 => "xyz-d50", Self::Lab => "lab", Self::Oklab => "oklab",
+            Self::Lch => "lch", Self::Oklch => "oklch", Self::Hsl => "hsl", Self::Hwb => "hwb",
+        }
+    }
+}
+
 impl ColorInterp {
     /// Parse `in <space> [<hue-method> hue]` from identifier words.
     pub fn parse(words: &[String]) -> Option<ColorInterp> {
@@ -739,11 +801,17 @@ impl ColorInterp {
             return None;
         }
         let space = match words[1].as_str() {
-            "srgb" | "display-p3" | "a98-rgb" | "prophoto-rgb" | "rec2020" => InterpSpace::Srgb,
+            "srgb" => InterpSpace::Srgb,
+            "display-p3" => InterpSpace::DisplayP3,
+            "display-p3-linear" => InterpSpace::DisplayP3Linear,
+            "a98-rgb" => InterpSpace::A98Rgb,
+            "prophoto-rgb" => InterpSpace::ProPhotoRgb,
+            "rec2020" => InterpSpace::Rec2020,
             "srgb-linear" => InterpSpace::SrgbLinear,
             "oklab" => InterpSpace::Oklab,
             "lab" => InterpSpace::Lab,
-            "xyz" | "xyz-d65" | "xyz-d50" => InterpSpace::Xyz,
+            "xyz" | "xyz-d65" => InterpSpace::Xyz,
+            "xyz-d50" => InterpSpace::XyzD50,
             "hsl" => InterpSpace::Hsl,
             "hwb" => InterpSpace::Hwb,
             "lch" => InterpSpace::Lch,
@@ -805,6 +873,8 @@ fn to_interp(linear: Rgb, space: InterpSpace) -> (Option<f64>, Rgb) {
     let srgb = linear.map(gamma_encode);
     let lin = || linear;
     match space {
+        InterpSpace::DisplayP3 | InterpSpace::DisplayP3Linear | InterpSpace::A98Rgb | InterpSpace::ProPhotoRgb | InterpSpace::Rec2020 | InterpSpace::XyzD50 =>
+            (None, predefined_coordinates(space.css_name(),linear).expect("predefined interpolation profile")),
         InterpSpace::Srgb => (None, srgb),
         InterpSpace::SrgbLinear => (None, lin()),
         InterpSpace::Oklab => (None, linear_to_oklab(lin())),
@@ -832,6 +902,8 @@ fn to_interp(linear: Rgb, space: InterpSpace) -> (Option<f64>, Rgb) {
 
 fn from_interp(h: f64, v: Rgb, space: InterpSpace) -> Rgb {
     let lin = match space {
+        InterpSpace::DisplayP3 | InterpSpace::DisplayP3Linear | InterpSpace::A98Rgb | InterpSpace::ProPhotoRgb | InterpSpace::Rec2020 | InterpSpace::XyzD50 =>
+            predefined(space.css_name(),v).expect("predefined interpolation profile"),
         InterpSpace::Srgb => [gamma_decode(v[0]), gamma_decode(v[1]), gamma_decode(v[2])],
         InterpSpace::SrgbLinear => v,
         InterpSpace::Oklab => oklab_to_linear(v[0], v[1], v[2]),
@@ -957,15 +1029,12 @@ fn interpolate_linear(a: (Rgb, f64), b: (Rgb, f64), t: f64, m: ColorInterp) -> (
     (from_interp(h, v, m.space), alpha.clamp(0.0, 1.0))
 }
 
-fn color_mix(c: &[Token]) -> Option<(Rgb, f64)> {
+fn color_mix(c: &[Token]) -> Option<(Rgb, f64, InterpSpace)> {
     let parts = split_top_commas(strip(c));
     if parts.len() != 3 {
         return None;
     }
-    let space: Vec<String> = components(parts[0]).iter().filter_map(|t| match t {
-        [Token::Ident(s)] => Some(s.to_ascii_lowercase()),
-        _ => None,
-    }).collect();
+    let space: Vec<String> = components(parts[0]).into_iter().map(crate::values::ident).collect::<Option<_>>()?;
     if space.first().map(String::as_str) != Some("in") || space.len() < 2 {
         return None;
     }
@@ -976,7 +1045,10 @@ fn color_mix(c: &[Token]) -> Option<(Rgb, f64)> {
         let mut pct = None;
         for comp in comps {
             if let [Token::Percentage(p)] = comp {
+                if pct.is_some() || !(0.0..=100.0).contains(p) { return None; }
                 pct = Some(*p as f64 / 100.0);
+            } else if color.is_some() {
+                return None;
             } else if let Some(w) = parse_wide(comp) {
                 color = Some(([w[0] as f64, w[1] as f64, w[2] as f64], w[3] as f64));
             } else {
@@ -1000,7 +1072,7 @@ fn color_mix(c: &[Token]) -> Option<(Rgb, f64)> {
     }
     let alpha_mult = sum.min(1.0);
     let (lin, alpha) = interpolate_linear(c1, c2, p2 / sum, interp);
-    Some((lin, alpha * alpha_mult))
+    Some((lin, alpha * alpha_mult, interp.space))
 }
 
 #[cfg(test)]
@@ -1008,6 +1080,25 @@ mod tests {
     use crate::values::{parse_color, ColorValue};
     use rabbithole_css::Tokenizer;
     use rabbithole_gfx::Color;
+
+    #[test]
+    fn color_mixes_keep_their_profile_and_unclipped_channels() {
+        for space in ["display-p3","display-p3-linear","a98-rgb","rec2020","prophoto-rgb","xyz-d50"] {
+            let input = format!("color-mix(in {space}, color({space} 0.2 0.3 1.2), color({space} 0.6 0.7 1.4))");
+            let css = super::ComputedColor::parse(&Tokenizer::tokenize(&input)).unwrap();
+            assert_eq!(css.space,space);
+            for (actual,expected) in css.channels.into_iter().zip([0.4,0.5,1.3]) {
+                assert!((actual.unwrap() - expected).abs() < 0.0001,"{input}: {css:?}");
+            }
+        }
+        let polar = super::ComputedColor::parse(&Tokenizer::tokenize("color-mix(in hsl, red, lime)")).unwrap();
+        assert_eq!(polar.space,"srgb");
+        assert!(polar.channels[0].unwrap() > 0.999 && polar.channels[1].unwrap() > 0.999 && polar.channels[2].unwrap() < 0.001);
+        for bad in ["color-mix(in srgb 3, red, blue)", "color-mix(in srgb, red red, blue)",
+                    "color-mix(in srgb, red 20% 30%, blue)", "color-mix(in srgb, red 120%, blue)"] {
+            assert!(color(bad).is_none(),"{bad}");
+        }
+    }
 
     fn color(s: &str) -> Option<Color> {
         match parse_color(&Tokenizer::tokenize(s))? {
