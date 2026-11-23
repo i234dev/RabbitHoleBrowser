@@ -2185,3 +2185,18 @@ fn web_crypto_derivation_resumes_across_blocks() {
     "#);
     assert_eq!(out, ["fecfc52d97412573ed2650d10759e86dc7e0c198b2b7331df1e32516fb75d443aa8cbaadbc23a0e835aa0cf5c038e4ef26af9146a9a603cc", "TypeError", "OperationError"]);
 }
+
+#[test]
+fn enumerated_attributes_preserve_raw_values_and_reflect_canonical_states() {
+    let out = result_of("<body><img id=im><span id=txt></span>", r#"
+        const img = document.getElementById('im'), txt=document.getElementById('txt');
+        txt.dir = ' RtL '; const invalid=txt.dir; txt.dir='RtL';
+        img.referrerPolicy='SAME-ORIGIN';
+        img.crossOrigin='invalid'; const anonymous=img.crossOrigin; img.crossOrigin=null;
+        document.dir='LtR';
+        txt.getAttribute=()=>{throw new Error('page override')};
+        window.result=[invalid,txt.dir,img.referrerPolicy,anonymous,img.crossOrigin===null,
+          document.dir,document.documentElement.getAttribute('dir')].join('|');
+    "#);
+    assert_eq!(out, "'|rtl|same-origin|anonymous|true|ltr|LtR'");
+}

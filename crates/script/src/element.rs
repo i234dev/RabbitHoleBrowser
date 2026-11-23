@@ -2609,7 +2609,7 @@ pub(crate) fn install(realm: &mut Realm) {
     hacc(realm, "offsetTop", e_offset_top, None);
     hacc(realm, "offsetLeft", e_offset_left, None);
     hacc(realm, "offsetParent", e_offset_parent, None);
-    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("dir", "dir"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize"), ("nonce", "nonce"), ("enterKeyHint", "enterkeyhint"), ("inputMode", "inputmode"), ("popover", "popover")] {
+    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize"), ("nonce", "nonce"), ("popover", "popover")] {
         reflect(realm, html, prop, attr, Reflect::Str);
     }
     reflect(realm, html, "draggable", "draggable", Reflect::Bool);
@@ -2709,7 +2709,7 @@ pub(crate) fn install(realm: &mut Realm) {
         realm.define_accessor(a, name, Some(g), None, ACC);
     }
     realm.define_method(a, "toString", 0, a_to_string);
-    for (p, at) in [("target", "target"), ("rel", "rel"), ("download", "download"), ("hreflang", "hreflang"), ("type", "type"), ("referrerPolicy", "referrerpolicy"), ("ping", "ping"), ("name", "name")] {
+    for (p, at) in [("target", "target"), ("rel", "rel"), ("download", "download"), ("hreflang", "hreflang"), ("type", "type"), ("ping", "ping"), ("name", "name")] {
         reflect(realm, a, p, at, Reflect::Str);
     }
     realm.define_accessor(a, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
@@ -2844,7 +2844,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(img, "width", Some(e_offset_width), Some(img_width_set), ACC);
     realm.define_accessor(img, "height", Some(e_offset_height), Some(img_height_set), ACC);
     realm.define_method(img, "decode", 0, img_decode);
-    for (p, at) in [("alt", "alt"), ("sizes", "sizes"), ("crossOrigin", "crossorigin"), ("loading", "loading"), ("decoding", "decoding"), ("referrerPolicy", "referrerpolicy"), ("useMap", "usemap"), ("fetchPriority", "fetchpriority")] {
+    for (p, at) in [("alt", "alt"), ("sizes", "sizes"), ("useMap", "usemap")] {
         reflect(realm, img, p, at, Reflect::Str);
     }
     reflect(realm, img, "isMap", "ismap", Reflect::Bool);
@@ -2854,7 +2854,7 @@ pub(crate) fn install(realm: &mut Realm) {
     // --- HTMLScriptElement
     let script = define_class(realm, "HTMLScriptElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(script, "text", Some(script_text_get), Some(script_text_set), ACC);
-    for (p, at) in [("type", "type"), ("charset", "charset"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("referrerPolicy", "referrerpolicy"), ("nonce", "nonce")] {
+    for (p, at) in [("type", "type"), ("charset", "charset"), ("integrity", "integrity"), ("nonce", "nonce")] {
         reflect(realm, script, p, at, Reflect::Str);
     }
     reflect(realm, script, "src", "src", Reflect::Url);
@@ -2870,7 +2870,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(link, "sheet", Some(style_sheet), None, ACC);
     realm.define_accessor(link, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
     reflect(realm, link, "href", "href", Reflect::Url);
-    for (p, at) in [("rel", "rel"), ("type", "type"), ("media", "media"), ("as", "as"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("hreflang", "hreflang"), ("referrerPolicy", "referrerpolicy"), ("imageSrcset", "imagesrcset")] {
+    for (p, at) in [("rel", "rel"), ("type", "type"), ("media", "media"), ("integrity", "integrity"), ("hreflang", "hreflang"), ("imageSrcset", "imagesrcset")] {
         // (`sizes` is a DOMTokenList, reflected from the table in html.js.)
         reflect(realm, link, p, at, Reflect::Str);
     }
@@ -2881,7 +2881,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(iframe, "contentDocument", Some(iframe_content_document), None, ACC);
     reflect(realm, iframe, "src", "src", Reflect::Url);
     // (`sandbox` is a DOMTokenList, reflected from the table in html.js.)
-    for (p, at) in [("name", "name"), ("allow", "allow"), ("srcdoc", "srcdoc"), ("loading", "loading"), ("referrerPolicy", "referrerpolicy"), ("width", "width"), ("height", "height"), ("title", "title")] {
+    for (p, at) in [("name", "name"), ("allow", "allow"), ("srcdoc", "srcdoc"), ("width", "width"), ("height", "height"), ("title", "title")] {
         reflect(realm, iframe, p, at, Reflect::Str);
     }
     reflect(realm, iframe, "allowFullscreen", "allowfullscreen", Reflect::Bool);
@@ -2943,7 +2943,7 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, media, "src", "src", Reflect::Url);
     reflect(realm, media, "currentSrc", "src", Reflect::Url);
     reflect(realm, media, "poster", "poster", Reflect::Url);
-    for (p, at) in [("preload", "preload"), ("crossOrigin", "crossorigin")] {
+    for (p, at) in [("preload", "preload")] {
         reflect(realm, media, p, at, Reflect::Str);
     }
     for (p, at) in [("autoplay", "autoplay"), ("controls", "controls"), ("loop", "loop"), ("muted", "muted"), ("playsInline", "playsinline")] {

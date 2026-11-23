@@ -13,11 +13,39 @@
   const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true }); };
   const method = (C, name, fn) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) hidden(C.prototype, name, fn); };
   // Enumerated attribute limited to known values.
-  const enumAttr = (C, prop, attr, values, missing = '', invalid = missing) => acc(C, prop, function () { const v = this.getAttribute(attr); if (v === null) return missing; const l = v.toLowerCase(); return values.includes(l) ? l : invalid; }, function (v) { this.setAttribute(attr, v); });
+  const {getAttribute, setAttribute, removeAttribute} = Element.prototype;
+  function enumAttr(C, prop, attr, values, missing = '', invalid = missing, empty = invalid) {
+    if (!C) return;
+    Object.defineProperty(C.prototype, prop, {
+      configurable: true, enumerable: true,
+      get() {
+        const raw = getAttribute.call(this, attr);
+        if (raw === null) return missing;
+        if (raw === '') return empty;
+        const keyword = raw.replace(/[A-Z]/g, ch => ch.toLowerCase());
+        return values.includes(keyword) ? keyword : invalid;
+      },
+      set(v) {
+        if (missing === null && v == null) removeAttribute.call(this, attr);
+        else setAttribute.call(this, attr, v);
+      },
+    });
+  }
   const strAttr = (C, prop, attr) => acc(C, prop, function () { return this.getAttribute(attr) || ''; }, function (v) { this.setAttribute(attr, v); });
 
   const POLICIES = ['', 'no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url'];
-  enumAttr(g.HTMLAreaElement, 'referrerPolicy', 'referrerpolicy', POLICIES);
+  enumAttr(g.HTMLElement, 'dir', 'dir', ['ltr', 'rtl', 'auto']);
+  enumAttr(g.HTMLElement, 'enterKeyHint', 'enterkeyhint', ['enter','done','go','next','previous','search','send']);
+  enumAttr(g.HTMLElement, 'inputMode', 'inputmode', ['none','text','decimal','numeric','tel','search','email','url']);
+  for (const C of [g.HTMLAnchorElement,g.HTMLAreaElement,g.HTMLImageElement,g.HTMLIFrameElement,g.HTMLLinkElement,g.HTMLScriptElement])
+    enumAttr(C, 'referrerPolicy', 'referrerpolicy', POLICIES);
+  for (const C of [g.HTMLImageElement,g.HTMLLinkElement,g.HTMLMediaElement,g.HTMLScriptElement])
+    enumAttr(C, 'crossOrigin', 'crossorigin', ['anonymous','use-credentials'], null, 'anonymous');
+  for (const C of [g.HTMLImageElement,g.HTMLIFrameElement])
+    enumAttr(C, 'loading', 'loading', ['eager','lazy'], 'eager');
+  enumAttr(g.HTMLImageElement, 'decoding', 'decoding', ['async','sync','auto'], 'auto');
+  enumAttr(g.HTMLLinkElement, 'as', 'as', ['audio','document','embed','fetch','font','image','json','manifest','object','script','style','track','video','worker']);
+  enumAttr(g.HTMLMediaElement, 'preload', 'preload', ['none','metadata','auto'], 'metadata', 'metadata', 'auto');
   strAttr(g.HTMLAreaElement, 'hreflang', 'hreflang');
   strAttr(g.HTMLAreaElement, 'type', 'type');
   enumAttr(g.HTMLInputElement, 'formEnctype', 'formenctype', ['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain'], '', 'application/x-www-form-urlencoded');

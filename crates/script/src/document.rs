@@ -528,6 +528,24 @@ fn d_has_focus(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value>
     Ok(Value::Bool(true))
 }
 
+fn d_dir_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    let value = with_doc(d, |doc| {
+        let raw = doc.html_element().and_then(|root| doc.attr(root, "dir")).unwrap_or("");
+        ["ltr", "rtl", "auto"].into_iter().find(|keyword| raw.eq_ignore_ascii_case(keyword)).unwrap_or("")
+    });
+    Ok(Value::str(value))
+}
+
+fn d_dir_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    let value = arg_str(realm, args, 0)?;
+    if let Some(root) = with_doc(d, |doc| doc.html_element()) {
+        crate::element::set_attribute(NodeRef { doc: d, node: root }, "dir", Some(&value));
+    }
+    Ok(Value::Undefined)
+}
+
 fn d_design_mode(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
     Ok(Value::str(if with_doc(d, |doc| doc.design_mode) { "on" } else { "off" }))
@@ -884,7 +902,8 @@ pub(crate) fn install(realm: &mut Realm) {
     }
     acc(realm, "contentType", d_content_type, None);
     acc(realm, "designMode", d_design_mode, Some(d_design_mode_set));
-    for (name, val) in [("visibilityState", "visible"), ("dir", "")] {
+    acc(realm, "dir", d_dir_get, Some(d_dir_set));
+    for (name, val) in [("visibilityState", "visible")] {
         let data: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(val.to_string());
         let g = realm.new_native_function_full(&format!("get {name}"), 0, d_constant_str, Some(data), vec![], false);
         realm.define_accessor_values(d, name, Some(Value::Object(g)), None, ACC);
