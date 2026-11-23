@@ -911,6 +911,65 @@ pub fn valid_rule_selector_with_namespaces(tokens: &[Token], nested: bool, decla
     parser.parse_list().is_some_and(|list| list.iter().all(valid))
 }
 
+/// Omit redundant universal type selectors and namespace qualifiers. Keep
+/// source slices for significant tokens so CSS escapes and strings survive
+/// serialization. Attribute selectors have different namespace defaults.
+pub fn serialize_type_selectors(source: &str, declarations: &[Token]) -> String {
+    let names: std::collections::HashMap<_, _> = declarations.split(|t| *t == Token::Semicolon)
+        .filter_map(crate::parse_namespace).collect();
+    let default = names.get("");
+    let mut lexer = crate::Tokenizer::new(source);
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    while let Some(token) = lexer.next_token() {
+        let end = lexer.position();
+        tokens.push((token, &source[start..end]));
+        start = end;
+    }
+    let mut result = String::new();
+    let mut contexts = Vec::new();
+    let (mut selector, mut compound) = (true, true);
+    let token = |i| tokens.get(i).map(|(token, _): &(Token, &str)| token);
+    let mut i = 0;
+    while i < tokens.len() {
+        if selector && compound {
+            let mut qualified = false;
+            if matches!(token(i), Some(Token::Ident(_) | Token::Delim('*'))) && token(i+1) == Some(&Token::Delim('|')) {
+                let redundant = match token(i) {
+                    Some(Token::Ident(prefix)) => default.is_some() && names.get(prefix.as_str()) == default,
+                    _ => default.is_none(),
+                };
+                if redundant { i += 2; } else { qualified = true; }
+            }
+            // Without an explicit type, logical pseudo-class subjects can
+            // match any namespace. Preserve an explicit default there.
+            let removable = !qualified && (contexts.is_empty() || default.is_none());
+            if removable && token(i) == Some(&Token::Delim('*')) &&
+                matches!(token(i+1), Some(Token::Delim('.') | Token::Hash(_) | Token::Colon | Token::OpenBracket)) {
+                i += 1;
+            }
+            compound = false;
+            if i == tokens.len() { break; }
+        }
+        let (t, raw) = &tokens[i];
+        match t {
+            Token::Function(name) => {
+                contexts.push(selector);
+                selector = selector && ["is","not","has","where","host","host-context","slotted","matches","-webkit-any","-moz-any"]
+                    .iter().any(|n| name.eq_ignore_ascii_case(n));
+                compound = selector;
+            }
+            Token::OpenBracket | Token::OpenParen => { contexts.push(selector); selector = false; }
+            Token::CloseBracket | Token::CloseParen => { selector = contexts.pop().unwrap_or(false); compound = false; }
+            Token::Whitespace | Token::Comma | Token::Delim('>' | '+' | '~') => compound = selector,
+            _ => compound = false,
+        }
+        if *t == Token::Whitespace { result.push(' '); } else { result.push_str(raw); }
+        i += 1;
+    }
+    result.trim().to_owned()
+}
+
 /// Parse `an+b` micro-syntax from tokens.
 fn parse_nth(toks: &[Token]) -> Option<(i32, i32)> {
     let significant: Vec<_> = toks.iter().filter(|t| **t != Token::Whitespace).collect();

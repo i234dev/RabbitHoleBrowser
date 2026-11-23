@@ -318,20 +318,29 @@
     if (sheet) sheetChanged(sheet);
   }
 
+  function selectorNamespaces(rule) {
+    const sheet = rule[S].sheet;
+    if (!sheet) return '';
+    const declarations = [];
+    for (const r of sheet[S].rules) {
+      if (r instanceof CSSNamespaceRule) declarations.push(r[S].condition);
+      else if (!(r instanceof CSSImportRule || r instanceof CSSLayerStatementRule)) break;
+    }
+    return declarations.join(';');
+  }
+
   class CSSStyleRule extends CSSRule {
-    get selectorText() { return this[S].selector; }
+    get selectorText() {
+      const selector = this[S].selector;
+      if (!/[\s*|]/.test(selector)) return selector;
+      return N.cssomSerializeSelector(selector, selector.includes('|') || selector.includes('*') ? selectorNamespaces(this) : '');
+    }
     set selectorText(v) {
       const selector = `${v}`.trim();
       let parent = this[S].parentRule;
       while (parent && !(parent instanceof CSSStyleRule)) parent = parent[S].parentRule;
-      const declarations = [];
-      if (selector.includes('|') && this[S].sheet) {
-        for (const rule of this[S].sheet[S].rules) {
-          if (rule instanceof CSSNamespaceRule) declarations.push(rule[S].condition);
-          else if (!(rule instanceof CSSImportRule)) break;
-        }
-      }
-      if (!N.cssomValidSelector(selector, !!parent, declarations.join(';'))) return;
+      const namespaces = selector.includes('|') ? selectorNamespaces(this) : '';
+      if (!N.cssomValidSelector(selector, !!parent, namespaces)) return;
       this[S].selector = selector;
       touch(this);
     }
@@ -569,15 +578,15 @@
       }
     } else {
       if (!prelude) return null;
-      r = newRule(CSSStyleRule, TYPES.STYLE_RULE, { selector: prelude.replace(/\s+/g, ' ') });
+      r = newRule(CSSStyleRule, TYPES.STYLE_RULE, { selector: prelude });
       // CSS nesting: nested rules inside the block.
       const nested = block.indexOf('{') >= 0 ? splitNested(block) : null;
       r[S].style = makeDecl(r, nested ? nested.decls : block);
       if (nested) r[S].children = nested.rules.map((c) => parseChunk(c, sheet, r, false)).filter(Boolean);
       r[S].text = () => {
         const decls = r[S].style.cssText;
-        if (!r[S].children.length) return `${r[S].selector} { ${decls}${decls ? ' ' : ''}}`;
-        return `${r[S].selector} {${decls ? ' ' + decls : ''}\n${serializeChildren(r)}\n}`;
+        if (!r[S].children.length) return `${r.selectorText} { ${decls}${decls ? ' ' : ''}}`;
+        return `${r.selectorText} {${decls ? ' ' + decls : ''}\n${serializeChildren(r)}\n}`;
       };
     }
     r[S].sheet = sheet;

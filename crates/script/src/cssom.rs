@@ -349,6 +349,12 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
     Some(tokens_to_css(tokens))
 }
 
+pub(crate) fn cssom_serialize_selector(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let selector = arg_str(realm, args, 0)?;
+    let namespaces = rabbithole_css::Tokenizer::tokenize(&arg_str(realm, args, 1)?);
+    Ok(Value::str(&rabbithole_css::selector::serialize_type_selectors(&selector, &namespaces)))
+}
+
 pub(crate) fn cssom_valid_selector(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let selector = arg_str(realm, args, 0)?;
     let nested = realm.to_boolean(&arg(args, 1));

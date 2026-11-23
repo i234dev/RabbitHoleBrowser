@@ -494,6 +494,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "setAdoptedStyles", 2, set_adopted_styles);
     realm.define_method(o, "cssomTryName", 1, crate::cssom::cssom_try_name);
     realm.define_method(o, "cssomTryDescriptors", 0, crate::cssom::cssom_try_descriptors);
+    realm.define_method(o, "cssomSerializeSelector", 2, crate::cssom::cssom_serialize_selector);
     realm.define_method(o, "cssomNamespace", 1, crate::cssom::cssom_namespace);
     realm.define_method(o, "cssomValidSelector", 3, crate::cssom::cssom_valid_selector);
     realm.define_method(o, "cssomExpandPlace", 2, crate::cssom::cssom_expand_place);

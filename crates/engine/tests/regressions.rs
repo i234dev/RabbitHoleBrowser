@@ -1631,3 +1631,19 @@ fn alignment_shorthands_expand_and_follow_their_longhand_priorities() {
     let expected = "safe center,end,important,,end start,end start,,";
     assert_eq!(result,format!("{expected}|{expected}"));
 }
+
+#[test]
+fn selector_text_preserves_namespace_matching_and_quoted_attribute_spaces() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=namespaces>@namespace url(urn:default); @namespace a url(urn:default); @namespace b url(urn:other); a|*.x > b|*[*|key='a  b'] { color: red }</style>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const sheet = document.getElementById('namespaces').sheet, rule = sheet.cssRules[3];
+        const parsed = rule.selectorText;
+        rule.selectorText = '*|*.x > a|span';
+        const assigned = rule.selectorText;
+        const plain = new CSSStyleSheet();
+        plain.replaceSync('*|*#a > *|span:is(*.x) { color: red }');
+        return [parsed,assigned,plain.cssRules[0].selectorText].join(' / ');
+    })()"#);
+    assert_eq!(result, ".x > b|*[*|key='a  b'] / *|*.x > span / #a > span:is(.x)");
+}

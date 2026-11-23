@@ -50,6 +50,9 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    /// Unconsumed byte position in the original CSS source.
+    pub fn position(&self) -> usize { self.pos }
+
     pub fn tokenize(src: &'a str) -> Vec<Token> {
         let mut t = Tokenizer::new(src);
         let mut out = Vec::new();
