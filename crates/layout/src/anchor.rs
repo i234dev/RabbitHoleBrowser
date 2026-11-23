@@ -146,7 +146,59 @@ fn reversed(horizontal: bool, (mode,dir): Writing) -> bool {
     }
 }
 
+/// Physical destination of the four source sides (left, right, top, bottom).
+/// Composing this permutation also handles flip-start in RTL and vertical text.
+#[derive(Clone, Copy)]
+struct AxisMap([usize;4]);
+
+impl AxisMap {
+    fn new(flips: &[rabbithole_style::props::anchor::Flip], writing: Writing) -> Self {
+        use rabbithole_style::props::anchor::Flip;
+        let mut sides = [0,1,2,3];
+        for flip in flips {
+            for side in &mut sides {
+                let horizontal = *side < 2;
+                if *flip == Flip::Start {
+                    *side ^= 2;
+                    if reversed(true,writing) != reversed(false,writing) { *side ^= 1; }
+                } else {
+                    let block = horizontal == writing.0.is_vertical();
+                    let reflected = match flip { Flip::X => horizontal, Flip::Y => !horizontal,
+                        Flip::Block => block, Flip::Inline => !block, Flip::Start => unreachable!() };
+                    if reflected { *side ^= 1; }
+                }
+            }
+        }
+        Self(sides)
+    }
+
+    fn side(self, horizontal: bool, end: bool) -> (bool,bool) {
+        let side = self.0[2*usize::from(!horizontal) + usize::from(end)];
+        (side < 2,side%2 == 1)
+    }
+
+    fn edges(self, edges: &mut rabbithole_style::Edges<Length>) {
+        let mut v = [Length::Auto;4];
+        for (to, value) in self.0.into_iter().zip([edges.left,edges.right,edges.top,edges.bottom]) { v[to] = value; }
+        [edges.left,edges.right,edges.top,edges.bottom] = v;
+    }
+
+    fn regions(self, source: [Region;2]) -> [Region;2] {
+        let mut regions = [Region::All;2];
+        for (i,region) in source.into_iter().enumerate() {
+            let (horizontal,flip) = self.side(i==0,false);
+            regions[usize::from(!horizontal)] = if flip { match region {
+                Region::Before => Region::After, Region::After => Region::Before,
+                Region::SpanBefore => Region::SpanAfter, Region::SpanAfter => Region::SpanBefore,
+                r => r,
+            } } else { region };
+        }
+        regions
+    }
+}
+
 struct QueryBox {
+    axes: AxisMap,
     cb: Rect,
     writing: Writing,
     own: Writing,
@@ -154,7 +206,8 @@ struct QueryBox {
 
 impl QueryBox {
     fn pixels(&self, dim: &Dimension, anchor: Rect, horizontal: bool, end: bool) -> Option<f32> {
-        let axis = |rect: Rect| if horizontal { (rect.x,rect.w) } else { (rect.y,rect.h) };
+        let (destination, far_edge) = self.axes.side(horizontal,end);
+        let axis = |rect: Rect| if destination { (rect.x,rect.w) } else { (rect.y,rect.h) };
         let (start,len) = axis(anchor);
         let ratio = match *dim {
             Dimension::Size(name) => {
@@ -167,7 +220,7 @@ impl QueryBox {
                     Some("self-inline") => !self.own.0.is_vertical(),
                     _ => horizontal,
                 };
-                return Some(if width {anchor.w} else {anchor.h});
+                return Some(if self.axes.side(width,false).0 {anchor.w} else {anchor.h});
             }
             Dimension::Percentage(p) => if reversed(horizontal,self.writing) { 1.-p/100. } else { p/100. },
             Dimension::Side("center") => 0.5,
@@ -185,8 +238,9 @@ impl QueryBox {
             }
         };
         let (origin,extent) = axis(self.cb);
+        let ratio = if end != far_edge { 1.-ratio } else { ratio };
         let offset = start + len*ratio - origin;
-        Some(if end { extent-offset } else { offset })
+        Some(if far_edge { extent-offset } else { offset })
     }
 
     fn length(&self, length: Length, horizontal: bool, end: bool, base: f32,
@@ -210,8 +264,17 @@ impl QueryBox {
             (&mut s.width,true,false,false),(&mut s.min_width,true,false,false),(&mut s.max_width,true,false,false),
             (&mut s.height,false,false,false),(&mut s.min_height,false,false,false),(&mut s.max_height,false,false,false),
         ] {
-            let width_base = if margin { !self.writing.0.is_vertical() } else { horizontal };
+            let width_base = if margin { !self.writing.0.is_vertical() } else { self.axes.side(horizontal,false).0 };
             *value = self.length(*value,horizontal,end,if width_base {self.cb.w} else {self.cb.h},lookup);
+        }
+        self.axes.edges(&mut s.inset);
+        self.axes.edges(&mut s.margin);
+        if !self.axes.side(true,false).0 {
+            std::mem::swap(&mut s.width,&mut s.height);
+            std::mem::swap(&mut s.min_width,&mut s.min_height);
+            std::mem::swap(&mut s.max_width,&mut s.max_height);
+            std::mem::swap(&mut s.align_self,&mut s.justify_self);
+            std::mem::swap(&mut s.align_self_flags,&mut s.justify_self_flags);
         }
         s
     }
@@ -235,7 +298,7 @@ pub(crate) fn advance_fallbacks(ctx: &LayoutContext, tree: &LayoutTree, pending:
         let start = choices.get(&id).map_or(0, |index| index+1);
         let scoped = ctx.styles.position_tries.get(&ctx.doc.tree_root(id));
         for (i, option) in list.iter().enumerate().skip(start) {
-            if let rabbithole_style::props::anchor::TryOption::Named(name) = option {
+            if let rabbithole_style::props::anchor::TryOption::Rule { name: Some(name), .. } = option {
                 if !scoped.is_some_and(|rules| rules.contains_key(name)) { continue; }
             }
             choices.insert(id,i);
@@ -275,7 +338,8 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree, choices: &HashM
                     style.position_area = *area;
                     Some(style)
                 }
-                TryOption::Named(name) => {
+                TryOption::Rule { name: None, .. } => Some((**base).clone()),
+                TryOption::Rule { name: Some(name), .. } => {
                     let rules = ctx.styles.position_tries.get(&ctx.doc.tree_root(id))?;
                     let parent = ctx.doc.flat_parent(id).and_then(|n| ctx.styles.get(n)).unwrap_or(base);
                     Some(rabbithole_style::cascade::apply_over(base,parent,rules.get(name)?,
@@ -299,14 +363,17 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree, choices: &HashM
             ctx.doc.popover_invoker(id).and_then(bounds)
         };
         let (cb,writing) = container(ctx,tree,cb_node);
+        let flips = match option { Some(rabbithole_style::props::anchor::TryOption::Rule { flips, .. }) => flips.as_slice(), _ => &[] };
+        let axes = AxisMap::new(flips,writing);
         if trial.is_some() || s.has_anchor_lengths() {
-            let geometry = QueryBox { cb, writing, own:(s.writing_mode,s.direction) };
+            let geometry = QueryBox { axes, cb, writing, own:(s.writing_mode,s.direction) };
             result.lengths.insert(id,std::rc::Rc::new(geometry.resolve(s,&lookup)));
         }
         if s.position_area.is_none() { continue; }
         let Some(anchor) = lookup(None) else { continue };
         let Some((_,coordinates)) = tree.box_and_coordinates(ctx.doc,id) else { continue };
-        let Some([x,y]) = s.position_area.physical(writing,(s.writing_mode,s.direction)) else { continue };
+        let Some(regions) = s.position_area.physical(writing,(s.writing_mode,s.direction)) else { continue };
+        let [x,y] = axes.regions(regions);
         let (left,right,ax) = interval(x,cb.x,cb.right(),anchor.x,anchor.right());
         let (top,bottom,ay) = interval(y,cb.y,cb.bottom(),anchor.y,anchor.bottom());
         result.areas.insert(id,Placement { area: Rect::new(left,top,right-left,bottom-top),

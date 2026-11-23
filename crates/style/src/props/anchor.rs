@@ -213,10 +213,21 @@ impl AnchorScope {
     }
 }
 
-/// A named descriptor block or an area in a position-try-fallbacks list.
+/// A fallback may name a descriptor block and then reflect its values across
+/// one or more axes. Reflections are applied in the author's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flip { Block, Inline, Start, X, Y }
+
+impl Flip {
+    fn css(self) -> &'static str {
+        match self { Self::Block => "flip-block", Self::Inline => "flip-inline", Self::Start => "flip-start",
+            Self::X => "flip-x", Self::Y => "flip-y" }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TryOption {
-    Named(String),
+    Rule { name: Option<String>, flips: Vec<Flip> },
     Area(PositionArea),
 }
 
@@ -225,17 +236,31 @@ impl TryOption {
         if matches!(parts, [p] if crate::values::is_ident(p,"none")) { return Some(Vec::new()); }
         if parts.is_empty() { return None; }
         crate::values::split_commas(parts).iter().map(|group| {
-            if let [p] = group.as_slice() {
-                if let Some(name) = dashed_ident(p) { return Some(Self::Named(name.into())); }
+            if let Some(area) = PositionArea::parse(group) {
+                return (!area.is_none()).then_some(Self::Area(area));
             }
-            PositionArea::parse(group).filter(|a| !a.is_none()).map(Self::Area)
+            if group.is_empty() { return None; }
+            let mut name = None;
+            let mut flips = Vec::new();
+            for (i,part) in group.iter().enumerate() {
+                if let Some(ident) = dashed_ident(part) {
+                    if name.is_some() || (i != 0 && i+1 != group.len()) { return None; }
+                    name = Some(ident.to_owned());
+                } else {
+                    let token = crate::values::ident(part)?;
+                    let flip = [Flip::Block, Flip::Inline, Flip::Start, Flip::X, Flip::Y].into_iter().find(|f| f.css() == token)?;
+                    if flips.contains(&flip) { return None; }
+                    flips.push(flip);
+                }
+            }
+            Some(Self::Rule { name, flips })
         }).collect()
     }
 
     pub fn list_css(list: &[Self], computed: bool) -> String {
         if list.is_empty() { return "none".into(); }
         list.iter().map(|item| match item {
-            Self::Named(n) => n.clone(),
+            Self::Rule { name, flips } => name.as_deref().into_iter().chain(flips.iter().map(|f| f.css())).collect::<Vec<_>>().join(" "),
             Self::Area(a) => a.to_css(computed),
         }).collect::<Vec<_>>().join(", ")
     }

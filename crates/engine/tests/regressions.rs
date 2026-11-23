@@ -1296,6 +1296,21 @@ fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
 }
 
 #[test]
+fn fallback_tactics_reflect_anchor_sides_and_preserve_try_order() {
+    let mut e = engine(true);
+    let mut page=load(&mut e,"<style>#cb{position:relative;width:180px;height:140px}#a{position:absolute;left:120px;top:100px;width:20px;height:20px;anchor-name:--a}#t{position:absolute;position-anchor:--a;width:55px;height:35px;left:anchor(right);top:anchor(bottom);position-try-fallbacks:flip-block,flip-inline,flip-block flip-inline}</style><main id=cb><i id=a></i><div id=t></div></main>");
+    let result=eval(&e,&mut page,r#"(() => {
+        const pos=()=>[t.offsetLeft,t.offsetTop].join(',');
+        const first=pos();
+        cb.style.width='240px';
+        const second=pos();
+        cb.style.height='200px';
+        return [first,second,pos()].join('|');
+    })()"#);
+    assert_eq!(result,"65,65|140,65|140,120");
+}
+
+#[test]
 fn position_try_descriptors_are_live_and_fallbacks_follow_layout() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<style id=rules>@position-try --fit { left: 12px; top: 8px; color:red; height:1px!important } #cb{width:80px;height:60px;position:relative}#target{position:absolute;left:65px;top:0;width:25px;height:12px;position-try-fallbacks:--missing,--fit}</style><div id=cb><i id=target></i></div>");
