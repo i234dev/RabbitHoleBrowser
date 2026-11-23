@@ -76,6 +76,28 @@ fn single_transport_sdp(sdp: &str) -> std::borrow::Cow<'_, str> {
     normalized.into()
 }
 
+/// A passive or simultaneous-open TCP candidate names the remote service
+/// the ICE agent would connect to. The port on an active candidate is unused.
+fn blocked_candidate(candidate: &Candidate) -> bool {
+    candidate.proto() != Protocol::Udp &&
+        candidate.tcptype() != Some(str0m::net::TcpType::Active) &&
+        rabbithole_net::url::is_bad_port(candidate.addr().port())
+}
+
+pub fn restricted_candidate(sdp: &str) -> bool {
+    Candidate::from_sdp_string(sdp.strip_prefix("a=").unwrap_or(sdp)).is_ok_and(|c| blocked_candidate(&c))
+}
+
+fn allowed_remote_sdp(sdp: &str) -> std::borrow::Cow<'_, str> {
+    let blocked = |line: &str| {
+        let Some(text) = line.trim_end_matches(['\r','\n']).strip_prefix("a=") else { return false };
+        text.starts_with("candidate:") && restricted_candidate(text)
+    };
+    if sdp.lines().any(blocked) {
+        sdp.split_inclusive('\n').filter(|line| !blocked(line)).collect::<String>().into()
+    } else { sdp.into() }
+}
+
 impl Peer {
     pub fn bind(addresses: &[IpAddr]) -> io::Result<Self> {
         Self::bind_with_certificate(addresses, None)
@@ -169,7 +191,8 @@ impl Peer {
     }
 
     pub fn answer_offer(&mut self, sdp: &str) -> io::Result<String> {
-        let normalized = single_transport_sdp(sdp);
+        let sdp = allowed_remote_sdp(sdp);
+        let normalized = single_transport_sdp(&sdp);
         let unbundled = matches!(normalized, std::borrow::Cow::Owned(_));
         let offer = SdpOffer::from_sdp_string(&normalized).map_err(io::Error::other)?;
         let answer = self
@@ -197,7 +220,8 @@ impl Peer {
     }
 
     pub fn accept_answer(&mut self, sdp: &str) -> io::Result<()> {
-        let answer = SdpAnswer::from_sdp_string(&single_transport_sdp(sdp)).map_err(io::Error::other)?;
+        let sdp = allowed_remote_sdp(sdp);
+        let answer = SdpAnswer::from_sdp_string(&single_transport_sdp(&sdp)).map_err(io::Error::other)?;
         let pending = self
             .pending
             .take()
@@ -220,9 +244,14 @@ impl Peer {
     }
 
     pub fn add_candidate(&mut self, sdp: &str) -> io::Result<()> {
-        self.rtc
-            .add_remote_candidate(Candidate::from_sdp_string(sdp).map_err(io::Error::other)?);
-        Ok(())
+        self.accept_candidate(sdp).map(|_| ())
+    }
+
+    pub fn accept_candidate(&mut self, sdp: &str) -> io::Result<bool> {
+        let candidate = Candidate::from_sdp_string(sdp.strip_prefix("a=").unwrap_or(sdp)).map_err(io::Error::other)?;
+        if blocked_candidate(&candidate) { return Ok(false); }
+        self.rtc.add_remote_candidate(candidate);
+        Ok(true)
     }
 
     pub fn send(&mut self, handle: u32, binary: bool, bytes: &[u8]) -> io::Result<bool> {
@@ -381,6 +410,22 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
     use std::time::Duration;
+
+    #[test]
+    fn remote_tcp_candidates_obey_port_restrictions_in_sdp_and_trickle() {
+        let line = |proto, port, tail| format!("candidate:1 1 {proto} 2122260223 127.0.0.1 {port} typ host{tail}");
+        let denied = line("tcp", 25, " tcptype passive");
+        let allowed = line("tcp", 8443, " tcptype passive");
+        let active = line("tcp", 9, " tcptype active");
+        let udp = line("udp", 25, "");
+        let desc = format!("v=0\r\na={denied}\r\na={allowed}\r\na={active}\r\na={udp}\r\n");
+        assert_eq!(allowed_remote_sdp(&desc), desc.replace(&format!("a={denied}\r\n"), ""));
+        let mut peer = Peer::bind(&[]).unwrap();
+        assert!(!peer.accept_candidate(&denied).unwrap());
+        assert!(!peer.accept_candidate(&format!("a={denied}")).unwrap());
+        assert!(peer.accept_candidate(&allowed).unwrap());
+        assert!(peer.accept_candidate(&udp).unwrap());
+    }
 
     #[test]
     fn a_single_unbundled_media_section_negotiates_one_transport() {

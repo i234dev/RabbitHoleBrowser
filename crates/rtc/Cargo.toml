@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+rabbithole-net.workspace = true
+
 # Use one provider for the DTLS certificate, handshake and SRTP primitives.
 [target.'cfg(not(windows))'.dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }

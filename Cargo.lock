@@ -2251,6 +2251,7 @@ dependencies = [
 name = "rabbithole-rtc"
 version = "0.1.44"
 dependencies = [
+ "rabbithole-net",
  "rcgen",
  "str0m",
  "time",

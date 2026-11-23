@@ -114,10 +114,12 @@ fn accept(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     with_peer(realm, args, |p| p.accept_answer(&sdp))?;
     Ok(Value::Undefined)
 }
+fn restricted_candidate(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    Ok(Value::Bool(rabbithole_rtc::restricted_candidate(&arg_str(realm, args, 0)?)))
+}
 fn candidate(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let text = arg_str(realm, args, 1)?;
-    with_peer(realm, args, |p| p.add_candidate(&text))?;
-    Ok(Value::Undefined)
+    with_peer(realm, args, |p| p.accept_candidate(&text)).map(Value::Bool)
 }
 fn send(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let handle = realm.to_number(arg(args, 1))? as u32;
@@ -213,6 +215,7 @@ pub(crate) fn install(realm: &mut Realm, o: ObjectId) {
     realm.define_method(o, "rtcOffer", 2, offer);
     realm.define_method(o, "rtcAnswer", 2, answer);
     realm.define_method(o, "rtcAccept", 2, accept);
+    realm.define_method(o, "rtcRestrictedCandidate", 1, restricted_candidate);
     realm.define_method(o, "rtcCandidate", 2, candidate);
     realm.define_method(o, "rtcSend", 4, send);
     realm.define_method(o, "rtcBufferedAmount", 2, buffered_amount);

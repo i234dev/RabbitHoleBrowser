@@ -377,6 +377,7 @@
     }
     const sdpMid = field('mid');
     for (const match of section.matchAll(/^a=(candidate:[^\r\n]+)/gm)) {
+      if (!local && N.rtcRestrictedCandidate(match[1])) continue;
       rememberCandidate(ice[list],new RTCIceCandidate({candidate:match[1],sdpMLineIndex:index-1,sdpMid,usernameFragment}));
     }
   }
@@ -782,7 +783,7 @@
         const mids=[...this.remoteDescription.sdp.matchAll(/^a=mid:([^\r\n]+)/gm)].map(m=>m[1]);
         if(c.sdpMid!==null ? !mids.includes(c.sdpMid) : c.sdpMLineIndex>=mids.length)
           throw failure('OperationError','Unknown media section');
-        N.rtcCandidate(backend(p),c.candidate);
+        if (!N.rtcCandidate(backend(p),c.candidate)) return;
         if (p.sctp) rememberCandidate(iceTransports.get(p.sctp.transport.iceTransport).remote,c);
       });
     }
