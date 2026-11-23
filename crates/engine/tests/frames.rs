@@ -589,3 +589,20 @@ fn same_origin_window_assignment_runs_property_setters_in_the_child() {
     })()"#);
     assert_eq!(output, "5,from parent,undefined|true|false|false");
 }
+
+#[test]
+fn a_same_origin_frames_range_keeps_its_identity_and_tracks_both_realms_edits() {
+    let mut e = engine();
+    let inner = "<p id=text>alphabet</p><script>var live=document.createRange();live.setStart(text.firstChild,1);live.setEnd(text.firstChild,5);function contents(){return live.toString()} function move(){live.setStart(text.firstChild,2)}</script>";
+    let mut page = load(&mut e,&format!(r#"<iframe id="child" srcdoc="{}"></iframe>"#,escape_attr(inner)));
+    let result = eval(&e,&mut page,r#"(() => {
+      const w=child.contentWindow, r=w.live, t=child.contentDocument.getElementById('text').firstChild;
+      const initial=[r instanceof Range,r===w.live,r.startContainer===t,r.toString()];
+      r.setEnd(t,6);
+      const changed=w.contents();
+      w.move();
+      t.insertData(0,'x');
+      return [...initial,changed,r.startOffset,r.endOffset,r.toString(),w.contents()].join('|');
+    })()"#);
+    assert_eq!(result,"true|true|true|lpha|lphab|3|7|phab|phab");
+}

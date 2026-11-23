@@ -16,6 +16,7 @@ mod host;
 mod misc;
 mod modules;
 mod live;
+pub use live::SharedRange;
 mod media;
 mod node;
 mod canvas2d;
@@ -276,6 +277,8 @@ pub enum FrameReply {
     Bool(bool),
     /// A node of the frame's document.
     Node(NodeId),
+    /// Shared live endpoints of a same-origin DOM Range.
+    Range(SharedRange),
     /// A function (the caller wraps it to call it through `CallGlobal`).
     Function,
     /// Any other value, as a serialized structured clone.

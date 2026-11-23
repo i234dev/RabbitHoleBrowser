@@ -298,6 +298,7 @@
   function toForeign(v) {
     if (typeof v === 'function') return [];
     if (typeof Node === 'function' && v instanceof Node) return v;
+    if (typeof g.Range === 'function' && v instanceof g.Range) return v;
     try { return serialize(v); } catch (e) { return undefined; }
   }
   const setProperty = Reflect.set;

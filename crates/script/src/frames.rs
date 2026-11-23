@@ -145,10 +145,11 @@ pub(crate) fn foreign(realm: &mut Realm, call: crate::FrameCall) -> crate::Frame
             rabbithole_js::V::Bool(b) => FrameReply::Bool(b),
             rabbithole_js::V::Undefined => FrameReply::Undefined,
             rabbithole_js::V::String(s) => FrameReply::Value(s.to_rust_string()),
+            // foreignGet/foreignCall use an empty array for a function.
+            rabbithole_js::V::Object(o) if realm.obj(o).is_array() => FrameReply::Function,
             rabbithole_js::V::Object(_) => match crate::host::node_of(realm, &v) {
                 Some(n) if n.doc == 0 => FrameReply::Node(n.node),
-                // The API returns a function marker as an empty array.
-                _ => FrameReply::Function,
+                _ => crate::SharedRange::export(realm,v).map_or(FrameReply::Undefined,FrameReply::Range),
             },
             _ => FrameReply::Undefined,
         },
@@ -163,6 +164,7 @@ fn reply_value(realm: &mut Realm, id: u64, r: Option<crate::FrameReply>) -> JsRe
         Some(FrameReply::Bool(b)) => Ok(Value::Bool(b)),
         Some(FrameReply::Node(node)) if id < crate::host::FRAME_DOC as u64 => Ok(crate::host::wrap(realm, crate::host::NodeRef { doc: crate::host::FRAME_DOC | id as u32, node })),
         Some(FrameReply::Node(_)) => Ok(Value::Null),
+        Some(FrameReply::Range(range)) => range.wrapper(realm),
         Some(FrameReply::Function) => Ok(Value::str("\u{0}function")),
         Some(FrameReply::Value(s)) => Ok(Value::str(&s)),
         Some(FrameReply::Error(m)) => Err(realm.throw_type_error(&m)),

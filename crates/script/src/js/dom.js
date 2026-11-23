@@ -669,6 +669,24 @@
   define('StaticRange', StaticRange);
   define('Range', Range);
   N.registerProto('Range', Range.prototype);
+  const sharedRanges = new Map();
+  N.setFactory('rangePoints', range => {
+    const state = range[S];
+    return state instanceof RangeState ? [state.a,state.b] : null;
+  });
+  N.setFactory('sharedRange', (key, original, a, b) => {
+    let range = original || sharedRanges.get(key)?.deref();
+    if (!range) {
+      range = Object.create(Range.prototype);
+      const points = Object.create(RangeState.prototype);
+      hidden(points,'a',a); hidden(points,'b',b);
+      hidden(range,S,points);
+    }
+    if (sharedRanges.size && sharedRanges.size % 64 === 0)
+      for (const [k,ref] of sharedRanges) if (!ref.deref()) sharedRanges.delete(k);
+    sharedRanges.set(key,new WeakRef(range));
+    return range;
+  });
   method(g.Document, 'createRange', function () { const r = Object.create(Range.prototype); hidden(r, S, new RangeState(this)); return r; }, true);
   // The caret position at a viewport point: in the text under it when the
   // layout has some there, else at the start of the element hit.
