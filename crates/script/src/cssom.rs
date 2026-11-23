@@ -921,12 +921,17 @@ fn match_media(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     Ok(Value::Object(o))
 }
 
-fn css_supports(_realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let text = match args.first().map(Value::v) {
-        Some(V::String(s)) => s.to_rust_string().to_ascii_lowercase(),
-        _ => String::new(),
+fn css_supports(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if args.is_empty() { return Err(realm.throw_type_error("CSS.supports requires an argument")); }
+    let first = arg_str(realm, args, 0)?;
+    rabbithole_style::install_supports_validator();
+    let matches = if args.len() == 1 {
+        rabbithole_css::supports::evaluate_script_condition(&rabbithole_css::Tokenizer::tokenize(&first))
+    } else {
+        let value = arg_str(realm, args, 1)?;
+        rabbithole_css::supports::evaluate_property(&first, &rabbithole_css::Tokenizer::tokenize(&value))
     };
-    Ok(Value::Bool(!(text.contains("container") || text.contains("grid-template-areas: none") || text.contains("backdrop-filter"))))
+    Ok(Value::Bool(matches))
 }
 
 fn css_escape(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {

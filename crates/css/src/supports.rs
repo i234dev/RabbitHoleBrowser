@@ -54,6 +54,25 @@ pub fn evaluate(prelude: &[Token]) -> bool {
     r.unwrap_or(false) && p.pos == toks.len()
 }
 
+/// CSS.supports(conditionText) also accepts an unparenthesized declaration.
+pub fn evaluate_script_condition(tokens: &[Token]) -> bool {
+    let flat: Vec<&Token> = tokens.iter().filter(|t| **t != Token::Whitespace).collect();
+    if matches!(flat.as_slice(), [Token::Ident(_), Token::Colon, ..]) {
+        declaration(&flat)
+    } else {
+        evaluate(tokens)
+    }
+}
+
+/// CSS.supports(property, value) takes a property name and a value,
+/// without interpreting either argument as a larger condition.
+pub fn evaluate_property(name: &str, value: &[Token]) -> bool {
+    let name = Token::Ident(name.to_owned());
+    let mut declaration_tokens = vec![&name, &Token::Colon];
+    declaration_tokens.extend(value.iter().filter(|t| **t != Token::Whitespace));
+    declaration(&declaration_tokens)
+}
+
 struct Cond<'a, 'b> {
     toks: &'b [&'a Token],
     pos: usize,
@@ -195,7 +214,7 @@ fn declaration(toks: &[&Token]) -> bool {
         return false;
     }
     if name.starts_with("--") {
-        return true;
+        return name.len() > 2 && matches!(crate::Tokenizer::tokenize(&name).as_slice(), [Token::Ident(n)] if n == &name);
     }
     if value.is_empty() {
         return false;

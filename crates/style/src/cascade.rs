@@ -4100,8 +4100,11 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     if name.starts_with("--") {
         return Some(true);
     }
+    if wide_keyword(value).is_some() {
+        return Some(recognizes_property(name));
+    }
     if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
-        return None;
+        return Some(recognizes_property(name));
     }
     let initial = ComputedStyle::initial();
     UNKNOWN_PROPERTY.with(|u| u.set(false));

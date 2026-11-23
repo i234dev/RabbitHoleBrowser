@@ -2262,3 +2262,14 @@ fn html_reflection_preserves_accessor_names_and_integer_semantics() {
     "#);
     assert_eq!(out, "'sharedworker|get as|set as|true|15|3|0|-1'");
 }
+
+#[test]
+fn css_supports_evaluates_conditions_and_separate_declaration_arguments() {
+    let out = result_of("<body>", r#"
+        const supported = CSS.supports('display:grid') && CSS.supports('(width: 10px) and (color: blue)')
+            && CSS.supports('COLOR','var(--foreground)') && CSS.supports('--custom','arbitrary');
+        const unsupported = ['invalid-property: inherit','width: cabbage','not (color: red)'].some(v => CSS.supports(v));
+        window.result = [supported,unsupported,CSS.supports('width','2px; color: red'),CSS.supports('invalid-property','var(--x)')].join('|');
+    "#);
+    assert_eq!(out, "'true|false|false|false'");
+}
