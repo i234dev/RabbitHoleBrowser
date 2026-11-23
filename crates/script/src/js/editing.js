@@ -503,6 +503,12 @@
   }
   function applyIndent(t,indent,separator) {
     const {host,sel} = t, doc = host.ownerDocument;
+    // A caret between two block boxes does not select either paragraph.
+    if (t.range.collapsed) {
+      const {startContainer,startOffset} = t.range;
+      if (isBlock(startContainer.childNodes[startOffset - 1]) &&
+          isBlock(startContainer.childNodes[startOffset])) return true;
+    }
     const a = bookmark(sel.anchorNode,sel.anchorOffset), b = bookmark(sel.focusNode,sel.focusOffset);
     const replacements = new Map(), handled = new Set();
     let changed = false;

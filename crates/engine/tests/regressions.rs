@@ -1189,3 +1189,18 @@ fn closing_a_data_channel_delivers_queued_blob_and_text_in_order() {
         std::thread::sleep(Duration::from_millis(4));
     }
 }
+
+#[test]
+fn indent_at_a_boundary_between_blocks_preserves_both_paragraphs() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div id=ed contenteditable><p>first</p><div>second</div></div>");
+    let result = eval(&e, &mut page, r#"(() => {
+        ed.focus();
+        const selection = getSelection();
+        selection.collapse(ed, 1);
+        document.execCommand('indent');
+        document.execCommand('outdent');
+        return [ed.innerHTML, selection.anchorNode === ed, selection.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result, "<p>first</p><div>second</div>|true|1");
+}
