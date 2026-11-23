@@ -147,3 +147,22 @@ fn outside_pointer_release_dismisses_a_popover_before_listeners_even_if_press_wa
     e.pointer_up(&mut page,5.0,5.0,0,Default::default());
     assert_eq!(eval(&e,&mut page,"[menu.matches(':popover-open'),...log].join('|')"),"false|pointerdown|closed|pointerup|click");
 }
+
+#[test]
+fn toggle_event_converts_dictionary_states_and_retargets_its_source() {
+    let mut e = engine();
+    let mut page = e.load_html("<div id=host></div>",Url::parse("http://localhost/").unwrap(),Viewport { width:800.0,height:600.0 });
+    let result = eval(&e,&mut page,r#"(() => {
+        const root=host.attachShadow({mode:'open'}), button=document.createElement('button');
+        root.appendChild(button);
+        const options=Object.create({oldState:42,newState:null,source:button,bubbles:true,composed:true});
+        const event=new ToggleEvent('toggle',options), log=[];
+        button.addEventListener('toggle', e=>log.push(e.source===button));
+        host.addEventListener('toggle', e=>log.push(e.source===host));
+        button.dispatchEvent(event);
+        let invalid=false;
+        try { new ToggleEvent('toggle',{source:{}}); } catch(e) { invalid=e instanceof TypeError; }
+        return [event.oldState,event.newState,typeof event.oldState,event.source===host,invalid,...log].join('|');
+    })()"#);
+    assert_eq!(result,"42|null|string|true|true|true|true");
+}

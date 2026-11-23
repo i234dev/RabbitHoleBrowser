@@ -45,6 +45,7 @@ pub struct EventData {
     /// DOM "in passive listener flag": preventDefault() is ignored.
     pub in_passive: bool,
     has_input_ranges: bool,
+    toggle: Option<Box<ToggleData>>,
 }
 
 fn event_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a mut EventData> {
@@ -79,6 +80,7 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             initialized: true,
             in_passive: false,
             has_input_ranges: false,
+            toggle: None,
         }),
     );
     realm.set_class_name(id, class);
@@ -459,6 +461,52 @@ fn progress_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
     let dict = arg(args, 1);
     copy_dict_props(realm, id, &dict, &[("lengthComputable", Value::Bool(false)), ("loaded", Value::Number(0.0)), ("total", Value::Number(0.0))])?;
     Ok(Value::Object(id))
+}
+
+struct ToggleData {
+    old_state: String,
+    new_state: String,
+    source: Option<NodeRef>,
+}
+
+fn toggle_event_ctor(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    if realm.new_target().is_undefined() || args.is_empty() {
+        return Err(realm.throw_type_error("ToggleEvent requires construction with an event type"));
+    }
+    let dict = arg(args, 1);
+    if !dict.is_nullish() && !dict.is_object() { return Err(realm.throw_type_error("Expected a ToggleEventInit dictionary")); }
+    let id = event_ctor_generic(realm, "ToggleEvent", args)?;
+    let _root = realm.root_object(id);
+    let new_state = dict_str(realm, &dict, "newState")?.unwrap_or_default();
+    let old_state = dict_str(realm, &dict, "oldState")?.unwrap_or_default();
+    let value = dict_value(realm, &dict, "source")?;
+    let source = if value.is_nullish() { None } else {
+        let node = node_of(realm, &value).filter(|n| with_doc(n.doc, |doc| doc.element(n.node).is_some()))
+            .ok_or_else(|| realm.throw_type_error("ToggleEvent source must be an Element"))?;
+        Some(node)
+    };
+    realm.host_data_mut::<EventData>(id).unwrap().toggle = Some(Box::new(ToggleData { old_state, new_state, source }));
+    Ok(Value::Object(id))
+}
+
+fn toggle_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a ToggleData> {
+    let Some(id) = this.as_object().filter(|&id| realm.host_data::<EventData>(id).is_some_and(|d| d.toggle.is_some())) else {
+        return Err(realm.throw_type_error("Expected a ToggleEvent"));
+    };
+    Ok(realm.host_data::<EventData>(id).unwrap().toggle.as_deref().unwrap())
+}
+fn toggle_old_state(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::str(&toggle_data(realm, &this)?.old_state))
+}
+fn toggle_new_state(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::str(&toggle_data(realm, &this)?.new_state))
+}
+fn toggle_source(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let Some(source) = toggle_data(realm, &this)?.source else { return Ok(Value::Null) };
+    let current = event_data(realm, &this)?.current_target.clone();
+    let against = node_of(realm, &current).filter(|n| n.doc == source.doc).map_or(Document::ROOT, |n| n.node);
+    let node = with_doc(source.doc, |doc| crate::shadow::retarget(doc, source.node, against));
+    Ok(wrap(realm, NodeRef { node, ..source }))
 }
 
 fn generic_sub_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1528,7 +1576,10 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "ClipboardEvent", Some("Event"), generic_sub_event_ctor);
     define_class(realm, "PromiseRejectionEvent", Some("Event"), generic_sub_event_ctor);
     define_class(realm, "SecurityPolicyViolationEvent", Some("Event"), generic_sub_event_ctor);
-    define_class(realm, "ToggleEvent", Some("Event"), generic_sub_event_ctor);
+    let toggle = define_class(realm, "ToggleEvent", Some("Event"), toggle_event_ctor);
+    realm.define_accessor(toggle, "oldState", Some(toggle_old_state), None, ACC);
+    realm.define_accessor(toggle, "newState", Some(toggle_new_state), None, ACC);
+    realm.define_accessor(toggle, "source", Some(toggle_source), None, ACC);
     let _ = ALL;
 }
 
