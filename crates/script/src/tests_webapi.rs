@@ -2090,3 +2090,19 @@ fn transfer_checks_observe_detachment_after_payload_getters() {
     "#);
     assert_eq!(out, ["DataCloneError 2", "true", "DataCloneError 2", "true"]);
 }
+
+#[test]
+fn contextless_offscreen_canvas_transfers_with_its_final_dimensions() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const canvas = new OffscreenCanvas(3, 2);
+        try { structuredClone(canvas); } catch (e) { console.log(e.name); }
+        const copy = structuredClone({canvas, get resized() { canvas.width = 7; return canvas; }}, {transfer: [canvas]});
+        console.log(canvas.width, canvas.height, copy.canvas === copy.resized, copy.canvas.width, copy.canvas.height);
+        try { canvas.getContext('2d'); } catch (e) { console.log(e.name); }
+        copy.canvas.getContext('2d');
+        try { structuredClone(copy.canvas, {transfer: [copy.canvas]}); } catch (e) { console.log(e.name); }
+        try { structuredClone(0, {transfer: [canvas]}); } catch (e) { console.log(e.name); }
+    "#);
+    assert_eq!(out, ["DataCloneError", "0 0 true 7 2", "InvalidStateError", "InvalidStateError", "DataCloneError"]);
+}

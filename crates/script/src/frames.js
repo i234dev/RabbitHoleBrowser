@@ -41,7 +41,7 @@
     const entries = Array.from(sequence);
     if (new Set(entries).size !== entries.length) throw cloneError('Duplicate transferable');
     for (const entry of entries) {
-      if (codec.isPort(entry)) continue;
+      if (codec.isPort(entry) || codec.offscreen.has(entry)) continue;
       try { bufferLength.call(entry); } catch (_) { throw cloneError('Non-transferable object'); }
     }
     return entries;
@@ -51,7 +51,8 @@
   // `ports` (optional): a Map from transferred MessagePorts to their index
   // in the transfer list; those ports may appear in the value and are
   // rebuilt from deserialize's `ports` array. Other ports cannot be cloned.
-  function serialize(value, ports) {
+  function serialize(value, ports, offscreen) {
+    const pendingCanvases = [];
     const seen = new Map();
     let next = 0;
     function enc(v) {
@@ -70,6 +71,12 @@
       if (seen.has(v)) return { t: 'ref', id: seen.get(v) };
       const id = next++;
       seen.set(v, id);
+      if (codec.offscreen.has(v)) {
+        if (!offscreen || !offscreen.has(v)) throw cloneError('OffscreenCanvas without transfer');
+        const record = { t: 'canvas', id };
+        append(pendingCanvases, [v, record]);
+        return record;
+      }
       const blob = encodeBlob(v);
       if (blob !== null) return { t: 'blob', id, v: blob };
       const tag = Object.prototype.toString.call(v).slice(8, -1);
@@ -96,7 +103,10 @@
       for (const k of Object.keys(v)) append(props, [k, enc(v[k])]);
       return { t: 'o', id, v: props };
     }
-    return JSON.stringify(enc(value));
+    const encoded = enc(value);
+    // Snapshot after visiting the full graph: a later getter may resize the canvas.
+    for (const [canvas, record] of pendingCanvases) record.size = codec.canvasSize(canvas);
+    return JSON.stringify(encoded);
   }
 
   function deserialize(text, ports) {
@@ -110,6 +120,7 @@
         case 'b': return BigInt(x.v);
         case 'ref': return objs.get(x.id);
         case 'port': out = ports ? ports[x.i] : undefined; break;
+        case 'canvas': out = codec.receiveCanvas(x.size); break;
         case 'a':
           out = new Array(x.l || 0); objs.set(x.id, out);
           x.v.forEach((e, i) => { put(out, i, dec(e)); });
@@ -361,17 +372,21 @@
     const list = transferList(transfer);
     const ports = list.filter(codec.isPort);
     const index = ports.length ? new Map(ports.map((port, i) => [port, i])) : null;
-    const d = serialize(value, index);
+    const d = serialize(value, index, list.length ? new Set(list) : null);
     // Payload getters may throw or detach an entry while serializing the graph.
     for (const item of list) {
-      if (codec.isPort(item) ? codec.portDetached(item) : bufferDetached.call(item)) {
+      if (codec.offscreen.has(item)) codec.checkCanvasTransfer(item);
+      else if (codec.isPort(item) ? codec.portDetached(item) : bufferDetached.call(item)) {
         throw cloneError('Detached transferable');
       }
     }
-    for (const item of list) if (!codec.isPort(item)) transferBuffer.call(item);
+    for (const item of list) {
+      if (codec.offscreen.has(item)) codec.detachCanvas(item);
+      else if (!codec.isPort(item)) transferBuffer.call(item);
+    }
     return { d, ports: ports.length ? ports.map(codec.movePort) : ports };
   }
-  const codec = { serialize, deserialize, pack, isPort: () => false };
+  const codec = { serialize, deserialize, pack, offscreen: new WeakSet(), isPort: () => false };
   Object.defineProperty(g, '__rhClone', { value: codec, configurable: true });
 
   // structuredClone with the same algorithm as postMessage.
