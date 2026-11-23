@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::ChannelId;
 pub use str0m::channel::{ChannelConfig, Reliability};
@@ -13,6 +13,8 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 
 #[derive(Debug)]
 pub enum PeerEvent {
+    Closed,
+    SelectedPair { local: SocketAddr, remote: SocketAddr },
     Ice(IceConnectionState),
     Connected,
     Open {
@@ -29,6 +31,9 @@ pub enum PeerEvent {
     BufferedLow(u32),
 }
 
+/// A full application message must fit both the send buffer and the negotiated limit.
+pub const MESSAGE_CAPACITY: u32 = 256 * 1024;
+
 pub struct Peer {
     rtc: Rtc,
     sockets: Vec<(SocketAddr, UdpSocket)>,
@@ -38,11 +43,16 @@ pub struct Peer {
     pending: Option<SdpPendingOffer>,
     offer: Option<String>,
     application: bool,
+    selected_pair: Option<(SocketAddr, SocketAddr)>,
 }
 
 impl Peer {
     pub fn bind(addresses: &[IpAddr]) -> io::Result<Self> {
-        let mut rtc = Rtc::new(Instant::now());
+        let mut rtc = str0m::RtcConfig::new()
+            .set_sctp_max_message_size(MESSAGE_CAPACITY)
+            .set_sctp_max_buffered_amount(MESSAGE_CAPACITY as usize)
+            .set_stats_interval(Some(Duration::from_millis(100)))
+            .build(Instant::now());
         let mut sockets = Vec::new();
         for &ip in addresses {
             let socket = UdpSocket::bind((ip, 0))?;
@@ -62,6 +72,7 @@ impl Peer {
             pending: None,
             offer: None,
             application: false,
+            selected_pair: None,
         })
     }
 
@@ -160,6 +171,12 @@ impl Peer {
         channel.write(binary, bytes).map_err(io::Error::other)
     }
 
+    pub fn close(&mut self) -> io::Result<()> {
+        self.rtc.close().map_err(io::Error::other)?;
+        // Drain pending close_notify datagrams before dropping the UDP socket.
+        self.poll().map(|_| ())
+    }
+
     pub fn close_channel(&mut self, handle: u32) {
         self.queued.retain(|(h, _)| *h != handle);
         if let Some(&id) = self.channels.get(&handle) {
@@ -175,6 +192,13 @@ impl Peer {
 
     fn event(&mut self, event: Event) -> io::Result<Option<PeerEvent>> {
         Ok(match event {
+            Event::Closed => Some(PeerEvent::Closed),
+            Event::PeerStats(stats) => {
+                let pair = stats.selected_candidate_pair.map(|p| (p.local.addr, p.remote.addr));
+                if self.selected_pair == pair { return Ok(None); }
+                self.selected_pair = pair;
+                pair.map(|(local, remote)| PeerEvent::SelectedPair { local, remote })
+            }
             Event::Connected => Some(PeerEvent::Connected),
             Event::IceConnectionStateChange(state) => Some(PeerEvent::Ice(state)),
             Event::ChannelOpen(id, label) => {

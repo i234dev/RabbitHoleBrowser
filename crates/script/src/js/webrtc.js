@@ -272,6 +272,93 @@
     }
     return new RTCStatsReport(channelToken, records);
   }
+  const iceTransports = new WeakMap(), dtlsTransports = new WeakMap();
+  const sctpTransports = new WeakMap(), candidatePairs = new WeakMap();
+  class RTCIceTransport extends EventTarget {
+    constructor(token, state) {
+      if (token !== channelToken) throw new TypeError('Illegal constructor');
+      super(); iceTransports.set(this, state);
+    }
+    getLocalCandidates() { return iceTransports.get(this).local.slice(); }
+    getRemoteCandidates() { return iceTransports.get(this).remote.slice(); }
+    getLocalParameters() {
+      const info = iceTransports.get(this).localParameters;
+      return info && {...info};
+    }
+    getRemoteParameters() {
+      const info = iceTransports.get(this).remoteParameters;
+      return info && {...info};
+    }
+    getSelectedCandidatePair() { return iceTransports.get(this).selected; }
+  }
+  expose(RTCIceTransport,iceTransports,['state','role','component','gatheringState']);
+  N.installHandlers(RTCIceTransport.prototype,['statechange','gatheringstatechange','selectedcandidatepairchange']);
+
+  class RTCIceCandidatePair {
+    constructor(token, local, remote) {
+      if (token !== channelToken) throw new TypeError('Illegal constructor');
+      candidatePairs.set(this,{local,remote});
+    }
+  }
+  expose(RTCIceCandidatePair,candidatePairs,['local','remote']);
+
+  class RTCDtlsTransport extends EventTarget {
+    constructor(token, iceTransport) {
+      if (token !== channelToken) throw new TypeError('Illegal constructor');
+      super(); dtlsTransports.set(this,{iceTransport,state:'new'});
+    }
+  }
+  expose(RTCDtlsTransport,dtlsTransports,['iceTransport','state']);
+  N.installHandlers(RTCDtlsTransport.prototype,['statechange','error']);
+
+  class RTCSctpTransport extends EventTarget {
+    constructor(token, transport) {
+      if (token !== channelToken) throw new TypeError('Illegal constructor');
+      super(); sctpTransports.set(this,{transport,state:'connecting',maxMessageSize:65536,maxChannels:null});
+    }
+  }
+  expose(RTCSctpTransport,sctpTransports,['transport','state','maxMessageSize','maxChannels']);
+  N.installHandlers(RTCSctpTransport.prototype,['statechange']);
+
+  function setTransportState(transport, state, notify = true) {
+    if (!transport || transport.state === state) return;
+    (iceTransports.get(transport) || dtlsTransports.get(transport) || sctpTransports.get(transport)).state = state;
+    if (notify) transport.dispatchEvent(new Event('statechange'));
+  }
+  function rememberCandidate(list, candidate) {
+    if (!list.some(c => c.candidate === candidate.candidate)) list.push(candidate);
+  }
+  function applyTransportDescription(peer, desc, local) {
+    const sections = desc.sdp.split(/(?:^|\r?\n)m=/);
+    const index = sections.findIndex((section,i) => i && /^application [1-9]\d* [^ ]*SCTP\b/i.test(section));
+    if (index < 0) return;
+    if (!peer.sctp) {
+      const ice = new RTCIceTransport(channelToken,{state:peer.iceConnectionState,role:'unknown',component:'rtp',
+        gatheringState:peer.iceGatheringState,local:[],remote:[],selected:null,localParameters:null,remoteParameters:null});
+      peer.sctp = new RTCSctpTransport(channelToken,new RTCDtlsTransport(channelToken,ice));
+    }
+    const ice = iceTransports.get(peer.sctp.transport.iceTransport);
+    const section = sections[index];
+    const field = name => {
+      const re = new RegExp('^a=' + name + ':([^\\r\\n]*)','m');
+      return re.exec(section)?.[1] ?? re.exec(sections[0])?.[1] ?? null;
+    };
+    const usernameFragment = field('ice-ufrag'), password = field('ice-pwd');
+    const key = local ? 'localParameters' : 'remoteParameters', list = local ? 'local' : 'remote';
+    if (ice[key]?.usernameFragment !== usernameFragment) ice[list] = [];
+    ice[key] = usernameFragment && password ? {usernameFragment,password} : null;
+    if (ice.role === 'unknown') ice.role = (desc.type === 'offer') === local ? 'controlling' : 'controlled';
+    if (!local) {
+      const raw = field('max-message-size');
+      const size = raw !== null && /^\d+$/.test(raw) ? Number(raw) : 65536;
+      sctpTransports.get(peer.sctp).maxMessageSize = Math.min(size || Infinity,N.rtcMessageCapacity);
+    }
+    const sdpMid = field('mid');
+    for (const match of section.matchAll(/^a=(candidate:[^\r\n]+)/gm)) {
+      rememberCandidate(ice[list],new RTCIceCandidate({candidate:match[1],sdpMLineIndex:index-1,sdpMid,usernameFragment}));
+    }
+  }
+
   class RTCDataChannel extends EventTarget {
     constructor(token, init) {
       if (token !== channelToken) throw new TypeError('Illegal constructor');
@@ -292,6 +379,7 @@
       else if (value instanceof ArrayBuffer) { data = new Uint8Array(value.slice(0)); size = data.length; }
       else { binary = false; data = encoder.encode(string(value)); size = data.length; }
       if (d.readyState !== 'open') return;
+      if (size > peers.get(d.pc).sctp.maxMessageSize) throw new TypeError('Message exceeds the negotiated SCTP message size');
       if (d.bufferedAmount + size > 16 * 1024 * 1024) throw failure('OperationError','Data channel send buffer is full');
       const entry = {binary, data: data instanceof Blob ? null : data, size};
       d.queue.push(entry);
@@ -359,20 +447,41 @@
         }
         events = N.rtcPoll(p.native);
       } catch {
+        setTransportState(p.sctp,'closed');
+        setTransportState(p.sctp?.transport,'failed');
         change(pc,'connectionState','failed','connectionstatechange');
         for (const channel of [...p.byHandle.values()]) finishChannel(channel);
         return;
       }
+      const sctp = p.sctp, dtls = sctp?.transport, ice = dtls?.iceTransport;
       for (const [kind,id,a,b,c,ordered,life,retries] of events) {
         if (p.signalingState === 'closed') break;
-        if (kind === 'connected') { change(pc,'connectionState','connected','connectionstatechange'); continue; }
+        if (kind === 'pair' && ice) {
+          const info = iceTransports.get(ice);
+          const local = info.local.find(v => v.address === id && v.port === a);
+          const remote = info.remote.find(v => v.address === b && v.port === c);
+          if (local && remote && (info.selected?.local !== local || info.selected?.remote !== remote)) {
+            info.selected = new RTCIceCandidatePair(channelToken,local,remote);
+            ice.dispatchEvent(new Event('selectedcandidatepairchange'));
+          }
+          continue;
+        }
+        if (kind === 'closed') {
+          setTransportState(sctp,'closed'); setTransportState(dtls,'closed');
+          for (const channel of [...p.byHandle.values()]) finishChannel(channel);
+          return;
+        }
+        if (kind === 'connected') { setTransportState(dtls,'connected'); change(pc,'connectionState','connected','connectionstatechange'); continue; }
         if (kind === 'ice') {
+          setTransportState(ice,id);
+          if (id === 'checking' && dtls?.state === 'new') setTransportState(dtls,'connecting');
           change(pc,'iceConnectionState',id,'iceconnectionstatechange');
           if (id === 'checking' && p.connectionState === 'new') change(pc,'connectionState','connecting','connectionstatechange');
           continue;
         }
         let ch = p.byHandle.get(id);
         if (kind === 'open') {
+          setTransportState(sctp,'connected');
           const incoming = !ch;
           if (incoming) {
             ch = new RTCDataChannel(channelToken,{pc,handle:id,id:a,label:b,protocol:c,ordered,maxPacketLifeTime:life,maxRetransmits:retries,negotiated:false});
@@ -399,7 +508,15 @@
     if (p.iceGatheringState !== 'new' || !/^m=/m.test(desc.sdp)) return;
     schedule(()=>{
       if (p.signalingState === 'closed') return;
-      change(pc,'iceGatheringState','gathering','icegatheringstatechange');
+      const ice = p.sctp?.transport.iceTransport;
+      const gathering = state => {
+        if (ice && ice.gatheringState !== state) {
+          iceTransports.get(ice).gatheringState = state;
+          ice.dispatchEvent(new Event('gatheringstatechange'));
+        }
+        change(pc,'iceGatheringState',state,'icegatheringstatechange');
+      };
+      gathering('gathering');
       let index=-1, mid=null;
       for (const line of desc.sdp.split(/\r?\n/)) {
         if (line.startsWith('m=')) { ++index; mid=null; }
@@ -409,7 +526,7 @@
           pc.dispatchEvent(new RTCPeerConnectionIceEvent('icecandidate',{candidate}));
         }
       }
-      change(pc,'iceGatheringState','complete','icegatheringstatechange');
+      gathering('complete');
       pc.dispatchEvent(new RTCPeerConnectionIceEvent('icecandidate'));
     },0);
   }
@@ -425,7 +542,7 @@
       super();
       const config=configuration(init);
       const id=crypto.getRandomValues(new Uint32Array(2));
-      peers.set(this,{config,native:null,byHandle:new Map(),opened:0,closed:0,timer:null,operations:Promise.resolve(),
+      peers.set(this,{config,native:null,byHandle:new Map(),opened:0,closed:0,sctp:null,timer:null,operations:Promise.resolve(),
         emptySdp:'v=0\r\no=- '+((BigInt(id[0])<<31n)|BigInt(id[1]>>>1))+' 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n',
         signalingState:'stable',iceConnectionState:'new',connectionState:'new',iceGatheringState:'new',
         pendingLocalDescription:null,pendingRemoteDescription:null,currentLocalDescription:null,currentRemoteDescription:null,
@@ -496,6 +613,7 @@
           p.lastOffer=generated;
           p.pendingLocalDescription=new RTCSessionDescription({type:t,sdp:generated});
           p.gatheringStarted=true;
+          applyTransportDescription(p,p.pendingLocalDescription,true);
           change(this,'signalingState','have-local-offer','signalingstatechange');
           gather(this,p.pendingLocalDescription);
         } else if(t==='answer' && p.signalingState==='have-remote-offer') {
@@ -504,6 +622,7 @@
           p.currentRemoteDescription=p.pendingRemoteDescription;
           p.pendingLocalDescription=p.pendingRemoteDescription=null;
           p.gatheringStarted=true;
+          applyTransportDescription(p,p.currentLocalDescription,true);
           change(this,'signalingState','stable','signalingstatechange');
           gather(this,p.currentLocalDescription); pump(this);
         } else throw failure('InvalidStateError','Description is invalid in the current signaling state');
@@ -516,11 +635,13 @@
           if (!/^v=0\r?\n/.test(desc.sdp)) throw new RTCError({errorDetail:'sdp-syntax-error',sdpLineNumber:1},'Invalid SDP');
           p.answer=/^m=/m.test(desc.sdp) ? N.rtcAnswer(backend(p),desc.sdp) : p.emptySdp;
           p.pendingRemoteDescription=desc;
+          applyTransportDescription(p,desc,false);
           change(this,'signalingState','have-remote-offer','signalingstatechange');
         } else if(desc.type==='answer' && p.signalingState==='have-local-offer') {
           if(/^m=/m.test(p.pendingLocalDescription.sdp)) N.rtcAccept(backend(p),desc.sdp);
           else if(!/^v=0\r?\n/.test(desc.sdp) || /^m=/m.test(desc.sdp)) throw failure('OperationError','Unexpected answer');
           p.currentLocalDescription=p.pendingLocalDescription; p.currentRemoteDescription=desc;
+          applyTransportDescription(p,desc,false);
           p.pendingLocalDescription=p.pendingRemoteDescription=null;
           change(this,'signalingState','stable','signalingstatechange'); pump(this);
         } else throw failure('InvalidStateError','Description is invalid in the current signaling state');
@@ -536,18 +657,24 @@
         if(c.sdpMid!==null ? !mids.includes(c.sdpMid) : c.sdpMLineIndex>=mids.length)
           throw failure('OperationError','Unknown media section');
         N.rtcCandidate(backend(p),c.candidate);
+        if (p.sctp) rememberCandidate(iceTransports.get(p.sctp.transport.iceTransport).remote,c);
       });
     }
     close() {
       const p=peers.get(this);
       if(p.signalingState==='closed') return;
       p.signalingState=p.iceConnectionState=p.connectionState='closed';
+      if (p.sctp) {
+        setTransportState(p.sctp,'closed',false);
+        setTransportState(p.sctp.transport,'closed',false);
+        setTransportState(p.sctp.transport.iceTransport,'closed',false);
+      }
       if(p.timer!==null) cancel(p.timer);
       if(p.native) N.rtcClose(p.native);
       for(const channel of [...p.byHandle.values()]) finishChannel(channel);
     }
   }
-  expose(RTCPeerConnection,peers,['signalingState','iceConnectionState','connectionState','iceGatheringState',
+  expose(RTCPeerConnection,peers,['sctp','signalingState','iceConnectionState','connectionState','iceGatheringState',
     'pendingLocalDescription','pendingRemoteDescription','currentLocalDescription','currentRemoteDescription']);
   N.installHandlers(RTCPeerConnection.prototype,['negotiationneeded','icecandidate','icecandidateerror','signalingstatechange',
     'iceconnectionstatechange','connectionstatechange','icegatheringstatechange','datachannel','track']);

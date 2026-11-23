@@ -51,7 +51,7 @@ fn close(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
         .as_object()
         .and_then(|id| realm.host_data_mut::<Option<Peer>>(id))
     {
-        p.take();
+        if let Some(mut peer) = p.take() { let _ = peer.close(); }
     }
     Ok(Value::Undefined)
 }
@@ -138,6 +138,11 @@ fn poll(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
                     IceConnectionState::Disconnected => "disconnected",
                 }),
             ],
+            PeerEvent::Closed => vec![Value::str("closed")],
+            PeerEvent::SelectedPair { local, remote } => vec![
+                Value::str("pair"), Value::str(&local.ip().to_string()), index(local.port().into()),
+                Value::str(&remote.ip().to_string()), index(remote.port().into()),
+            ],
             PeerEvent::Connected => vec![Value::str("connected")],
             PeerEvent::Open {
                 handle,
@@ -183,6 +188,7 @@ fn poll(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 pub(crate) fn install(realm: &mut Realm, o: ObjectId) {
+    realm.define_property(o, "rtcMessageCapacity", Value::Number(rabbithole_rtc::MESSAGE_CAPACITY.into()), 0);
     realm.define_method(o, "rtcCreate", 1, create);
     realm.define_method(o, "rtcClose", 1, close);
     realm.define_method(o, "rtcChannel", 7, channel);

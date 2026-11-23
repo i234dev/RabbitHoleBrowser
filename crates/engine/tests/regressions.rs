@@ -912,3 +912,63 @@ fn aria_dom_strings_reflect_absence_and_keep_their_content_attributes() {
     })()"#);
     assert_eq!(result, "true|true|4|marker|button|true|false");
 }
+
+#[test]
+fn data_channel_transports_report_negotiated_limits_and_the_selected_ice_pair() {
+    use std::time::{Duration, Instant};
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<main></main>");
+    eval(&e, &mut page, r#"
+        var result = '', step = 'offer';
+        var sender = new RTCPeerConnection(), receiver = new RTCPeerConnection();
+        (async () => {
+            const channel = sender.createDataChannel('transport');
+            const message = new Promise(resolve => channel.onmessage = event => resolve(event.data));
+            receiver.ondatachannel = ({channel}) => {
+                const reply = () => {
+                    try {
+                        let oversized = false;
+                        try { channel.send('four'); } catch (error) { oversized = error instanceof TypeError; }
+                        if (!oversized) throw Error('negotiated limit ignored');
+                        channel.send('abc');
+                    } catch (error) { result = String(error); }
+                };
+                if (channel.readyState === 'open') reply(); else channel.onopen = reply;
+            };
+            await sender.setLocalDescription(await sender.createOffer());
+            const offer = sender.localDescription.sdp.replace(/a=max-message-size:[0-9]+/, 'a=max-message-size:3');
+            await receiver.setRemoteDescription({type:'offer',sdp:offer});
+            await receiver.setLocalDescription(await receiver.createAnswer());
+            await sender.setRemoteDescription(receiver.localDescription);
+            step = 'message';
+            const data = await message;
+            const sctp = receiver.sctp, dtls = sctp.transport, ice = dtls.iceTransport;
+            step = 'pair';
+            while (!ice.getSelectedCandidatePair()) await new Promise(resolve => setTimeout(resolve, 10));
+            const pair = ice.getSelectedCandidatePair();
+            const properties = [data, sctp instanceof RTCSctpTransport, dtls instanceof RTCDtlsTransport,
+                ice instanceof RTCIceTransport, sctp.state, dtls.state, ice.role, sctp.maxMessageSize,
+                ice.getLocalCandidates().includes(pair.local), ice.getRemoteCandidates().includes(pair.remote),
+                ice.getLocalParameters().usernameFragment === sender.sctp.transport.iceTransport.getRemoteParameters().usernameFragment];
+            const closed = new Promise(resolve => dtls.onstatechange = () => {
+                if (dtls.state === 'closed') resolve();
+            });
+            step = 'close';
+            sender.close();
+            await closed;
+            result = properties.concat([sctp.state, sender.sctp.state]).join('|');
+            receiver.close();
+        })().catch(error => { result = String(error); });
+    "#);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        e.tick(&mut page);
+        let result = eval(&e, &mut page, "result");
+        if !result.is_empty() {
+            assert_eq!(result, "abc|true|true|true|connected|connected|controlled|3|true|true|true|closed|closed");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", eval(&e, &mut page, "step"));
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
