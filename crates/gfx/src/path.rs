@@ -410,169 +410,124 @@ pub fn polylines_bounds(p: &Polylines) -> Option<Rect> {
     Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
 }
 
-/// Parse an SVG path `d` attribute into segments.
+/// SVG rendering uses each complete segment up to the first syntax error.
 pub fn parse_svg_path(d: &str) -> Vec<PathSeg> {
-    let mut p = SvgParser { s: d.as_bytes(), i: 0 };
-    let mut out = Vec::new();
-    let mut cur = Point::default();
+    let mut path = Vec::new();
+    let _ = read_svg_path(d, &mut path);
+    path
+}
+
+/// A CSS path() requires a nonempty, entirely valid SVG path.
+pub fn parse_css_path(d: &str) -> Option<Vec<PathSeg>> {
+    let mut path = Vec::new();
+    read_svg_path(d, &mut path)?;
+    (!path.is_empty()).then_some(path)
+}
+
+fn read_svg_path(d: &str, out: &mut Vec<PathSeg>) -> Option<()> {
+    let mut p = SvgParser { s: d.as_bytes(), i: 0, after_argument: false };
+    let mut previous = Point::default();
     let mut start = Point::default();
-    let mut last_ctrl: Option<Point> = None; // for S/T reflection
-    let mut last_cmd = b' ';
-    while let Some(c) = p.next_cmd() {
-        let rel = c.is_ascii_lowercase();
-        let cmd = c.to_ascii_uppercase();
-        match cmd {
-            b'M' => {
-                let mut first = true;
-                while let Some((x, y)) = p.pair() {
-                    let pt = if rel { Point::new(cur.x + x, cur.y + y) } else { Point::new(x, y) };
-                    if first {
-                        out.push(PathSeg::MoveTo(pt));
-                        start = pt;
-                        first = false;
-                    } else {
-                        out.push(PathSeg::LineTo(pt));
-                    }
-                    cur = pt;
+    let mut cubic_control = None;
+    let mut quad_control = None;
+    let mut repeat = None;
+    loop {
+        p.skip_ws();
+        let Some(&next) = p.s.get(p.i) else { return Some(()) };
+        let command = if next.is_ascii_alphabetic() {
+            p.i += 1;
+            p.after_argument = false;
+            next
+        } else {
+            repeat?
+        };
+        let kind = command.to_ascii_uppercase();
+        if out.is_empty() && kind != b'M' { return None; }
+        let relative = command.is_ascii_lowercase();
+        let point = |(x,y)| if relative { Point::new(previous.x+x, previous.y+y) } else { Point::new(x,y) };
+        let reflect = |last: Option<Point>| last.map_or(previous, |p| Point::new(2.0*previous.x-p.x, 2.0*previous.y-p.y));
+        let mut next_cubic = None;
+        let mut next_quad = None;
+        let (seg, end) = match kind {
+            b'M' | b'L' => {
+                let end = point(p.pair()?);
+                if kind == b'M' {
+                    start = end;
+                    (PathSeg::MoveTo(end), end)
+                } else {
+                    (PathSeg::LineTo(end), end)
                 }
-                last_ctrl = None;
-            }
-            b'L' => {
-                while let Some((x, y)) = p.pair() {
-                    let pt = if rel { Point::new(cur.x + x, cur.y + y) } else { Point::new(x, y) };
-                    out.push(PathSeg::LineTo(pt));
-                    cur = pt;
-                }
-                last_ctrl = None;
             }
             b'H' => {
-                while let Some(x) = p.number() {
-                    let pt = Point::new(if rel { cur.x + x } else { x }, cur.y);
-                    out.push(PathSeg::LineTo(pt));
-                    cur = pt;
-                }
-                last_ctrl = None;
+                let x = p.number()?;
+                let end = Point::new(if relative { previous.x+x } else { x }, previous.y);
+                (PathSeg::LineTo(end), end)
             }
             b'V' => {
-                while let Some(y) = p.number() {
-                    let pt = Point::new(cur.x, if rel { cur.y + y } else { y });
-                    out.push(PathSeg::LineTo(pt));
-                    cur = pt;
-                }
-                last_ctrl = None;
+                let y = p.number()?;
+                let end = Point::new(previous.x, if relative { previous.y+y } else { y });
+                (PathSeg::LineTo(end), end)
             }
-            b'C' => {
-                while let Some((x1, y1)) = p.pair() {
-                    let (Some((x2, y2)), Some((x, y))) = (p.pair(), p.pair()) else { break };
-                    let (c1, c2, pt) = if rel {
-                        (Point::new(cur.x + x1, cur.y + y1), Point::new(cur.x + x2, cur.y + y2), Point::new(cur.x + x, cur.y + y))
-                    } else {
-                        (Point::new(x1, y1), Point::new(x2, y2), Point::new(x, y))
-                    };
-                    out.push(PathSeg::CubicTo(c1, c2, pt));
-                    last_ctrl = Some(c2);
-                    cur = pt;
-                }
+            b'C' | b'S' => {
+                let c1 = if kind == b'C' { point(p.pair()?) } else { reflect(cubic_control) };
+                let c2 = point(p.pair()?);
+                let end = point(p.pair()?);
+                next_cubic = Some(c2);
+                (PathSeg::CubicTo(c1,c2,end), end)
             }
-            b'S' => {
-                while let Some((x2, y2)) = p.pair() {
-                    let Some((x, y)) = p.pair() else { break };
-                    let c1 = match (last_cmd, last_ctrl) {
-                        (b'C' | b'S', Some(lc)) => Point::new(2.0 * cur.x - lc.x, 2.0 * cur.y - lc.y),
-                        _ => cur,
-                    };
-                    let (c2, pt) = if rel {
-                        (Point::new(cur.x + x2, cur.y + y2), Point::new(cur.x + x, cur.y + y))
-                    } else {
-                        (Point::new(x2, y2), Point::new(x, y))
-                    };
-                    out.push(PathSeg::CubicTo(c1, c2, pt));
-                    last_ctrl = Some(c2);
-                    cur = pt;
-                    last_cmd = b'S';
-                }
-            }
-            b'Q' => {
-                while let Some((x1, y1)) = p.pair() {
-                    let Some((x, y)) = p.pair() else { break };
-                    let (c1, pt) = if rel {
-                        (Point::new(cur.x + x1, cur.y + y1), Point::new(cur.x + x, cur.y + y))
-                    } else {
-                        (Point::new(x1, y1), Point::new(x, y))
-                    };
-                    out.push(PathSeg::QuadTo(c1, pt));
-                    last_ctrl = Some(c1);
-                    cur = pt;
-                }
-            }
-            b'T' => {
-                while let Some((x, y)) = p.pair() {
-                    let c1 = match (last_cmd, last_ctrl) {
-                        (b'Q' | b'T', Some(lc)) => Point::new(2.0 * cur.x - lc.x, 2.0 * cur.y - lc.y),
-                        _ => cur,
-                    };
-                    let pt = if rel { Point::new(cur.x + x, cur.y + y) } else { Point::new(x, y) };
-                    out.push(PathSeg::QuadTo(c1, pt));
-                    last_ctrl = Some(c1);
-                    cur = pt;
-                    last_cmd = b'T';
-                }
+            b'Q' | b'T' => {
+                let c = if kind == b'Q' { point(p.pair()?) } else { reflect(quad_control) };
+                let end = point(p.pair()?);
+                next_quad = Some(c);
+                (PathSeg::QuadTo(c,end), end)
             }
             b'A' => {
-                while let Some(rx) = p.number() {
-                    let (Some(ry), Some(rot), Some(large), Some(sweep), Some((x, y))) = (p.number(), p.number(), p.flag(), p.flag(), p.pair()) else { break };
-                    let pt = if rel { Point::new(cur.x + x, cur.y + y) } else { Point::new(x, y) };
-                    out.push(PathSeg::ArcTo {
-                        rx,
-                        ry,
-                        rotation: rot.to_radians(),
-                        large_arc: large,
-                        sweep,
-                        to: pt,
-                    });
-                    cur = pt;
-                }
-                last_ctrl = None;
+                let rx = p.number()?;
+                let ry = p.number()?;
+                let rotation = p.number()?.to_radians();
+                let large_arc = p.flag()?;
+                let sweep = p.flag()?;
+                let to = point(p.pair()?);
+                (PathSeg::ArcTo { rx, ry, rotation, large_arc, sweep, to }, to)
             }
-            b'Z' => {
-                out.push(PathSeg::Close);
-                cur = start;
-                last_ctrl = None;
-            }
-            _ => break,
-        }
-        if !matches!(cmd, b'S' | b'T') {
-            last_cmd = cmd;
-        }
+            b'Z' => (PathSeg::Close, start),
+            _ => return None,
+        };
+        out.push(seg);
+        previous = end;
+        cubic_control = next_cubic;
+        quad_control = next_quad;
+        repeat = match command {
+            b'M' => Some(b'L'),
+            b'm' => Some(b'l'),
+            b'Z' | b'z' => None,
+            _ => Some(command),
+        };
     }
-    out
 }
 
 struct SvgParser<'a> {
     s: &'a [u8],
     i: usize,
+    after_argument: bool,
 }
 
 impl SvgParser<'_> {
     fn skip_ws(&mut self) {
-        while self.i < self.s.len() && (self.s[self.i].is_ascii_whitespace() || self.s[self.i] == b',') {
-            self.i += 1;
-        }
+        while matches!(self.s.get(self.i), Some(b' ' | b'\t' | b'\r' | b'\n')) { self.i += 1; }
     }
 
-    fn next_cmd(&mut self) -> Option<u8> {
+    fn argument(&mut self) {
         self.skip_ws();
-        let c = *self.s.get(self.i)?;
-        if c.is_ascii_alphabetic() {
+        if self.after_argument && self.s.get(self.i) == Some(&b',') {
             self.i += 1;
-            Some(c)
-        } else {
-            None
+            self.skip_ws();
         }
+        self.after_argument = true;
     }
 
     fn number(&mut self) -> Option<f32> {
-        self.skip_ws();
+        self.argument();
         let start = self.i;
         let s = self.s;
         let mut i = self.i;
@@ -607,23 +562,15 @@ impl SvgParser<'_> {
             }
         }
         self.i = i;
-        std::str::from_utf8(&s[start..i]).ok()?.parse().ok()
+        std::str::from_utf8(&s[start..i]).ok()?.parse::<f32>().ok().filter(|n| n.is_finite())
     }
 
     fn pair(&mut self) -> Option<(f32, f32)> {
-        let save = self.i;
-        let x = self.number()?;
-        match self.number() {
-            Some(y) => Some((x, y)),
-            None => {
-                self.i = save;
-                None
-            }
-        }
+        Some((self.number()?, self.number()?))
     }
 
     fn flag(&mut self) -> Option<bool> {
-        self.skip_ws();
+        self.argument();
         let c = *self.s.get(self.i)?;
         match c {
             b'0' => {

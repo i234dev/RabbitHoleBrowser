@@ -3,7 +3,7 @@
 use crate::canvas::{Canvas, Color, ColorStop, FillRule, LineCap, Paint, PathSeg, Point, Rect, StrokeStyle};
 use crate::font::{Family, FontContext, FontId};
 use crate::font_ext::sfnt;
-use crate::path::{ellipse_path, parse_svg_path, rounded_rect_path};
+use crate::path::{ellipse_path, parse_css_path, parse_svg_path, rounded_rect_path};
 
 fn px(c: &Canvas, x: u32, y: u32) -> Color {
     Color::from_u32(c.data[(y * c.width + x) as usize])
@@ -670,4 +670,20 @@ fn image_regions_never_sample_outside_the_source_rect() {
     let mut c = Canvas::new(20, 2);
     c.draw_image_region(&img, Rect::new(0.0, 0.0, 1.0, 1.0), Rect::new(0.0, 0.0, 20.0, 2.0), 1.0);
     assert_eq!(px(&c, 19, 1), Color::rgb(255, 0, 0));
+}
+
+#[test]
+fn css_paths_reject_incomplete_data_and_svg_renders_the_valid_prefix() {
+    let prefix = parse_svg_path("M3 4 L8 9");
+    for suffix in ["10", "C20 30 4 5", "A 10 15 0 2 1 20 30", ",", "L,2 3", "L 2,,3", "X1 2"] {
+        let path = format!("M3 4 L8 9 {suffix}");
+        assert_eq!(parse_svg_path(&path), prefix);
+        assert!(parse_css_path(&path).is_none());
+    }
+    assert!(parse_css_path(" L5 6").is_none());
+    assert!(parse_css_path("  ").is_none());
+    let path = parse_css_path("m2,3 4,5 a1 1 0 011-2z m1 1").unwrap();
+    assert!(matches!(path.as_slice(), [PathSeg::MoveTo(_), PathSeg::LineTo(_),
+        PathSeg::ArcTo { large_arc: false, sweep: true, to, .. }, PathSeg::Close, PathSeg::MoveTo(last)]
+        if (to.x, to.y) == (7.0, 6.0) && (last.x, last.y) == (3.0, 4.0)));
 }

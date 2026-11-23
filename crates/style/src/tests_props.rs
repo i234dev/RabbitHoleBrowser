@@ -738,6 +738,9 @@ fn clip_path_basic_shapes() {
         Some(ClipPath::Shape(BasicShape::Polygon { evenodd: true, points: vec![(px(0.0), px(0.0)), (pc(100.0), px(0.0)), (pc(50.0), pc(100.0))], round: 0.0 }, ShapeBox::Border))
     );
     assert!(matches!(clip("path(evenodd, 'M0 0 L10 0 L10 10 Z')"), Some(ClipPath::Shape(BasicShape::Path { evenodd: true, .. }, _))));
+    for invalid in ["path('')", "path('M1 2 L3')", "path(evenodd extra, 'M1 2')"] {
+        assert!(clip(invalid).is_none(), "{invalid}");
+    }
     assert!(matches!(
         clip("shape(from 0 0, line to 100% 0, hline by -50%, curve to 0 100% with 10px 10px, arc by 5px 5px of 10px cw large, close)"),
         Some(ClipPath::Shape(BasicShape::Shape { evenodd: false, .. }, ShapeBox::Border))
