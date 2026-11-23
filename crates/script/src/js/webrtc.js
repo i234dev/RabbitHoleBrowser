@@ -385,7 +385,7 @@
     constructor(token, init) {
       if (token !== channelToken) throw new TypeError('Illegal constructor');
       super();
-      channels.set(this,{...init,readyState:'connecting',binaryType:'arraybuffer',bufferedAmount:0,bufferedAmountLowThreshold:0,queue:[],queuedBytes:0,resetSent:false,
+      channels.set(this,{...init,readyState:'connecting',binaryType:'arraybuffer',bufferedAmount:0,bufferedAmountLowThreshold:0,queue:[],resetSent:false,
         opened:false,messagesSent:0,bytesSent:0,messagesReceived:0,bytesReceived:0});
     }
     get binaryType() { return channels.get(this).binaryType; }
@@ -406,12 +406,10 @@
       const entry = {binary, data: data instanceof Blob ? null : data, size};
       d.queue.push(entry);
       d.bufferedAmount += size;
-      d.queuedBytes += size;
       if (data instanceof Blob) data.arrayBuffer().then(b=>{entry.data=new Uint8Array(b);},()=>{
         const index = d.queue.indexOf(entry);
         if (index !== -1) {
           d.queue.splice(index,1);
-          d.queuedBytes -= size;
           d.bufferedAmount -= size;
         }
         this.dispatchEvent(new Event('error'));
@@ -473,14 +471,13 @@
             const item = d.queue[0];
             if (!N.rtcSend(p.native,d.handle,item.binary,item.data)) break;
             d.queue.shift();
-            d.queuedBytes -= item.size;
+            d.bufferedAmount -= item.size;
             ++d.messagesSent;
             d.bytesSent += item.size;
           }
-          d.bufferedAmount = d.queuedBytes + N.rtcBufferedAmount(p.native,d.handle);
-          // Reset the stream only after both the application queue and SCTP's
-          // reliable send buffer have drained, preserving message ordering.
-          if (d.readyState === 'closing' && !d.queue.length && !d.bufferedAmount) {
+          // bufferedAmount counts bytes waiting for transmission by the
+          // browser. SCTP may retain a transmitted message for retransmission.
+          if (d.readyState === 'closing' && !d.queue.length && !N.rtcBufferedAmount(p.native,d.handle)) {
             d.resetSent = true;
             N.rtcCloseChannel(p.native,d.handle);
           }

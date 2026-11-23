@@ -1170,7 +1170,7 @@ fn closing_a_data_channel_delivers_queued_blob_and_text_in_order() {
         b.ondatachannel=e=>{
           const incoming=e.channel, messages=[];
           incoming.onmessage=event=>messages.push(typeof event.data==='string'?event.data:event.data.byteLength);
-          incoming.onclose=()=>{drainResult=messages.join('|');a.close();b.close();};
+          incoming.onclose=()=>{drainResult=[...messages,c.bufferedAmount].join('|');a.close();b.close();};
         };
         const c=a.createDataChannel('drain');
         c.onopen=()=>{c.send(new Blob([new Uint8Array(4096)]));c.send('done');c.close();};
@@ -1184,7 +1184,7 @@ fn closing_a_data_channel_delivers_queued_blob_and_text_in_order() {
     loop {
         e.tick(&mut page);
         let value=eval(&e,&mut page,"drainResult");
-        if !value.is_empty() { assert_eq!(value,"4096|done"); break; }
+        if !value.is_empty() { assert_eq!(value,"4096|done|0"); break; }
         assert!(Instant::now()<until,"remote channel did not receive and close");
         std::thread::sleep(Duration::from_millis(4));
     }
