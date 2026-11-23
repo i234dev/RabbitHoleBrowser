@@ -244,6 +244,26 @@ fn discrete_alignment_keeps_modifiers_and_switches_at_half_progress() {
 }
 
 #[test]
+fn discrete_anchor_effects_update_the_selected_box_and_its_position() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<!doctype html>
+        <style>body{margin:0}.box{width:20px;height:10px}#a{anchor-name:--a}#b{anchor-name:--b;margin-left:80px}#t{position:absolute;position-area:bottom right;position-anchor:--a;width:10px;height:10px}</style>
+        <div class=box id=a></div><div class=box id=b></div><div id=t></div><script>
+        const cs=getComputedStyle(t);
+        console.log(cs.positionAnchor,t.offsetLeft);
+        t.style.transition='position-anchor 1s linear allow-discrete';
+        t.style.positionAnchor='--b';
+        const transition=t.getAnimations()[0];
+        transition.pause();
+        for (const ms of [499,500]) {
+            transition.currentTime=ms;
+            console.log(cs.positionAnchor,t.offsetLeft);
+        }
+        </script>"#);
+    assert_eq!(logs(&mut page), ["--a 20","--a 20","--b 100"]);
+}
+
+#[test]
 fn grid_track_effects_reach_layout_and_preserve_repeat_structure() {
     let mut e = engine();
     let mut page = load(&mut e, r#"<!doctype html>

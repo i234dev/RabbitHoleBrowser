@@ -71,6 +71,10 @@ enum Prop {
     JustifySelf,
     AlignItems,
     JustifyItems,
+    AnchorName,
+    PositionAnchor,
+    PositionArea,
+    AnchorScope,
     GridTemplateColumns,
     GridTemplateRows,
 }
@@ -118,6 +122,10 @@ const ALL: &[Prop] = &[
     Prop::JustifySelf,
     Prop::AlignItems,
     Prop::JustifyItems,
+    Prop::AnchorName,
+    Prop::PositionAnchor,
+    Prop::PositionArea,
+    Prop::AnchorScope,
     Prop::GridTemplateColumns,
     Prop::GridTemplateRows,
 ];
@@ -167,6 +175,10 @@ impl Prop {
             Prop::JustifySelf => "justify-self",
             Prop::AlignItems => "align-items",
             Prop::JustifyItems => "justify-items",
+            Prop::AnchorName => "anchor-name",
+            Prop::PositionAnchor => "position-anchor",
+            Prop::PositionArea => "position-area",
+            Prop::AnchorScope => "anchor-scope",
             Prop::GridTemplateRows => "grid-template-rows",
             Prop::GridTemplateColumns => "grid-template-columns",
         }
@@ -206,6 +218,10 @@ impl Prop {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
+    AnchorName(Option<Rc<[String]>>),
+    PositionAnchor(Option<Rc<str>>),
+    PositionArea(rabbithole_style::props::anchor::PositionArea),
+    AnchorScope(rabbithole_style::props::anchor::AnchorScope),
     Tracks(Vec<TrackListItem>),
     Distribution(ContentDistribution, AlignFlags),
     ItemAlignment(ItemAlign, AlignFlags),
@@ -262,6 +278,10 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         AlignSelf => Val::ItemAlignment(s.align_self, s.align_self_flags),
         JustifySelf => Val::ItemAlignment(s.justify_self, s.justify_self_flags),
         AlignItems => Val::ItemAlignment(s.align_items, s.align_items_flags),
+        AnchorName => Val::AnchorName(s.anchor_names.clone()),
+        PositionAnchor => Val::PositionAnchor(s.position_anchor.clone()),
+        PositionArea => Val::PositionArea(s.position_area),
+        AnchorScope => Val::AnchorScope(s.anchor_scope.clone()),
         GridTemplateRows => Val::Tracks(s.grid_template_rows.clone()),
         GridTemplateColumns => Val::Tracks(s.grid_template_columns.clone()),
         JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
@@ -271,6 +291,10 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
 fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
     use Prop::*;
     match (p, v) {
+        (AnchorName, Val::AnchorName(value)) => s.anchor_names.clone_from(value),
+        (PositionAnchor, Val::PositionAnchor(value)) => s.position_anchor.clone_from(value),
+        (PositionArea, Val::PositionArea(value)) => s.position_area.clone_from(value),
+        (AnchorScope, Val::AnchorScope(value)) => s.anchor_scope.clone_from(value),
         (GridTemplateRows, Val::Tracks(tracks)) => s.grid_template_rows.clone_from(tracks),
         (GridTemplateColumns, Val::Tracks(tracks)) => s.grid_template_columns.clone_from(tracks),
         (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
@@ -1550,6 +1574,7 @@ impl Engine {
         }
         let changed = page.styles.get(node).map(|s| **s != style).unwrap_or(true);
         if changed {
+            page.styles.any_position_area |= !style.position_area.is_none() && matches!(style.position, rabbithole_style::Position::Absolute | rabbithole_style::Position::Fixed);
             if let Some(slot) = page.styles.styles.get_mut(node) {
                 *slot = Some(Rc::new(style));
                 page.incr.style_patched(node);
