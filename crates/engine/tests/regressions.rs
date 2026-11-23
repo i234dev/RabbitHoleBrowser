@@ -1204,3 +1204,24 @@ fn indent_at_a_boundary_between_blocks_preserves_both_paragraphs() {
     })()"#);
     assert_eq!(result, "<p>first</p><div>second</div>|true|1");
 }
+
+#[test]
+fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<p>test</p>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const doc = document.implementation.createHTMLDocument('other');
+        const text = doc.body.appendChild(doc.createTextNode('abcdef'));
+        const range = doc.createRange();
+        range.setStart(text, 2);
+        range.setEnd(text, 5);
+        const errors = [];
+        for (const bad of [doc, doc.body]) {
+            try { range.insertNode(bad); } catch (e) { errors.push(e.name); }
+        }
+        const copy = range.cloneContents();
+        return [...errors, copy.ownerDocument === doc, copy.textContent,
+                text.data, doc.body.childNodes.length, range.endContainer === text, range.endOffset].join('|');
+    })()"#);
+    assert_eq!(result, "HierarchyRequestError|HierarchyRequestError|true|cde|abcdef|1|true|5");
+}

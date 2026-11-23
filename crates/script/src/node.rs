@@ -312,6 +312,9 @@ pub(crate) fn ensure_insert_validity(realm: &mut Realm, parent: NodeRef, node: N
     if !matches!(parent_kind, Kind::Document | Kind::Fragment | Kind::Element) {
         return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "This node type does not support this method."));
     }
+    if node.doc == parent.doc && (node.node == parent.node || with_doc(parent.doc, |doc| doc.is_ancestor(node.node, parent.node))) {
+        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
+    }
     let (node_kind, frag_elements, frag_text) = with_doc(node.doc, |doc| {
         let k = kind_of(doc, node.node);
         let (mut elements, mut text) = (0, false);
@@ -471,9 +474,6 @@ pub(crate) fn insert_node(realm: &mut Realm, parent: NodeRef, child: NodeRef, be
 /// `insert_node`; `validate` runs the pre-insertion checks (callers that
 /// already ran the "replace" checks pass false).
 pub(crate) fn insert_node_checked(realm: &mut Realm, parent: NodeRef, child: NodeRef, before: Option<NodeId>, validate: bool) -> JsResult<()> {
-    if child.doc == parent.doc && (child.node == parent.node || with_doc(parent.doc, |doc| doc.is_ancestor(child.node, parent.node))) {
-        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
-    }
     if validate {
         ensure_insert_validity(realm, parent, child, before, false)?;
     }
@@ -1229,9 +1229,6 @@ fn n_replace_child(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     };
     if with_doc(n.doc, |doc| doc.parent(old.node)) != Some(n.node) {
         return Err(crate::misc::dom_exception(realm, "NotFoundError", "The node to be replaced is not a child of this node."));
-    }
-    if new.doc == n.doc && (new.node == n.node || with_doc(n.doc, |doc| doc.is_ancestor(new.node, n.node))) {
-        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
     }
     ensure_insert_validity(realm, n, new, Some(old.node), true)?;
     let next = with_doc(n.doc, |doc| doc.next_sibling(old.node));

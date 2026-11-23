@@ -199,6 +199,16 @@ fn handle_obj(realm: &mut Realm, this: &Value) -> JsResult<rabbithole_js::Object
 
 // ---------------------------------------------------------- boundary points
 
+/// Range insertion must validate the original reference child before it
+/// splits a text node, which would otherwise already mutate live ranges.
+fn check_range_insertion(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let parent = node_arg(realm, &arg(args, 0))?;
+    let child = node_arg(realm, &arg(args, 1))?;
+    let reference = node_arg(realm, &arg(args, 2))?;
+    crate::node::ensure_insert_validity(realm, parent, child, Some(reference.node), false)?;
+    Ok(Value::Undefined)
+}
+
 /// `liveBoundary(node, offset)`: a handle whose `node` / `offset` follow
 /// DOM mutations.
 fn live_boundary(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -467,6 +477,7 @@ pub(crate) fn install(realm: &mut Realm, natives: rabbithole_js::ObjectId) {
     realm.define_accessor(ip, "before", Some(iter_before_get), Some(iter_before_set), ACC);
     realm.extra_roots.push(Value::Object(ip));
     state().borrow_mut().protos.insert("__LiveIteratorPosition", ip);
+    realm.define_method(natives, "checkRangeInsertion", 3, check_range_insertion);
     realm.define_method(natives, "liveBoundary", 2, live_boundary);
     realm.define_method(natives, "liveIteratorPosition", 3, live_iterator_position);
     realm.define_method(natives, "selectionSync", 2, selection_sync);

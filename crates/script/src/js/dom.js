@@ -441,8 +441,8 @@
     deleteContents() { removeContents(this, false); }
     extractContents() { return removeContents(this, true); }
     cloneContents() {
-      const frag = document.createDocumentFragment();
       const s = this[S];
+      const frag = (s.sc.nodeType === 9 ? s.sc : s.sc.ownerDocument).createDocumentFragment();
       if (this.collapsed) return frag;
       if (s.sc === s.ec && isCharData(s.sc)) { const c = s.sc.cloneNode(); c.data = s.sc.data.slice(s.so, s.eo); frag.appendChild(c); return frag; }
       for (const n of containedTop(this)) frag.appendChild(cloneBounded(this, n));
@@ -450,15 +450,18 @@
     }
     insertNode(node) {
       const s = this[S];
-      if ((s.sc.nodeType === 8 || s.sc.nodeType === 7) || (s.sc.nodeType === 3 && !s.sc.parentNode) || s.sc === node) throw domError("Failed to execute 'insertNode' on 'Range': The range start is in an invalid position.", 'HierarchyRequestError');
+      rangeNode(node);
+      const text = s.sc.nodeType === 3 || s.sc.nodeType === 4;
+      if ((s.sc.nodeType === 8 || s.sc.nodeType === 7) || (text && !s.sc.parentNode) || s.sc === node) throw domError("Failed to execute 'insertNode' on 'Range': The range start is in an invalid position.", 'HierarchyRequestError');
       let ref = null, parent;
-      if (s.sc.nodeType === 3) { ref = s.sc.splitText(s.so); parent = ref.parentNode; }
-      else { parent = s.sc; ref = s.sc.childNodes[s.so] || null; }
+      if (text) {
+        parent = s.sc.parentNode;
+        N.checkRangeInsertion(parent, node, s.sc);
+        ref = s.sc.splitText(s.so);
+      } else { parent = s.sc; ref = s.sc.childNodes[s.so] || null; }
       if (ref === node) ref = node.nextSibling;
-      const count = node.nodeType === 11 ? node.childNodes.length : 1;
       parent.insertBefore(node, ref);
       if (this.collapsed) { s.ec = parent; s.eo = (ref ? index(ref) : parent.childNodes.length); }
-      void count;
     }
     surroundContents(newParent) {
       const s = this[S];
