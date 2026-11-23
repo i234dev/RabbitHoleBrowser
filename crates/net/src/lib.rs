@@ -18,6 +18,7 @@ pub mod cookies;
 pub mod cache;
 pub mod client;
 pub mod cors;
+pub mod mime;
 pub mod h1;
 pub mod h2;
 pub mod transport;

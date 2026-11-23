@@ -2015,3 +2015,15 @@ fn text_decoder_uses_standard_labels_and_converts_options_once() {
     "#);
     assert_eq!(out, ["ibm866 true true 1", "RangeError", "TypeError"]);
 }
+
+#[test]
+fn fetch_blob_and_clone_preserve_serialized_mime_parameter_values() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const ct = 'Text/Plain; Label="cAsE,é"';
+        new Response('x', {headers: {'Content-Type':ct}}).blob().then(b => {
+            console.log(b.type, structuredClone(b).type === b.type, new Blob([], {type:ct}).type === '');
+        });
+    "#);
+    assert_eq!(out, ["text/plain;label=\"cAsE,é\" true true"]);
+}

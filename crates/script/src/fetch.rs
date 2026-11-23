@@ -830,7 +830,10 @@ fn body_blob(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
             return rejected(realm, "TypeError", &msg);
         }
     };
-    let ct = realm.get_str(this.clone(), "headers").ok().and_then(|h| h.as_object()).and_then(|h| realm.host_data::<HeadersData>(h).and_then(|d| d.list.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.clone()))).unwrap_or_default();
+    let headers = realm.get_str(this, "headers")?;
+    let ct = headers.as_object().and_then(|o| realm.host_data::<HeadersData>(o)).map_or_else(String::new, |data| {
+        rabbithole_net::mime::from_content_type_headers(data.list.iter().filter(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, value)| value.as_str()))
+    });
     let blob = make_blob(realm, bytes, &ct);
     resolved(realm, blob)
 }
@@ -1535,7 +1538,7 @@ fn normalize_blob_type(ty: &str) -> String {
 }
 
 pub(crate) fn make_blob(realm: &mut Realm, bytes: Vec<u8>, ty: &str) -> Value {
-    make_blob_object(realm, BlobData { bytes, mime: normalize_blob_type(ty), file: None }, proto("Blob"))
+    make_blob_object(realm, BlobData { bytes, mime: ty.to_string(), file: None }, proto("Blob"))
 }
 
 fn make_blob_object(realm: &mut Realm, data: BlobData, prototype: ObjectId) -> Value {
@@ -1669,7 +1672,7 @@ pub(crate) fn deserialize_blob(realm: &mut Realm, _: Value, args: &[Value]) -> J
         _ => return Err(realm.throw_type_error("Invalid serialized File metadata")),
     };
     let prototype = proto(if file.is_some() { "File" } else { "Blob" });
-    Ok(make_blob_object(realm, BlobData { bytes, mime: normalize_blob_type(&mime.to_rust_string()), file }, prototype))
+    Ok(make_blob_object(realm, BlobData { bytes, mime: mime.to_rust_string(), file }, prototype))
 }
 
 fn file_name(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1718,7 +1721,7 @@ fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
     let end = blob_offset(realm, arg(args, 1), len, len)?;
     let ty = arg_str_opt(realm, args, 2)?.unwrap_or_default();
     let bytes = blob_data(realm, &this)?.bytes[start.min(end)..end].to_vec();
-    Ok(make_blob(realm, bytes, &ty))
+    Ok(make_blob(realm, bytes, &normalize_blob_type(&ty)))
 }
 
 /// `URL.createObjectURL(blob)`: `blob:<origin>/<uuid>` resolving to the
@@ -2094,10 +2097,6 @@ fn byte_string(realm: &mut Realm, args: &[Value], index: usize) -> JsResult<Stri
     Ok(text)
 }
 
-fn http_token(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_|~".contains(&b) || b == 0x60)
-}
-
 fn forbidden_method(method: &str) -> bool {
     ["CONNECT", "TRACE", "TRACK"].iter().any(|m| method.eq_ignore_ascii_case(m))
 }
@@ -2107,7 +2106,7 @@ fn xhr_open(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     if args.len() < 2 { return Err(realm.throw_type_error("open requires a method and URL")); }
     let method = byte_string(realm, args, 0)?;
     let url = arg_str(realm, args, 1)?;
-    if !http_token(&method) {
+    if !rabbithole_net::mime::is_http_token(&method) {
         return Err(crate::misc::dom_exception(realm, "SyntaxError", "Invalid HTTP method"));
     }
     if forbidden_method(&method) {
@@ -2143,7 +2142,7 @@ fn xhr_set_request_header(realm: &mut Realm, this: Value, args: &[Value]) -> JsR
     if d.ready_state != 1 || d.sent {
         return Err(crate::misc::dom_exception(realm, "InvalidStateError", "Request headers require an open, unsent request"));
     }
-    if !http_token(&name) || value.contains(['\0', '\r', '\n']) {
+    if !rabbithole_net::mime::is_http_token(&name) || value.contains(['\0', '\r', '\n']) {
         return Err(crate::misc::dom_exception(realm, "SyntaxError", "Invalid HTTP header"));
     }
     let method_override = matches!(name.as_str(), "x-http-method" | "x-http-method-override" | "x-method-override");
