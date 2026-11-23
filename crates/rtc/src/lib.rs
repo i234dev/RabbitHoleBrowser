@@ -49,6 +49,32 @@ pub struct Peer {
     selected_pair: Option<(SocketAddr, SocketAddr)>,
 }
 
+/// str0m uses a single ICE/DTLS transport and requires an explicit BUNDLE
+/// group. A session with just one media section already has that topology.
+/// Keep the provider's equivalent representation private to negotiation.
+fn single_transport_sdp(sdp: &str) -> std::borrow::Cow<'_, str> {
+    let mut media_offset = None;
+    let mut mid = None;
+    let mut offset = 0;
+    for line in sdp.split_inclusive('\n') {
+        let value = line.trim_end_matches(['\r','\n']);
+        if value.starts_with("m=") {
+            if media_offset.replace(offset).is_some() { return sdp.into(); }
+        } else if media_offset.is_none() && value.strip_prefix("a=group:")
+            .is_some_and(|g| g.split_ascii_whitespace().next() == Some("BUNDLE")) {
+            return sdp.into();
+        } else if let Some(id) = value.strip_prefix("a=mid:") {
+            if media_offset.is_none() || id.is_empty() || id.bytes().any(|b| b.is_ascii_whitespace()) ||
+                mid.replace(id).is_some() { return sdp.into(); }
+        }
+        offset += line.len();
+    }
+    let (Some(index),Some(id)) = (media_offset,mid) else { return sdp.into() };
+    let mut normalized = sdp.to_owned();
+    normalized.insert_str(index,&format!("a=group:BUNDLE {id}\r\n"));
+    normalized.into()
+}
+
 impl Peer {
     pub fn bind(addresses: &[IpAddr]) -> io::Result<Self> {
         Self::bind_with_certificate(addresses, None)
@@ -124,7 +150,9 @@ impl Peer {
     }
 
     pub fn answer_offer(&mut self, sdp: &str) -> io::Result<String> {
-        let offer = SdpOffer::from_sdp_string(sdp).map_err(io::Error::other)?;
+        let normalized = single_transport_sdp(sdp);
+        let unbundled = matches!(normalized, std::borrow::Cow::Owned(_));
+        let offer = SdpOffer::from_sdp_string(&normalized).map_err(io::Error::other)?;
         let answer = self
             .rtc
             .sdp_api()
@@ -141,11 +169,16 @@ impl Peer {
                 self.channels.insert(handle, id);
             }
         }
-        Ok(answer)
+        if unbundled {
+            // The answer cannot negotiate a group the peer never offered.
+            Ok(answer.split_inclusive('\n').filter(|line| !line.starts_with("a=group:BUNDLE ")).collect())
+        } else {
+            Ok(answer)
+        }
     }
 
     pub fn accept_answer(&mut self, sdp: &str) -> io::Result<()> {
-        let answer = SdpAnswer::from_sdp_string(sdp).map_err(io::Error::other)?;
+        let answer = SdpAnswer::from_sdp_string(&single_transport_sdp(sdp)).map_err(io::Error::other)?;
         let pending = self
             .pending
             .take()
@@ -272,6 +305,8 @@ impl Peer {
                     }
                 }
                 Output::Transmit(t) => {
+                    // The current socket backend gathers UDP host candidates.
+                    if t.proto != Protocol::Udp { continue; }
                     if let Some((_, socket)) =
                         self.sockets.iter().find(|(addr, _)| *addr == t.source)
                     {
@@ -327,6 +362,22 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
     use std::time::Duration;
+
+    #[test]
+    fn a_single_unbundled_media_section_negotiates_one_transport() {
+        let interfaces = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        let mut caller = Peer::bind(&interfaces).unwrap();
+        let mut receiver = Peer::bind(&interfaces).unwrap();
+        caller.add_channel(ChannelConfig::default()).unwrap();
+        let offer: String = caller.create_offer().unwrap().split_inclusive('\n')
+            .filter(|line| !line.starts_with("a=group:BUNDLE ")).collect();
+        let answer = receiver.answer_offer(&offer).unwrap();
+        assert!(!answer.contains("a=group:BUNDLE"));
+        assert!(answer.contains("a=fingerprint:"));
+        caller.accept_answer(&answer).unwrap();
+        let multi = format!("{offer}m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:audio\r\n");
+        assert!(matches!(single_transport_sdp(&multi), std::borrow::Cow::Borrowed(_)));
+    }
 
     #[test]
     fn peers_exchange_binary_data_over_dtls_sctp() {
