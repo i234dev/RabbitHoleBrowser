@@ -2235,3 +2235,16 @@ fn rtc_events_dispatch_candidates_and_structured_errors() {
     "#);
     assert_eq!(out, ["true true stun:localhost", "true true OperationError invalid media line 3 null", "1 701 unreachable null", "TypeError"]);
 }
+
+#[test]
+fn shadow_hosts_follow_dom_local_name_rules() {
+    let out = result_of("<body>", r#"
+        const name = 'a-<widget';
+        customElements.define(name, class extends HTMLElement {});
+        const root = document.createElement(name).attachShadow({mode:'open'});
+        let rejected = false;
+        try { customElements.define('a-\0b', class extends HTMLElement {}) } catch (e) { rejected = e.name === 'SyntaxError' }
+        window.result = root.host.localName === name && rejected;
+    "#);
+    assert_eq!(out, "'true'");
+}

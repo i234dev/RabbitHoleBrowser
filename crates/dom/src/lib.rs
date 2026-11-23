@@ -220,15 +220,25 @@ pub struct ShadowInfo {
     pub declarative: bool,
 }
 
-/// The HTML PotentialCustomElementName production and its reserved names.
+/// DOM "valid element local name".
+pub fn valid_element_local_name(s: &str) -> bool {
+    let mut it = s.chars();
+    let Some(first) = it.next() else { return false };
+    if first.is_ascii_alphabetic() {
+        return !s.chars().any(|c| matches!(c, '\0' | '\t' | '\n' | '\u{c}' | '\r' | ' ' | '/' | '>'));
+    }
+    if !(first == ':' || first == '_' || first as u32 >= 0x80) {
+        return false;
+    }
+    it.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':' | '_') || c as u32 >= 0x80)
+}
+
+/// HTML custom element names are valid DOM local names with an ASCII
+/// lowercase initial, at least one hyphen and no ASCII uppercase letters.
 pub fn valid_custom_element_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some('a'..='z')) && name.contains('-')
+    name.starts_with(|c: char| c.is_ascii_lowercase()) && name.contains('-')
+        && !name.bytes().any(|c| c.is_ascii_uppercase()) && valid_element_local_name(name)
         && !matches!(name, "annotation-xml" | "color-profile" | "font-face" | "font-face-src" | "font-face-uri" | "font-face-format" | "font-face-name" | "missing-glyph")
-        && chars.all(|c| matches!(c, '-' | '.' | '_' | '0'..='9' | 'a'..='z') || matches!(c as u32,
-            0xB7 | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0x37D | 0x37F..=0x1FFF | 0x200C..=0x200D |
-            0x203F..=0x2040 | 0x2070..=0x218F | 0x2C00..=0x2FEF | 0x3001..=0xD7FF |
-            0xF900..=0xFDCF | 0xFDF0..=0xFFFD | 0x10000..=0xEFFFF))
 }
 
 /// Identity of one live document incarnation. A rendering/DOM clone owns a

@@ -731,29 +731,31 @@ pub(crate) fn get_html(realm: &mut Realm, this: Value, args: &[Value]) -> JsResu
     if !with_doc(n.doc, |doc| doc.is_html) {
         return fragment_serialize(realm, n, false);
     }
-    let roots: Vec<(NodeId, NodeId)> = with_doc(n.doc, |doc| doc.shadow_roots.iter().map(|(&h, &r)| (h, r)).collect());
-    let mut chosen: std::collections::HashMap<NodeId, (NodeId, String)> = std::collections::HashMap::new();
-    for (host, root) in roots {
-        let rr = NodeRef { doc: n.doc, node: root };
-        let Some(info) = crate::shadow::shadow_info(rr) else { continue };
-        if !((serializable && info.serializable) || listed.contains(&rr)) {
-            continue;
+    let s = with_doc(n.doc, |doc| {
+        if !serializable && listed.is_empty() {
+            return doc.serialize_with_shadows(n.node, false, None);
         }
-        let mut open = format!("<template shadowrootmode=\"{}\"", if info.open { "open" } else { "closed" });
-        if info.delegates_focus {
-            open.push_str(" shadowrootdelegatesfocus=\"\"");
-        }
-        if info.serializable {
-            open.push_str(" shadowrootserializable=\"\"");
-        }
-        if info.clonable {
-            open.push_str(" shadowrootclonable=\"\"");
-        }
-        open.push('>');
-        chosen.insert(host, (root, open));
-    }
-    let f = |h: NodeId| chosen.get(&h).cloned();
-    let s = with_doc(n.doc, |doc| doc.serialize_with_shadows(n.node, false, Some(&f)));
+        let choose = |host: NodeId| {
+            let root = doc.shadow_root(host)?;
+            let info = doc.shadow_info.get(&root)?;
+            if !(serializable && info.serializable) && !listed.contains(&NodeRef { doc: n.doc, node: root }) {
+                return None;
+            }
+            let mut open = format!("<template shadowrootmode=\"{}\"", if info.open { "open" } else { "closed" });
+            if info.delegates_focus {
+                open.push_str(" shadowrootdelegatesfocus=\"\"");
+            }
+            if info.serializable {
+                open.push_str(" shadowrootserializable=\"\"");
+            }
+            if info.clonable {
+                open.push_str(" shadowrootclonable=\"\"");
+            }
+            open.push('>');
+            Some((root, open))
+        };
+        doc.serialize_with_shadows(n.node, false, Some(&choose))
+    });
     Ok(Value::str(&s))
 }
 

@@ -1,5 +1,6 @@
 //! `Document`: lookup, creation, `write`, `cookie`, ready state, etc.
 
+use rabbithole_dom::valid_element_local_name;
 use crate::env::with_env;
 use rabbithole_js::V;
 use crate::host::*;
@@ -227,20 +228,6 @@ fn d_style_sheets(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
         sheets.push(s);
     }
     Ok(realm.new_array_value(sheets))
-}
-
-/// XML `Name` production (simplified to the BMP ranges that matter).
-/// DOM "valid element local name".
-pub(crate) fn valid_element_local_name(s: &str) -> bool {
-    let mut it = s.chars();
-    let Some(first) = it.next() else { return false };
-    if first.is_ascii_alphabetic() {
-        return !s.chars().any(|c| matches!(c, '\0' | '\t' | '\n' | '\u{c}' | '\r' | ' ' | '/' | '>'));
-    }
-    if !(first == ':' || first == '_' || first as u32 >= 0x80) {
-        return false;
-    }
-    it.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':' | '_') || c as u32 >= 0x80)
 }
 
 /// DOM "valid attribute local name".
