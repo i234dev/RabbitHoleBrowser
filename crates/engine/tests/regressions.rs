@@ -1106,3 +1106,25 @@ fn computed_gradient_layers_retain_geometry_and_color_interpolation() {
     let result = eval(&e,&mut page,"[getComputedStyle(sample).backgroundImage,getComputedStyle(sample).maskImage].join('|')");
     assert_eq!(result,"radial-gradient(50% 40px at 100% 50%, rgb(255, 0, 0), rgb(0, 0, 255)), linear-gradient(to right in oklch longer hue, color(srgb 1 0 0), rgb(0, 0, 255))|conic-gradient(from 30deg, rgb(0, 0, 0), rgb(255, 255, 255))");
 }
+
+#[test]
+fn rich_list_commands_respect_sublists_and_table_cell_boundaries() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=ed contenteditable><ul><li>outer<ul><li>inner</li></ul></li></ul><table><tr><td><b>cell</b></td></tr></table></section>");
+    let result = eval(&e,&mut page,r#"(() => {
+        ed.focus();
+        const sel=getSelection(), outer=ed.querySelector('li').firstChild, cell=ed.querySelector('td');
+        sel.collapse(outer,2);
+        document.execCommand('insertOrderedList');
+        const mixed=[document.queryCommandState('insertOrderedList'),document.queryCommandIndeterm('insertOrderedList')];
+        sel.collapse(ed.querySelector('ul li').firstChild,2);
+        document.execCommand('insertUnorderedList');
+        const lifted=ed.firstChild.lastChild.textContent;
+        const text=cell.firstChild.firstChild;
+        sel.setBaseAndExtent(text,1,text,3);
+        document.execCommand('insertOrderedList');
+        document.execCommand('insertOrderedList');
+        return [...mixed,lifted,cell.innerHTML,sel.anchorNode===text,sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result,"false|true|inner|<b>cell</b>|true|1");
+}

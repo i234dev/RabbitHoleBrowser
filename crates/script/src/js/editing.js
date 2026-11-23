@@ -359,8 +359,10 @@
     if (listCommands.has(cmd)) {
       if (kind === 'value') return '';
       const items = listParagraphs(t), tag = listCommands.get(cmd);
-      const count = items.filter(run => run.item?.parentElement?.localName === tag).length;
-      return kind === 'mixed' ? count > 0 && count < items.length : count > 0 && count === items.length;
+      // A selection anchored on rows selects table cells as structural units.
+      if (t.range.startContainer.localName === 'tr' && t.range.endContainer.localName === 'tr') return false;
+      const state = selectionListState(items,tag);
+      return kind === 'mixed' ? state === 'mixed' : state === 'active';
     }
     const values=paragraphs(t).map(run=>blockValue(run,cmd));
     if (kind==='value') return values[0] || '';
@@ -381,6 +383,13 @@
   }
   function listParagraphs(t) {
     const result = [], seen = new Set();
+    const range = t.range, table = range.startContainer;
+    if (table.localName === 'table' && table === range.endContainer && !range.collapsed &&
+        range.startOffset === 0 && range.endOffset === table.childNodes.length && table !== t.host) {
+      const parent = table.parentElement;
+      const item = parent?.localName === 'li' && ['ol','ul'].includes(parent.parentElement?.localName) ? parent : null;
+      return [{container:table.parentNode,nodes:[table],item}];
+    }
     for (const run of paragraphs(t,true)) {
       const item = run.container.closest('li');
       if (item && item !== t.host && t.host.contains(item) && ['ol','ul'].includes(item.parentElement?.localName)) {
@@ -388,6 +397,16 @@
       } else result.push(run);
     }
     return result;
+  }
+  function selectionListState(runs,tag) {
+    const other = tag === 'ol' ? 'ul' : 'ol';
+    let present = false, pure = runs.length > 0;
+    for (const {item} of runs) {
+      const parent = item?.parentElement?.localName;
+      if (parent === tag || item?.querySelector(tag)) present = true;
+      if (parent !== tag || item.querySelector(other)) pure = false;
+    }
+    return pure ? 'active' : present ? 'mixed' : 'none';
   }
   function splitBeforeChild(parent, child) {
     if (!child.previousSibling) return;
@@ -412,7 +431,7 @@
   function applyList(t,tag,separator) {
     const runs = listParagraphs(t), {host,sel} = t, doc = host.ownerDocument;
     if (!runs.length) return true;
-    const remove = runs.every(run => run.item?.parentElement.localName === tag);
+    const remove = selectionListState(runs,tag) === 'active';
     const a = bookmark(sel.anchorNode,sel.anchorOffset), b = bookmark(sel.focusNode,sel.focusOffset);
     const replacements = new Map(), lists = [];
     for (const run of runs) {
@@ -422,12 +441,27 @@
         if (!remove && old.localName === tag) { lists.push(old); continue; }
         splitBeforeChild(old,item);
         if (remove) {
-          const block = doc.createElement(separator);
-          old.parentNode.insertBefore(block,old);
-          for (const attr of Array.from(item.attributes)) block.setAttribute(attr.name,attr.value);
-          while (item.firstChild) block.appendChild(item.firstChild);
-          replacements.set(item,block);
-          item.remove();
+          const parent = old.parentElement;
+          const outer = parent.localName === 'li' ? parent.parentElement : parent;
+          if (['ol','ul'].includes(outer?.localName) && host.contains(outer)) {
+            // Lift the selected item by one level. Its following siblings
+            // stay at their original depth underneath it.
+            outer.insertBefore(item,parent === outer ? old : parent.nextSibling);
+            if (old.firstChild) item.appendChild(old);
+          } else if (!item.attributes.length &&
+              ((['td','th'].includes(parent.localName) && parent.childNodes.length === 1 && old.childNodes.length === 1) ||
+               (item.childNodes.length === 1 && item.firstChild.localName === 'table'))) {
+            while (item.firstChild) parent.insertBefore(item.firstChild,old);
+            replacements.set(item,parent);
+            item.remove();
+          } else {
+            const block = doc.createElement(separator);
+            parent.insertBefore(block,old);
+            for (const attr of Array.from(item.attributes)) block.setAttribute(attr.name,attr.value);
+            while (item.firstChild) block.appendChild(item.firstChild);
+            replacements.set(item,block);
+            item.remove();
+          }
         } else {
           list = doc.createElement(tag);
           old.parentNode.insertBefore(list,old);
@@ -439,7 +473,8 @@
       }
       const container = run.nodes[0]?.parentNode || run.container;
       const first = run.nodes[0], last = run.nodes[run.nodes.length - 1];
-      const replaceBlock = container !== host && (container.localName === 'p' || container.localName === 'div');
+      const replaceBlock = container !== host && first?.localName !== 'table' &&
+          (container.localName === 'p' || container.localName === 'div');
       list = doc.createElement(tag);
       item = doc.createElement('li');
       list.appendChild(item);
