@@ -7,9 +7,11 @@
   'use strict';
   const g = globalThis;
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
-  const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
-  const S = Symbol('crypto');
+  const keySlots = new WeakMap();
+  const keyInfo = WeakMap.prototype.get.bind(keySlots);
+  const recordKey = WeakMap.prototype.set.bind(keySlots);
+  const hasKey = WeakMap.prototype.has.bind(keySlots);
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const err = (name, msg) => new g.DOMException(msg, name);
   const native = g.crypto;
@@ -206,18 +208,27 @@
   // ------------------------------------------------------------ CryptoKey
   class CryptoKey {
     constructor() { ILLEGAL(); }
-    get type() { return this[S].type; }
-    get extractable() { return this[S].extractable; }
-    get algorithm() { return this[S].algorithm; }
-    get usages() { return this[S].usages.slice(); }
+    get type() { return keyInfo(this).type; }
+    get extractable() { return keyInfo(this).extractable; }
+    get algorithm() { return keyInfo(this).publicAlgorithm; }
+    get usages() { return keyInfo(this).usages; }
   }
   tag(CryptoKey, 'CryptoKey');
-  const newKey = (type, extractable, algorithm, usages, raw) => { const k = Object.create(CryptoKey.prototype); hidden(k, S, { type, extractable: !!extractable, algorithm, usages: Array.from(usages), raw }); return k; };
+  function newKey(type, extractable, algorithm, usages, raw) {
+    const k = Object.create(CryptoKey.prototype);
+    const publicAlgorithm = { ...algorithm };
+    if (algorithm.hash) publicAlgorithm.hash = { ...algorithm.hash };
+    recordKey(k, { type, extractable: !!extractable, algorithm, publicAlgorithm,
+      usages: Object.freeze(Array.from(new Set(usages))), raw });
+    return k;
+  }
 
-  const normAlg = (a) => (typeof a === 'string' ? { name: a } : Object.assign({}, a));
+  const normAlg = a => typeof a === 'object' && a !== null ? a : { name: `${a}` };
   const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ECDH', 'ED25519', 'X25519', 'ED448', 'X448'];
   function algName(a) {
-    const n = String(normAlg(a).name || '').toUpperCase();
+    const id = normAlg(a);
+    if (id.name === undefined) throw new TypeError('An algorithm name is required');
+    const n = String(id.name).toUpperCase();
     const map = { 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
@@ -225,7 +236,7 @@
   }
   const b64u = (bytes) => g.btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const unb64u = (s) => { const t = String(s).replace(/-/g, '+').replace(/_/g, '/'); const bin = g.atob(t + '==='.slice((t.length + 3) % 4)); return Uint8Array.from(bin, (c) => c.charCodeAt(0)); };
-  const usageCheck = (usages, allowed) => { for (const u of usages) if (!allowed.includes(u)) throw new SyntaxError(`Cannot create a key using the specified key usages.`); };
+  const usageCheck = (usages, allowed) => { for (const u of usages) if (!allowed.includes(u)) throw err('SyntaxError', `Cannot create a key using the specified key usages.`); };
 
   function importSecret(format, keyData, alg, extractable, usages) {
     const name = algName(alg);
@@ -248,7 +259,7 @@
         return newKey('secret', extractable, { name, length: raw.length * 8 }, usages, raw);
       }
       case 'PBKDF2': case 'HKDF':
-        if (extractable) throw new SyntaxError(`${name} keys are not extractable.`);
+        if (extractable) throw err('SyntaxError', `${name} keys are not extractable.`);
         usageCheck(usages, ['deriveKey', 'deriveBits']);
         return newKey('secret', false, { name }, usages, raw);
       default: throw err('NotSupportedError', `Algorithm ${name} cannot import keys.`);
@@ -257,7 +268,7 @@
   function deriveBitsImpl(alg, key, length) {
     const name = algName(alg);
     const a = normAlg(alg);
-    if (key[S].algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key.');
+    if (keyInfo(key).algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key.');
     if (length == null || !Number.isInteger(length) || length < 0 || length > 0xffffffff || length % 8)
       throw err('OperationError', 'The length must be a multiple of 8.');
     const n = length / 8;
@@ -267,7 +278,7 @@
       if (!Number.isFinite(iterations) || iterations < 0 || iterations > 0xffffffff) throw new TypeError('Invalid iteration count');
       if (!iterations) throw err('OperationError', 'PBKDF2 iterations must be greater than 0.');
       if (!n) return new ArrayBuffer(0);
-      const op = N.pbkdfStart(hash, key[S].raw, salt, iterations, n);
+      const op = N.pbkdfStart(hash, keyInfo(key).raw, salt, iterations, n);
       const output = N.pbkdfStep(op);
       if (output) return output;
       return new Promise((resolve, reject) => {
@@ -284,7 +295,7 @@
     if (!n) return new ArrayBuffer(0);
     const hl = HASHES[hash][1];
     if (n > 255 * hl) throw err('OperationError', 'HKDF output exceeds 255 blocks.');
-    const prk = hmac(hash, salt.length ? salt : new Uint8Array(hl), key[S].raw);
+    const prk = hmac(hash, salt.length ? salt : new Uint8Array(hl), keyInfo(key).raw);
     const out = new Uint8Array(n);
     let t = new Uint8Array(0);
     for (let i = 1, off = 0; off < n; i++) {
@@ -307,27 +318,27 @@
         if (name !== 'HMAC' && ![128, 192, 256].includes(len)) throw err('OperationError', 'AES key length must be 128, 192 or 256 bits.');
         const raw = new Uint8Array(Math.ceil(len / 8));
         nativeRandom(raw);
-        if (!usages || !usages.length) throw new SyntaxError('Usages cannot be empty when creating a key.');
+        if (!usages || !usages.length) throw err('SyntaxError', 'Usages cannot be empty when creating a key.');
         return importSecret('raw', raw, alg, extractable, usages);
       });
     }
     importKey(format, keyData, alg, extractable, usages) { return run(() => importSecret(format, keyData, alg, extractable, usages)); }
     exportKey(format, key) {
       return run(() => {
-        if (!(key instanceof CryptoKey)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
-        if (!key[S].extractable) throw err('InvalidAccessError', 'key is not extractable');
-        const raw = key[S].raw;
+        if (!hasKey(key)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
+        if (!keyInfo(key).extractable) throw err('InvalidAccessError', 'key is not extractable');
+        const raw = keyInfo(key).raw;
         if (format === 'raw' || format === 'raw-secret') return raw.slice().buffer;
         if (format === 'jwk') {
-          const a = key[S].algorithm;
+          const a = keyInfo(key).algorithm;
           const alg = a.name === 'HMAC' ? 'HS' + a.hash.name.slice(4) : 'A' + a.length + (a.name === 'AES-KW' ? 'KW' : a.name.slice(4));
-          return { kty: 'oct', k: b64u(raw), alg, key_ops: key[S].usages.slice(), ext: true };
+          return { kty: 'oct', k: b64u(raw), alg, key_ops: keyInfo(key).usages.slice(), ext: true };
         }
         throw err('NotSupportedError', `Unsupported export format '${format}'.`);
       });
     }
-    sign(alg, key, data) { return run(() => { checkKey(key, 'HMAC', 'sign'); return hmac(key[S].algorithm.hash.name, key[S].raw, bytesOf(data)).buffer; }); }
-    verify(alg, key, signature, data) { return run(() => { checkKey(key, 'HMAC', 'verify'); return N.cryptoHmac(key[S].algorithm.hash.name, key[S].raw, bytesOf(data), bytesOf(signature)); }); }
+    sign(alg, key, data) { return run(() => { checkKey(key, algName(alg), 'sign'); return hmac(keyInfo(key).algorithm.hash.name, keyInfo(key).raw, bytesOf(data)).buffer; }); }
+    verify(alg, key, signature, data) { return run(() => { checkKey(key, algName(alg), 'verify'); return N.cryptoHmac(keyInfo(key).algorithm.hash.name, keyInfo(key).raw, bytesOf(data), bytesOf(signature)); }); }
     encrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), false, 'encrypt').buffer); }
     decrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), true, 'decrypt').buffer); }
     deriveBits(alg, key, length) { return run(() => { checkKey(key, algName(alg), 'deriveBits'); return deriveBitsImpl(alg, key, length); }); }
@@ -335,14 +346,14 @@
     wrapKey(format, key, wrappingKey, wrapAlg) {
       return this.exportKey(format, key).then((exported) => {
         const bytes = format === 'jwk' ? new TextEncoder().encode(JSON.stringify(exported)) : new Uint8Array(exported);
-        if (!wrappingKey[S].usages.includes('wrapKey')) throw err('InvalidAccessError', 'The wrapping key does not support wrapKey.');
-        return algName(wrapAlg) === 'AES-KW' ? aesKw(wrappingKey[S].raw, bytes, false).buffer : cipher(wrapAlg, wrappingKey, bytes, false, null).buffer;
+        checkKey(wrappingKey, algName(wrapAlg), 'wrapKey');
+        return algName(wrapAlg) === 'AES-KW' ? aesKw(keyInfo(wrappingKey).raw, bytes, false).buffer : cipher(wrapAlg, wrappingKey, bytes, false, null).buffer;
       });
     }
     unwrapKey(format, wrapped, unwrappingKey, unwrapAlg, keyAlg, extractable, usages) {
       return run(() => {
-        if (!unwrappingKey[S].usages.includes('unwrapKey')) throw err('InvalidAccessError', 'The unwrapping key does not support unwrapKey.');
-        const bytes = algName(unwrapAlg) === 'AES-KW' ? aesKw(unwrappingKey[S].raw, bytesOf(wrapped), true) : cipher(unwrapAlg, unwrappingKey, bytesOf(wrapped), true, null);
+        checkKey(unwrappingKey, algName(unwrapAlg), 'unwrapKey');
+        const bytes = algName(unwrapAlg) === 'AES-KW' ? aesKw(keyInfo(unwrappingKey).raw, bytesOf(wrapped), true) : cipher(unwrapAlg, unwrappingKey, bytesOf(wrapped), true, null);
         const data = format === 'jwk' ? JSON.parse(new TextDecoder().decode(bytes)) : bytes;
         return importSecret(format, data, keyAlg, extractable, usages);
       });
@@ -351,18 +362,18 @@
   tag(SubtleCrypto, 'SubtleCrypto');
   function run(fn) { try { return Promise.resolve(fn()); } catch (e) { return Promise.reject(e); } }
   function checkKey(key, name, usage) {
-    if (!(key instanceof CryptoKey)) throw new TypeError("parameter is not of type 'CryptoKey'.");
-    if (key[S].algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key');
-    if (usage && !key[S].usages.includes(usage)) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key');
+    if (!hasKey(key)) throw new TypeError("parameter is not of type 'CryptoKey'.");
+    if (keyInfo(key).algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key');
+    if (usage && !keyInfo(key).usages.includes(usage)) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key');
   }
   function cipher(alg, key, data, decrypt, usage) {
     const name = algName(alg);
     checkKey(key, name, usage);
     const a = normAlg(alg);
     switch (name) {
-      case 'AES-CBC': return cbc(key[S].raw, bytesOf(a.iv), data, decrypt);
-      case 'AES-CTR': { const c = bytesOf(a.counter); if (c.length !== 16) throw err('OperationError', 'The counter must be 16 bytes.'); return ctr(key[S].raw, c, data, a.length || 64); }
-      case 'AES-GCM': { const tl = a.tagLength === undefined ? 128 : a.tagLength; if (![32, 64, 96, 104, 112, 120, 128].includes(tl)) throw err('OperationError', 'Invalid tag length.'); return gcm(key[S].raw, bytesOf(a.iv), data, a.additionalData ? bytesOf(a.additionalData) : new Uint8Array(0), tl, decrypt); }
+      case 'AES-CBC': return cbc(keyInfo(key).raw, bytesOf(a.iv), data, decrypt);
+      case 'AES-CTR': { const c = bytesOf(a.counter); if (c.length !== 16) throw err('OperationError', 'The counter must be 16 bytes.'); return ctr(keyInfo(key).raw, c, data, a.length || 64); }
+      case 'AES-GCM': { const tl = a.tagLength === undefined ? 128 : a.tagLength; if (![32, 64, 96, 104, 112, 120, 128].includes(tl)) throw err('OperationError', 'Invalid tag length.'); return gcm(keyInfo(key).raw, bytesOf(a.iv), data, a.additionalData ? bytesOf(a.additionalData) : new Uint8Array(0), tl, decrypt); }
       default: throw err('NotSupportedError', `${name} does not support encryption.`);
     }
   }

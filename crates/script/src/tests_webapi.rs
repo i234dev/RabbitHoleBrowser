@@ -2273,3 +2273,18 @@ fn css_supports_evaluates_conditions_and_separate_declaration_arguments() {
     "#);
     assert_eq!(out, "'true|false|false|false'");
 }
+
+#[test]
+fn web_crypto_operations_use_the_keys_original_algorithm_and_usages() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle;
+        const key = await s.importKey('raw', new Uint8Array([1]), {name:'HMAC', hash:'SHA-256'}, false, ['sign']);
+        key.algorithm.hash.name = 'SHA-512';
+        const sig = await s.sign('HMAC', key, new Uint8Array([2]));
+        console.log(sig.byteLength, Object.isFrozen(key.usages), await s.exportKey('raw',key).catch(e=>e.name));
+        console.log(await s.sign('AES-CBC', key, new Uint8Array()).catch(e=>e.name));
+      })();
+    "#);
+    assert_eq!(out, ["32 true InvalidAccessError", "InvalidAccessError"]);
+}
