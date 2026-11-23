@@ -182,6 +182,13 @@ fn stretch_height(style: &ComputedStyle, cb_h: f32, pb_v: f32) -> f32 {
     (cb_h - m - pb_v).max(0.0)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PositionedDescendants {
+    Absolute,
+    AbsoluteAndFixed,
+    FixedOnly,
+}
+
 /// Static-position rectangle of an absolutely positioned box (inline
 /// axis) and the alignment defaults of its static parent.
 #[derive(Clone, Copy)]
@@ -1860,16 +1867,20 @@ impl<'a> Layouter<'a> {
     pub(crate) fn layout_abs_descendants(&mut self, b: &mut LayoutBox, cb: Rect) -> bool {
         // The common case needs no inline geometry or allocation. Preserve
         // this fact on reused subtrees, just as the recursive walk below does.
-        if b.no_abs_below {
+        // A positioned descendant stops the normal absolute-position walk.
+        // Fixed descendants can still belong to this transformed container.
+        let through_positioned = self.fixed_cb && has_contained_fixed(b);
+        if b.no_abs_below && !through_positioned {
             return false;
         }
-        if !has_abs_descendants(b) {
+        if !through_positioned && !has_abs_descendants(b) {
             b.no_abs_below = true;
             return false;
         }
         let inline_cbs = inline_containing_blocks(b);
         let mut ancestors = HashMap::new();
-        let found = self.layout_abs_descendants_with(b, cb, &inline_cbs, &mut ancestors);
+        let mode = if through_positioned { PositionedDescendants::AbsoluteAndFixed } else { PositionedDescendants::Absolute };
+        let found = self.layout_abs_descendants_with(b, cb, &inline_cbs, &mut ancestors, mode);
         b.no_abs_below = !found;
         found
     }
@@ -1887,7 +1898,7 @@ impl<'a> Layouter<'a> {
         ancestor
     }
 
-    fn layout_abs_descendants_with(&mut self, b: &mut LayoutBox, cb: Rect, inline_cbs: &HashMap<rabbithole_dom::NodeId, Rect>, ancestors: &mut HashMap<rabbithole_dom::NodeId, Option<rabbithole_dom::NodeId>>) -> bool {
+    fn layout_abs_descendants_with(&mut self, b: &mut LayoutBox, cb: Rect, inline_cbs: &HashMap<rabbithole_dom::NodeId, Rect>, ancestors: &mut HashMap<rabbithole_dom::NodeId, Option<rabbithole_dom::NodeId>>, mode: PositionedDescendants) -> bool {
         // Into a vertical subtree's logical space.
         let logical_cbs;
         let (cb, inline_cbs) = match b.wm_transform {
@@ -1899,8 +1910,10 @@ impl<'a> Layouter<'a> {
         };
         let mut found = false;
         for i in 0..b.children.len() {
-            if b.children[i].flow == Flow::Absolute {
+            let fixed = b.children[i].style.position == Position::Fixed;
+            if b.children[i].flow == Flow::Absolute && (mode != PositionedDescendants::FixedOnly || fixed) {
                 let area = b.children[i].abs_node().and_then(|n| {
+                    if mode == PositionedDescendants::FixedOnly { return None; }
                     if inline_cbs.is_empty() {
                         return self.abs_cb.get(&n).copied();
                     }
@@ -1929,12 +1942,19 @@ impl<'a> Layouter<'a> {
                 });
                 self.layout_absolute(&mut b.children[i], area.unwrap_or(cb), static_right, static_rect);
                 found = true;
-            } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below && !b.children[i].style.establishes_fixed_containing_block() {
-                // Kept boxes remember having none (their subtree is
-                // unchanged), so large static subtrees are walked once.
-                let f = self.layout_abs_descendants_with(&mut b.children[i], cb, inline_cbs, ancestors);
-                b.children[i].no_abs_below = !f;
+            }
+            let child = &mut b.children[i];
+            if child.style.establishes_fixed_containing_block() { continue; }
+            if mode != PositionedDescendants::FixedOnly && child.style.position == Position::Static &&
+                (!child.no_abs_below || mode == PositionedDescendants::AbsoluteAndFixed) {
+                let f = self.layout_abs_descendants_with(child, cb, inline_cbs, ancestors, mode);
+                child.no_abs_below = !f;
                 found |= f;
+            } else if mode == PositionedDescendants::FixedOnly ||
+                (mode == PositionedDescendants::AbsoluteAndFixed && child.style.position != Position::Static) {
+                // Its absolute descendants have already been positioned by
+                // their own containing block. Only fixed boxes escape it.
+                found |= self.layout_abs_descendants_with(child, cb, inline_cbs, ancestors, PositionedDescendants::FixedOnly);
             }
         }
         found
@@ -2246,6 +2266,13 @@ fn contains_absolutes(style: &rabbithole_style::ComputedStyle) -> bool {
 /// descendants (positioned or transformed)?
 pub(crate) fn contains_positioned(style: &rabbithole_style::ComputedStyle) -> bool {
     style.position != Position::Static || style.establishes_fixed_containing_block()
+}
+
+fn has_contained_fixed(b: &LayoutBox) -> bool {
+    b.children.iter().any(|child| {
+        child.style.position == Position::Fixed ||
+            (!child.style.establishes_fixed_containing_block() && has_contained_fixed(child))
+    })
 }
 
 fn has_abs_descendants(b: &LayoutBox) -> bool {

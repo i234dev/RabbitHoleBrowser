@@ -1439,3 +1439,21 @@ fn consecutive_floats_add_up_in_a_shrink_to_fit_container() {
     assert_eq!(r1.x, l1.x + 30.0);
     assert_eq!((l2.x, l2.y), (l1.x, l1.y + 10.0));
 }
+
+#[test]
+fn fixed_descendants_escape_positioned_boxes_inside_their_transformed_ancestor() {
+    let fx = Fixture::new("<div id=outer><section><aside><div id=fixed></div><div id=absolute></div></aside></section></div>",
+        "#outer{transform:scale(1);height:120px;width:240px;margin:40px;padding:10px;border:4px solid} section{position:relative;width:80px;height:60px;margin:14px} aside{position:absolute;inset:5px} #fixed,#absolute{bottom:3px;right:5px;width:8px;height:9px} #fixed{position:fixed} #absolute{position:absolute}");
+    let images = HashMap::new();
+    let bgs = HashMap::new();
+    let tree = layout(&fx.ctx(&images, &bgs));
+    let boxes = fx.find(&tree,"div");
+    let outer = boxes[0].padding_rect();
+    let fixed = boxes[1];
+    let inner = fx.find(&tree,"aside")[0].padding_rect();
+    let absolute = boxes[2];
+    assert!((fixed.rect.y + fixed.rect.h - (outer.y + outer.h - 3.0)).abs() < 0.1);
+    assert!((fixed.rect.x + fixed.rect.w - (outer.x + outer.w - 5.0)).abs() < 0.1);
+    assert!((absolute.rect.y + absolute.rect.h - (inner.y + inner.h - 3.0)).abs() < 0.1);
+    assert!(!fixed.fixed);
+}
