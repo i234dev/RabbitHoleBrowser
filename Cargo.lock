@@ -2259,6 +2259,7 @@ name = "rabbithole-script"
 version = "0.1.44"
 dependencies = [
  "aes 0.8.4",
+ "aws-lc-rs",
  "flate2",
  "ghash",
  "rabbithole-css",

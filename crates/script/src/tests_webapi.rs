@@ -2396,3 +2396,35 @@ fn web_crypto_x25519_matches_rfc7748_and_rejects_noncontributory_peers() {
     "#);
     assert_eq!(out, ["4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", "4a58 OperationError InvalidAccessError", "DataError", "X25519 false 48"]);
 }
+
+#[test]
+fn ecdh_checks_points_and_reuses_generated_and_imported_private_keys() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle, name = 'ECDH';
+        const bytes = hex => Uint8Array.from(hex.match(/../g), h => parseInt(h, 16));
+        const hex = data => Array.from(new Uint8Array(data), b => b.toString(16).padStart(2,'0')).join('');
+        const b64 = data => btoa(String.fromCharCode(...data)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+        const x = '6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296';
+        const y = '4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5';
+        const jwk = {kty:'EC',crv:'P-256',x:b64(bytes(x)),y:b64(bytes(y)),d:b64(bytes('00'.repeat(31)+'01'))};
+        const alg = { name, namedCurve:jwk.crv };
+        const key = await s.importKey('jwk',jwk,alg,false,['deriveBits']);
+        const pub = await s.importKey('raw',bytes('04'+x+y),alg,true,[]);
+        console.log(hex(await s.deriveBits({name,public:pub},key,null)) === x,
+          hex(await s.deriveBits({name,public:pub},key,13)),await s.exportKey('jwk',key).catch(e=>e.name));
+        console.log(await s.importKey('raw',bytes('04'+'00'.repeat(64)),alg,true,[]).catch(e=>e.name),
+          await s.importKey('jwk',{...jwk,d:b64(bytes('00'.repeat(31)+'02'))},alg,true,['deriveBits']).catch(e=>e.name));
+        for (const namedCurve of ['P-256','P-384','P-521']) {
+          const a={name,namedCurve}, local=await s.generateKey(a,true,['deriveBits']);
+          const peer=await s.generateKey(a,true,['deriveBits']);
+          const priv=await s.importKey('pkcs8',await s.exportKey('pkcs8',local.privateKey),a,false,['deriveBits']);
+          const pub=await s.importKey('spki',await s.exportKey('spki',peer.publicKey),a,false,[]);
+          const left=await s.deriveBits({name,public:pub},priv,null);
+          const right=await s.deriveBits({name,public:local.publicKey},peer.privateKey,null);
+          console.log(namedCurve,left.byteLength,hex(left)===hex(right));
+        }
+      })().catch(e=>console.log(e.name,e.message));
+    "#);
+    assert_eq!(out, ["true 6b10 InvalidAccessError", "DataError DataError", "P-256 32 true", "P-384 48 true", "P-521 66 true"]);
+}

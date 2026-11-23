@@ -179,12 +179,12 @@
   }
 
   const normAlg = a => typeof a === 'object' && a !== null ? a : { name: `${a}` };
-  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ECDH', 'ED448', 'X448'];
+  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ED448', 'X448'];
   function algName(a) {
     const id = normAlg(a);
     if (id.name === undefined) throw new TypeError('An algorithm name is required');
     const n = String(id.name).toUpperCase();
-    const map = { ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
+    const map = { ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
     throw err('NotSupportedError', 'Algorithm: Unrecognized name');
@@ -266,8 +266,116 @@
     throw err('InvalidAccessError', 'The key type cannot be exported in this format');
   }
 
+  const ecCurves = {
+    __proto__: null,
+    'P-256': {size:32, oid:[0x2a,0x86,0x48,0xce,0x3d,3,1,7]},
+    'P-384': {size:48, oid:[0x2b,0x81,4,0,0x22]},
+    'P-521': {size:66, oid:[0x2b,0x81,4,0,0x23]},
+  };
+  const ecError = () => err('DataError','Invalid elliptic curve key encoding');
+  function ecCurve(alg) {
+    const curve = normAlg(alg).namedCurve;
+    if (curve === undefined) throw new TypeError('An EC namedCurve is required');
+    const name = `${curve}`;
+    if (!ecCurves[name]) throw err('NotSupportedError','Unsupported named curve');
+    return name;
+  }
+  function ecPart(value, size) {
+    if (typeof value !== 'string' || value.length !== Math.ceil(size * 4 / 3) ||
+        !/^[A-Za-z0-9_-]+$/.test(value)) throw ecError();
+    const bytes = unb64u(value);
+    if (bytes.length !== size || b64u(bytes) !== value) throw ecError();
+    return bytes;
+  }
+  // EC public key SPKI (RFC 5480) uses a named-curve OID and a BIT STRING.
+  // PKCS #8 uses the same AlgorithmIdentifier, followed by an OCTET STRING.
+  function ecDerField(bytes, start, tag) {
+    if (bytes[start++] !== tag || start >= bytes.length) throw ecError();
+    let length = bytes[start++];
+    if (length & 128) {
+      const count = length & 127;
+      if (!count || count > 4 || bytes[start] === 0 || start + count > bytes.length) throw ecError();
+      length = 0;
+      for (let i = 0; i < count; ++i) length = length * 256 + bytes[start++];
+      if (length < 128) throw ecError();
+    }
+    if (start + length > bytes.length) throw ecError();
+    return {data: bytes.subarray(start,start + length), end:start + length};
+  }
+  function ecAlgIdentifier(curve) {
+    const oid = ecCurves[curve].oid;
+    return Uint8Array.of(6,7,0x2a,0x86,0x48,0xce,0x3d,2,1,6,oid.length,...oid);
+  }
+  function parseEcDer(bytes, curve, priv) {
+    const outer = ecDerField(bytes,0,0x30);
+    if (outer.end !== bytes.length) throw ecError();
+    let start = 0;
+    if (priv) {
+      const version = ecDerField(outer.data,0,2);
+      if (version.data.length !== 1 || version.data[0] !== 0) throw ecError();
+      start = version.end;
+    }
+    const alg = ecDerField(outer.data,start,0x30), want = ecAlgIdentifier(curve);
+    if (alg.data.length !== want.length || !want.every((b,i)=>b === alg.data[i])) throw ecError();
+    const key = ecDerField(outer.data,alg.end,priv ? 4 : 3);
+    if (priv) return bytes; // Native decoder checks the private key and optional attributes.
+    if (key.end !== outer.data.length || key.data[0] !== 0) throw ecError();
+    return key.data.slice(1);
+  }
+  function encodeEcSpki(curve, bytes) {
+    function field(tag, body) {
+      const len = body.length;
+      return [tag, ...(len < 128 ? [len] : [0x81,len]), ...body];
+    }
+    return Uint8Array.from(field(0x30,[...field(0x30,ecAlgIdentifier(curve)),...field(3,[0,...bytes])])).buffer;
+  }
+  function importEcdh(format, data, alg, extractable, usages) {
+    const curve = ecCurve(alg), size = ecCurves[curve].size;
+    const priv = format === 'pkcs8' || (format === 'jwk' && data?.d !== undefined);
+    usageCheck(usages, priv ? ['deriveBits','deriveKey'] : []);
+    if (priv && !usages.length) throw err('SyntaxError','A private key requires a usage');
+    let point, handle;
+    if (format === 'jwk') {
+      if (data?.kty !== 'EC' || data.crv !== curve || (usages.length && data.use !== undefined && data.use !== 'enc') ||
+          (data.ext === false && extractable)) throw ecError();
+      if (data.key_ops !== undefined) {
+        const ops = Array.from(data.key_ops);
+        if (new Set(ops).size !== ops.length || usages.some(u => !ops.includes(u))) throw ecError();
+      }
+      point = Uint8Array.of(4,...ecPart(data.x,size),...ecPart(data.y,size));
+      if (priv) {
+        handle = N.ecdhKey(curve,'scalar',ecPart(data.d,size),!!extractable);
+        const actual = new Uint8Array(N.ecdhExport(handle,'public'));
+        if (!actual.every((b,i)=>b === point[i])) throw ecError();
+      }
+    } else if (format === 'pkcs8') {
+      handle = N.ecdhKey(curve,'pkcs8',parseEcDer(bytesOf(data),curve,true),!!extractable);
+    } else if (format === 'spki') {
+      point = parseEcDer(bytesOf(data),curve,false);
+    } else if (format === 'raw' || format === 'raw-public') {
+      point = bytesOf(data);
+    } else throw err('NotSupportedError','Unsupported ECDH import format');
+    if (!priv) N.ecdhValidate(curve,point);
+    return newKey(priv ? 'private' : 'public',extractable,{name:'ECDH',namedCurve:curve},usages,priv ? handle : point.slice());
+  }
+  function exportEcdh(format, k) {
+    const curve = k.algorithm.namedCurve, priv = k.type === 'private';
+    if (format === 'pkcs8' && priv) return N.ecdhExport(k.raw,format);
+    const point = priv ? new Uint8Array(N.ecdhExport(k.raw,'public')) : k.raw;
+    if (!priv && (format === 'raw' || format === 'raw-public')) return point.slice().buffer;
+    if (!priv && format === 'spki') return encodeEcSpki(curve,point);
+    if (format === 'jwk') {
+      const split = 1 + ecCurves[curve].size;
+      const jwk = {kty:'EC',crv:curve,x:b64u(point.subarray(1,split)),y:b64u(point.subarray(split)),ext:true,key_ops:k.usages.slice()};
+      if (priv) jwk.d = b64u(new Uint8Array(N.ecdhExport(k.raw,'scalar')));
+      return jwk;
+    }
+    throw err('InvalidAccessError','The ECDH key type cannot be exported in this format');
+  }
+
   function importSecret(format, keyData, alg, extractable, usages) {
     const name = algName(alg);
+    if (name === 'ECDH') return importEcdh(format,keyData,alg,extractable,Array.from(usages));
     if (okp[name]) return importOctetKey(name, format, keyData, extractable, Array.from(usages));
     let raw;
     if (format === 'raw' || format === 'raw-secret') raw = bytesOf(keyData);
@@ -298,14 +406,17 @@
     const name = algName(alg);
     const a = normAlg(alg);
     if (keyInfo(key).algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key.');
-    if (name === 'X25519') {
+    if (name === 'X25519' || name === 'ECDH') {
       const peer = a.public;
       if (!hasKey(peer)) throw new TypeError('A public CryptoKey is required');
-      if (keyInfo(key).type !== 'private' || keyInfo(peer).type !== 'public' || keyInfo(peer).algorithm.name !== name)
-        throw err('InvalidAccessError', 'Expected X25519 private and public keys');
-      const bits = length == null ? 256 : Number(length) >>> 0;
-      if (bits > 256) throw err('OperationError', 'Requested length exceeds the shared secret');
-      const result = new Uint8Array(N.x25519Derive(keyInfo(key).raw, keyInfo(peer).raw), 0, Math.ceil(bits / 8)).slice();
+      const priv = keyInfo(key), pub = keyInfo(peer);
+      if (priv.type !== 'private' || pub.type !== 'public' || pub.algorithm.name !== name ||
+          priv.algorithm.namedCurve !== pub.algorithm.namedCurve)
+        throw err('InvalidAccessError', 'Key agreement requires compatible private and public keys');
+      const secret = name === 'ECDH' ? N.ecdhDerive(priv.raw,pub.raw) : N.x25519Derive(priv.raw,pub.raw);
+      const bits = length == null ? secret.byteLength * 8 : Number(length) >>> 0;
+      if (bits > secret.byteLength * 8) throw err('OperationError', 'Requested length exceeds the shared secret');
+      const result = new Uint8Array(secret, 0, Math.ceil(bits / 8)).slice();
       if (bits % 8) result[result.length - 1] &= 0xff << (8 - bits % 8);
       return result.buffer;
     }
@@ -354,6 +465,16 @@
     generateKey(alg, extractable, usages) {
       return run(() => {
         const name = algName(alg);
+        if (name === 'ECDH') {
+          const namedCurve = ecCurve(alg), requested = Array.from(usages);
+          usageCheck(requested, ['deriveBits','deriveKey']);
+          if (!requested.length) throw err('SyntaxError','A private key requires a usage');
+          const handle = N.ecdhKey(namedCurve,'generate',null,!!extractable);
+          return {
+            publicKey: newKey('public',true,{name,namedCurve},[],new Uint8Array(N.ecdhExport(handle,'public'))),
+            privateKey: newKey('private',extractable,{name,namedCurve},requested,handle),
+          };
+        }
         if (okp[name]) {
           const curve = okp[name], requested = Array.from(usages);
           usageCheck(requested, [...curve.privateUsages, ...curve.publicUsages]);
@@ -377,6 +498,7 @@
       return run(() => {
         if (!hasKey(key)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
         if (!keyInfo(key).extractable) throw err('InvalidAccessError', 'key is not extractable');
+        if (keyInfo(key).algorithm.name === 'ECDH') return exportEcdh(format,keyInfo(key));
         if (okp[keyInfo(key).algorithm.name]) return exportOctetKey(format, keyInfo(key));
         const raw = keyInfo(key).raw;
         if (format === 'raw' || format === 'raw-secret') return raw.slice().buffer;
