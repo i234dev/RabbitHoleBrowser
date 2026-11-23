@@ -1257,3 +1257,23 @@ fn joining_an_inline_line_preserves_contextual_whitespace_on_the_moved_fragment(
     })()"#);
     assert_eq!(result,"two  words|pre-wrap|right");
 }
+
+#[test]
+fn alignment_shorthands_expand_and_follow_their_longhand_priorities() {
+    let mut e = engine(true);
+    let mut page=load(&mut e,"<style id=sheet>#target { place-items: safe center end !important }</style><p id=target style='place-items:safe center end !important'></p>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const inspect = style => {
+            const first=[style.alignItems,style.justifyItems,style.getPropertyPriority('place-items')];
+            style.justifyItems='start';
+            const mixed=style.placeItems;
+            style.setProperty('align-items','end');
+            const combined=style.placeItems;
+            const old=style.removeProperty('place-items');
+            return [...first,mixed,combined,old,style.alignItems,style.justifyItems].join(',');
+        };
+        return [inspect(target.style),inspect(sheet.sheet.cssRules[0].style)].join('|');
+    })()"#);
+    let expected = "safe center,end,important,,end start,end start,,";
+    assert_eq!(result,format!("{expected}|{expected}"));
+}

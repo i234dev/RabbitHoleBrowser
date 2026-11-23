@@ -122,6 +122,95 @@ struct DeclList {
     items: Vec<(String, String, bool)>,
 }
 
+fn place_longhands(name: &str) -> Option<[&'static str;2]> {
+    match name {
+        "place-items" => Some(["align-items","justify-items"]),
+        "place-content" => Some(["align-content","justify-content"]),
+        "place-self" => Some(["align-self","justify-self"]),
+        _ => None,
+    }
+}
+
+fn css_wide(value: &str) -> bool { matches!(value,"inherit" | "initial" | "unset" | "revert" | "revert-layer") }
+
+fn expand_place(name: &str, value: &str) -> Option<[(&'static str,String);2]> {
+    let [align,justify] = place_longhands(name)?;
+    if css_wide(value) { return Some([(align,value.into()),(justify,value.into())]); }
+    let tokens = rabbithole_css::Tokenizer::tokenize(value);
+    let parts = rabbithole_style::values::components(&tokens);
+    let (a,b) = rabbithole_style::props::flex::specified_alignment_values(name,&parts)?;
+    Some([(align,a),(justify,b?)])
+}
+
+/// Rule declarations use the same shorthand parser as inline declarations.
+pub(crate) fn cssom_expand_place(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let name = arg_str(realm,args,0)?;
+    let value = arg_str(realm,args,1)?;
+    let Some([(a,av),(b,bv)]) = expand_place(&name,&value) else { return Ok(Value::Null) };
+    Ok(realm.new_array_value(vec![Value::str(a),Value::str(&av),Value::str(b),Value::str(&bv)]))
+}
+
+impl DeclList {
+    fn push(&mut self, name: String, value: String, important: bool) {
+        if let Some(longhands) = expand_place(&name,&value) {
+            self.items.extend(longhands.into_iter().map(|(k,v)| (k.into(),v,important)));
+        } else {
+            self.items.push((name,value,important));
+        }
+    }
+
+    fn direct(&self, prop: &str) -> Option<(&str,bool)> {
+        self.items.iter().rev().filter(|(k,_,_)| k==prop)
+            .find(|(_,_,imp)| *imp).or_else(|| self.items.iter().rev().find(|(k,_,_)| k==prop))
+            .map(|(_,v,imp)| (v.as_str(),*imp))
+    }
+
+    fn value(&self, prop: &str) -> (String,bool) {
+        if let Some((v,imp)) = self.direct(prop) { return (v.into(),imp); }
+        if let Some([a,b]) = place_longhands(prop) {
+            if let (Some((a,pa)),Some((b,pb))) = (self.direct(a),self.direct(b)) {
+                if pa==pb {
+                    if a==b { return (a.into(),pa); }
+                    if !css_wide(a) && !css_wide(b) { return (format!("{a} {b}"),pa); }
+                }
+            }
+        }
+        (String::new(),false)
+    }
+
+    fn css_text(&self) -> String {
+        let mut out = String::new();
+        let mut items = self.items.iter().peekable();
+        while let Some((name,value,important)) = items.next() {
+            let mut property = name.as_str();
+            let mut text = value.clone();
+            if let Some((next,other,priority)) = items.peek() {
+                let shorthand = match (property,next.as_str()) {
+                    ("align-items","justify-items") => Some("place-items"),
+                    ("align-self","justify-self") => Some("place-self"),
+                    ("align-content","justify-content") => Some("place-content"),
+                    _ => None,
+                };
+                if let Some(shorthand) = shorthand.filter(|_| important==priority && (value==other || (!css_wide(value) && !css_wide(other)))) {
+                    property = shorthand;
+                    if value != other { text.push(' '); text.push_str(other); }
+                    items.next();
+                }
+            }
+            if !out.is_empty() { out.push(' '); }
+            out.push_str(property); out.push_str(": "); out.push_str(&text);
+            if *important { out.push_str(" !important"); }
+            out.push(';');
+        }
+        out
+    }
+
+    fn remove(&mut self, prop: &str) {
+        let longhands = place_longhands(prop);
+        self.items.retain(|(k,_,_)| k != prop && !longhands.is_some_and(|pair| pair.contains(&k.as_str())));
+    }
+}
+
 /// CSS property names are ASCII case-insensitive, except custom
 /// properties (`--fooBar`), which keep their case.
 fn prop_name(s: &str) -> String {
@@ -249,10 +338,11 @@ pub(crate) fn cssom_specified_value(realm: &mut Realm, _: Value, args: &[Value])
 fn parse_style(n: NodeRef) -> DeclList {
     let text = get_attribute(n, "style").unwrap_or_default();
     let decls: Vec<Declaration> = parse_declaration_list(&text);
-    DeclList { items: decls.into_iter().filter_map(|d| {
-        let value = specified_value(&d.name, &d.value)?;
-        Some((d.name, value, d.important))
-    }).collect() }
+    let mut list = DeclList { items: Vec::with_capacity(decls.len()) };
+    for d in decls {
+        if let Some(value) = specified_value(&d.name, &d.value) { list.push(d.name,value,d.important); }
+    }
+    list
 }
 
 fn write_style(n: NodeRef, list: &DeclList) {
@@ -262,7 +352,7 @@ fn write_style(n: NodeRef, list: &DeclList) {
         }
         return;
     }
-    let text = list.items.iter().map(|(k, v, imp)| format!("{k}: {v}{};", if *imp { " !important" } else { "" })).collect::<Vec<_>>().join(" ");
+    let text = list.css_text();
     set_attribute(n, "style", Some(&text));
 }
 
@@ -302,7 +392,7 @@ fn style_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     }
     let prop = camel_to_kebab(&key);
     let list = parse_style(n);
-    Ok(Value::str(list.items.iter().rev().find(|(k, _, _)| *k == prop).map(|(_, v, _)| v.as_str()).unwrap_or("")))
+    Ok(Value::str(&list.value(&prop).0))
 }
 
 fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
@@ -314,10 +404,9 @@ fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
         serialized.as_str()
     } else { value };
     let mut list = parse_style(n);
-    list.items.retain(|(k, _, _)| *k != prop);
+    list.remove(prop);
     if !value.is_empty() {
-        // Expand nothing: keep as given (the cascade handles shorthands).
-        list.items.push((prop.to_string(), value.to_string(), important));
+        list.push(prop.to_string(), value.to_string(), important);
     }
     write_style(n, &list);
 }
@@ -374,21 +463,21 @@ fn style_get_property_value(realm: &mut Realm, this: Value, args: &[Value]) -> J
     let n = this_node(realm, &this, "getPropertyValue")?;
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
-    Ok(Value::str(list.items.iter().rev().find(|(k, _, _)| *k == prop).map(|(_, v, _)| v.as_str()).unwrap_or("")))
+    Ok(Value::str(&list.value(&prop).0))
 }
 
 fn style_get_property_priority(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getPropertyPriority")?;
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
-    Ok(Value::str(if list.items.iter().any(|(k, _, imp)| *k == prop && *imp) { "important" } else { "" }))
+    Ok(Value::str(if list.value(&prop).1 { "important" } else { "" }))
 }
 
 fn style_remove_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "removeProperty")?;
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
-    let old = list.items.iter().rev().find(|(k, _, _)| *k == prop).map(|(_, v, _)| v.clone()).unwrap_or_default();
+    let old = list.value(&prop).0;
     set_style_prop(n, &prop, "", false);
     Ok(Value::str(&old))
 }

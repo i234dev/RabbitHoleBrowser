@@ -74,6 +74,59 @@
     'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
     'accent-color', 'column-rule-color', 'align-self', 'align-items', 'align-content', 'justify-self', 'justify-items',
     'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-anchor', 'anchor-name']);
+  const placeLonghands = new Map([
+    ['place-items',['align-items','justify-items']], ['place-self',['align-self','justify-self']],
+    ['place-content',['align-content','justify-content']]
+  ]);
+  const cssWide = new Set(['initial','inherit','unset','revert','revert-layer']);
+  function appendDeclaration(list, name, value, important) {
+    const pair = placeLonghands.has(name) && N.cssomExpandPlace(name,value);
+    if (pair) list.push([pair[0],pair[1],important],[pair[2],pair[3],important]);
+    else list.push([name,value,important]);
+  }
+  function dropDeclaration(list,name) {
+    const pair = placeLonghands.get(name);
+    return list.filter(([k]) => k !== name && !pair?.includes(k));
+  }
+  function declarationValue(list,name) {
+    function direct(k) {
+      let last;
+      for (let i=list.length-1; i>=0; i--) if (list[i][0]===k) {
+        if (list[i][2]) return list[i];
+        last ||= list[i];
+      }
+      return last;
+    }
+    const found = direct(name);
+    if (found) return found;
+    const pair = placeLonghands.get(name);
+    if (pair) {
+      const a=direct(pair[0]), b=direct(pair[1]);
+      if (a && b && a[2]===b[2]) {
+        if (a[1]===b[1]) return [name,a[1],a[2]];
+        if (!cssWide.has(a[1]) && !cssWide.has(b[1])) return [name,a[1]+' '+b[1],a[2]];
+      }
+    }
+    return [name,'',false];
+  }
+  function declarationText(list) {
+    const out = [];
+    for (let i=0; i<list.length; i++) {
+      let [name,value,priority] = list[i];
+      const other = list[i+1];
+      if (other && name.startsWith('align-') && other[0] === 'justify-'+name.slice(6) &&
+          other[2] === priority && (value === other[1] || (!cssWide.has(value) && !cssWide.has(other[1])))) {
+        const shorthand = 'place-'+name.slice(6);
+        if (placeLonghands.has(shorthand)) {
+          name = shorthand;
+          if (value !== other[1]) value += ' '+other[1];
+          i++;
+        }
+      }
+      out.push(name+': '+value+(priority ? ' !important;' : ';'));
+    }
+    return out.join(' ');
+  }
   function parseDecls(text) {
     const out = [];
     let i = 0, start = 0, depth = 0;
@@ -94,7 +147,7 @@
         value = N.cssomSpecifiedValue(name, value);
         if (value === null) return;
       }
-      out.push([name, value, important]);
+      appendDeclaration(out,name,value,important);
     };
     while (i < n) {
       const c = text[i];
@@ -119,25 +172,25 @@
     const st = { raw: text || '', parsed: null, rule };
     Object.defineProperty(st, 'decls', { get() { if (!this.parsed) this.parsed = parseDecls(this.raw); return this.parsed; }, set(v) { this.parsed = v; } });
     const changed = () => { if (st.rule) touch(st.rule); };
-    const get = (p) => { for (let i = st.decls.length - 1; i >= 0; i--) if (st.decls[i][0] === p) return st.decls[i][1]; return ''; };
+    const get = (p) => declarationValue(st.decls,p)[1];
     const set = (p, v, imp) => {
       v = v === null ? '' : `${v}`.trim();
       if (v && checkedProperties.has(p)) {
         v = N.cssomSpecifiedValue(p, v);
         if (v === null) return;
       }
-      st.decls = st.decls.filter((d) => d[0] !== p);
-      if (v !== '') st.decls.push([p, v, !!imp]);
+      st.decls = dropDeclaration(st.decls,p);
+      if (v !== '') appendDeclaration(st.decls,p,v,!!imp);
       changed();
     };
     const cssText = () => {
-      if (st.parsed) return st.parsed.map(([k, v, i]) => `${k}: ${v}${i ? ' !important' : ''};`).join(' ');
+      if (st.parsed) return declarationText(st.parsed);
       const t = st.raw.trim();
       return t && !t.endsWith(';') ? t + ';' : t;
     };
     const methods = {
       getPropertyValue: (p) => get(String(p).startsWith('--') ? String(p) : String(p).toLowerCase()),
-      getPropertyPriority: (p) => (st.decls.find((d) => d[0] === String(p).toLowerCase() && d[2]) ? 'important' : ''),
+      getPropertyPriority: (p) => (declarationValue(st.decls,String(p).toLowerCase())[2] ? 'important' : ''),
       setProperty(p, v, prio = '') {
         if (arguments.length < 2) throw new TypeError('setProperty requires a name and a value');
         p = `${p}`;
@@ -146,7 +199,7 @@
         if (!value || !priority || priority === 'important')
           set(p.startsWith('--') ? p : p.toLowerCase(), value, priority === 'important');
       },
-      removeProperty: (p) => { p = String(p).toLowerCase(); const old = get(p); st.decls = st.decls.filter((d) => d[0] !== p); changed(); return old; },
+      removeProperty: (p) => { p = String(p).toLowerCase(); const old = get(p); st.decls = dropDeclaration(st.decls,p); changed(); return old; },
       item: (i) => (st.decls[i] ? st.decls[i][0] : ''),
       toString: () => '[object CSSStyleDeclaration]',
     };

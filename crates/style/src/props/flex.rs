@@ -178,12 +178,16 @@ fn parse_alignment<'a>(kws: &'a [String], first: &str, second: Option<&str>) -> 
 
 pub fn alignment_property(name: &str) -> bool { longhands(name).is_some() }
 
-pub fn specified_alignment(name: &str, comps: &[&[Token]]) -> Option<String> {
+pub fn specified_alignment_values(name: &str, comps: &[&[Token]]) -> Option<(String, Option<String>)> {
     let (first, second) = longhands(name)?;
     let kws = idents(comps)?;
     let (a, b) = parse_alignment(&kws, first, second)?;
-    let a = a.specified();
-    match b.map(Alignment::specified) {
+    Some((a.specified(),b.map(Alignment::specified)))
+}
+
+pub fn specified_alignment(name: &str, comps: &[&[Token]]) -> Option<String> {
+    let (a,b) = specified_alignment_values(name,comps)?;
+    match b {
         Some(b) if a != b => Some(format!("{a} {b}")),
         _ => Some(a),
     }
