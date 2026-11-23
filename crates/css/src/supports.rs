@@ -12,11 +12,11 @@ use crate::tokenizer::Token;
 /// Properties (and `property: value` pairs) the engine does not implement:
 /// guards that test them must take the fallback branch.
 const UNSUPPORTED_PROPERTIES: &[&str] = &[
-    "inset-area", "position-try", "position-try-fallbacks", "position-visibility", "anchor-scope",
+    "inset-area", "position-try", "position-visibility",
     "view-transition-name", "view-transition-class", "animation-timeline", "scroll-timeline", "scroll-timeline-name", "view-timeline", "view-timeline-name",
     "animation-range", "timeline-scope", "initial-letter", "-webkit-initial-letter", "math-depth", "math-shift", "reading-flow", "reading-order",
     "interpolate-size", "field-sizing", "text-box", "text-box-trim", "text-box-edge", "hanging-punctuation", "box-decoration-break", "-webkit-box-reflect",
-    "shape-outside", "offset-path", "offset-distance", "offset", "zoom", "corner-shape", "dynamic-range-limit", "overlay", "container-name-x",
+    "offset-path", "offset-distance", "offset", "zoom", "corner-shape", "dynamic-range-limit", "overlay", "container-name-x",
 ];
 
 /// Properties disabled in this implementation use the same feature
@@ -50,38 +50,40 @@ pub fn set_declaration_validator(f: DeclarationValidator) {
 
 /// Evaluate the prelude of an `@supports` rule.
 pub fn evaluate(prelude: &[Token]) -> bool {
-    let toks: Vec<&Token> = prelude.iter().filter(|t| !matches!(t, Token::Whitespace)).collect();
-    let mut p = Cond { toks: &toks, pos: 0 };
+    let mut p = Cond { toks: trim(prelude), pos: 0 };
     let r = p.condition();
-    r.unwrap_or(false) && p.pos == toks.len()
+    r.unwrap_or(false) && p.pos == p.toks.len()
+}
+
+fn trim(mut tokens: &[Token]) -> &[Token] {
+    while matches!(tokens.first(), Some(Token::Whitespace)) { tokens = &tokens[1..]; }
+    while matches!(tokens.last(), Some(Token::Whitespace)) { tokens = &tokens[..tokens.len()-1]; }
+    tokens
+}
+
+fn declaration_parts(tokens: &[Token]) -> Option<(&str, &[Token])> {
+    let [Token::Ident(name), rest @ ..] = trim(tokens) else { return None };
+    let [Token::Colon, value @ ..] = trim(rest) else { return None };
+    Some((name, trim(value)))
 }
 
 /// CSS.supports(conditionText) also accepts an unparenthesized declaration.
 pub fn evaluate_script_condition(tokens: &[Token]) -> bool {
-    let flat: Vec<&Token> = tokens.iter().filter(|t| **t != Token::Whitespace).collect();
-    if matches!(flat.as_slice(), [Token::Ident(_), Token::Colon, ..]) {
-        declaration(&flat)
-    } else {
-        evaluate(tokens)
-    }
+    declaration_parts(tokens).map_or_else(|| evaluate(tokens), |(name,value)| evaluate_property(name,value))
 }
 
-/// CSS.supports(property, value) takes a property name and a value,
-/// without interpreting either argument as a larger condition.
-pub fn evaluate_property(name: &str, value: &[Token]) -> bool {
-    let name = Token::Ident(name.to_owned());
-    let mut declaration_tokens = vec![&name, &Token::Colon];
-    declaration_tokens.extend(value.iter().filter(|t| **t != Token::Whitespace));
-    declaration(&declaration_tokens)
-}
-
-struct Cond<'a, 'b> {
-    toks: &'b [&'a Token],
+struct Cond<'a> {
+    toks: &'a [Token],
     pos: usize,
 }
 
-impl<'a, 'b> Cond<'a, 'b> {
-    fn peek_ident(&self) -> Option<String> {
+impl<'a> Cond<'a> {
+    fn skip_space(&mut self) {
+        while self.toks.get(self.pos) == Some(&Token::Whitespace) { self.pos += 1; }
+    }
+
+    fn peek_ident(&mut self) -> Option<String> {
+        self.skip_space();
         match self.toks.get(self.pos) {
             Some(Token::Ident(s)) => Some(s.to_ascii_lowercase()),
             _ => None,
@@ -117,7 +119,7 @@ impl<'a, 'b> Cond<'a, 'b> {
     }
 
     /// The tokens up to the parenthesis closing the one just consumed.
-    fn group(&mut self) -> Option<Vec<&'a Token>> {
+    fn group(&mut self) -> Option<&'a [Token]> {
         let mut depth = 1;
         let start = self.pos;
         while self.pos < self.toks.len() {
@@ -126,7 +128,7 @@ impl<'a, 'b> Cond<'a, 'b> {
                 Token::CloseParen => {
                     depth -= 1;
                     if depth == 0 {
-                        let inner = self.toks[start..self.pos].to_vec();
+                        let inner = trim(&self.toks[start..self.pos]);
                         self.pos += 1;
                         return Some(inner);
                     }
@@ -139,16 +141,16 @@ impl<'a, 'b> Cond<'a, 'b> {
     }
 
     fn in_parens(&mut self) -> Option<bool> {
+        self.skip_space();
         match self.toks.get(self.pos)? {
             Token::OpenParen => {
                 self.pos += 1;
                 let inner = self.group()?;
                 // A nested condition or a declaration.
-                let is_decl = matches!(inner.as_slice(), [Token::Ident(_), Token::Colon, ..]);
-                if is_decl {
-                    return Some(declaration(&inner));
+                if let Some((name,value)) = declaration_parts(inner) {
+                    return Some(evaluate_property(name,value));
                 }
-                let mut sub = Cond { toks: &inner, pos: 0 };
+                let mut sub = Cond { toks: inner, pos: 0 };
                 let v = sub.condition();
                 // Unknown syntax inside parentheses is false, not an error.
                 Some(v.unwrap_or(false) && sub.pos == inner.len())
@@ -158,10 +160,10 @@ impl<'a, 'b> Cond<'a, 'b> {
                 self.pos += 1;
                 let inner = self.group()?;
                 Some(match f.as_str() {
-                    "selector" => selector_supported(&inner),
-                    "font-format" => single_ident(&inner).is_some_and(|f| matches!(f.as_str(), "woff" | "woff2" | "truetype" | "opentype" | "collection")),
-                    "font-tech" => single_ident(&inner).is_some_and(|f| matches!(f.as_str(), "features-opentype" | "color-colrv0" | "color-cbdt" | "color-sbix")),
-                    "at-rule" => at_rule_supported(&inner),
+                    "selector" => selector_supported(inner),
+                    "font-format" => single_ident(inner).is_some_and(|f| matches!(f.as_str(), "woff" | "woff2" | "truetype" | "opentype" | "collection")),
+                    "font-tech" => single_ident(inner).is_some_and(|f| matches!(f.as_str(), "features-opentype" | "color-colrv0" | "color-cbdt" | "color-sbix")),
+                    "at-rule" => at_rule_supported(inner),
                     _ => false,
                 })
             }
@@ -172,11 +174,11 @@ impl<'a, 'b> Cond<'a, 'b> {
 
 /// Split `!important` off a declaration value; `None` when the value has
 /// another `!` (an invalid declaration).
-fn strip_important<'a, 'b>(value: &'b [&'a Token]) -> Option<&'b [&'a Token]> {
+fn strip_important(value: &[Token]) -> Option<&[Token]> {
     match value.iter().position(|t| matches!(t, Token::Delim('!'))) {
         None => Some(value),
-        Some(i) => match &value[i + 1..] {
-            [Token::Ident(s)] if s.eq_ignore_ascii_case("important") => Some(&value[..i]),
+        Some(i) => match trim(&value[i + 1..]) {
+            [Token::Ident(s)] if s.eq_ignore_ascii_case("important") => Some(trim(&value[..i])),
             _ => None,
         },
     }
@@ -184,7 +186,7 @@ fn strip_important<'a, 'b>(value: &'b [&'a Token]) -> Option<&'b [&'a Token]> {
 
 /// A declaration value is never valid with a top-level `;`, unbalanced
 /// brackets or bad tokens.
-fn well_formed(value: &[&Token]) -> bool {
+fn well_formed(value: &[Token]) -> bool {
     let mut stack = Vec::new();
     for t in value {
         match t {
@@ -208,10 +210,11 @@ fn well_formed(value: &[&Token]) -> bool {
     stack.is_empty()
 }
 
-fn declaration(toks: &[&Token]) -> bool {
-    let Some(Token::Ident(name)) = toks.first() else { return false };
+/// Validate the original component values, preserving whitespace for the
+/// property's grammar (including math operators and descendant combinators).
+pub fn evaluate_property(name: &str, value: &[Token]) -> bool {
     let name = name.to_ascii_lowercase();
-    let Some(value) = strip_important(&toks[2..]) else { return false };
+    let Some(value) = strip_important(trim(value)) else { return false };
     if !well_formed(value) {
         return false;
     }
@@ -224,7 +227,7 @@ fn declaration(toks: &[&Token]) -> bool {
     if !property_enabled(&name) {
         return false;
     }
-    let values: Vec<String> = toks[2..]
+    let values: Vec<String> = value
         .iter()
         .filter_map(|t| match t {
             Token::Ident(s) => Some(s.to_ascii_lowercase()),
@@ -236,7 +239,7 @@ fn declaration(toks: &[&Token]) -> bool {
         return false;
     }
     // Value functions we do not implement anywhere.
-    if values.iter().any(|v| matches!(v.as_str(), "anchor(" | "anchor-size(" | "sibling-index(" | "sibling-count(" | "if(" | "random(" | "progress(")) {
+    if values.iter().any(|v| matches!(v.as_str(), "sibling-index(" | "sibling-count(" | "if(" | "random(" | "progress(")) {
         return false;
     }
     // Vendor-prefixed properties of other engines.
@@ -244,10 +247,7 @@ fn declaration(toks: &[&Token]) -> bool {
         return false;
     }
     match VALIDATOR.get() {
-        Some(validate) => {
-            let owned: Vec<Token> = value.iter().map(|t| (*t).clone()).collect();
-            validate(&name, &owned).unwrap_or(true)
-        }
+        Some(validate) => validate(&name, value).unwrap_or(true),
         None => true,
     }
 }
@@ -270,9 +270,8 @@ fn has_unknown(sel: &crate::selector::Selector) -> bool {
 
 /// `selector(<complex-selector>)`: one selector (not a list) that parses
 /// with known pseudo-classes and pseudo-elements only.
-fn selector_supported(toks: &[&Token]) -> bool {
-    let owned: Vec<Token> = toks.iter().map(|t| (*t).clone()).collect();
-    let mut p = SelectorParser::new(&owned);
+fn selector_supported(toks: &[Token]) -> bool {
+    let mut p = SelectorParser::new(toks);
     match p.parse_list() {
         Some(list) => list.len() == 1 && !list.iter().any(has_unknown),
         None => false,
@@ -280,7 +279,7 @@ fn selector_supported(toks: &[&Token]) -> bool {
 }
 
 /// The single identifier argument of `font-format()` / `font-tech()`.
-fn single_ident(toks: &[&Token]) -> Option<String> {
+fn single_ident(toks: &[Token]) -> Option<String> {
     match toks {
         [Token::Ident(s)] => Some(s.to_ascii_lowercase()),
         _ => None,
@@ -288,12 +287,12 @@ fn single_ident(toks: &[&Token]) -> Option<String> {
 }
 
 /// `at-rule(<at-keyword>)`: at-rules the parser knows.
-fn at_rule_supported(toks: &[&Token]) -> bool {
+fn at_rule_supported(toks: &[Token]) -> bool {
     match toks {
         [Token::AtKeyword(k)] => matches!(
             k.to_ascii_lowercase().as_str(),
             "media" | "supports" | "import" | "namespace" | "charset" | "font-face" | "keyframes" | "-webkit-keyframes" | "layer"
-                | "container" | "scope" | "page" | "property" | "font-feature-values" | "counter-style" | "starting-style"
+                | "container" | "scope" | "page" | "property" | "font-feature-values" | "counter-style" | "starting-style" | "position-try"
         ),
         _ => false,
     }
@@ -314,7 +313,8 @@ mod tests {
         assert!(ok("(display: flex) and (gap: 1rem)"));
         assert!(!ok("not (display: grid)"));
         assert!(ok("(display: grid) or (anchor-name: --a)"));
-        assert!(!ok("(anchor-name: --a)"));
+        assert!(ok("(anchor-name: --a)"));
+        assert!(!ok("(position-visibility: anchors-visible)"));
         assert!(ok("(grid-template-columns: subgrid)"));
         assert!(ok("selector(:has(a))"));
         assert!(ok("selector(:focus-visible)"));

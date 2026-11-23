@@ -1054,6 +1054,28 @@ fn script_formatting_switches_baseline_semantics_on_only_the_selected_text() {
 }
 
 #[test]
+fn css_supports_preserves_selector_combinators_and_checks_anchor_grammar() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, r#"<style>
+        @supports selector(div span) and (left: anchor(--origin right, 2px)) {
+            #result { width: 73px; }
+        }
+    </style><div id=result></div>"#);
+    let value = eval(&e,&mut page,r#"
+        (() => {
+          result.style.shapeOutside = 'initial';
+          return [getComputedStyle(result).width,result.style.shapeOutside,
+            CSS.supports('shape-outside','circle(20px at 30% 50%)'),
+            CSS.supports('top','anchor(--origin bottom)'),
+            CSS.supports('width','anchor(--origin bottom)'),
+            CSS.supports('position-try-fallbacks','--try flip-inline'),
+            CSS.supports('anchor-scope','--first, --second')].join('|');
+        })()
+    "#);
+    assert_eq!(value,"73px|initial|true|true|false|true|true");
+}
+
+#[test]
 fn float_exclusion_shapes_wrap_lines_without_moving_the_float() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<style>*{margin:0}main{width:300px;line-height:20px}#f{float:left;width:100px;height:100px;shape-outside:inset(0 70px 0 0);shape-margin:5px}i{display:inline-block;width:8px;height:10px}</style><main><div id=f></div><i id=mark></i><br><i></i></main>");
