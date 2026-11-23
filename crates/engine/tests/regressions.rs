@@ -761,3 +761,16 @@ fn alignment_cssom_preserves_modifiers_and_resolves_inherited_legacy_alignment()
     })()"#);
     assert_eq!(result, "legacy right|baseline start|baseline start|unsafe flex-end|unsafe flow-end|false");
 }
+
+#[test]
+fn font_size_commands_validate_the_entire_numeric_argument() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<p id=ed contenteditable>type</p>");
+    let out = eval(&e, &mut page, r#"(() => {
+        getSelection().collapse(ed.firstChild, 2);
+        const set = v => document.execCommand('fontSize', false, v);
+        return [set('+2.5'), document.queryCommandValue('fontSize'), set('2em'),
+                set('3e+'), document.queryCommandValue('fontSize')].join('|');
+    })()"#);
+    assert_eq!(out, "true|5|false|false|5");
+}

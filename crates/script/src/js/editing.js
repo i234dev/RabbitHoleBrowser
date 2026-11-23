@@ -54,7 +54,7 @@
   }
   function normalizeFormat(cmd, value) {
     if (cmd === 'fontsize') {
-      const m = /^([+-]?)([0-9]+)/.exec(value.trimStart());
+      const m = /^([+-]?)([0-9]+)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/.exec(value.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, ''));
       if (!m) return null;
       const n = m[1] ? 3 + Number(m[1] + m[2]) : Number(m[2]);
       return String(Math.min(7, Math.max(1, n)));
