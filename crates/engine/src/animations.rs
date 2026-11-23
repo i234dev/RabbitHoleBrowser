@@ -11,6 +11,10 @@
 //! `transitionrun/start/end/cancel` and `animationstart/iteration/end/
 //! cancel` events are queued and dispatched from the tick.
 
+mod grid_tracks;
+
+use grid_tracks::Operation as GridOperation;
+use rabbithole_style::TrackListItem;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -67,6 +71,8 @@ enum Prop {
     JustifySelf,
     AlignItems,
     JustifyItems,
+    GridTemplateColumns,
+    GridTemplateRows,
 }
 
 const ALL: &[Prop] = &[
@@ -112,6 +118,8 @@ const ALL: &[Prop] = &[
     Prop::JustifySelf,
     Prop::AlignItems,
     Prop::JustifyItems,
+    Prop::GridTemplateColumns,
+    Prop::GridTemplateRows,
 ];
 
 impl Prop {
@@ -159,6 +167,8 @@ impl Prop {
             Prop::JustifySelf => "justify-self",
             Prop::AlignItems => "align-items",
             Prop::JustifyItems => "justify-items",
+            Prop::GridTemplateRows => "grid-template-rows",
+            Prop::GridTemplateColumns => "grid-template-columns",
         }
     }
 
@@ -175,6 +185,7 @@ impl Prop {
         }
         use Prop::*;
         match n {
+            "grid" | "grid-template" => matches!(self, GridTemplateRows | GridTemplateColumns),
             "place-content" => matches!(self, AlignContent | JustifyContent),
             "place-items" => matches!(self, AlignItems | JustifyItems),
             "place-self" => matches!(self, AlignSelf | JustifySelf),
@@ -195,6 +206,7 @@ impl Prop {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
+    Tracks(Vec<TrackListItem>),
     Distribution(ContentDistribution, AlignFlags),
     ItemAlignment(ItemAlign, AlignFlags),
     F(f32),
@@ -250,6 +262,8 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         AlignSelf => Val::ItemAlignment(s.align_self, s.align_self_flags),
         JustifySelf => Val::ItemAlignment(s.justify_self, s.justify_self_flags),
         AlignItems => Val::ItemAlignment(s.align_items, s.align_items_flags),
+        GridTemplateRows => Val::Tracks(s.grid_template_rows.clone()),
+        GridTemplateColumns => Val::Tracks(s.grid_template_columns.clone()),
         JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
     }
 }
@@ -257,6 +271,8 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
 fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
     use Prop::*;
     match (p, v) {
+        (GridTemplateRows, Val::Tracks(tracks)) => s.grid_template_rows.clone_from(tracks),
+        (GridTemplateColumns, Val::Tracks(tracks)) => s.grid_template_columns.clone_from(tracks),
         (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
         (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),
         (AlignSelf, Val::ItemAlignment(value, flags)) => (s.align_self, s.align_self_flags) = (*value, *flags),
@@ -874,6 +890,7 @@ fn lerp_matrix(a: [f32; 6], b: [f32; 6], t: f32) -> [f32; 6] {
 fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
+        (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(t).tracks(x, y).map(Val::Tracks).unwrap_or_else(discrete),
         (Val::F(x), Val::F(y)) => Val::F(lerp(*x, *y, t)),
         (Val::C(x), Val::C(y)) => {
             let ch = |p: u8, q: u8| lerp(p as f32, q as f32, t).round().clamp(0.0, 255.0) as u8;
@@ -1371,8 +1388,10 @@ impl Engine {
             if scripted.contains(&p) {
                 continue;
             }
-            let to = get(after, p);
             let running = page.anim.transitions.iter().position(|t| t.node == node && t.prop == p);
+            let spec = transition_for(after, p).filter(|t| t.duration.max(0.0) + t.delay > 0.0);
+            if running.is_none() && spec.is_none() { continue; }
+            let to = get(after, p);
             let from = match running {
                 Some(i) if !page.anim.transitions[i].clock.idle() => page.anim.transitions[i].value_at(now),
                 _ => get(before, p),
@@ -1382,7 +1401,6 @@ impl Engine {
                     continue; // still heading to the same value
                 }
             }
-            let spec = transition_for(after, p).filter(|t| t.duration.max(0.0) + t.delay > 0.0);
             if let Some(i) = running {
                 // Replaced or no longer transitioned: cancel.
                 let t = page.anim.transitions.remove(i);
@@ -1951,6 +1969,7 @@ fn rendered(page: &Page, node: NodeId) -> bool {
 /// `under` composited with `v` (`add` / `accumulate`).
 fn add_values(under: &Val, v: &Val) -> Val {
     match (under, v) {
+        (Val::Tracks(a), Val::Tracks(b)) => GridOperation::Add.tracks(a, b).map(Val::Tracks).unwrap_or_else(|| v.clone()),
         (Val::F(a), Val::F(b)) => Val::F(a + b),
         (Val::L(a), Val::L(b)) => add_lp(*a, *b).map(Val::L).unwrap_or_else(|| v.clone()),
         (Val::T(a), Val::T(b)) => Val::T(a.iter().chain(b.iter()).cloned().collect()),
@@ -2040,6 +2059,7 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
 fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::F(_), Val::F(_)) | (Val::C(_), Val::C(_)) | (Val::V(_), Val::V(_)) => true,
+        (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(0.5).tracks(x, y).is_some(),
         (Val::L(x), Val::L(y)) => lerp_len(x, y, 0.5).is_some(),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),
         (Val::Cp(Some(x)), Val::Cp(Some(y))) => lerp_clip(x, y, 0.5).is_some(),

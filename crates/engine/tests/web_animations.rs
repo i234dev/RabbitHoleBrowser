@@ -242,3 +242,29 @@ fn discrete_alignment_keeps_modifiers_and_switches_at_half_progress() {
         </script>"#);
     assert_eq!(logs(&mut p), ["safe center", "allow-discrete safe center", "last baseline", "end 0"]);
 }
+
+#[test]
+fn grid_track_effects_reach_layout_and_preserve_repeat_structure() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<!doctype html>
+        <style>#grid {display:grid; width:200px} #sample {grid-template-rows: 4px 2fr}</style>
+        <div id=grid><i id=first></i></div><div id=sample></div>
+        <script>
+        let move = grid.animate({gridTemplateColumns:['20px 1fr','100px 2fr']}, 1000);
+        move.pause(); move.currentTime = 250;
+        console.log(first.offsetWidth);
+        let add = sample.animate({gridTemplateRows:['4px 2fr','12px 4fr']},
+                                 {duration:1000, composite:'add'});
+        add.pause(); add.currentTime = 500;
+        console.log(getComputedStyle(sample).gridTemplateRows);
+        const run = (from, to) => sample.animate({gridTemplateColumns:[from, to]}, 1000);
+        let rep = run('repeat(2, [start] 10px auto)', 'repeat(2, [end] 30px 2fr)');
+        rep.pause(); rep.currentTime = 750;
+        console.log(getComputedStyle(sample).gridTemplateColumns);
+        rep.cancel();
+        let mismatch = run('repeat(3, 10px)', 'repeat(2, 40px)');
+        mismatch.pause(); mismatch.currentTime = 250;
+        console.log(getComputedStyle(sample).gridTemplateColumns);
+        </script>"#);
+    assert_eq!(logs(&mut page), ["40", "12px 5fr", "repeat(2, [end] 25px 2fr)", "repeat(3, 10px)"]);
+}
