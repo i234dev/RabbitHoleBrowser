@@ -20,6 +20,24 @@ fn algorithms(realm: &mut Realm, args: &[Value]) -> JsResult<(&'static digest::A
     })
 }
 
+// WebCrypto uses Web IDL's copy of a BufferSource, including the empty
+// sequence for detached buffers. Read internal slots without invoking script.
+fn copy_buffer(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let value = arg(args, 0);
+    if let V::Object(object) = value.v() {
+        use rabbithole_js::ObjectKind;
+        let buffer = match &realm.obj(object).kind {
+            ObjectKind::TypedArray(view) | ObjectKind::DataView(view) => view.buffer,
+            _ => object,
+        };
+        if matches!(&realm.obj(buffer).kind, ObjectKind::ArrayBuffer(b) if b.shared) {
+            return Err(realm.throw_type_error("WebCrypto requires a non-shared buffer"));
+        }
+    }
+    let bytes = buffer_source_bytes(realm, &value, "WebCrypto")?;
+    Ok(make_array_buffer(realm, bytes))
+}
+
 fn hash(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let (algorithm, _) = algorithms(realm, args)?;
     let data = buffer_source_bytes(realm, &arg(args, 1), "digest")?;
@@ -194,6 +212,7 @@ pub(crate) fn install(realm: &mut Realm, internals: ObjectId) {
     realm.define_method(internals, "ed25519KeyBytes", 2, ed_key_bytes);
     realm.define_method(internals, "ed25519Sign", 2, ed_sign);
     realm.define_method(internals, "ed25519Verify", 3, ed_verify);
+    realm.define_method(internals, "cryptoCopyBuffer", 1, copy_buffer);
     realm.define_method(internals, "cryptoDigest", 2, hash);
     realm.define_method(internals, "cryptoHmac", 3, mac);
     realm.define_method(internals, "pbkdfStart", 5, pbkdf_start);

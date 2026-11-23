@@ -2485,3 +2485,39 @@ fn ecdsa_verifies_a_published_signature_and_supports_independent_hash_selection(
         "P-384 96/true,96/true,96/true,96/true InvalidAccessError",
         "P-521 132/true,132/true,132/true,132/true InvalidAccessError"]);
 }
+
+#[test]
+fn web_crypto_normalizes_cipher_parameters_before_copying_the_message() {
+    let output = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle, iv = new Uint8Array(12), name = 'AES-GCM';
+        const key = await s.generateKey({name,length:128},false,['encrypt','decrypt']);
+        const data = new Uint8Array([7,8,9]), view = new DataView(data.buffer,1,1);
+        const sealed = await s.encrypt({name,get iv() { data[1]=42; return iv; }},key,view);
+        data[1]=0;
+        const plain = new Uint8Array(await s.decrypt({name,iv},key,sealed));
+        const empty = await s.encrypt({get name() { data.buffer.transfer(); return name; },iv},key,data);
+        console.log(plain.length, plain[0], empty.byteLength);
+        console.log(await s.generateKey({name,length:65536+128},false,['encrypt']).catch(e=>e.name));
+      })().catch(e=>console.log(String(e)));
+    "#);
+    assert_eq!(output, ["1 42 16","TypeError"]);
+}
+
+#[test]
+fn aes_ctr_wraps_only_the_counter_bits_and_rejects_counter_reuse() {
+    let output = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle, name = 'AES-CTR';
+        const key = await s.importKey('raw',new Uint8Array(16),name,false,['encrypt']);
+        const counter = new Uint8Array(16);
+        counter[15] = 0xaf;
+        const two = new Uint8Array(await s.encrypt({name,counter,length:3},key,new Uint8Array(32)));
+        counter[15] = 0xa8;
+        const next = new Uint8Array(await s.encrypt({name,counter,length:128},key,new Uint8Array(16)));
+        console.log(next.every((b,i)=>b===two[16+i]));
+        console.log(await s.encrypt({name,counter,length:3},key,new Uint8Array(129)).catch(e=>e.name));
+      })().catch(e=>console.log(String(e)));
+    "#);
+    assert_eq!(output, ["true","OperationError"]);
+}

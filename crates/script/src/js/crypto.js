@@ -18,12 +18,14 @@
   const nativeUUID = native.randomUUID.bind(native);
 
   // ------------------------------------------------------------- hashes
-  const bytesOf = (data) => {
-    if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
-    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
-    throw new TypeError("Failed to execute on 'SubtleCrypto': The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.");
-  };
   const N = g.__rhNative, defer = g.setTimeout;
+  const bytesOf = data => new Uint8Array(N.cryptoCopyBuffer(data));
+  function unsigned(value, maximum) {
+    if (value === undefined) throw new TypeError('Missing algorithm parameter');
+    const number = Math.trunc(+value);
+    if (!Number.isFinite(number) || number < 0 || number > maximum) throw new TypeError('Algorithm parameter out of range');
+    return number;
+  }
   const HASHES = { 'SHA-1': [64,20], 'SHA-256': [64,32], 'SHA-384': [128,48], 'SHA-512': [128,64] };
   function hashName(h) {
     const n = (typeof h === 'string' ? h : h && h.name || '').toUpperCase();
@@ -119,7 +121,8 @@
     if (n < 1 || n > 16 || out.slice(out.length - n).some((x) => x !== n)) throw err('OperationError', 'The decryption failed (bad padding).');
     return out.slice(0, out.length - n);
   }
-  function ctr(key, counter, data, length = 128) {
+  function ctr(key, counter, data, length) {
+    if (Math.ceil(data.length / 16) > 2 ** length) throw err('OperationError', 'AES-CTR counter would repeat');
     const ks = expandKey(key);
     const block = new Uint8Array(counter);
     const out = new Uint8Array(data.length);
@@ -127,7 +130,12 @@
       const ksb = encBlock(ks, block);
       for (let j = 0; j < 16 && i + j < data.length; j++) out[i + j] = data[i + j] ^ ksb[j];
       // Increment the rightmost `length` bits.
-      for (let k = 15, carry = 1, bits = length; k >= 0 && carry && bits > 0; k--, bits -= 8) { const v = block[k] + carry; block[k] = v & 255; carry = v >> 8; }
+      for (let k = 15, bits = length; bits > 0; --k, bits -= 8) {
+        const mask = (1 << Math.min(bits, 8)) - 1;
+        const low = (block[k] + 1) & mask;
+        block[k] = (block[k] & ~mask) | low;
+        if (low) break;
+      }
     }
     return out;
   }
@@ -182,8 +190,9 @@
   const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ED448', 'X448'];
   function algName(a) {
     const id = normAlg(a);
-    if (id.name === undefined) throw new TypeError('An algorithm name is required');
-    const n = String(id.name).toUpperCase();
+    const name = id.name;
+    if (name === undefined) throw new TypeError('An algorithm name is required');
+    const n = String(name).toUpperCase();
     const map = { 'CHACHA20-POLY1305': 'ChaCha20-Poly1305', ECDSA: 'ECDSA', ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
@@ -486,7 +495,7 @@
     }
     return out.buffer;
   }
-  const keyLength = (alg) => { const a = normAlg(alg); const n = algName(alg); if (n === 'ChaCha20-Poly1305') return 256; if (n === 'HMAC') return a.length || HASHES[hashName(a.hash)][0] * 8; return a.length; };
+  const keyLength = (alg) => { const a = normAlg(alg); const n = algName(alg); if (n === 'ChaCha20-Poly1305') return 256; if (n === 'HMAC') return a.length === undefined ? HASHES[hashName(a.hash)][0] * 8 : unsigned(a.length,0xffffffff); return unsigned(a.length,65535); };
 
   class SubtleCrypto {
     constructor() { ILLEGAL(); }
@@ -562,8 +571,8 @@
       if (name === 'ECDSA') return N.ecdsaVerify(encodeEcSpki(k.algorithm.namedCurve,k.raw), ecDigest(alg,msg), sig);
       return name === 'Ed25519' ? N.ed25519Verify(k.raw, msg, sig) : N.cryptoHmac(k.algorithm.hash.name, k.raw, msg, sig);
     }); }
-    encrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), false, 'encrypt').buffer); }
-    decrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), true, 'decrypt').buffer); }
+    encrypt(alg, key, data) { return run(() => cipher(alg, key, data, false, 'encrypt').buffer); }
+    decrypt(alg, key, data) { return run(() => cipher(alg, key, data, true, 'decrypt').buffer); }
     deriveBits(alg, key, length) { return run(() => { checkKey(key, algName(alg), 'deriveBits'); return deriveBitsImpl(alg, key, length); }); }
     deriveKey(alg, key, derivedAlg, extractable, usages) { return run(() => { checkKey(key, algName(alg), 'deriveKey'); return Promise.resolve(deriveBitsImpl(alg, key, keyLength(derivedAlg))).then(bits => importSecret(algName(derivedAlg) === 'ChaCha20-Poly1305' ? 'raw-secret' : 'raw', bits, derivedAlg, extractable, usages)); }); }
     wrapKey(format, key, wrappingKey, wrapAlg) {
@@ -576,7 +585,7 @@
     unwrapKey(format, wrapped, unwrappingKey, unwrapAlg, keyAlg, extractable, usages) {
       return run(() => {
         checkKey(unwrappingKey, algName(unwrapAlg), 'unwrapKey');
-        const bytes = algName(unwrapAlg) === 'AES-KW' ? aesKw(keyInfo(unwrappingKey).raw, bytesOf(wrapped), true) : cipher(unwrapAlg, unwrappingKey, bytesOf(wrapped), true, null);
+        const bytes = algName(unwrapAlg) === 'AES-KW' ? aesKw(keyInfo(unwrappingKey).raw, bytesOf(wrapped), true) : cipher(unwrapAlg, unwrappingKey, wrapped, true, null);
         const data = format === 'jwk' ? JSON.parse(new TextDecoder().decode(bytes)) : bytes;
         return importSecret(format, data, keyAlg, extractable, usages);
       });
@@ -596,15 +605,20 @@
     switch (name) {
       case 'ChaCha20-Poly1305': {
         const aad = a.additionalData === undefined ? new Uint8Array(0) : bytesOf(a.additionalData);
-        return new Uint8Array(N.chachaPoly1305(keyInfo(key).raw, bytesOf(a.iv), data, aad, decrypt));
+        return new Uint8Array(N.chachaPoly1305(keyInfo(key).raw, bytesOf(a.iv), bytesOf(data), aad, decrypt));
       }
-      case 'AES-CBC': return cbc(keyInfo(key).raw, bytesOf(a.iv), data, decrypt);
-      case 'AES-CTR': { const c = bytesOf(a.counter); if (c.length !== 16) throw err('OperationError', 'The counter must be 16 bytes.'); return ctr(keyInfo(key).raw, c, data, a.length || 64); }
+      case 'AES-CBC': return cbc(keyInfo(key).raw, bytesOf(a.iv), bytesOf(data), decrypt);
+      case 'AES-CTR': {
+        const counter = bytesOf(a.counter), length = unsigned(a.length,255);
+        if (counter.length !== 16 || !length || length > 128) throw err('OperationError', 'Invalid AES-CTR counter or bit length');
+        return ctr(keyInfo(key).raw, counter, bytesOf(data), length);
+      }
       case 'AES-GCM': {
-        const tag = a.tagLength === undefined ? 128 : Number(a.tagLength) & 255;
+        const additional = a.additionalData, aad = additional === undefined ? new Uint8Array(0) : bytesOf(additional);
+        const iv = bytesOf(a.iv), tagLength = a.tagLength;
+        const tag = tagLength === undefined ? 128 : unsigned(tagLength,255);
         if (![32, 64, 96, 104, 112, 120, 128].includes(tag)) throw err('OperationError', 'Invalid tag length.');
-        const aad = a.additionalData === undefined ? new Uint8Array(0) : bytesOf(a.additionalData);
-        return new Uint8Array(N.aesGcm(keyInfo(key).raw, bytesOf(a.iv), data, aad, tag / 8, decrypt));
+        return new Uint8Array(N.aesGcm(keyInfo(key).raw, iv, bytesOf(data), aad, tag / 8, decrypt));
       }
       default: throw err('NotSupportedError', `${name} does not support encryption.`);
     }
