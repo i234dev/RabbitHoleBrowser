@@ -74,19 +74,20 @@
   const checkedProperties = new Set(['shape-outside', 'shape-margin', 'color', 'background-color', 'border-top-color', 'border-right-color',
     'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
     'accent-color', 'column-rule-color', 'align-self', 'align-items', 'align-content', 'justify-self', 'justify-items',
-    'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-try-fallbacks', 'position-anchor', 'anchor-name', 'anchor-scope']);
-  const placeLonghands = new Map([
+    'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-try', 'position-try-order', 'position-try-fallbacks', 'position-anchor', 'anchor-name', 'anchor-scope']);
+  const pairedLonghands = new Map([
     ['place-items',['align-items','justify-items']], ['place-self',['align-self','justify-self']],
+    ['position-try',['position-try-order','position-try-fallbacks']],
     ['place-content',['align-content','justify-content']]
   ]);
   const cssWide = new Set(['initial','inherit','unset','revert','revert-layer']);
   function appendDeclaration(list, name, value, important) {
-    const pair = placeLonghands.has(name) && N.cssomExpandPlace(name,value);
+    const pair = pairedLonghands.has(name) && N.cssomExpandPlace(name,value);
     if (pair) list.push([pair[0],pair[1],important],[pair[2],pair[3],important]);
     else list.push([name,value,important]);
   }
   function dropDeclaration(list,name) {
-    const pair = placeLonghands.get(name);
+    const pair = pairedLonghands.get(name);
     return list.filter(([k]) => k !== name && !pair?.includes(k));
   }
   function declarationValue(list,name) {
@@ -100,10 +101,11 @@
     }
     const found = direct(name);
     if (found) return found;
-    const pair = placeLonghands.get(name);
+    const pair = pairedLonghands.get(name);
     if (pair) {
       const a=direct(pair[0]), b=direct(pair[1]);
       if (a && b && a[2]===b[2]) {
+        if (name === 'position-try' && a[1] === 'normal' && !cssWide.has(b[1])) return [name,b[1],a[2]];
         if (a[1]===b[1]) return [name,a[1],a[2]];
         if (!cssWide.has(a[1]) && !cssWide.has(b[1])) return [name,a[1]+' '+b[1],a[2]];
       }
@@ -115,10 +117,16 @@
     for (let i=0; i<list.length; i++) {
       let [name,value,priority] = list[i];
       const other = list[i+1];
-      if (other && name.startsWith('align-') && other[0] === 'justify-'+name.slice(6) &&
+      if (other && name === 'position-try-order' && other[0] === 'position-try-fallbacks' && other[2] === priority &&
+          (value === other[1] || (!cssWide.has(value) && !cssWide.has(other[1])))) {
+        name = 'position-try';
+        if (value === 'normal') value = other[1];
+        else if (value !== other[1]) value += ' '+other[1];
+        i++;
+      } else if (other && name.startsWith('align-') && other[0] === 'justify-'+name.slice(6) &&
           other[2] === priority && (value === other[1] || (!cssWide.has(value) && !cssWide.has(other[1])))) {
         const shorthand = 'place-'+name.slice(6);
-        if (placeLonghands.has(shorthand)) {
+        if (pairedLonghands.has(shorthand)) {
           name = shorthand;
           if (value !== other[1]) value += ' '+other[1];
           i++;

@@ -525,8 +525,10 @@ impl<'a> Layouter<'a> {
         let mut choices = HashMap::new();
         let mut areas = crate::anchor::placements(self.ctx,&initial,&choices);
         let mut pending = std::mem::take(&mut areas.fallback_targets);
+        let mut best = HashMap::new();
         let mut tree = initial;
         loop {
+            let available = std::mem::take(&mut areas.available_space);
             if !areas.is_empty() {
                 let mut positioned = Self::new(self.ctx);
                 positioned.anchor_areas = areas;
@@ -535,7 +537,7 @@ impl<'a> Layouter<'a> {
             } else if !choices.is_empty() || !tree.resolved_anchor_styles.is_empty() {
                 tree = Self::new(self.ctx).layout_pass(None);
             }
-            if !crate::anchor::advance_fallbacks(self.ctx,&tree,&mut pending,&mut choices) { return tree; }
+            if !crate::anchor::advance_fallbacks(self.ctx,&tree,&mut pending,&mut choices,&available,&mut best) { return tree; }
             areas = crate::anchor::placements(self.ctx,&tree,&choices);
         }
     }

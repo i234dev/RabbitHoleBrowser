@@ -123,11 +123,12 @@ struct DeclList {
     items: Vec<(String, String, bool)>,
 }
 
-fn place_longhands(name: &str) -> Option<[&'static str;2]> {
+fn paired_longhands(name: &str) -> Option<[&'static str;2]> {
     match name {
         "place-items" => Some(["align-items","justify-items"]),
         "place-content" => Some(["align-content","justify-content"]),
         "place-self" => Some(["align-self","justify-self"]),
+        "position-try" => Some(["position-try-order","position-try-fallbacks"]),
         _ => None,
     }
 }
@@ -135,10 +136,14 @@ fn place_longhands(name: &str) -> Option<[&'static str;2]> {
 fn css_wide(value: &str) -> bool { matches!(value,"inherit" | "initial" | "unset" | "revert" | "revert-layer") }
 
 fn expand_place(name: &str, value: &str) -> Option<[(&'static str,String);2]> {
-    let [align,justify] = place_longhands(name)?;
+    let [align,justify] = paired_longhands(name)?;
     if css_wide(value) { return Some([(align,value.into()),(justify,value.into())]); }
     let tokens = rabbithole_css::Tokenizer::tokenize(value);
     let parts = rabbithole_style::values::components(&tokens);
+    if name == "position-try" {
+        let (order,list) = rabbithole_style::props::anchor::TryOrder::shorthand(&parts)?;
+        return Some([(align,order.css().into()), (justify,rabbithole_style::props::anchor::TryOption::list_css(&list,false))]);
+    }
     let (a,b) = rabbithole_style::props::flex::specified_alignment_values(name,&parts)?;
     Some([(align,a),(justify,b?)])
 }
@@ -168,9 +173,10 @@ impl DeclList {
 
     fn value(&self, prop: &str) -> (String,bool) {
         if let Some((v,imp)) = self.direct(prop) { return (v.into(),imp); }
-        if let Some([a,b]) = place_longhands(prop) {
+        if let Some([a,b]) = paired_longhands(prop) {
             if let (Some((a,pa)),Some((b,pb))) = (self.direct(a),self.direct(b)) {
                 if pa==pb {
+                    if prop == "position-try" && a == "normal" && !css_wide(b) { return (b.into(),pa); }
                     if a==b { return (a.into(),pa); }
                     if !css_wide(a) && !css_wide(b) { return (format!("{a} {b}"),pa); }
                 }
@@ -187,6 +193,7 @@ impl DeclList {
             let mut text = value.clone();
             if let Some((next,other,priority)) = items.peek() {
                 let shorthand = match (property,next.as_str()) {
+                    ("position-try-order","position-try-fallbacks") => Some("position-try"),
                     ("align-items","justify-items") => Some("place-items"),
                     ("align-self","justify-self") => Some("place-self"),
                     ("align-content","justify-content") => Some("place-content"),
@@ -194,7 +201,8 @@ impl DeclList {
                 };
                 if let Some(shorthand) = shorthand.filter(|_| important==priority && (value==other || (!css_wide(value) && !css_wide(other)))) {
                     property = shorthand;
-                    if value != other { text.push(' '); text.push_str(other); }
+                    if shorthand == "position-try" && value == "normal" { text = other.clone(); }
+                    else if value != other { text.push(' '); text.push_str(other); }
                     items.next();
                 }
             }
@@ -207,7 +215,7 @@ impl DeclList {
     }
 
     fn remove(&mut self, prop: &str) {
-        let longhands = place_longhands(prop);
+        let longhands = paired_longhands(prop);
         self.items.retain(|(k,_,_)| k != prop && !longhands.is_some_and(|pair| pair.contains(&k.as_str())));
     }
 }
@@ -286,7 +294,7 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
 }
 
 fn checked_property(name: &str) -> bool {
-    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
@@ -298,7 +306,7 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
         if name == "shape-outside" { return Some(shapes::specified(tokens)); }
     }
     if single_color_property(name) { return specified_color(name, tokens); }
-    if matches!(name, "position-area" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
+    if matches!(name, "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
         let parts = rabbithole_style::values::components(tokens);
         if let [value] = parts.as_slice() {
             if let Some(k) = rabbithole_style::values::ident(value).filter(|k| matches!(k.as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer")) {
@@ -311,6 +319,11 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
             if name == "position-anchor" {
                 let [c] = parts.as_slice() else { return None };
                 return if rabbithole_style::values::is_ident(c,"auto") { Some("auto".into()) } else { rabbithole_style::props::anchor::dashed_ident(c).map(str::to_owned) };
+            }
+            if name == "position-try" { return rabbithole_style::props::anchor::TryOrder::shorthand(&parts).map(|(order,list)| order.shorthand_css(&list,false)); }
+            if name == "position-try-order" {
+                let [part] = parts.as_slice() else { return None };
+                return rabbithole_style::props::anchor::TryOrder::parse(part).map(|o| o.css().into());
             }
             if name == "position-try-fallbacks" { use rabbithole_style::props::anchor::TryOption; return TryOption::parse_list(&parts).map(|v| TryOption::list_css(&v,false)); }
             if name == "position-area" { return rabbithole_style::props::anchor::PositionArea::parse(&parts).map(|a| a.to_css(false)); }
@@ -771,6 +784,8 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "display" => display_css(s.display).to_string(),
         "shape-outside" => shapes::computed(s.shape_outside.as_deref(), s.shape_outside_position_explicit),
         "shape-margin" => position_css(&s.shape_margin),
+        "position-try" => s.position_try_order.shorthand_css(s.position_try_fallbacks.as_deref().unwrap_or_default(),true),
+        "position-try-order" => s.position_try_order.css().into(),
         "position-try-fallbacks" => rabbithole_style::props::anchor::TryOption::list_css(s.position_try_fallbacks.as_deref().unwrap_or_default(),true),
         "position-area" => s.position_area.to_css(true),
         "anchor-scope" => s.anchor_scope.to_css(),

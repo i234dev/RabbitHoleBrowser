@@ -119,10 +119,23 @@ fn name_scope(ctx: &LayoutContext, mut node: NodeId, name: &str) -> Option<NodeI
 pub(crate) struct AnchoredLayout {
     pub areas: HashMap<NodeId, Placement>,
     pub fallback_targets: Vec<NodeId>,
+    pub available_space: HashMap<NodeId,f32>,
     pub lengths: HashMap<NodeId, std::rc::Rc<ComputedStyle>>,
 }
 
 impl AnchoredLayout {
+    fn record_space(&mut self, id: NodeId, style: &ComputedStyle, cb: Rect, writing: Writing) {
+        use rabbithole_style::props::anchor::TryOrder;
+        let horizontal = match style.position_try_order {
+            TryOrder::Normal => return,
+            TryOrder::Width => true, TryOrder::Height => false,
+            TryOrder::Block => writing.0.is_vertical(), TryOrder::Inline => !writing.0.is_vertical(),
+        };
+        let (size,start,end) = if horizontal { (cb.w,style.inset.left,style.inset.right) }
+                               else { (cb.h,style.inset.top,style.inset.bottom) };
+        self.available_space.insert(id,(size-start.resolve_or_zero(size)-end.resolve_or_zero(size)).max(0.0));
+    }
+
     pub fn is_empty(&self) -> bool { self.areas.is_empty() && self.lengths.is_empty() }
 
     /// Apply physical values before the writing-mode layout converts them
@@ -310,10 +323,11 @@ impl QueryBox {
     }
 }
 
-/// Try the next declared alternative only for boxes that overflow in the
-/// actual layout. Once the list is exhausted, restore the original style.
+/// Normal order stops at the first fit. Size ordering considers the base
+/// style and every eligible fallback, retaining the earliest fit on ties.
 pub(crate) fn advance_fallbacks(ctx: &LayoutContext, tree: &LayoutTree, pending: &mut Vec<NodeId>,
-                                choices: &mut HashMap<NodeId, usize>) -> bool {
+                                choices: &mut HashMap<NodeId, usize>, available: &HashMap<NodeId,f32>,
+                                best: &mut HashMap<NodeId,(Option<usize>,f32)>) -> bool {
     let mut changed = false;
     pending.retain(|&id| {
         let Some(style) = ctx.styles.get(id) else { return false; };
@@ -323,7 +337,10 @@ pub(crate) fn advance_fallbacks(ctx: &LayoutContext, tree: &LayoutTree, pending:
         let rect = matrix.map_or(rect, |m| rabbithole_gfx::path::transform_rect_bounds(&m,rect));
         let (cb,_) = container(ctx,tree,containing_node(ctx,id,style));
         if rect.x >= cb.x-0.01 && rect.y >= cb.y-0.01 && rect.right() <= cb.right()+0.01 && rect.bottom() <= cb.bottom()+0.01 {
-            return false;
+            let Some(&space) = available.get(&id) else { return false; };
+            if best.get(&id).is_none_or(|(_,previous)| space > *previous) {
+                best.insert(id,(choices.get(&id).copied(),space));
+            }
         }
         let start = choices.get(&id).map_or(0, |index| index+1);
         let scoped = ctx.styles.position_tries.get(&ctx.doc.tree_root(id));
@@ -335,7 +352,10 @@ pub(crate) fn advance_fallbacks(ctx: &LayoutContext, tree: &LayoutTree, pending:
             changed = true;
             return true;
         }
-        changed |= choices.remove(&id).is_some();
+        let selected = best.remove(&id).and_then(|(choice,_)| choice);
+        let previous = choices.remove(&id);
+        if let Some(index) = selected { choices.insert(id,index); }
+        changed |= previous != selected;
         false
     });
     changed
@@ -399,6 +419,9 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree, choices: &HashM
             let geometry = QueryBox { axes, cb, writing, own:(s.writing_mode,s.direction) };
             result.lengths.insert(id,std::rc::Rc::new(geometry.resolve(s,&lookup)));
         }
+        let resolved = result.lengths.get(&id).cloned();
+        let inset_style = resolved.as_deref().unwrap_or(s);
+        result.record_space(id,inset_style,cb,writing);
         if s.position_area.is_none() { continue; }
         let Some(anchor) = lookup(None) else { continue };
         let Some((_,coordinates)) = tree.box_and_coordinates(ctx.doc,id) else { continue };
@@ -406,7 +429,9 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree, choices: &HashM
         let [x,y] = axes.regions(regions);
         let (left,right,ax) = interval(x,cb.x,cb.right(),anchor.x,anchor.right());
         let (top,bottom,ay) = interval(y,cb.y,cb.bottom(),anchor.y,anchor.bottom());
-        result.areas.insert(id,Placement { area: Rect::new(left,top,right-left,bottom-top),
+        let area = Rect::new(left,top,right-left,bottom-top);
+        result.record_space(id,inset_style,area,writing);
+        result.areas.insert(id,Placement { area,
             center:(anchor.x+anchor.w/2.,anchor.y+anchor.h/2.),align:[ax,ay] }.in_box_space(coordinates));
     }
     result

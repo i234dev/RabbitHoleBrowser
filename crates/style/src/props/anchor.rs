@@ -213,6 +213,36 @@ impl AnchorScope {
     }
 }
 
+/// Sort the fitting alternatives by one dimension of their inset-modified
+/// containing block. Ties retain declaration order, with the base style first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TryOrder { #[default] Normal, Width, Height, Block, Inline }
+
+impl TryOrder {
+    pub fn parse(tokens: &[Token]) -> Option<Self> {
+        Some(match crate::values::ident(tokens)?.as_str() {
+            "normal" => Self::Normal, "most-width" => Self::Width, "most-height" => Self::Height,
+            "most-block-size" => Self::Block, "most-inline-size" => Self::Inline, _ => return None,
+        })
+    }
+
+    pub fn css(self) -> &'static str {
+        match self { Self::Normal => "normal", Self::Width => "most-width", Self::Height => "most-height",
+            Self::Block => "most-block-size", Self::Inline => "most-inline-size" }
+    }
+
+    pub fn shorthand(parts: &[&[Token]]) -> Option<(Self,Vec<TryOption>)> {
+        let first = *parts.first()?;
+        let (order,remaining) = Self::parse(first).map_or((Self::Normal,parts),|o| (o,&parts[1..]));
+        Some((order,TryOption::parse_list(remaining)?))
+    }
+
+    pub fn shorthand_css(self, options: &[TryOption], computed: bool) -> String {
+        let list = TryOption::list_css(options,computed);
+        if self == Self::Normal { list } else { format!("{} {list}",self.css()) }
+    }
+}
+
 /// A fallback may name a descriptor block and then reflect its values across
 /// one or more axes. Reflections are applied in the author's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

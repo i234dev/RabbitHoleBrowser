@@ -12,7 +12,7 @@ use crate::tokenizer::Token;
 /// Properties (and `property: value` pairs) the engine does not implement:
 /// guards that test them must take the fallback branch.
 const UNSUPPORTED_PROPERTIES: &[&str] = &[
-    "inset-area", "position-try", "position-visibility",
+    "inset-area", "position-visibility",
     "view-transition-name", "view-transition-class", "animation-timeline", "scroll-timeline", "scroll-timeline-name", "view-timeline", "view-timeline-name",
     "animation-range", "timeline-scope", "initial-letter", "-webkit-initial-letter", "math-depth", "math-shift", "reading-flow", "reading-order",
     "interpolate-size", "field-sizing", "text-box", "text-box-trim", "text-box-edge", "hanging-punctuation", "box-decoration-break", "-webkit-box-reflect",

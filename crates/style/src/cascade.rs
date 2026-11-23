@@ -2224,6 +2224,11 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "position" => to.position = from.position,
         "position-area" => to.position_area = from.position_area,
+        "position-try" => {
+            to.position_try_order = from.position_try_order;
+            to.position_try_fallbacks = from.position_try_fallbacks.clone();
+        }
+        "position-try-order" => to.position_try_order = from.position_try_order,
         "position-try-fallbacks" => to.position_try_fallbacks = from.position_try_fallbacks.clone(),
         "position-anchor" => to.position_anchor = from.position_anchor.clone(),
         "anchor-scope" => to.anchor_scope = from.anchor_scope.clone(),
@@ -3466,6 +3471,17 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             if values::is_ident(c0,"auto") { style.position_anchor = None; }
             else if let Some(name) = props::anchor::dashed_ident(c0) { style.position_anchor = Some(name.into()); }
         }
+        "position-try" => {
+            if let Some((order,list)) = props::anchor::TryOrder::shorthand(&comps) {
+                style.position_try_order = order;
+                style.position_try_fallbacks = (!list.is_empty()).then(|| list.into());
+            }
+        }
+        "position-try-order" => {
+            if let [part] = comps.as_slice() {
+                if let Some(order) = props::anchor::TryOrder::parse(part) { style.position_try_order = order; }
+            }
+        }
         "position-try-fallbacks" => {
             if let Some(list) = props::anchor::TryOption::parse_list(&comps) {
                 style.position_try_fallbacks = (!list.is_empty()).then(|| list.into());
@@ -4164,6 +4180,8 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     if name == "anchor-scope" { return Some(props::anchor::AnchorScope::parse(&values::components(value)).is_some()); }
     if name == "anchor-name" { return Some(props::anchor::names(&values::components(value)).is_some()); }
     if name == "position-anchor" { return Some(matches!(values::components(value).as_slice(), [c] if values::is_ident(c,"auto") || props::anchor::dashed_ident(c).is_some())); }
+    if name == "position-try" { return Some(props::anchor::TryOrder::shorthand(&values::components(value)).is_some()); }
+    if name == "position-try-order" { return Some(matches!(values::components(value).as_slice(), [v] if props::anchor::TryOrder::parse(v).is_some())); }
     if name == "position-try-fallbacks" { return Some(props::anchor::TryOption::parse_list(&values::components(value)).is_some()); }
     if name == "position-area" { return Some(props::anchor::PositionArea::parse(&values::components(value)).is_some()); }
     if matches!(name, "grid-template-columns" | "grid-template-rows") {
