@@ -100,7 +100,8 @@ fn channel(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn offer(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
-    Ok(Value::str(&with_peer(realm, args, Peer::create_offer)?))
+    let restart = realm.to_boolean(&arg(args, 1));
+    Ok(Value::str(&with_peer(realm, args, |p| p.create_offer_with_ice_restart(restart))?))
 }
 fn answer(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let sdp = arg_str(realm, args, 1)?;
@@ -209,7 +210,7 @@ pub(crate) fn install(realm: &mut Realm, o: ObjectId) {
     realm.define_method(o, "rtcCertificate", 1, certificate);
     realm.define_method(o, "rtcClose", 1, close);
     realm.define_method(o, "rtcChannel", 7, channel);
-    realm.define_method(o, "rtcOffer", 1, offer);
+    realm.define_method(o, "rtcOffer", 2, offer);
     realm.define_method(o, "rtcAnswer", 2, answer);
     realm.define_method(o, "rtcAccept", 2, accept);
     realm.define_method(o, "rtcCandidate", 2, candidate);

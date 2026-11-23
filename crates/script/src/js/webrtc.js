@@ -560,9 +560,11 @@
   }
   function gather(pc, desc) {
     const p = peers.get(pc);
-    if (p.iceGatheringState !== 'new' || !/^m=/m.test(desc.sdp)) return;
+    const [generation] = iceCredentials(desc);
+    if (!generation || p.gatheredGeneration === generation) return;
+    p.gatheredGeneration = generation;
     schedule(()=>{
-      if (p.signalingState === 'closed') return;
+      if (p.signalingState === 'closed' || p.gatheredGeneration !== generation) return;
       const ice = p.sctp?.transport.iceTransport;
       const gathering = state => {
         if (ice && ice.gatheringState !== state) {
@@ -585,6 +587,21 @@
       pc.dispatchEvent(new RTCPeerConnectionIceEvent('icecandidate'));
     },0);
   }
+  function iceCredentials(description) {
+    if (!description) return [];
+    // All currently supported m-lines use the bundled ICE transport.
+    const ufrag = /^a=ice-ufrag:([^\r\n]+)/m.exec(description.sdp);
+    const pwd = /^a=ice-pwd:([^\r\n]+)/m.exec(description.sdp);
+    return ufrag && pwd ? [ufrag[1] + ':' + pwd[1]] : [];
+  }
+  function finishNegotiation(peer) {
+    const local = iceCredentials(peer.currentLocalDescription);
+    if (local.length && local.every(value => !peer.replaceIce.has(value))) peer.replaceIce.clear();
+    peer.negotiationNeeded = false;
+  }
+  function generateOffer(peer, restart) {
+    return peer.native ? N.rtcOffer(peer.native,restart || peer.replaceIce.size !== 0) : peer.emptySdp;
+  }
   function updateNegotiationNeeded(pc) {
     const p = peers.get(pc);
     if (p.negotiationQueued || p.signalingState !== 'stable') return;
@@ -593,7 +610,7 @@
       p.negotiationQueued = false;
       if (p.signalingState !== 'stable' || p.pendingOperations) return;
       const hasData = desc => desc && /^m=application [1-9]\d* [^ ]*SCTP\b/im.test(desc.sdp);
-      const needed = p.byHandle.size > 0 &&
+      const needed = p.replaceIce.size > 0 || p.byHandle.size > 0 &&
         !(hasData(p.currentLocalDescription) && hasData(p.currentRemoteDescription));
       const notify = needed && !p.negotiationNeeded;
       p.negotiationNeeded = needed;
@@ -606,7 +623,7 @@
     ++p.pendingOperations;
     const result = p.operations.then(()=>{state(pc);return action(p);});
     p.operations = result.catch(()=>{}).then(()=>{
-      if (--p.pendingOperations === 0 && p.byHandle.size) updateNegotiationNeeded(pc);
+      if (--p.pendingOperations === 0 && (p.byHandle.size || p.replaceIce.size)) updateNegotiationNeeded(pc);
     });
     return result;
   }
@@ -619,7 +636,7 @@
         emptySdp:'v=0\r\no=- '+((BigInt(id[0])<<31n)|BigInt(id[1]>>>1))+' 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n',
         signalingState:'stable',iceConnectionState:'new',connectionState:'new',iceGatheringState:'new',
         pendingLocalDescription:null,pendingRemoteDescription:null,currentLocalDescription:null,currentRemoteDescription:null,
-        gatheringStarted:false,pendingOperations:0,negotiationNeeded:false,negotiationQueued:false,answer:null,lastOffer:null});
+        gatheringStarted:false,replaceIce:new Set(),pendingOperations:0,negotiationNeeded:false,negotiationQueued:false,answer:null,lastOffer:null});
     }
     static async generateCertificate(algorithm) {
       if (!arguments.length) throw new TypeError('A key generation algorithm is required');
@@ -677,9 +694,17 @@
       updateNegotiationNeeded(this);
       return ch;
     }
-    createOffer() {
+    restartIce() {
+      const p = peers.get(this);
+      if (!p) throw new TypeError('Invalid receiver');
+      if (p.signalingState === 'closed') return;
+      p.replaceIce = new Set([...iceCredentials(p.currentLocalDescription), ...iceCredentials(p.pendingLocalDescription)]);
+      if (p.replaceIce.size) updateNegotiationNeeded(this);
+    }
+    createOffer(options = {}) {
+      const restart = !!dictionary(options).iceRestart;
       return enqueue(this,p=>{
-        p.lastOffer=p.native ? N.rtcOffer(p.native) : p.emptySdp;
+        p.lastOffer=generateOffer(p,restart);
         return {type:'offer',sdp:p.lastOffer};
       });
     }
@@ -694,7 +719,7 @@
       return enqueue(this,p=>{
         const t=type===undefined ? (p.pendingRemoteDescription?'answer':'offer') : enumeration(type,['offer','answer','pranswer','rollback']);
         if(t==='offer' && ['stable','have-local-offer'].includes(p.signalingState)) {
-          const generated=(sdp && p.lastOffer) || (p.native ? N.rtcOffer(p.native) : p.emptySdp);
+          const generated=(sdp && p.lastOffer) || generateOffer(p,false);
           if(sdp && sdp!==generated) throw failure('InvalidModificationError','Local SDP must match the generated offer');
           p.lastOffer=generated;
           p.pendingLocalDescription=new RTCSessionDescription({type:t,sdp:generated});
@@ -709,7 +734,7 @@
           p.pendingLocalDescription=p.pendingRemoteDescription=null;
           p.gatheringStarted=true;
           applyTransportDescription(p,p.currentLocalDescription,true);
-          p.negotiationNeeded=false;
+          finishNegotiation(p);
           change(this,'signalingState','stable','signalingstatechange');
           gather(this,p.currentLocalDescription); pump(this);
         } else throw failure('InvalidStateError','Description is invalid in the current signaling state');
@@ -730,7 +755,7 @@
           p.currentLocalDescription=p.pendingLocalDescription; p.currentRemoteDescription=desc;
           applyTransportDescription(p,desc,false);
           p.pendingLocalDescription=p.pendingRemoteDescription=null;
-          p.negotiationNeeded=false;
+          finishNegotiation(p);
           change(this,'signalingState','stable','signalingstatechange'); pump(this);
         } else throw failure('InvalidStateError','Description is invalid in the current signaling state');
       });

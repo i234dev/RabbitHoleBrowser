@@ -44,6 +44,7 @@ pub struct Peer {
     queued: Vec<(u32, ChannelConfig)>,
     next_handle: u32,
     pending: Option<SdpPendingOffer>,
+    pending_restart: bool,
     offer: Option<String>,
     application: bool,
     selected_pair: Option<(SocketAddr, SocketAddr)>,
@@ -107,6 +108,7 @@ impl Peer {
             queued: Vec::new(),
             next_handle: 0,
             pending: None,
+            pending_restart: false,
             offer: None,
             application: false,
             selected_pair: None,
@@ -133,8 +135,24 @@ impl Peer {
     }
 
     pub fn create_offer(&mut self) -> io::Result<String> {
-        if !self.queued.is_empty() && self.pending.is_none() {
+        self.create_offer_with_ice_restart(false)
+    }
+
+    pub fn create_offer_with_ice_restart(&mut self, restart: bool) -> io::Result<String> {
+        let replace_offer = restart && self.pending.is_some() && !self.pending_restart;
+        if replace_offer {
+            // The new pending offer supersedes the old one. Re-create only
+            // its provisional channels, preserving established SCTP streams.
+            for (handle, _) in &self.queued {
+                if let Some(id) = self.channels.remove(handle) {
+                    self.rtc.direct_api().close_data_channel(id);
+                }
+            }
+            self.pending = None;
+        }
+        if (restart || !self.queued.is_empty()) && self.pending.is_none() {
             let mut changes = self.rtc.sdp_api();
+            if restart { changes.ice_restart(true); }
             for (handle, config) in &self.queued {
                 let id = changes.add_channel_with_config(config.clone());
                 self.channels.insert(*handle, id);
@@ -142,6 +160,7 @@ impl Peer {
             if let Some((offer, pending)) = changes.apply() {
                 self.offer = Some(offer.to_sdp_string());
                 self.pending = Some(pending);
+                self.pending_restart = restart;
             }
         }
         self.offer
@@ -377,6 +396,49 @@ mod tests {
         caller.accept_answer(&answer).unwrap();
         let multi = format!("{offer}m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:audio\r\n");
         assert!(matches!(single_transport_sdp(&multi), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn ice_restart_rotates_both_credentials_and_preserves_the_open_stream() {
+        let interfaces = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        let mut a = Peer::bind(&interfaces).unwrap();
+        let mut b = Peer::bind(&interfaces).unwrap();
+        let stream = a.add_channel(ChannelConfig::default()).unwrap();
+        let offer = a.create_offer().unwrap();
+        let answer = b.answer_offer(&offer).unwrap();
+        a.accept_answer(&answer).unwrap();
+        let until = Instant::now() + Duration::from_secs(8);
+        let mut restarted = false;
+        loop {
+            assert!(Instant::now() < until, "SCTP traffic timed out");
+            for event in a.poll().unwrap() {
+                if let PeerEvent::Open { handle, .. } = event {
+                    assert_eq!(handle, stream);
+                    assert!(a.send(stream, false, b"before").unwrap());
+                }
+            }
+            for event in b.poll().unwrap() {
+                let PeerEvent::Message { data, .. } = event else { continue };
+                if restarted {
+                    assert_eq!(data, b"after");
+                    return;
+                }
+                assert_eq!(data, b"before");
+                let next_offer = a.create_offer_with_ice_restart(true).unwrap();
+                let next_answer = b.answer_offer(&next_offer).unwrap();
+                for (old, new) in [(&offer, &next_offer), (&answer, &next_answer)] {
+                    for field in ["a=ice-ufrag:", "a=ice-pwd:"] {
+                        let old = old.lines().find(|line| line.starts_with(field)).unwrap();
+                        let new = new.lines().find(|line| line.starts_with(field)).unwrap();
+                        assert_ne!(old, new);
+                    }
+                }
+                a.accept_answer(&next_answer).unwrap();
+                assert!(a.send(stream, false, b"after").unwrap());
+                restarted = true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]
