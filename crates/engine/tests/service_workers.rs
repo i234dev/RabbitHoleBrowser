@@ -576,5 +576,6 @@ fn form_submission_navigates_the_named_child_with_the_encoded_request() {
     let mut page = e.load(&format!("{}/form", server.origin), Viewport { width: 640.0, height: 480.0 }).unwrap();
     e.eval_in_page(&mut page, "document.forms[0].submit()");
     wait(&e, &mut page, "document.querySelector('iframe').contentWindow.location.href.endsWith('/receive?q=%E9')");
+    assert_eq!(e.eval_in_page(&mut page, "document.querySelector('iframe').contentWindow.location.search"), "'?q=%E9'");
     assert!(page.url.to_string().ends_with("/form"));
 }

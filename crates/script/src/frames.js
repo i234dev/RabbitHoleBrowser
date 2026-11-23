@@ -139,12 +139,24 @@
     let p = proxies.get(id);
     if (p) return p;
     const location = {
-      get href() { return info(id, 'href', 0); },
+      get href() {
+        if (!sameOrigin(id)) throw new DOMException('Cannot read a cross-origin Location', 'SecurityError');
+        return info(id, 'href', 0);
+      },
       set href(v) { info(id, 'navigate', String(v)); },
       assign(v) { info(id, 'navigate', String(v)); },
       replace(v) { info(id, 'navigate', String(v)); },
-      toString() { return info(id, 'href', 0); },
+      toString() { return this.href; },
     };
+    for (const key of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin']) {
+      const descriptor = { enumerable: true, get() { return new URL(location.href)[key]; } };
+      if (key !== 'origin') descriptor.set = function (value) {
+        const url = new URL(location.href);
+        url[key] = value;
+        location.href = url.href;
+      };
+      Object.defineProperty(location, key, descriptor);
+    }
     const target = {
       postMessage(message, targetOrigin, transfer) {
         const list = transfer || (targetOrigin && typeof targetOrigin === 'object' ? targetOrigin.transfer : null);
