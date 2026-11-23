@@ -599,3 +599,26 @@ fn keyboard_edits_the_selection_only_after_uncanceled_beforeinput() {
     e.key_input(&mut page,"0","Digit0",true,Modifiers::default());
     assert_eq!(eval(&e,&mut page,"ed.innerHTML+'|'+events.join('|')"),"x0z|beforeinput insertText|beforeinput insertText|input true");
 }
+
+#[test]
+fn keyboard_target_ranges_snapshot_the_edit_and_clear_after_dispatch() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section contenteditable>xyz</section>");
+    eval(&e,&mut page,r#"
+        var ed = document.querySelector('section'), node=ed.firstChild, seen=[], saved;
+        ed.focus();
+        getSelection().collapse(node,2);
+        ed.onbeforeinput = e => {
+            saved = e;
+            const r = e.getTargetRanges()[0];
+            seen.push(r instanceof StaticRange, r.startContainer === node, r.startOffset, r.endOffset);
+            getSelection().collapse(node,3);
+            seen.push(e.getTargetRanges()[0].endOffset);
+        };
+    "#);
+    e.key_input(&mut page,"Backspace","Backspace",true,Modifiers::default());
+    assert_eq!(eval(&e,&mut page,"[ed.textContent,...seen,saved.getTargetRanges().length].join('|')"), "xy|true|true|1|2|2|0");
+    eval(&e,&mut page,"getSelection().removeAllRanges();seen.length=0");
+    e.key_input(&mut page,"a","KeyA",true,Modifiers::default());
+    assert_eq!(eval(&e,&mut page,"[ed.textContent,seen.length].join('|')"), "xy|0");
+}

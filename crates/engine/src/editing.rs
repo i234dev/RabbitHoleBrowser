@@ -1,7 +1,7 @@
 //! Keyboard default actions shared by the GUI, frame routing and automation.
 use crate::scripting::{input_event_init, EngineEnv, ScriptOutcome};
 use crate::{Engine, Modifiers, Page};
-use rabbithole_dom::BoundaryPoint;
+use rabbithole_script::EventDetail;
 
 impl Engine {
     /// Called after keydown. A handled key consumes the GUI default even
@@ -23,16 +23,25 @@ impl Engine {
             k if !shortcut && k.chars().count() == 1 && !k.chars().any(char::is_control) => ("inserttext", "insertText", Some(k)),
             _ => return None,
         };
-        if page.doc.selection().is_none() {
-            let point = BoundaryPoint { node: focused, offset: 0 };
-            page.doc.set_selection(point, point);
-        }
-        let selection = page.doc.selection()?;
+        let Some(selection) = page.doc.selection() else { return Some(ScriptOutcome::default()); };
         if [selection.start, selection.end].iter().any(|p| page.doc.editing_host(p.node) != Some(target)) {
             return Some(ScriptOutcome::default());
         }
         self.ensure_script_host(page);
-        let mut out = self.dispatch_event(page, target, "beforeinput", input_event_init(input_type, text, true));
+        let mut init = input_event_init(input_type, text, true);
+        if let Some(EventDetail::Input { target_range, .. }) = &mut init.detail {
+            let (mut start, mut end) = (selection.start, selection.end);
+            if start == end && matches!(command, "delete" | "forwarddelete") {
+                let forward = command == "forwarddelete";
+                let next = page.moved_position(start, forward, false);
+                let cell = |n| page.doc.ancestor_or_self(n, |p| matches!(page.doc.tag(p), Some("td" | "th")));
+                if page.doc.editing_host(next.node) == Some(target) && cell(next.node) == cell(start.node) {
+                    if forward { end = next; } else { start = next; }
+                }
+            }
+            *target_range = Some((start, end));
+        }
+        let mut out = self.dispatch_event(page, target, "beforeinput", init);
         if out.default_prevented || out.navigation.is_some() || page.state.focused != Some(focused) || page.doc.editing_host(focused) != Some(target) {
             return Some(out);
         }

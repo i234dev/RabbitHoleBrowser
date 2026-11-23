@@ -363,6 +363,36 @@
   }
   tag(StaticRange, 'StaticRange');
 
+  // A beforeinput event captures its target before any listener can move
+  // the selection. Keep the boundary nodes private as it crosses shadows.
+  const eventRanges = new WeakMap();
+  const nodeRoot = g.Node.prototype.getRootNode;
+  const currentTarget = Object.getOwnPropertyDescriptor(g.Event.prototype, 'currentTarget').get;
+  N.setFactory('inputRanges', function (first, startOffset, endContainer, endOffset) {
+    if (!arguments.length) { eventRanges.delete(this); return false; }
+    let ranges;
+    if (arguments.length === 4) {
+      ranges = [new StaticRange({ startContainer:first, startOffset, endContainer, endOffset })];
+    } else {
+      if (first == null || typeof first[Symbol.iterator] !== 'function') throw new TypeError('Expected a sequence of StaticRange objects');
+      ranges = Array.from(first, r => {
+        if (!(r instanceof StaticRange) || !r[S]) throw new TypeError('Expected a StaticRange');
+        return r;
+      });
+    }
+    if (ranges.length) eventRanges.set(this, ranges);
+    return !!ranges.length;
+  });
+  method(g.InputEvent, 'getTargetRanges', function getTargetRanges() {
+    const receiver = currentTarget.call(this);
+    const ranges = eventRanges.get(this);
+    if (!ranges) return [];
+    if (!receiver) return ranges.slice();
+    const root = receiver === g ? document : receiver instanceof g.Node ? nodeRoot.call(receiver) : null;
+    return ranges.filter(r => nodeRoot.call(r[S].sc) === root && nodeRoot.call(r[S].ec) === root);
+  });
+
+
   // A live range's boundary points are native live points: tree and text
   // mutations update them (DOM §5.5).
   class RangeState {

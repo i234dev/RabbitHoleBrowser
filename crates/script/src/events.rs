@@ -44,6 +44,7 @@ pub struct EventData {
     pub initialized: bool,
     /// DOM "in passive listener flag": preventDefault() is ignored.
     pub in_passive: bool,
+    has_input_ranges: bool,
 }
 
 fn event_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a mut EventData> {
@@ -77,6 +78,7 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             path: Vec::new(),
             initialized: true,
             in_passive: false,
+            has_input_ranges: false,
         }),
     );
     realm.set_class_name(id, class);
@@ -156,11 +158,17 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             }
             realm.define_method(id, "getModifierState", 1, key_get_modifier_state);
         }
-        Some(EventDetail::Input { data, input_type, is_composing }) => {
+        Some(EventDetail::Input { data, input_type, is_composing, target_range }) => {
             realm.define_property(id, "data", data.as_deref().map(Value::str).unwrap_or(Value::Null), ACC);
             realm.define_property(id, "inputType", Value::str(input_type), ACC);
             realm.define_property(id, "isComposing", Value::Bool(*is_composing), ACC);
             realm.define_property(id, "dataTransfer", Value::Null, ACC);
+            if let Some((a, b)) = target_range {
+                let _keep = realm.root_object(id);
+                let start = wrap_main(realm, a.node);
+                let end = wrap_main(realm, b.node);
+                let _ = input_ranges(realm, id, &[start, Value::Number(a.offset as f64), end, Value::Number(b.offset as f64)]);
+            }
         }
         Some(EventDetail::Animation { name, elapsed, pseudo, transition }) => {
             realm.define_property(id, if *transition { "propertyName" } else { "animationName" }, Value::str(name), ACC);
@@ -379,10 +387,24 @@ fn keyboard_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
     Ok(Value::Object(id))
 }
 
+/// StaticRange objects and their node wrappers live in the JS realm.
+fn input_ranges(realm: &mut Realm, event: ObjectId, args: &[Value]) -> JsResult<()> {
+    let factory = state().borrow().factories.get("inputRanges").cloned();
+    if let Some(factory) = factory {
+        let result = realm.call(factory, Value::Object(event), args)?;
+        let nonempty = realm.to_boolean(&result);
+        realm.host_data_mut::<EventData>(event).unwrap().has_input_ranges = nonempty;
+    }
+    Ok(())
+}
+
 fn input_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = event_ctor_generic(realm, "InputEvent", args)?;
+    let _keep = realm.root_object(id);
     let dict = arg(args, 1);
     copy_dict_props(realm, id, &dict, &[("data", Value::Null), ("inputType", Value::str("")), ("isComposing", Value::Bool(false)), ("dataTransfer", Value::Null)])?;
+    let ranges = dict_value(realm, &dict, "targetRanges")?;
+    if !ranges.is_undefined() { input_ranges(realm, id, &[ranges])?; }
     Ok(Value::Object(id))
 }
 
@@ -1218,6 +1240,7 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
     }
     d.path.clear();
     let default_prevented = d.default_prevented;
+    if d.has_input_ranges { let _ = input_ranges(realm, eid, &[]); }
     if related.is_some() || matches!(key, TargetKey::Node(_)) {
         clear_targets(realm, eid, &path, related);
     }

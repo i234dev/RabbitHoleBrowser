@@ -1640,6 +1640,7 @@ impl Engine {
         if page.state.focused == node {
             return false;
         }
+        page.doc.focus_editing_host(node);
         page.state.focused = node;
         page.state.focus_visible = node.map(|n| page.focus_should_be_visible(n)).unwrap_or(false);
         if page.has_dynamic_rules {

@@ -89,6 +89,15 @@ impl Document {
         host
     }
 
+    /// Focusing an editing host establishes its caret once. An explicit
+    /// removeAllRanges() afterwards leaves the editor without a caret.
+    pub fn focus_editing_host(&mut self, node: Option<NodeId>) {
+        let Some(host) = node.filter(|&n| self.editing_host(n) == Some(n)) else { return };
+        if self.selection().is_some_and(|s| self.editing_host(s.start.node) == Some(host) && self.editing_host(s.end.node) == Some(host)) { return; }
+        let point = BoundaryPoint { node: host, offset: 0 };
+        self.set_selection(point, point);
+    }
+
     /// The selection's range, if the selection is not empty.
     pub fn selection(&self) -> Option<SelectionRange> {
         let s = self.selection?;

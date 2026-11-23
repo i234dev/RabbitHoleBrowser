@@ -717,6 +717,7 @@ impl HostEnv for EngineEnv<'_> {
         self.page.frames.children.iter_mut().find(|c| c.node == node).and_then(|c| c.page.as_mut()).map(|p| std::mem::take(&mut p.script.frame_initial_load_pending)).unwrap_or(false)
     }
     fn focus_node(&mut self, node: Option<NodeId>) {
+        self.page.doc.focus_editing_host(node);
         self.page.state.focused = node;
         self.page.state.focus_visible = node.map(|n| self.page.focus_should_be_visible(n)).unwrap_or(false);
     }
@@ -1403,7 +1404,7 @@ pub fn input_init(data: Option<&str>) -> EventInit {
 /// Build a text-editing event. `beforeinput` is cancelable; the matching
 /// `input` describes the same operation after its default mutation.
 pub fn input_event_init(input_type: &str, data: Option<&str>, cancelable: bool) -> EventInit {
-    EventInit { bubbles: true, cancelable, detail: Some(EventDetail::Input { data: data.map(str::to_string), input_type: input_type.to_string(), is_composing: false }) }
+    EventInit { bubbles: true, cancelable, detail: Some(EventDetail::Input { data: data.map(str::to_string), input_type: input_type.to_string(), is_composing: false, target_range: None }) }
 }
 
 /// Plain bubbling event init (change, submit, ...).
