@@ -1069,3 +1069,17 @@ fn rich_list_commands_group_paragraphs_and_split_only_selected_items() {
     })()"#);
     assert_eq!(result,"<ol><li>one</li><li>two</li></ol><p>three</p>|backward|true|true|<ol><li>one</li></ol><ul><li>two</li></ul><p>three</p>|<ol><li>one</li></ol><div>two</div><p>three</p>|true|1");
 }
+
+#[test]
+fn physical_cssom_geometry_survives_nested_orthogonal_writing_modes() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, r#"<style>
+      #v { writing-mode:vertical-rl; position:relative; width:164px; height:88px; padding:6px 18px; border:3px solid }
+      #i { writing-mode:horizontal-tb; position:absolute; left:10%; top:25%; width:26px; height:14px }
+      </style><div id=v><div id=i>x</div></div>"#);
+    let result = eval(&e, &mut page, r#"(() => {
+      const rect=v.getBoundingClientRect(), inner=i.getBoundingClientRect(), css=getComputedStyle(i);
+      return [v.clientWidth,v.clientHeight,rect.width,rect.height,inner.width,inner.height,css.left,css.top].join('|');
+    })()"#);
+    assert_eq!(result,"200|100|206|106|26|14|20px|25px");
+}

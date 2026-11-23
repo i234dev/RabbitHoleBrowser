@@ -501,6 +501,15 @@ impl LayoutBox {
         Rect::new(self.rect.x - l, self.rect.y - t, self.rect.w + l + r, self.rect.h + t + b)
     }
 
+    /// Compose the layout-only writing-mode mappings along a box path.
+    /// Author transforms are applied later for viewport-relative geometry.
+    fn child_coordinates(&self, parent: Option<Matrix>) -> Option<Matrix> {
+        match (parent, self.wm_transform) {
+            (Some(outer), Some(inner)) => Some(rabbithole_style::multiply_matrix(outer, inner)),
+            (outer, inner) => outer.or(inner),
+        }
+    }
+
     /// Padding box rectangle.
     pub fn padding_rect(&self) -> Rect {
         let b = &self.style.border_width;
@@ -1052,7 +1061,7 @@ impl LayoutTree {
                 guard += 1;
             }
         }
-        fn walk(b: &LayoutBox, container: Option<NodeId>, doc: &rabbithole_dom::Document, out: &mut std::collections::HashMap<NodeId, Rect>) {
+        fn walk(b: &LayoutBox, container: Option<NodeId>, coordinates: Option<Matrix>, doc: &rabbithole_dom::Document, out: &mut std::collections::HashMap<NodeId, Rect>) {
             let container = b.node.or(container);
             for line in &b.lines {
                 for f in &line.fragments {
@@ -1065,16 +1074,17 @@ impl LayoutTree {
                     };
                     if let Some(n) = n {
                         if Some(n) != container {
-                            add(out, doc, n, container, f.rect);
+                            add(out, doc, n, container, physical_rect(coordinates, f.rect));
                         }
                     }
                 }
             }
+            let coordinates = b.child_coordinates(coordinates);
             for c in &b.children {
-                walk(c, container, doc, out);
+                walk(c, container, coordinates, doc, out);
             }
         }
-        walk(&self.root, None, doc, &mut out);
+        walk(&self.root, None, None, doc, &mut out);
         out
     }
 
@@ -1097,7 +1107,7 @@ impl LayoutTree {
             }
             false
         }
-        fn walk(b: &LayoutBox, container: Option<NodeId>, doc: &rabbithole_dom::Document, node: NodeId, out: &mut Vec<Rect>) {
+        fn walk(b: &LayoutBox, container: Option<NodeId>, coordinates: Option<Matrix>, doc: &rabbithole_dom::Document, node: NodeId, out: &mut Vec<Rect>) {
             let container = b.node.or(container);
             for line in &b.lines {
                 let mut acc: Option<Rect> = None;
@@ -1114,14 +1124,15 @@ impl LayoutTree {
                         acc = Some(acc.map_or(f.rect, |a| a.union(&f.rect)));
                     }
                 }
-                out.extend(acc);
+                out.extend(acc.map(|r| physical_rect(coordinates, r)));
             }
+            let coordinates = b.child_coordinates(coordinates);
             for c in &b.children {
-                walk(c, container, doc, node, out);
+                walk(c, container, coordinates, doc, node, out);
             }
         }
         let mut out = Vec::new();
-        walk(&self.root, None, doc, node, &mut out);
+        walk(&self.root, None, None, doc, node, &mut out);
         out
     }
 
@@ -1134,6 +1145,18 @@ impl LayoutTree {
             b = &b.children[i];
         }
         Some(b)
+    }
+
+    /// A generated box and its physical border rectangle in document coordinates.
+    pub fn box_in_document(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<(&LayoutBox, Rect)> {
+        let path = guided_path(&self.root, doc, node)?;
+        let mut b = &self.root;
+        let mut coordinates = None;
+        for index in path {
+            coordinates = b.child_coordinates(coordinates);
+            b = &b.children[index];
+        }
+        Some((b, physical_rect(coordinates, b.rect)))
     }
 
     /// Mutable [`LayoutTree::box_of`].
@@ -1351,6 +1374,10 @@ impl Hit {
 pub fn layout_document(ctx: &LayoutContext) -> LayoutTree {
     let mut layouter = crate::block::Layouter::new(ctx);
     layouter.layout_document()
+}
+
+fn physical_rect(coordinates: Option<Matrix>, rect: Rect) -> Rect {
+    coordinates.map_or(rect, |matrix| rabbithole_gfx::path::transform_rect_bounds(&matrix, rect))
 }
 
 /// Child-index path from `root` to the box of `node`, descending only into

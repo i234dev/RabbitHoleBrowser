@@ -2450,8 +2450,8 @@ impl Page {
             return None;
         }
         self.incr.cached_rect(node, || {
-            if let Some(b) = self.layout.box_of(&self.doc, node) {
-                return Some(b.rect);
+            if let Some((_, rect)) = self.layout.box_in_document(&self.doc, node) {
+                return Some(rect);
             }
             {
                 // Inline elements: the union of their line fragments.
@@ -2461,10 +2461,10 @@ impl Page {
                 // a block has no fragments of its own at all.
                 if self.styles.get(node).is_some_and(|s| s.display == rabbithole_style::Display::Inline) {
                     for c in self.doc.flat_child_elements(node) {
-                        if let Some(b) = self.layout.box_of(&self.doc, c).filter(|b| b.flow.is_in_flow() && !b.is_inline_level()) {
+                        if let Some((_, child_rect)) = self.layout.box_in_document(&self.doc, c).filter(|(b, _)| b.flow.is_in_flow() && !b.is_inline_level()) {
                             rect = Some(match rect {
-                                Some(r) => r.union(&b.rect),
-                                None => b.rect,
+                                Some(r) => r.union(&child_rect),
+                                None => child_rect,
                             });
                         }
                     }
@@ -2510,8 +2510,8 @@ impl Page {
                     if !self.doc.element(n).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Svg) {
                         break;
                     }
-                    if let Some(b) = self.layout.box_of(&self.doc, n) {
-                        return Some(b.rect);
+                    if let Some((_, rect)) = self.layout.box_in_document(&self.doc, n) {
+                        return Some(rect);
                     }
                     cur = self.doc.flat_parent(n);
                 }
@@ -2533,8 +2533,8 @@ impl Page {
         {
             let mut rects = self.layout.inline_client_rects(&self.doc, node);
             for c in self.doc.flat_child_elements(node) {
-                if let Some(b) = self.layout.box_of(&self.doc, c).filter(|b| b.flow.is_in_flow() && !b.is_inline_level()) {
-                    rects.push(b.rect);
+                if let Some((_, child_rect)) = self.layout.box_in_document(&self.doc, c).filter(|(b, _)| b.flow.is_in_flow() && !b.is_inline_level()) {
+                    rects.push(child_rect);
                 }
             }
             if !rects.is_empty() {
