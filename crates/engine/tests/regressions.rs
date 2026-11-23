@@ -1055,6 +1055,19 @@ fn link_editing_preserves_existing_attributes_and_customizes_typed_text() {
 }
 
 #[test]
+fn typing_a_new_link_inside_a_link_keeps_the_surrounding_destination() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div id=ed contenteditable><a href='/old'><em>ab</em></a></div>");
+    let result = eval(&e, &mut page, r#"(() => {
+        getSelection().collapse(ed.querySelector('em').firstChild, 1);
+        document.execCommand('createLink', false, '/new');
+        document.execCommand('insertText', false, 'X');
+        return Array.from(ed.querySelectorAll('a'), a => a.getAttribute('href') + '=' + a.textContent).join(',');
+    })()"#);
+    assert_eq!(result, "/old=a,/new=X,/old=b");
+}
+
+#[test]
 fn removing_rich_formatting_preserves_links_unselected_text_and_selection_direction() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<div contenteditable id=ed><b>abc</b><a href='#n'><i>de</i></a><span contenteditable=false>locked</span></div>");

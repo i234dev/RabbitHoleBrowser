@@ -303,9 +303,10 @@
     }
   }
 
-  function putLink(node, href) {
+  function putLink(node, href, host) {
     const parent = node.parentElement, current = parent?.closest('a');
-    if (current) {
+    if (current && current !== host && editingHost(current) === host) {
+      if (current.getAttribute('href') !== href) splitAncestors(node, current);
       current.setAttribute('href',href);
       return current;
     }
@@ -374,7 +375,7 @@
         if (u.from) u.node = u.node.splitText(u.from);
         u.to -= u.from; u.from = 0;
       }
-      putLink(u.node,href);
+      putLink(u.node,href,host);
     }
     if (units.length) {
       const point = (u,end) => u.node.nodeType === 3 ? [u.node,end?u.to:u.from] :
@@ -1073,7 +1074,7 @@
           const node = doc.createTextNode(lines[i]);
           sel.getRangeAt(0).insertNode(node);
           for (const [name, enabled] of toggles) {
-            if (name === 'createlink') { putLink(node,enabled); continue; }
+            if (name === 'createlink') { putLink(node,enabled,host); continue; }
             if (valueFormats.has(name)) { wrapValue(node, name, enabled, state.css); continue; }
             if (!enabled) clearFormat(node, host, name);
             if (activeFormat(node.parentElement, name) !== enabled) wrapFormat(node, name, enabled, state.css);
