@@ -216,6 +216,7 @@
       set location(v) { info(id, 'navigate', String(v)); },
     };
     Object.defineProperty(target, Symbol.toStringTag, { value: 'Window' });
+    const local = new Set();
     p = new Proxy(target, {
       get(t, key) {
         if (typeof key === 'string' && key !== '' && String(Number(key) >>> 0) === key) {
@@ -263,7 +264,15 @@
         if (key === 'location') { info(id, 'navigate', String(v)); return true; }
         if (!sameOrigin(id)) throw new DOMException('Cannot write a cross-origin Window property', 'SecurityError');
         if (typeof key !== 'string') return false;
-        return !!info(id, 'set', key, serialize(v));
+        // Primitives cross into the frame's realm, where its setters run.
+        // Objects, functions and nodes cannot cross without losing their
+        // identity (or at all): they stay on this realm's window object.
+        if (v === null || (typeof v !== 'object' && typeof v !== 'function')) {
+          if (local.delete(key)) delete t[key];
+          return !!info(id, 'set', key, serialize(v));
+        }
+        if (!(key in t) || local.has(key)) { local.add(key); t[key] = v; return true; }
+        return Reflect.set(t, key, v);
       },
     });
     ids.set(p, id);

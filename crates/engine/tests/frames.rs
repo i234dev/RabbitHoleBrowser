@@ -591,6 +591,20 @@ fn same_origin_window_assignment_runs_property_setters_in_the_child() {
 }
 
 #[test]
+fn same_origin_window_keeps_assigned_objects_and_nodes_with_their_identity() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<iframe srcdoc="<p id=text>child</p>"></iframe>"#);
+    let output = eval(&e, &mut page, r#"(() => {
+        const w = window.frames[0], obj = {a: 1}, node = w.document.getElementById('text'), own = document.createElement('div');
+        w.obj = obj; w.node = node; w.own = own; w.fn = () => 7;
+        const kept = [w.obj === obj, w.node === node, w.own === own, w.fn()];
+        w.obj = 'text';
+        return kept.concat([w.obj, w.read === undefined]).join(',');
+    })()"#);
+    assert_eq!(output, "true,true,true,7,text,true");
+}
+
+#[test]
 fn a_same_origin_frames_range_keeps_its_identity_and_tracks_both_realms_edits() {
     let mut e = engine();
     let inner = "<p id=text>alphabet</p><script>var live=document.createRange();live.setStart(text.firstChild,1);live.setEnd(text.firstChild,5);function contents(){return live.toString()} function move(){live.setStart(text.firstChild,2)}</script>";
