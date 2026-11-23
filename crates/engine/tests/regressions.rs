@@ -1036,6 +1036,24 @@ fn stylesheet_namespaces_limit_type_and_attribute_selectors_in_nested_rules() {
 }
 
 #[test]
+fn script_formatting_switches_baseline_semantics_on_only_the_selected_text() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<main id=ed contenteditable><sub>abc</sub><span style='vertical-align:super'>tail</span></main>");
+    let value=eval(&e,&mut page,r#"(() => {
+        const sel=getSelection(), text=ed.firstChild.firstChild;
+        sel.setBaseAndExtent(text,1,text,2);
+        document.execCommand('styleWithCSS',false,'true');
+        document.execCommand('superscript');
+        const changed=ed.querySelector('sup');
+        const state=document.queryCommandState('superscript');
+        sel.selectAllChildren(ed.lastChild);
+        return [ed.textContent,changed?.textContent,[...ed.querySelectorAll('sub')].map(e=>e.textContent).join(','),
+          state,document.queryCommandState('superscript'),ed.lastChild.style.verticalAlign].join('|');
+    })()"#);
+    assert_eq!(value,"abctail|b|a,c|true|false|super");
+}
+
+#[test]
 fn link_editing_preserves_existing_attributes_and_customizes_typed_text() {
     let mut e = engine(true);
     let mut page=load(&mut e,"<main contenteditable id=ed><p><a href='/old' title='title'>old</a> plain</p><p>next</p></main>");

@@ -88,13 +88,24 @@
     return mixed ? runs.some(r => formatValue(r.node.parentElement, cmd) !== first) : first;
   }
 
+  const isScriptFormat = cmd => cmd === 'subscript' || cmd === 'superscript';
+  function scriptFormat(el) {
+    let sub=false, sup=false;
+    while (el && !isBlock(el)) {
+      sub ||= el.localName === 'sub';
+      sup ||= el.localName === 'sup';
+      el = el.parentElement;
+    }
+    return sub && sup ? 'mixed' : sub ? 'subscript' : sup ? 'superscript' : '';
+  }
   function activeFormat(el, cmd) {
     if (!el) return false;
+    if (isScriptFormat(cmd)) return scriptFormat(el) === cmd;
     const [, prop, on] = formats.get(cmd);
     const style = getComputedStyle(el).getPropertyValue(prop);
     if (cmd === 'bold') return style === 'bold' || Number(style) >= 600;
     if (style.split(' ').includes(on)) return true;
-    if (['subscript','superscript','underline','strikethrough'].includes(cmd)) {
+    if (['underline','strikethrough'].includes(cmd)) {
       for (let p = el.parentElement; p; p = p.parentElement) {
         if (getComputedStyle(p).getPropertyValue(prop).split(' ').includes(on)) return true;
       }
@@ -139,6 +150,7 @@
       return pending?.has(cmd) ? pending.get(cmd) : activeFormat(selectionElement(t.range), cmd);
     }
     const runs = selectedText(t);
+    if (mixed && isScriptFormat(cmd) && runs.some(r => scriptFormat(r.node.parentElement) === 'mixed')) return true;
     const values = runs.map(r => activeFormat(r.node.parentElement, cmd));
     if (!values.length) return !mixed && activeFormat(selectionElement(t.range), cmd);
     return mixed ? values.includes(true) && values.includes(false) : values.every(Boolean);
@@ -168,10 +180,11 @@
     const [tag, prop, on] = valued ? [null, valued[0], null] : formats.get(cmd);
     for (let el = node.parentElement; el && el !== host;) {
       const parent = el.parentElement;
-      const semantic = el.localName === tag || (cmd === 'bold' && el.localName === 'strong') ||
+      const scripts = isScriptFormat(cmd);
+      const semantic = scripts && (el.localName === 'sup' || el.localName === 'sub') || el.localName === tag || (cmd === 'bold' && el.localName === 'strong') ||
         (cmd === 'italic' && el.localName === 'em') || (cmd === 'strikethrough' && el.localName === 'strike');
-      const inline = el.style.getPropertyValue(prop) ||
-        (prop === 'text-decoration-line' && el.style.getPropertyValue('text-decoration'));
+      const inline = !scripts && (el.style.getPropertyValue(prop) ||
+        (prop === 'text-decoration-line' && el.style.getPropertyValue('text-decoration')));
       const attr = valued?.[1];
       const legacy = attr && el.localName === 'font' && el.hasAttribute(attr);
       if (semantic || inline || legacy) {
@@ -269,6 +282,7 @@
   }
   function wrapFormat(node, cmd, enable, css) {
     const [tag, prop, on, off] = formats.get(cmd);
+    if (isScriptFormat(cmd)) css = false;
     const wrapper = node.ownerDocument.createElement(css || !enable ? 'span' : tag);
     if (css || !enable) wrapper.style.setProperty(prop, enable ? on : off);
     node.parentNode.insertBefore(wrapper, node);
@@ -280,6 +294,7 @@
     const { sel, range, host } = t;
     if (range.collapsed) {
       const toggles = typingStyle(state, range) || new Map();
+      if (isScriptFormat(cmd)) toggles.delete(cmd === 'subscript' ? 'superscript' : 'subscript');
       toggles.set(cmd, enable);
       state.typing = { node: range.startContainer, offset: range.startOffset, formats: toggles };
       return;
@@ -291,7 +306,7 @@
       if (r.from) r.node = r.node.splitText(r.from);
       r.to -= r.from;
       r.from = 0;
-      if (valued || !enable) clearFormat(r.node, host, cmd);
+      if (valued || !enable || isScriptFormat(cmd)) clearFormat(r.node, host, cmd);
       if (valued) wrapValue(r.node, cmd, value, state.css);
       else if (activeFormat(r.node.parentElement, cmd) !== enable) wrapFormat(r.node, cmd, enable, state.css);
     }
@@ -1076,7 +1091,7 @@
           for (const [name, enabled] of toggles) {
             if (name === 'createlink') { putLink(node,enabled,host); continue; }
             if (valueFormats.has(name)) { wrapValue(node, name, enabled, state.css); continue; }
-            if (!enabled) clearFormat(node, host, name);
+            if (!enabled || isScriptFormat(name)) clearFormat(node, host, name);
             if (activeFormat(node.parentElement, name) !== enabled) wrapFormat(node, name, enabled, state.css);
           }
           sel.collapse(node, node.length);
