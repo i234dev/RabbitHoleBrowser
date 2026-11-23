@@ -606,3 +606,29 @@ fn a_same_origin_frames_range_keeps_its_identity_and_tracks_both_realms_edits() 
     })()"#);
     assert_eq!(result,"true|true|true|lpha|lphab|3|7|phab|phab");
 }
+
+#[test]
+fn same_origin_frames_share_detached_documents_and_their_live_ranges() {
+    let mut e = engine();
+    let inner = r#"<script>
+        var detached = new DOMParser().parseFromString('<p>alphabet</p>', 'text/html');
+        var text = detached.body.firstChild.firstChild;
+        var live = detached.createRange();
+        live.setStart(text, 1);
+        live.setEnd(text, 5);
+        function contents() { return live.toString(); }
+    </script>"#;
+    let mut page = load(&mut e, &format!(r#"<iframe id="child" srcdoc="{}"></iframe>"#, escape_attr(inner)));
+    let result = eval(&e, &mut page, r#"(() => {
+        const local = document.implementation.createHTMLDocument('separate');
+        const w = child.contentWindow, doc = w.detached, r = w.live, text = w.text;
+        const identities = [doc !== local, text.ownerDocument === doc,
+                            r.startContainer === text, doc === w.detached];
+        text.insertData(0, 'x');
+        r.setEnd(text, 7);
+        const shared = w.contents();
+        child.remove();
+        return [...identities, shared, r.toString(), local.title].join('|');
+    })()"#);
+    assert_eq!(result, "true|true|true|true|lphab|lphab|separate");
+}

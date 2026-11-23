@@ -38,9 +38,21 @@ struct PointHandle {
 struct SharedPoint(Rc<RefCell<PointOwner>>);
 
 struct PointOwner {
+    auxiliary: Option<crate::AuxiliaryDocument>,
     frame: u64,
     id: u64,
     handle: PointHandle,
+}
+
+impl Drop for PointOwner {
+    fn drop(&mut self) {
+        if let Some(arena) = &self.auxiliary {
+            if let Ok(mut doc) = arena.0.try_borrow_mut() {
+                doc.remove_live_point(self.handle.slot);
+                self.handle.slot = RELEASED;
+            }
+        }
+    }
 }
 
 impl SharedPoint {
@@ -48,7 +60,8 @@ impl SharedPoint {
         let owner = self.0.borrow();
         let h = &owner.handle;
         let here = crate::env::with_env(|env| env.frame_id());
-        let doc = if owner.frame == here { h.doc } else {
+        let doc = if let Some(arena) = &owner.auxiliary { arena.local_id() }
+        else if owner.frame == here { h.doc } else {
             let target = if h.doc == 0 { owner.frame }
                 else if h.doc & FRAME_DOC != 0 { u64::from(h.doc & !FRAME_DOC) }
                 else { return None };
@@ -68,6 +81,7 @@ impl SharedPoint {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT.fetch_update(std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed,|n| n.checked_add(1)).ok()?;
         let shared = Self(Rc::new(RefCell::new(PointOwner {
+            auxiliary: crate::AuxiliaryDocument::lookup(handle.doc),
             frame: crate::env::with_env(|env| env.frame_id()), id,
             handle: PointHandle { doc: handle.doc, slot: handle.slot, freed: handle.freed.clone(),
                 identity: Some(with_doc(handle.doc, |d| d.weak_identity())) },
@@ -231,6 +245,7 @@ fn boundary_node_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
             old.slot = RELEASED;
         } else if let Some(shared) = realm.host_data::<SharedPoint>(o) {
             let mut owner = shared.0.borrow_mut();
+            owner.auxiliary = crate::AuxiliaryDocument::lookup(n.doc);
             owner.frame = crate::env::with_env(|env| env.frame_id());
             owner.handle.slot = RELEASED;
             owner.handle = PointHandle { doc: n.doc, slot: new_slot, freed: freed_slots(), identity: Some(with_doc(n.doc, |d| d.weak_identity())) };

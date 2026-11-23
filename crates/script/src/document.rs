@@ -723,7 +723,7 @@ pub(crate) fn new_aux_document_from(realm: &mut Realm, doc: Document) -> Value {
     let key = {
         let st = state();
         let mut st = st.borrow_mut();
-        st.extra_docs.push(doc);
+        st.extra_docs.push(doc.into());
         st.extra_docs.len() as u32
     };
     wrap(realm, NodeRef { doc: key, node: Document::ROOT })
@@ -828,13 +828,7 @@ pub(crate) fn create_xml_document(realm: &mut Realm, _this: Value, args: &[Value
         _ => "application/xml",
     }
     .to_string();
-    let key = {
-        let st = state();
-        let mut st = st.borrow_mut();
-        st.extra_docs.push(doc);
-        st.extra_docs.len() as u32
-    };
-    Ok(wrap(realm, NodeRef { doc: key, node: Document::ROOT }))
+    Ok(new_aux_document_from(realm, doc))
 }
 
 /// `__rhNative.validateQName(name)`: throws the DOMException of "validate"

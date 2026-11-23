@@ -17,6 +17,7 @@ mod misc;
 mod modules;
 mod live;
 pub use live::SharedRange;
+pub use host::AuxiliaryDocument;
 mod media;
 mod node;
 mod canvas2d;
@@ -277,6 +278,8 @@ pub enum FrameReply {
     Bool(bool),
     /// A node of the frame's document.
     Node(NodeId),
+    /// A node belonging to a detached document returned by a same-origin realm.
+    AuxiliaryNode(AuxiliaryDocument, NodeId),
     /// Shared live endpoints of a same-origin DOM Range.
     Range(SharedRange),
     /// A function (the caller wraps it to call it through `CallGlobal`).

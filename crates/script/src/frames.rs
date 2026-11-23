@@ -149,7 +149,9 @@ pub(crate) fn foreign(realm: &mut Realm, call: crate::FrameCall) -> crate::Frame
             rabbithole_js::V::Object(o) if realm.obj(o).is_array() => FrameReply::Function,
             rabbithole_js::V::Object(_) => match crate::host::node_of(realm, &v) {
                 Some(n) if n.doc == 0 => FrameReply::Node(n.node),
-                _ => crate::SharedRange::export(realm,v).map_or(FrameReply::Undefined,FrameReply::Range),
+                Some(n) => crate::AuxiliaryDocument::lookup(n.doc)
+                    .map_or(FrameReply::Undefined, |doc| FrameReply::AuxiliaryNode(doc,n.node)),
+                None => crate::SharedRange::export(realm,v).map_or(FrameReply::Undefined,FrameReply::Range),
             },
             _ => FrameReply::Undefined,
         },
@@ -164,6 +166,10 @@ fn reply_value(realm: &mut Realm, id: u64, r: Option<crate::FrameReply>) -> JsRe
         Some(FrameReply::Bool(b)) => Ok(Value::Bool(b)),
         Some(FrameReply::Node(node)) if id < crate::host::FRAME_DOC as u64 => Ok(crate::host::wrap(realm, crate::host::NodeRef { doc: crate::host::FRAME_DOC | id as u32, node })),
         Some(FrameReply::Node(_)) => Ok(Value::Null),
+        Some(FrameReply::AuxiliaryNode(doc,node)) => {
+            let local = crate::host::NodeRef { doc: doc.local_id(), node };
+            Ok(crate::host::wrap(realm,local))
+        }
         Some(FrameReply::Range(range)) => range.wrapper(realm),
         Some(FrameReply::Function) => Ok(Value::str("\u{0}function")),
         Some(FrameReply::Value(s)) => Ok(Value::str(&s)),

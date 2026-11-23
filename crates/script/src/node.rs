@@ -463,23 +463,6 @@ pub(crate) fn record_character_data(target: NodeRef, old: Option<String>) {
     }
 }
 
-/// Document access while the state is already borrowed (main doc via env).
-fn with_doc_in_state<R>(st: &HostState, doc: u32, f: impl FnOnce(&Document) -> R) -> R {
-    if doc == 0 {
-        with_env(|env| f(env.doc()))
-    } else if doc & crate::host::FRAME_DOC != 0 {
-        with_env(|env| match env.frame_document((doc & !crate::host::FRAME_DOC) as u64) {
-            Some(d) => f(d),
-            None => f(&Document::new()),
-        })
-    } else {
-        match st.extra_docs.get((doc - 1) as usize) {
-            Some(d) => f(d),
-            None => f(&Document::new()),
-        }
-    }
-}
-
 /// Insert `child` (or a fragment's children) into `parent` before `before`.
 pub(crate) fn insert_node(realm: &mut Realm, parent: NodeRef, child: NodeRef, before: Option<NodeId>) -> JsResult<()> {
     insert_node_checked(realm, parent, child, before, true)
