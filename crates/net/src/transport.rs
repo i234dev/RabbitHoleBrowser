@@ -21,23 +21,44 @@ pub enum Alpn {
     Http1,
 }
 
-fn tls_config(alpn: Alpn) -> Arc<ClientConfig> {
-    static CONFIGS: OnceLock<(Arc<ClientConfig>, Arc<ClientConfig>)> = OnceLock::new();
-    let (both, h1) = CONFIGS.get_or_init(|| {
-        let make = |protos: Vec<Vec<u8>>| {
-            let mut roots = rustls::RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
-            let mut cfg = ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .expect("TLS protocol versions")
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            cfg.alpn_protocols = protos;
-            Arc::new(cfg)
-        };
-        (make(vec![b"h2".to_vec(), b"http/1.1".to_vec()]), make(vec![b"http/1.1".to_vec()]))
-    });
+type TlsConfigs = (Arc<ClientConfig>, Arc<ClientConfig>);
+static LOOPBACK_TLS: OnceLock<TlsConfigs> = OnceLock::new();
+
+fn make_configs(roots: rustls::RootCertStore) -> TlsConfigs {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut h1 = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("TLS protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    h1.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let mut both = h1.clone();
+    both.alpn_protocols.insert(0, b"h2".to_vec());
+    (Arc::new(both), Arc::new(h1))
+}
+
+/// Install the certificate authority for a local test server. Its chain,
+/// validity interval and server name are verified by rustls as usual.
+pub fn install_loopback_ca(pem: &[u8]) -> io::Result<()> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    let cert = CertificateDer::from_pem_slice(pem).map_err(io::Error::other)?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).map_err(io::Error::other)?;
+    LOOPBACK_TLS.set(make_configs(roots)).map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "loopback authority already configured"))
+}
+
+fn local_tls_endpoint(host: &str, peer: SocketAddr) -> bool {
+    peer.ip().is_loopback() && crate::cookies::is_loopback_host(host)
+}
+
+fn tls_config(host: &str, peer: SocketAddr, alpn: Alpn) -> Arc<ClientConfig> {
+    static PUBLIC_TLS: OnceLock<TlsConfigs> = OnceLock::new();
+    let local = LOOPBACK_TLS.get().filter(|_| local_tls_endpoint(host, peer));
+    let (both, h1) = local.unwrap_or_else(|| PUBLIC_TLS.get_or_init(|| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        make_configs(roots)
+    }));
     match alpn {
         Alpn::H2OrHttp1 => both.clone(),
         Alpn::Http1 => h1.clone(),
@@ -311,7 +332,7 @@ pub fn connect(scheme: &str, host: &str, port: u16, alpn: Alpn, timeout: Duratio
     }
     let name_str = host.trim_start_matches('[').trim_end_matches(']').to_string();
     let name = ServerName::try_from(name_str).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-    let mut conn = ClientConnection::new(tls_config(alpn), name).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let mut conn = ClientConnection::new(tls_config(host, tcp.peer_addr()?, alpn), name).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     let mut tcp = tcp;
     while conn.is_handshaking() {
         conn.complete_io(&mut tcp).map_err(|e| io::Error::new(e.kind(), format!("TLS handshake with {host}: {e}")))?;
@@ -458,6 +479,17 @@ impl WriteHalf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_authorities_require_a_loopback_name_and_peer() {
+        let local = "[::1]:8443".parse().unwrap();
+        let remote = "192.0.2.3:8443".parse().unwrap();
+        assert!(local_tls_endpoint("one.two.localhost.", local));
+        assert!(local_tls_endpoint("127.0.0.1", local));
+        assert!(!local_tls_endpoint("one.localhost.example", local));
+        assert!(!local_tls_endpoint("localhost", remote));
+        assert!(install_loopback_ca(b"invalid PEM").is_err());
+    }
 
     #[test]
     fn b64() {

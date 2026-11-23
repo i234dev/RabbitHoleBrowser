@@ -98,6 +98,9 @@ pub struct HostState {
     /// Private property keys for URL <-> query-list GC edges. The keys do
     /// not root any instances; the owning objects hold the traced values.
     pub url_links: (rabbithole_js::SymbolId, rabbithole_js::SymbolId),
+    /// Private GC edges for files in form entries and the source of each iterator.
+    pub form_data_files: rabbithole_js::SymbolId,
+    pub pair_iterator_owner: rabbithole_js::SymbolId,
     pub listeners: HashMap<TargetKey, Vec<Listener>>,
     /// Count of listeners per (node, type) for fast existence checks.
     pub listener_counts: HashMap<(TargetKey, String), usize>,
@@ -112,7 +115,7 @@ pub struct HostState {
     pub loading: bool,
     pub current_script: Option<NodeRef>,
     pub focused: Option<NodeId>,
-    pub extra_docs: Vec<Document>,
+    pub extra_docs: Vec<AuxiliaryDocument>,
     pub window: ObjectId,
     pub document_obj: ObjectId,
     /// JS array object holding GC roots for listener callbacks / timers.
@@ -217,6 +220,38 @@ pub(crate) fn state() -> Rc<RefCell<HostState>> {
 /// child frame (frame id in the low bits), owned by the engine.
 pub(crate) const FRAME_DOC: u32 = 0x8000_0000;
 
+/// Detached documents have no browsing context. Same-origin realms that
+/// receive one of their nodes must share the arena, with a realm-local id.
+#[derive(Clone)]
+pub struct AuxiliaryDocument(pub(crate) Rc<RefCell<Document>>);
+
+impl From<Document> for AuxiliaryDocument {
+    fn from(doc: Document) -> Self { Self(Rc::new(RefCell::new(doc))) }
+}
+
+impl PartialEq for AuxiliaryDocument {
+    fn eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.0, &other.0) }
+}
+
+impl std::fmt::Debug for AuxiliaryDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("AuxiliaryDocument") }
+}
+
+impl AuxiliaryDocument {
+    pub(crate) fn lookup(doc: u32) -> Option<Self> {
+        if doc == 0 || doc & FRAME_DOC != 0 { return None; }
+        state().borrow().extra_docs.get((doc - 1) as usize).cloned()
+    }
+
+    pub(crate) fn local_id(&self) -> u32 {
+        let state = state();
+        let mut st = state.borrow_mut();
+        if let Some(index) = st.extra_docs.iter().position(|d| d == self) { return index as u32 + 1; }
+        st.extra_docs.push(self.clone());
+        st.extra_docs.len() as u32
+    }
+}
+
 pub(crate) fn with_doc<R>(doc: u32, f: impl FnOnce(&mut Document) -> R) -> R {
     if doc == 0 {
         with_env(|env| f(env.doc()))
@@ -227,15 +262,26 @@ pub(crate) fn with_doc<R>(doc: u32, f: impl FnOnce(&mut Document) -> R) -> R {
             None => f(&mut Document::new()),
         })
     } else {
-        let st = state();
-        let mut st = st.borrow_mut();
-        // A node can outlive or cross into a realm that doesn't own its
-        // document (e.g. a node of a DOMParser document passed between
-        // same-origin frames): treat it like a detached frame document
-        // instead of panicking and taking the whole tab down.
-        match st.extra_docs.get_mut((doc - 1) as usize) {
-            Some(d) => f(d),
+        match AuxiliaryDocument::lookup(doc) {
+            Some(d) => f(&mut d.0.borrow_mut()),
             None => f(&mut Document::new()),
+        }
+    }
+}
+
+/// Read nodes while an event or collection already borrows the host state.
+pub(crate) fn with_doc_in_state<R>(st: &HostState, doc: u32, f: impl FnOnce(&Document) -> R) -> R {
+    if doc == 0 {
+        with_env(|env| f(env.doc()))
+    } else if doc & crate::host::FRAME_DOC != 0 {
+        with_env(|env| match env.frame_document((doc & !crate::host::FRAME_DOC) as u64) {
+            Some(d) => f(d),
+            None => f(&Document::new()),
+        })
+    } else {
+        match st.extra_docs.get((doc - 1) as usize) {
+            Some(d) => f(&d.0.borrow()),
+            None => f(&Document::new()),
         }
     }
 }

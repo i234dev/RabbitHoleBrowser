@@ -200,6 +200,27 @@ pub struct EngineEnv<'a> {
     pub page: &'a mut Page,
 }
 
+impl EngineEnv<'_> {
+    fn with_frame_layout<T>(&mut self, frame: Option<u64>, read: impl FnOnce(&Page) -> Option<T>) -> Option<T> {
+        let Some(id) = frame.filter(|&id| id != self.page.frame_id) else {
+            self.ensure_layout();
+            return read(self.page);
+        };
+        self.ensure_layout();
+        self.engine.update_frame_viewport(self.page, id);
+        let origin = crate::frames::page_origin(self.page);
+        if let Some(anc) = crate::frames::ancestor_page(id) {
+            if crate::frames::page_origin(anc) != origin { return None; }
+            self.engine.flush_layout(anc);
+            return read(anc);
+        }
+        let child = crate::frames::find_frame_page_mut(self.page, id)?;
+        if crate::frames::page_origin(child) != origin { return None; }
+        self.engine.flush_layout(child);
+        read(child)
+    }
+}
+
 impl HostEnv for EngineEnv<'_> {
     fn service_worker_client(&self) -> Option<rabbithole_script::ServiceWorkerClient> { self.page.script.service_worker_client.clone() }
     fn service_worker_registry(&self) -> Option<rabbithole_script::ServiceWorkerRegistry> {
@@ -211,6 +232,7 @@ impl HostEnv for EngineEnv<'_> {
     fn document_url(&self) -> Url {
         self.page.url.clone()
     }
+    fn referrer_policy(&self) -> rabbithole_net::ReferrerPolicy { self.page.referrer_policy }
     fn document_is_complete(&self) -> bool { self.page.script.load_complete }
     fn security_origin(&self) -> String { crate::frames::page_origin(self.page) }
     fn window_context(&self) -> Option<rabbithole_script::WindowContext> {
@@ -342,6 +364,9 @@ impl HostEnv for EngineEnv<'_> {
         self.engine.flush_style(self.page);
         self.page.incr.style_engine()?.custom_property(node, name)
     }
+    fn anchor_style(&mut self, frame: Option<u64>, node: NodeId) -> Option<Rc<ComputedStyle>> {
+        self.with_frame_layout(frame,|page| page.layout.resolved_anchor_styles.get(&node).cloned())
+    }
     fn used_grid_tracks(&mut self, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
         self.ensure_layout();
         self.page.layout.used_grid_tracks(&self.page.doc, node, rows)
@@ -438,6 +463,19 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn submit_form(&mut self, form: NodeId, submitter: Option<NodeId>) {
         if let Some(req) = self.page.submit_request(form, submitter, &|_| Vec::new()) {
+            let doc = &self.page.doc;
+            let target = submitter.and_then(|node| doc.attr(node, "formtarget")).or_else(|| doc.attr(form, "target"));
+            if let Some(name) = target.filter(|name| !name.is_empty() && !name.starts_with('_')) {
+                let child = doc.descendants(Document::ROOT).find(|&node| {
+                    matches!(doc.tag(node), Some("iframe" | "frame")) && doc.attr(node, "name") == Some(name)
+                });
+                if let Some(node) = child {
+                    if self.ensure_frame(node).is_some() {
+                        self.engine.load_frame_request(self.page, node, req);
+                    }
+                    return;
+                }
+            }
             self.page.script.pending_navigation = Some(PendingNavigation { request: req, replace: false });
         }
     }
@@ -613,6 +651,13 @@ impl HostEnv for EngineEnv<'_> {
         }
         child.styles.get(node).cloned().or_else(|| self.engine.unrendered_style(child, node))
     }
+    fn frame_viewport(&mut self, id: u64) -> Option<(f32, f32)> {
+        self.ensure_layout();
+        self.engine.update_frame_viewport(self.page, id);
+        let origin = crate::frames::page_origin(self.page);
+        let child = crate::frames::find_frame_page_mut(self.page, id)?;
+        (crate::frames::page_origin(child) == origin).then_some((child.viewport.width, child.viewport.height))
+    }
     fn frame_node_rect(&mut self, id: u64, node: NodeId) -> Option<Rect> {
         self.ensure_layout();
         self.engine.update_frame_viewport(self.page, id);
@@ -625,19 +670,7 @@ impl HostEnv for EngineEnv<'_> {
         child.layout_rect_of(node)
     }
     fn frame_used_grid_tracks(&mut self, id: u64, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
-        if id == self.page.frame_id { return self.used_grid_tracks(node, rows); }
-        self.ensure_layout();
-        self.engine.update_frame_viewport(self.page, id);
-        let origin = crate::frames::page_origin(self.page);
-        if let Some(anc) = crate::frames::ancestor_page(id) {
-            if crate::frames::page_origin(anc) != origin { return None; }
-            self.engine.flush_layout(anc);
-            return anc.layout.used_grid_tracks(&anc.doc, node, rows);
-        }
-        let child = crate::frames::find_frame_page_mut(self.page, id)?;
-        if crate::frames::page_origin(child) != origin { return None; }
-        self.engine.flush_layout(child);
-        child.layout.used_grid_tracks(&child.doc, node, rows)
+        self.with_frame_layout(Some(id), |page| page.layout.used_grid_tracks(&page.doc,node,rows))
     }
     fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
         if let Some(c) = self.page.frames.get(node) {
@@ -696,7 +729,26 @@ impl HostEnv for EngineEnv<'_> {
     fn take_initial_frame_load(&mut self, node: NodeId) -> bool {
         self.page.frames.children.iter_mut().find(|c| c.node == node).and_then(|c| c.page.as_mut()).map(|p| std::mem::take(&mut p.script.frame_initial_load_pending)).unwrap_or(false)
     }
+    fn selector_state(&mut self, frame: Option<u64>) -> rabbithole_css::MatchState {
+        let state = if let Some(id) = frame {
+            let origin = crate::frames::page_origin(self.page);
+            let target = crate::frames::ancestor_page(id).or_else(|| crate::frames::find_frame_page_mut(self.page, id));
+            let Some(target) = target.filter(|p| crate::frames::page_origin(p) == origin) else {
+                return Default::default();
+            };
+            &target.state
+        } else {
+            &self.page.state
+        };
+        // History is private. Script selector APIs always see links as unvisited.
+        rabbithole_css::MatchState {
+            focused: state.focused, focus_visible: state.focus_visible, active: state.active,
+            hovered: state.hovered, target_id: state.target_id.clone(), ..Default::default()
+        }
+    }
+
     fn focus_node(&mut self, node: Option<NodeId>) {
+        self.page.doc.focus_editing_host(node);
         self.page.state.focused = node;
         self.page.state.focus_visible = node.map(|n| self.page.focus_should_be_visible(n)).unwrap_or(false);
     }
@@ -1383,7 +1435,7 @@ pub fn input_init(data: Option<&str>) -> EventInit {
 /// Build a text-editing event. `beforeinput` is cancelable; the matching
 /// `input` describes the same operation after its default mutation.
 pub fn input_event_init(input_type: &str, data: Option<&str>, cancelable: bool) -> EventInit {
-    EventInit { bubbles: true, cancelable, detail: Some(EventDetail::Input { data: data.map(str::to_string), input_type: input_type.to_string(), is_composing: false }) }
+    EventInit { bubbles: true, cancelable, detail: Some(EventDetail::Input { data: data.map(str::to_string), input_type: input_type.to_string(), is_composing: false, target_range: None }) }
 }
 
 /// Plain bubbling event init (change, submit, ...).

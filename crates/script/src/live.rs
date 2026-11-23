@@ -9,7 +9,8 @@
 
 use crate::host::*;
 use rabbithole_js::V;
-use rabbithole_dom::{BoundaryPoint, Document, IteratorPosition};
+use rabbithole_dom::{BoundaryPoint, Document, DocumentWeak, IteratorPosition};
+use std::rc::Rc;
 use rabbithole_js::{JsResult, Realm, Value, CONFIGURABLE, ENUMERABLE};
 use std::cell::RefCell;
 
@@ -20,13 +21,118 @@ use std::cell::RefCell;
 /// a page's frames and of the next page in the tab share the thread. A
 /// thread-wide list let one realm release another realm's slots, in a
 /// document it doesn't have.
-pub(crate) type FreedSlots = std::rc::Rc<RefCell<Vec<(bool, u32, usize)>>>;
+pub(crate) type FreedSlots = std::rc::Rc<RefCell<Vec<(bool, u32, usize, Option<DocumentWeak>)>>>;
 
 /// A live boundary point owned by a JS handle.
 struct PointHandle {
     doc: u32,
     slot: usize,
     freed: FreedSlots,
+    identity: Option<DocumentWeak>,
+}
+
+// Only points which actually cross a same-origin frame boundary need a
+// shared owner. Both wrappers then see endpoint assignments as well as
+// character-data and tree mutations recorded in the document's slot.
+#[derive(Clone)]
+struct SharedPoint(Rc<RefCell<PointOwner>>);
+
+struct PointOwner {
+    auxiliary: Option<crate::AuxiliaryDocument>,
+    frame: u64,
+    id: u64,
+    handle: PointHandle,
+}
+
+impl Drop for PointOwner {
+    fn drop(&mut self) {
+        if let Some(arena) = &self.auxiliary {
+            if let Ok(mut doc) = arena.0.try_borrow_mut() {
+                doc.remove_live_point(self.handle.slot);
+                self.handle.slot = RELEASED;
+            }
+        }
+    }
+}
+
+impl SharedPoint {
+    fn position(&self) -> Option<(u32,usize,BoundaryPoint)> {
+        let owner = self.0.borrow();
+        let h = &owner.handle;
+        let here = crate::env::with_env(|env| env.frame_id());
+        let doc = if let Some(arena) = &owner.auxiliary { arena.local_id() }
+        else if owner.frame == here { h.doc } else {
+            let target = if h.doc == 0 { owner.frame }
+                else if h.doc & FRAME_DOC != 0 { u64::from(h.doc & !FRAME_DOC) }
+                else { return None };
+            if target == here { 0 } else if target < u64::from(FRAME_DOC) { FRAME_DOC | target as u32 } else { return None }
+        };
+        with_doc(doc, |d| {
+            if !h.identity.as_ref()?.is_for(d) { return None; }
+            Some((doc,h.slot,d.live_point(h.slot)?))
+        })
+    }
+
+    fn export(realm: &mut Realm, value: Value) -> Option<Self> {
+        let object = value.as_object()?;
+        if let Some(shared) = realm.host_data::<Self>(object) { return Some(shared.clone()); }
+        let handle = realm.host_data_mut::<PointHandle>(object)?;
+        if handle.slot == RELEASED { return None; }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT.fetch_update(std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed,|n| n.checked_add(1)).ok()?;
+        let shared = Self(Rc::new(RefCell::new(PointOwner {
+            auxiliary: crate::AuxiliaryDocument::lookup(handle.doc),
+            frame: crate::env::with_env(|env| env.frame_id()), id,
+            handle: PointHandle { doc: handle.doc, slot: handle.slot, freed: handle.freed.clone(),
+                identity: Some(with_doc(handle.doc, |d| d.weak_identity())) },
+        })));
+        handle.slot = RELEASED;
+        realm.set_host_data(object,Box::new(shared.clone()));
+        Some(shared)
+    }
+
+    fn wrapper(&self, realm: &mut Realm) -> Value {
+        let object = realm.new_object_with_proto(Some(proto("__LiveBoundary")));
+        realm.set_host_data(object,Box::new(self.clone()));
+        Value::Object(object)
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedRange { start: SharedPoint, end: SharedPoint }
+
+impl PartialEq for SharedRange {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.start.0,&other.start.0) && Rc::ptr_eq(&self.end.0,&other.end.0)
+    }
+}
+
+impl std::fmt::Debug for SharedRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("SharedRange") }
+}
+
+impl SharedRange {
+    fn key(&self) -> Value { Value::str(&self.start.0.borrow().id.to_string()) }
+
+    pub(crate) fn export(realm: &mut Realm, range: Value) -> Option<Self> {
+        let factory = state().borrow().factories.get("rangePoints")?.clone();
+        let handles = realm.call(factory,Value::Undefined,std::slice::from_ref(&range)).ok()?;
+        if !handles.is_object() { return None; }
+        let a = realm.get_str(handles.clone(),"0").ok()?;
+        let b = realm.get_str(handles,"1").ok()?;
+        let shared = Self { start: SharedPoint::export(realm,a)?, end: SharedPoint::export(realm,b)? };
+        let factory = state().borrow().factories.get("sharedRange")?.clone();
+        realm.call(factory,Value::Undefined,&[shared.key(),range]).ok()?;
+        Some(shared)
+    }
+
+    pub(crate) fn wrapper(&self, realm: &mut Realm) -> JsResult<Value> {
+        let factory = state().borrow().factories.get("sharedRange").cloned();
+        let Some(factory) = factory else { return Ok(Value::Undefined) };
+        let a = self.start.wrapper(realm);
+        let b = self.end.wrapper(realm);
+        realm.call(factory,Value::Undefined,&[self.key(),Value::Null,a,b])
+    }
 }
 
 /// A live NodeIterator position owned by a JS handle.
@@ -45,7 +151,7 @@ impl Drop for PointHandle {
             return;
         }
         if let Ok(mut f) = self.freed.try_borrow_mut() {
-            f.push((false, self.doc, self.slot));
+            f.push((false, self.doc, self.slot, self.identity.clone()));
         }
     }
 }
@@ -53,7 +159,7 @@ impl Drop for PointHandle {
 impl Drop for IterHandle {
     fn drop(&mut self) {
         if let Ok(mut f) = self.freed.try_borrow_mut() {
-            f.push((true, self.doc, self.slot));
+            f.push((true, self.doc, self.slot, None));
         }
     }
 }
@@ -65,8 +171,11 @@ fn freed_slots() -> FreedSlots {
 /// Release the slots of this realm's collected handles.
 fn purge() {
     let freed = std::mem::take(&mut *freed_slots().borrow_mut());
-    for (iter, doc, slot) in freed {
-        with_doc(doc, |d| if iter { d.remove_live_iterator(slot) } else { d.remove_live_point(slot) });
+    for (iter, doc, slot, identity) in freed {
+        with_doc(doc, |d| {
+            if identity.is_some_and(|id| !id.is_for(d)) { return; }
+            if iter { d.remove_live_iterator(slot) } else { d.remove_live_point(slot) }
+        });
     }
 }
 
@@ -83,12 +192,22 @@ fn offset_arg(realm: &mut Realm, v: Value) -> JsResult<usize> {
 
 fn handle_obj(realm: &mut Realm, this: &Value) -> JsResult<rabbithole_js::ObjectId> {
     match this.v() {
-        V::Object(o) if realm.host_data::<PointHandle>(o).is_some() || realm.host_data::<IterHandle>(o).is_some() => Ok(o),
+        V::Object(o) if realm.host_data::<PointHandle>(o).is_some() || realm.host_data::<SharedPoint>(o).is_some() || realm.host_data::<IterHandle>(o).is_some() => Ok(o),
         _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
 
 // ---------------------------------------------------------- boundary points
+
+/// Range insertion must validate the original reference child before it
+/// splits a text node, which would otherwise already mutate live ranges.
+fn check_range_insertion(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let parent = node_arg(realm, &arg(args, 0))?;
+    let child = node_arg(realm, &arg(args, 1))?;
+    let reference = node_arg(realm, &arg(args, 2))?;
+    crate::node::ensure_insert_validity(realm, parent, child, Some(reference.node), false)?;
+    Ok(Value::Undefined)
+}
 
 /// `liveBoundary(node, offset)`: a handle whose `node` / `offset` follow
 /// DOM mutations.
@@ -98,12 +217,17 @@ fn live_boundary(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
     let offset = offset_arg(realm, arg(args, 1))?;
     let slot = with_doc(n.doc, |d| d.add_live_point(BoundaryPoint { node: n.node, offset }));
     let o = realm.new_object_with_proto(Some(proto("__LiveBoundary")));
-    realm.set_host_data(o, Box::new(PointHandle { doc: n.doc, slot, freed: freed_slots() }));
+    realm.set_host_data(o, Box::new(PointHandle { doc: n.doc, slot, freed: freed_slots(), identity: None }));
     Ok(Value::Object(o))
 }
 
 fn point(realm: &mut Realm, this: &Value) -> JsResult<(rabbithole_js::ObjectId, u32, usize, BoundaryPoint)> {
     let o = handle_obj(realm, this)?;
+    if let Some(shared) = realm.host_data::<SharedPoint>(o) {
+        let position = shared.position();
+        return position.map(|(doc,slot,p)| (o,doc,slot,p)).ok_or_else(||
+            crate::misc::dom_exception(realm,"InvalidStateError","The range's document is unavailable."));
+    }
     let Some(h) = realm.host_data::<PointHandle>(o) else { return Err(realm.throw_type_error("Illegal invocation")) };
     let (doc, slot) = (h.doc, h.slot);
     let p = with_doc(doc, |d| d.live_point(slot)).unwrap_or(BoundaryPoint { node: Document::ROOT, offset: 0 });
@@ -127,8 +251,14 @@ fn boundary_node_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
         if let Some(h) = realm.host_data_mut::<PointHandle>(o) {
             // (The slot just released is not queued again.)
             let freed = h.freed.clone();
-            let mut old = std::mem::replace(h, PointHandle { doc: n.doc, slot: new_slot, freed });
+            let mut old = std::mem::replace(h, PointHandle { doc: n.doc, slot: new_slot, freed, identity: None });
             old.slot = RELEASED;
+        } else if let Some(shared) = realm.host_data::<SharedPoint>(o) {
+            let mut owner = shared.0.borrow_mut();
+            owner.auxiliary = crate::AuxiliaryDocument::lookup(n.doc);
+            owner.frame = crate::env::with_env(|env| env.frame_id());
+            owner.handle.slot = RELEASED;
+            owner.handle = PointHandle { doc: n.doc, slot: new_slot, freed: freed_slots(), identity: Some(with_doc(n.doc, |d| d.weak_identity())) };
         }
     }
     Ok(Value::Undefined)
@@ -201,7 +331,7 @@ fn iter_before_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
 /// A handle object owning an existing live point slot of document `doc`.
 fn adopt_point(realm: &mut Realm, doc: u32, slot: usize) -> Value {
     let o = realm.new_object_with_proto(Some(proto("__LiveBoundary")));
-    realm.set_host_data(o, Box::new(PointHandle { doc, slot, freed: freed_slots() }));
+    realm.set_host_data(o, Box::new(PointHandle { doc, slot, freed: freed_slots(), identity: None }));
     Value::Object(o)
 }
 
@@ -347,6 +477,7 @@ pub(crate) fn install(realm: &mut Realm, natives: rabbithole_js::ObjectId) {
     realm.define_accessor(ip, "before", Some(iter_before_get), Some(iter_before_set), ACC);
     realm.extra_roots.push(Value::Object(ip));
     state().borrow_mut().protos.insert("__LiveIteratorPosition", ip);
+    realm.define_method(natives, "checkRangeInsertion", 3, check_range_insertion);
     realm.define_method(natives, "liveBoundary", 2, live_boundary);
     realm.define_method(natives, "liveIteratorPosition", 3, live_iterator_position);
     realm.define_method(natives, "selectionSync", 2, selection_sync);

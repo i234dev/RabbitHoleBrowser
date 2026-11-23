@@ -8,21 +8,11 @@
 use crate::env::with_env;
 use crate::host::*;
 use crate::node;
-use rabbithole_dom::{Document, NodeId};
+use rabbithole_dom::{valid_custom_element_name, Document, NodeId, ShadowInfo};
 use rabbithole_js::{JsResult, Realm, Value, CONFIGURABLE, ENUMERABLE};
 use crate::host::HashMap;
 
 const ACC: u8 = CONFIGURABLE | ENUMERABLE;
-
-/// `ShadowRootInit` options remembered per shadow root.
-#[derive(Clone, Copy, Debug)]
-pub struct ShadowInfo {
-    pub open: bool,
-    pub delegates_focus: bool,
-    pub manual: bool,
-    pub clonable: bool,
-    pub serializable: bool,
-}
 
 /// A queued custom element reaction (run by [`drain_ce_reactions`]).
 #[derive(Debug)]
@@ -44,7 +34,6 @@ pub struct CeDefinition {
 
 #[derive(Default)]
 pub struct ShadowState {
-    pub info: HashMap<NodeRef, ShadowInfo>,
     pub ce_queue: Vec<CeReaction>,
     pub definitions: HashMap<String, std::rc::Rc<CeDefinition>>,
     pub waiters: HashMap<String, Vec<Value>>,
@@ -70,12 +59,7 @@ pub(crate) fn is_shadow_root(n: NodeRef) -> bool {
 }
 
 pub(crate) fn shadow_info(root: NodeRef) -> Option<ShadowInfo> {
-    if let Some(i) = sstate(|s| s.info.get(&root).copied()) {
-        return Some(i);
-    }
-    // Declarative shadow roots (parsed): open or closed per the markup.
-    let (open, bits) = with_doc(root.doc, |doc| doc.declarative_shadow.get(&root.node).map(|&o| (o, doc.declarative_shadow_flags.get(&root.node).copied().unwrap_or(0))))?;
-    Some(ShadowInfo { open, delegates_focus: bits & 4 != 0, manual: false, clonable: bits & 1 != 0, serializable: bits & 2 != 0 })
+    with_doc(root.doc, |doc| doc.shadow_info.get(&root.node).copied())
 }
 
 /// The definition that applies to element `n` (autonomous by tag, or a
@@ -312,8 +296,6 @@ pub(crate) fn has_pending_reactions() -> bool {
 
 // --------------------------------------------------------- attachShadow
 
-const VALID_HOSTS: &[&str] = &["article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span"];
-
 fn e_attach_shadow(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "attachShadow")?;
     let init = arg(args, 0);
@@ -323,17 +305,16 @@ fn e_attach_shadow(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
         Some("closed") => false,
         _ => return Err(realm.throw_type_error("Failed to execute 'attachShadow' on 'Element': The provided value is not a valid enum value of type ShadowRootMode.")),
     };
-    let tag = tag_of(n).unwrap_or_default();
-    if !(tag.contains('-') || VALID_HOSTS.contains(&tag.as_str())) {
+    if !with_doc(n.doc, |doc| doc.can_host_shadow(n.node)) {
         return Err(crate::misc::dom_exception(realm, "NotSupportedError", &format!("Failed to execute 'attachShadow' on 'Element': This element does not support attachShadow")));
     }
     // A declarative shadow root (`<template shadowrootmode>`) of the same
     // mode is taken over: emptied and returned.
-    let declarative = with_doc(n.doc, |doc| doc.shadow_root(n.node).and_then(|r| doc.declarative_shadow.get(&r).map(|o| (r, *o))));
+    let declarative = with_doc(n.doc, |doc| doc.shadow_root(n.node).and_then(|r| doc.shadow_info.get(&r).filter(|info| info.declarative).map(|info| (r, info.open))));
     if let Some((r, was_open)) = declarative {
         if was_open == open {
             with_doc(n.doc, |doc| {
-                doc.declarative_shadow.remove(&r);
+                doc.shadow_info.get_mut(&r).unwrap().declarative = false;
                 doc.clear_children(r);
             });
             if n.doc == 0 {
@@ -346,16 +327,16 @@ fn e_attach_shadow(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
         return Err(crate::misc::dom_exception(realm, "NotSupportedError", "Failed to execute 'attachShadow' on 'Element': Shadow root cannot be created on a host which already hosts a shadow tree."));
     }
     let info = ShadowInfo {
-        open,
+        open, declarative: false,
         delegates_focus: dict_bool(realm, &init, "delegatesFocus")?.unwrap_or(false),
         manual: dict_str(realm, &init, "slotAssignment")?.as_deref() == Some("manual"),
         clonable: dict_bool(realm, &init, "clonable")?.unwrap_or(false),
         serializable: dict_bool(realm, &init, "serializable")?.unwrap_or(false),
     };
-    let root = with_doc(n.doc, |doc| doc.attach_shadow(n.node));
-    let root = NodeRef { doc: n.doc, node: root };
-    sstate(|s| {
-        s.info.insert(root, info);
+    let root = with_doc(n.doc, |doc| {
+        let root = doc.attach_shadow(n.node);
+        doc.shadow_info.insert(root, info);
+        NodeRef { doc: n.doc, node: root }
     });
     if n.doc == 0 {
         mark_dirty();
@@ -694,12 +675,6 @@ fn ce_define(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     Ok(Value::Undefined)
 }
 
-fn valid_custom_element_name(name: &str) -> bool {
-    const RESERVED: &[&str] = &["annotation-xml", "color-profile", "font-face", "font-face-src", "font-face-uri", "font-face-format", "font-face-name", "missing-glyph"];
-    let mut chars = name.chars();
-    matches!(chars.next(), Some('a'..='z')) && name.contains('-') && !name.chars().any(|c| c.is_ascii_uppercase() || c.is_whitespace() || matches!(c, '<' | '>' | '/' | '"' | '\'' | '=')) && !RESERVED.contains(&name)
-}
-
 fn ce_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let name = arg_str(realm, args, 0)?;
     Ok(sstate(|s| s.definitions.get(&name).map(|d| d.ctor.clone())).unwrap_or(Value::Undefined))
@@ -818,7 +793,6 @@ pub(crate) fn install(realm: &mut Realm) {
     }
     realm.define_accessor(sr, "innerHTML", Some(sr_inner_html_get), Some(sr_inner_html_set), ACC);
     realm.define_method(sr, "getHTML", 0, crate::element::get_html);
-    realm.define_method(sr, "setHTMLUnsafe", 1, sr_inner_html_set);
     realm.define_method(sr, "elementFromPoint", 2, sr_element_from_point);
     realm.define_method(sr, "elementsFromPoint", 2, sr_elements_from_point);
     realm.define_method(sr, "getSelection", 0, sr_get_selection);

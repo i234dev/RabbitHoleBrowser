@@ -151,7 +151,8 @@ impl ReferrerPolicy {
 }
 
 fn is_downgrade(from: &Url, to: &Url) -> bool {
-    from.scheme == "https" && to.scheme != "https"
+    let trustworthy = |url: &Url| url.scheme == "file" || crate::cookies::is_secure_url(url);
+    trustworthy(from) && !trustworthy(to)
 }
 
 /// The `Referer` value for a request to `target` from `referrer` under
@@ -417,6 +418,9 @@ mod tests {
         assert_eq!(referrer_for(&from, &same, p).unwrap(), "https://a.com/page?q=1");
         assert_eq!(referrer_for(&from, &cross, p).unwrap(), "https://a.com/");
         assert!(referrer_for(&from, &down, p).is_none());
+        let loopback = Url::parse("http://127.0.0.1/private").unwrap();
+        assert_eq!(referrer_for(&from, &loopback, p).as_deref(), Some("https://a.com/"));
+        assert!(referrer_for(&loopback, &down, p).is_none());
         assert!(referrer_for(&from, &same, ReferrerPolicy::NoReferrer).is_none());
         assert_eq!(referrer_for(&from, &down, ReferrerPolicy::UnsafeUrl).unwrap(), "https://a.com/page?q=1");
         assert!(referrer_for(&from, &cross, ReferrerPolicy::SameOrigin).is_none());

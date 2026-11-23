@@ -2,6 +2,7 @@
 //! with `@media` evaluation and `@import` discovery.
 
 pub mod container;
+pub mod position_try;
 pub mod selector;
 pub mod supports;
 pub mod tokenizer;
@@ -96,6 +97,7 @@ pub enum Rule {
     },
     /// `@font-face { ... }` descriptors (font-family, src, font-weight, ...).
     FontFace(Vec<Declaration>),
+    PositionTry { name: String, declarations: Vec<Declaration> },
     /// `@font-feature-values <family>#` (CSS Fonts 4 §6.9.1): for each
     /// family, (block kind such as `styleset`, value name, numbers).
     FontFeatureValues {
@@ -107,6 +109,34 @@ pub enum Rule {
         name: String,
         frames: Vec<Keyframe>,
     },
+}
+
+/// An ordinary animation offset or a percentage of a named timeline range.
+#[derive(Debug, PartialEq)]
+pub struct KeyframeSelector {
+    pub range: Option<String>,
+    pub percentage: f32,
+}
+
+/// A malformed selector invalidates its entire comma-separated block.
+pub fn keyframe_selectors(tokens: &[Token]) -> Option<Vec<KeyframeSelector>> {
+    tokens.split(|t| *t == Token::Comma).map(|item| {
+        let mut parts = item.iter().filter(|t| **t != Token::Whitespace);
+        let (range, percentage) = match (parts.next()?, parts.next()) {
+            (Token::Ident(k), None) if k.eq_ignore_ascii_case("from") => (None, 0.0),
+            (Token::Ident(k), None) if k.eq_ignore_ascii_case("to") => (None, 100.0),
+            (Token::Percentage(p), None) if (0.0..=100.0).contains(p) => (None, *p),
+            (Token::Ident(k), Some(Token::Percentage(p))) if p.is_finite() => {
+                let name = k.to_ascii_lowercase();
+                if !matches!(name.as_str(), "cover" | "contain" | "entry" | "exit" | "entry-crossing" | "exit-crossing") {
+                    return None;
+                }
+                (Some(name), *p)
+            }
+            _ => return None,
+        };
+        parts.next().is_none().then_some(KeyframeSelector { range, percentage })
+    }).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -273,7 +303,7 @@ impl Stylesheet {
                             walk(rules, env, out);
                         }
                     }
-                    Rule::Import { .. } | Rule::FontFace(_) | Rule::Keyframes { .. } | Rule::FontFeatureValues { .. } => {}
+                    Rule::Import { .. } | Rule::PositionTry { .. } | Rule::FontFace(_) | Rule::Keyframes { .. } | Rule::FontFeatureValues { .. } => {}
                 }
             }
         }
@@ -309,6 +339,21 @@ impl Stylesheet {
             }
         }
         walk(&self.rules, env, out);
+    }
+
+    /// Named position fallbacks in active conditional groups, in source order.
+    pub fn position_tries<'a>(&'a self, env: &MediaEnv, out: &mut Vec<(&'a str, &'a [Declaration])>) {
+        fn collect<'a>(rules: &'a [Rule], env: &MediaEnv, out: &mut Vec<(&'a str, &'a [Declaration])>) {
+            for r in rules {
+                match r {
+                    Rule::PositionTry { name, declarations } => out.push((name,declarations)),
+                    Rule::Media { query, rules } if query.evaluate(env) => collect(rules,env,out),
+                    Rule::Supports { matches: true, rules } => collect(rules,env,out),
+                    _ => {}
+                }
+            }
+        }
+        collect(&self.rules, env, out);
     }
 
     /// All `@keyframes` rules as (name, frames).
@@ -410,7 +455,7 @@ pub fn parse_stylesheet(src: &str) -> Stylesheet {
         src
     };
     let toks = Tokenizer::tokenize(src);
-    let mut p = Parser { toks: &toks, pos: 0 };
+    let mut p = Parser { toks: &toks, pos: 0, namespaces: None };
     Stylesheet {
         rules: p.parse_rules(true),
         base_url: None,
@@ -422,7 +467,7 @@ pub fn parse_stylesheet(src: &str) -> Stylesheet {
 /// Parse the contents of a `style="..."` attribute.
 pub fn parse_declaration_list(src: &str) -> Vec<Declaration> {
     let toks = Tokenizer::tokenize(src);
-    let mut p = Parser { toks: &toks, pos: 0 };
+    let mut p = Parser { toks: &toks, pos: 0, namespaces: None };
     p.parse_declarations()
 }
 
@@ -433,11 +478,16 @@ pub fn parse_media_query(src: &str) -> MediaQuery {
 }
 
 struct Parser<'a> {
+    namespaces: selector::Namespaces,
     toks: &'a [Token],
     pos: usize,
 }
 
 impl<'a> Parser<'a> {
+    fn subparser(&self, toks: &'a [Token]) -> Self {
+        Self { toks, pos: 0, namespaces: self.namespaces.clone() }
+    }
+
     fn peek(&self) -> Option<&'a Token> {
         self.toks.get(self.pos)
     }
@@ -502,6 +552,7 @@ impl<'a> Parser<'a> {
     fn parse_rule_context(&mut self, top_level: bool, parent: Option<std::sync::Arc<Vec<Selector>>>, depth: usize) -> Vec<Rule> {
         if depth > 64 { return Vec::new(); }
         let mut rules = Vec::new();
+        let mut allow_namespace = top_level;
         loop {
             self.skip_ws();
             match self.peek() {
@@ -516,6 +567,7 @@ impl<'a> Parser<'a> {
                 Some(Token::AtKeyword(name)) => {
                     let name = name.to_ascii_lowercase();
                     self.pos += 1;
+                    allow_namespace &= matches!(name.as_str(), "charset" | "import" | "namespace");
                     let prelude = self.consume_until(true, true);
                     match self.peek() {
                         Some(Token::OpenBrace) => {
@@ -523,21 +575,21 @@ impl<'a> Parser<'a> {
                             match name.as_str() {
                                 "media" => {
                                     let query = parse_media_tokens(prelude);
-                                    let mut sub = Parser { toks: inner, pos: 0 };
+                                    let mut sub = self.subparser(inner);
                                     rules.push(Rule::Media {
                                         query,
                                         rules: if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) },
                                     });
                                 }
                                 "supports" => {
-                                    let mut sub = Parser { toks: inner, pos: 0 };
+                                    let mut sub = self.subparser(inner);
                                     rules.push(Rule::Supports {
                                         matches: supports::evaluate(prelude),
                                         rules: if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) },
                                     });
                                 }
                                 "layer" => {
-                                    let mut sub = Parser { toks: inner, pos: 0 };
+                                    let mut sub = self.subparser(inner);
                                     let mut inner_rules = if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) };
                                     let name = layer_names(prelude).into_iter().next().unwrap_or_else(|| {
                                         // An anonymous layer is unique.
@@ -555,7 +607,7 @@ impl<'a> Parser<'a> {
                                 "container" => {
                                     // An invalid prelude drops the rule.
                                     if let Some(q) = container::parse(prelude) {
-                                        let mut sub = Parser { toks: inner, pos: 0 };
+                                        let mut sub = self.subparser(inner);
                                         let mut inner_rules = if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) };
                                         assign_container(&mut inner_rules, &q);
                                         rules.extend(inner_rules);
@@ -563,11 +615,18 @@ impl<'a> Parser<'a> {
                                 }
                                 "scope" => {
                                     // Transparent grouping.
-                                    let mut sub = Parser { toks: inner, pos: 0 };
+                                    let mut sub = self.subparser(inner);
                                     rules.extend(if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) });
                                 }
+                                "position-try" if parent.is_none() => {
+                                    if let Some(name) = position_try::name(prelude) {
+                                        let mut declarations = self.subparser(inner).parse_declarations();
+                                        declarations.retain(|d| !d.important && position_try::DESCRIPTORS.contains(&d.name.as_str()));
+                                        rules.push(Rule::PositionTry { name: name.to_string(), declarations });
+                                    }
+                                }
                                 "font-face" if parent.is_none() => {
-                                    let mut dp = Parser { toks: inner, pos: 0 };
+                                    let mut dp = self.subparser(inner);
                                     rules.push(Rule::FontFace(dp.parse_declarations()));
                                 }
                                 "font-feature-values" if parent.is_none() => {
@@ -583,7 +642,7 @@ impl<'a> Parser<'a> {
                                             _ => None,
                                         })
                                         .unwrap_or_default();
-                                    let mut kp = Parser { toks: inner, pos: 0 };
+                                    let mut kp = self.subparser(inner);
                                     rules.push(Rule::Keyframes {
                                         name: kname,
                                         frames: kp.parse_keyframes(),
@@ -593,6 +652,12 @@ impl<'a> Parser<'a> {
                             }
                         }
                         _ => {
+                            if allow_namespace && name == "namespace" {
+                                if let Some((prefix, uri)) = parse_namespace(prelude) {
+                                    let names = self.namespaces.get_or_insert_with(Default::default);
+                                    std::sync::Arc::make_mut(names).insert(prefix.to_owned(), std::sync::Arc::from(uri));
+                                }
+                            }
                             // Statement at-rule
                             if self.peek() == Some(&Token::Semicolon) {
                                 self.pos += 1;
@@ -612,6 +677,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Some(_) => {
+                    allow_namespace = false;
                     let prelude = self.consume_until(false, true);
                     if self.peek() != Some(&Token::OpenBrace) {
                         // Garbage until EOF
@@ -619,8 +685,9 @@ impl<'a> Parser<'a> {
                     }
                     let inner = self.consume_block();
                     let mut sp = if let Some(p) = &parent { selector::SelectorParser::nested(prelude, p.clone()) } else { selector::SelectorParser::new(prelude) };
+                    sp.namespaces = self.namespaces.clone();
                     if let Some(selectors) = sp.parse_list() {
-                        let mut dp = Parser { toks: inner, pos: 0 };
+                        let mut dp = self.subparser(inner);
                         rules.extend(dp.parse_style_body(std::sync::Arc::new(selectors), depth + 1));
                     }
                 }
@@ -651,7 +718,7 @@ impl<'a> Parser<'a> {
             if self.peek() == Some(&Token::Semicolon) { self.pos += 1; }
             let end = self.pos;
             if end == start { self.pos += 1; continue; }
-            let mut sub = Parser { toks: &self.toks[start..end], pos: 0 };
+            let mut sub = self.subparser(&self.toks[start..end]);
             if at_rule || block {
                 if !declarations.is_empty() {
                     let declarations = std::mem::take(&mut declarations);
@@ -683,16 +750,12 @@ impl<'a> Parser<'a> {
                 break;
             }
             let inner = self.consume_block();
-            let mut offsets = Vec::new();
-            for t in prelude {
-                match t {
-                    Token::Ident(i) if i.eq_ignore_ascii_case("from") => offsets.push(0.0),
-                    Token::Ident(i) if i.eq_ignore_ascii_case("to") => offsets.push(1.0),
-                    Token::Percentage(p) => offsets.push((p / 100.0).clamp(0.0, 1.0)),
-                    _ => {}
-                }
-            }
-            let mut dp = Parser { toks: inner, pos: 0 };
+            let Some(selectors) = keyframe_selectors(prelude) else { continue };
+            // Time-based animations sample ordinary offsets. Named ranges
+            // participate when the corresponding scroll timeline is resolved.
+            let offsets: Vec<_> = selectors.into_iter().filter(|s| s.range.is_none())
+                .map(|s| s.percentage / 100.0).collect();
+            let mut dp = self.subparser(inner);
             let declarations = dp.parse_declarations();
             if !offsets.is_empty() {
                 frames.push(Keyframe { offsets, declarations });
@@ -774,6 +837,24 @@ impl<'a> Parser<'a> {
         }
         decls
     }
+}
+
+pub fn parse_namespace(prelude: &[Token]) -> Option<(&str, &str)> {
+    let mut tokens = prelude.iter().filter(|t| **t != Token::Whitespace).peekable();
+    let prefix = match tokens.peek().copied() {
+        Some(Token::Ident(name)) => { tokens.next(); name.as_str() }
+        _ => "",
+    };
+    let uri = match tokens.next()? {
+        Token::String(uri) | Token::Url(uri) => uri,
+        Token::Function(f) if f.eq_ignore_ascii_case("url") => {
+            let Token::String(uri) = tokens.next()? else { return None };
+            if tokens.next() != Some(&Token::CloseParen) { return None; }
+            uri
+        }
+        _ => return None,
+    };
+    tokens.next().is_none().then_some((prefix, uri))
 }
 
 fn parse_import(prelude: &[Token]) -> Option<Rule> {

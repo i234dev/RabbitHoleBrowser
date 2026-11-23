@@ -270,7 +270,7 @@ pub struct KeyResult {
 fn focusable(page: &Page, n: NodeId) -> bool {
     rabbithole_engine::pointer::is_focusable(&page.doc, n)
         && crate::ax::displayed(page, n)
-        && page.doc.attr(n, "tabindex").and_then(|t| t.trim().parse::<i32>().ok()).map(|t| t >= 0).unwrap_or(true)
+        && page.doc.explicit_tab_index(n).map(|t| t >= 0).unwrap_or(true)
 }
 
 /// Press a key on `target` (the focused element when None).

@@ -219,3 +219,101 @@ fn css_animations_set_by_scripts_are_listed() {
     }
     assert_eq!(out, vec!["move -50000 50px", "1 2", "rejected AbortError idle true"]);
 }
+
+#[test]
+fn discrete_alignment_keeps_modifiers_and_switches_at_half_progress() {
+    let mut e = engine();
+    let mut p = load(&mut e, r#"<!doctype html>
+        <div id=t style="display:grid;align-items:safe center"></div><script>
+        const t = document.querySelector('#t'), cs = getComputedStyle(t);
+        console.log(cs.alignItems);
+        t.style.transition = 'align-items 1s linear allow-discrete';
+        t.style.alignItems = 'last baseline';
+        const a = t.getAnimations()[0];
+        a.pause();
+        a.currentTime = 499;
+        console.log(cs.transitionBehavior, cs.alignItems);
+        a.currentTime = 500;
+        console.log(cs.alignItems);
+        a.finish();
+        t.style.transitionBehavior = 'normal';
+        t.style.alignItems = 'end';
+        console.log(cs.alignItems, t.getAnimations().filter(x=>x.playState==='running').length);
+        </script>"#);
+    assert_eq!(logs(&mut p), ["safe center", "allow-discrete safe center", "last baseline", "end 0"]);
+}
+
+#[test]
+fn discrete_anchor_effects_update_the_selected_box_and_its_position() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<!doctype html>
+        <style>body{margin:0}.box{width:20px;height:10px}#a{anchor-name:--a}#b{anchor-name:--b;margin-left:80px}#t{position:absolute;position-area:bottom right;position-anchor:--a;width:10px;height:10px}</style>
+        <div class=box id=a></div><div class=box id=b></div><div id=t></div><script>
+        const cs=getComputedStyle(t);
+        console.log(cs.positionAnchor,t.offsetLeft);
+        t.style.transition='position-anchor 1s linear allow-discrete';
+        t.style.positionAnchor='--b';
+        const transition=t.getAnimations()[0];
+        transition.pause();
+        for (const ms of [499,500]) {
+            transition.currentTime=ms;
+            console.log(cs.positionAnchor,t.offsetLeft);
+        }
+        </script>"#);
+    assert_eq!(logs(&mut page), ["--a 20","--a 20","--b 100"]);
+}
+
+#[test]
+fn grid_track_effects_reach_layout_and_preserve_repeat_structure() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<!doctype html>
+        <style>#grid {display:grid; width:200px} #sample {grid-template-rows: 4px 2fr}</style>
+        <div id=grid><i id=first></i></div><div id=sample></div>
+        <script>
+        let move = grid.animate({gridTemplateColumns:['20px 1fr','100px 2fr']}, 1000);
+        move.pause(); move.currentTime = 250;
+        console.log(first.offsetWidth);
+        let add = sample.animate({gridTemplateRows:['4px 2fr','12px 4fr']},
+                                 {duration:1000, composite:'add'});
+        add.pause(); add.currentTime = 500;
+        console.log(getComputedStyle(sample).gridTemplateRows);
+        const run = (from, to) => sample.animate({gridTemplateColumns:[from, to]}, 1000);
+        let rep = run('repeat(2, [start] 10px auto)', 'repeat(2, [end] 30px 2fr)');
+        rep.pause(); rep.currentTime = 750;
+        console.log(getComputedStyle(sample).gridTemplateColumns);
+        rep.cancel();
+        let mismatch = run('repeat(3, 10px)', 'repeat(2, 40px)');
+        mismatch.pause(); mismatch.currentTime = 250;
+        console.log(getComputedStyle(sample).gridTemplateColumns);
+        </script>"#);
+    assert_eq!(logs(&mut page), ["40", "12px 5fr", "repeat(2, [end] 25px 2fr)", "repeat(3, 10px)"]);
+}
+
+#[test]
+fn auto_repeated_grid_lists_switch_as_a_whole() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<!doctype html><div id=sample></div><script>
+        const effect = sample.animate({gridTemplateColumns:[
+            '10px repeat(auto-fill, 20px)', '40px repeat(auto-fill, 60px)']}, 1000);
+        effect.pause(); effect.currentTime = 250;
+        console.log(getComputedStyle(sample).gridTemplateColumns);
+        effect.currentTime = 750;
+        console.log(getComputedStyle(sample).gridTemplateColumns);
+        </script>"#);
+    assert_eq!(logs(&mut page), ["10px repeat(auto-fill, 20px)", "40px repeat(auto-fill, 60px)"]);
+}
+
+#[test]
+fn css_keyframe_composition_uses_the_underlying_value_at_each_endpoint() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<!doctype html><style>
+        @keyframes wider {from {width:10px} to {width:30px; animation-composition:replace}}
+        @keyframes extra {from {width:2px} to {width:6px}}
+        #box {width:50px; animation: wider 1s linear both, extra 1s linear both; animation-composition:add}
+        </style><div id=box></div><script>
+        const effects = box.getAnimations();
+        for (const a of effects) { a.pause(); a.currentTime = 500; }
+        console.log(getComputedStyle(box).animationComposition, box.offsetWidth);
+        </script>"#);
+    assert_eq!(logs(&mut page), ["add 49"]);
+}

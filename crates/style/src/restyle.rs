@@ -339,6 +339,7 @@ impl InvalidationMap {
                         *self.attrs.entry(a.into()).or_default() |= rel;
                     }
                 }
+                Pseudo::PopoverOpen => *self.attrs.entry("popover".into()).or_default() |= rel,
                 Pseudo::Checked => {
                     *self.attrs.entry("checked".into()).or_default() |= rel;
                     *self.attrs.entry("selected".into()).or_default() |= rel;
@@ -770,7 +771,16 @@ impl StyleEngine {
         self.feature_values = Rc::new(fv);
         crate::props::text::set_feature_values(self.feature_values.clone());
         tree.keyframes.clear();
+        tree.position_tries.clear();
         for sheet in author {
+            let mut tries = Vec::new();
+            sheet.position_tries(&self.env, &mut tries);
+            for (name, declarations) in tries {
+                let scopes = if sheet.shadow_scopes.is_empty() { &[Document::ROOT][..] } else { &sheet.shadow_scopes };
+                for scope in scopes {
+                    tree.position_tries.entry(*scope).or_default().insert(name.into(), declarations.to_vec());
+                }
+            }
             let mut kf = Vec::new();
             sheet.keyframes(&mut kf);
             for (name, frames) in kf {
@@ -1288,6 +1298,9 @@ impl StyleEngine {
                 // (Layout looks these up only once any element has one.)
                 tree.any_first_letter |= tree.first_letter[node].is_some();
                 tree.any_first_line |= tree.first_line[node].is_some();
+                tree.any_position_area |= style.needs_anchor_layout();
+                tree.any_motion_path |= style.has_motion_path() || tree.before[node].as_ref().is_some_and(|s| s.has_motion_path())
+                    || tree.after[node].as_ref().is_some_and(|s| s.has_motion_path());
                 let changed = !old.as_ref().map(|o| Rc::ptr_eq(o, &style)).unwrap_or(false);
                 if !all && (changed || pseudo_changed) {
                     changes.push(StyleChange { node, old: old.clone(), new: Some(style.clone()), pseudo_changed });

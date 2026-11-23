@@ -703,13 +703,22 @@
   hidden(CE.prototype, 'captureStream', function () { return null; });
 
   // ------------------------------------------------------------ OffscreenCanvas
+  const clone = g.__rhClone;
+  function requireAttached(canvas) {
+    if (canvas[S].detached) throw domError('The OffscreenCanvas has been transferred.', 'InvalidStateError');
+  }
   class OffscreenCanvas extends g.EventTarget {
-    constructor(w, h) { super(); hidden(this, S, { surface: newSurface(w >>> 0, h >>> 0, this), ctx: null, type: null }); }
+    constructor(w, h) {
+      super();
+      hidden(this, S, { surface: newSurface(w >>> 0, h >>> 0, this), ctx: null, type: null, detached: false });
+      clone.offscreen.add(this);
+    }
     get width() { return this[S].surface.width; }
-    set width(v) { const s = this[S].surface; s.width = v >>> 0; if (!['webgl', 'webgl2'].includes(this[S].type)) N.canvasResize(s.id, s.width, s.height); if (['webgl', 'webgl2'].includes(this[S].type)) N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
+    set width(v) { requireAttached(this); const s = this[S].surface; s.width = v >>> 0; if (!['webgl', 'webgl2'].includes(this[S].type)) N.canvasResize(s.id, s.width, s.height); if (['webgl', 'webgl2'].includes(this[S].type)) N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
     get height() { return this[S].surface.height; }
-    set height(v) { const s = this[S].surface; s.height = v >>> 0; if (!['webgl', 'webgl2'].includes(this[S].type)) N.canvasResize(s.id, s.width, s.height); if (['webgl', 'webgl2'].includes(this[S].type)) N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
+    set height(v) { requireAttached(this); const s = this[S].surface; s.height = v >>> 0; if (!['webgl', 'webgl2'].includes(this[S].type)) N.canvasResize(s.id, s.width, s.height); if (['webgl', 'webgl2'].includes(this[S].type)) N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
     getContext(type, attrs = {}) {
+      requireAttached(this);
       type = String(type);
       if (type === 'experimental-webgl') type = 'webgl';
       if (this[S].ctx) return this[S].type === type ? this[S].ctx : null;
@@ -718,12 +727,25 @@
       if (type === 'webgl' || type === 'webgl2') { const c = N.makeWebGLContext(this, this[S].surface, attrs === null ? {} : attrs, type === 'webgl2' ? 2 : 1); if (c) { this[S].ctx = c; this[S].type = type; } return c; }
       return null;
     }
-    transferToImageBitmap() { const s = this[S].surface; const bm = makeBitmap(s.width, s.height, pixelsOf(s)); N.canvasResize(s.id, s.width, s.height); return bm; }
+    transferToImageBitmap() { requireAttached(this); const s = this[S].surface; const bm = makeBitmap(s.width, s.height, pixelsOf(s)); N.canvasResize(s.id, s.width, s.height); return bm; }
     convertToBlob(options = {}) {
+      if (this[S].detached) return Promise.reject(domError('The OffscreenCanvas has been transferred.', 'InvalidStateError'));
       const bytes = encode(this[S].surface, options.type, options.quality);
       return bytes ? Promise.resolve(new g.Blob([bytes], { type: mimeOf(options.type) })) : Promise.reject(domError('The image is empty.', 'IndexSizeError'));
     }
   }
+  clone.canvasSize = canvas => [canvas[S].surface.width, canvas[S].surface.height];
+  clone.checkCanvasTransfer = canvas => {
+    if (canvas[S].detached) throw domError('The OffscreenCanvas has already been transferred.', 'DataCloneError');
+    if (canvas[S].type !== null) throw domError('The OffscreenCanvas has a rendering context.', 'InvalidStateError');
+  };
+  clone.detachCanvas = canvas => {
+    const state = canvas[S];
+    N.canvasFree(state.surface.id);
+    state.surface.width = state.surface.height = 0;
+    state.detached = true;
+  };
+  clone.receiveCanvas = size => new OffscreenCanvas(size[0], size[1]);
   tag(OffscreenCanvas, 'OffscreenCanvas');
   N.installHandlers(OffscreenCanvas.prototype, ['contextlost', 'contextrestored']);
   class OffscreenCanvasRenderingContext2D { constructor() { ILLEGAL(); } }

@@ -16,6 +16,8 @@ const ACC: u8 = CONFIGURABLE | ENUMERABLE;
 #[allow(dead_code)]
 pub(crate) enum Reflect {
     Str,
+    NullableStr,
+    Popover,
     Bool,
     /// Number (`NaN`-free: 0 when missing)
     Num,
@@ -38,6 +40,8 @@ fn reflect_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let raw = with_doc(n.doc, |doc| doc.attr(n.node, spec.attr).map(|s| s.to_string()));
     Ok(match spec.kind {
         Reflect::Str => Value::str(raw.as_deref().unwrap_or("")),
+        Reflect::Popover => raw.as_deref().map(Document::popover_mode).map(Value::str).unwrap_or(Value::Null),
+        Reflect::NullableStr => raw.as_deref().map(Value::str).unwrap_or(Value::Null),
         Reflect::Bool => Value::Bool(raw.is_some()),
         Reflect::Num => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0)),
         Reflect::Int(d) => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(d as f64)),
@@ -57,6 +61,9 @@ fn reflect_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
         Reflect::Bool => {
             let b = realm.to_boolean(&v);
             set_attribute(n, spec.attr, if b { Some("") } else { None });
+        }
+        Reflect::NullableStr | Reflect::Popover if v.is_nullish() => {
+            if get_attribute(n, spec.attr).is_some() { set_attribute(n, spec.attr, None); }
         }
         Reflect::Num | Reflect::Int(_) => {
             let num = realm.to_number(v)?;
@@ -731,29 +738,31 @@ pub(crate) fn get_html(realm: &mut Realm, this: Value, args: &[Value]) -> JsResu
     if !with_doc(n.doc, |doc| doc.is_html) {
         return fragment_serialize(realm, n, false);
     }
-    let roots: Vec<(NodeId, NodeId)> = with_doc(n.doc, |doc| doc.shadow_roots.iter().map(|(&h, &r)| (h, r)).collect());
-    let mut chosen: std::collections::HashMap<NodeId, (NodeId, String)> = std::collections::HashMap::new();
-    for (host, root) in roots {
-        let rr = NodeRef { doc: n.doc, node: root };
-        let Some(info) = crate::shadow::shadow_info(rr) else { continue };
-        if !((serializable && info.serializable) || listed.contains(&rr)) {
-            continue;
+    let s = with_doc(n.doc, |doc| {
+        if !serializable && listed.is_empty() {
+            return doc.serialize_with_shadows(n.node, false, None);
         }
-        let mut open = format!("<template shadowrootmode=\"{}\"", if info.open { "open" } else { "closed" });
-        if info.delegates_focus {
-            open.push_str(" shadowrootdelegatesfocus=\"\"");
-        }
-        if info.serializable {
-            open.push_str(" shadowrootserializable=\"\"");
-        }
-        if info.clonable {
-            open.push_str(" shadowrootclonable=\"\"");
-        }
-        open.push('>');
-        chosen.insert(host, (root, open));
-    }
-    let f = |h: NodeId| chosen.get(&h).cloned();
-    let s = with_doc(n.doc, |doc| doc.serialize_with_shadows(n.node, false, Some(&f)));
+        let choose = |host: NodeId| {
+            let root = doc.shadow_root(host)?;
+            let info = doc.shadow_info.get(&root)?;
+            if !(serializable && info.serializable) && !listed.contains(&NodeRef { doc: n.doc, node: root }) {
+                return None;
+            }
+            let mut open = format!("<template shadowrootmode=\"{}\"", if info.open { "open" } else { "closed" });
+            if info.delegates_focus {
+                open.push_str(" shadowrootdelegatesfocus=\"\"");
+            }
+            if info.serializable {
+                open.push_str(" shadowrootserializable=\"\"");
+            }
+            if info.clonable {
+                open.push_str(" shadowrootclonable=\"\"");
+            }
+            open.push('>');
+            Some((root, open))
+        };
+        doc.serialize_with_shadows(n.node, false, Some(&choose))
+    });
     Ok(Value::str(&s))
 }
 
@@ -932,9 +941,8 @@ fn e_closest(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     let n = this_node(realm, &this, "closest")?;
     let s = arg_str(realm, args, 0)?;
     let list = node::parse_selectors(realm, &s)?;
-    let found = with_doc(n.doc, |doc| {
-        let state = node::scoped_state(doc, n.node);
-        let matcher = rabbithole_css::selector::SelectorMatcher::new(doc, &state);
+    let found = node::with_selector_scope(n, |doc, state| {
+        let matcher = rabbithole_css::selector::SelectorMatcher::new(doc, state);
         let mut cur = Some(n.node);
         while let Some(c) = cur {
             match doc.element(c) {
@@ -1496,7 +1504,7 @@ fn e_scroll_by(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     Ok(Value::Undefined)
 }
 
-fn e_focus(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+pub(crate) fn e_focus(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "focus")?;
     if forward_to_frame(n, "focus") {
         return Ok(Value::Undefined);
@@ -1575,17 +1583,13 @@ fn e_hidden_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
 
 fn e_tab_index_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "tabIndex")?;
-    if let Some(v) = get_attribute(n, "tabindex").and_then(|s| s.trim().parse::<f64>().ok()) {
-        return Ok(Value::Number(v));
-    }
-    let tag = tag_of(n).unwrap_or_default();
-    Ok(Value::Number(if matches!(tag.as_str(), "a" | "input" | "button" | "select" | "textarea" | "iframe") { 0.0 } else { -1.0 }))
+    Ok(Value::Number(with_doc(n.doc, |doc| doc.tab_index(n.node)) as f64))
 }
 
 fn e_tab_index_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "tabIndex")?;
-    let v = realm.to_number(arg(args, 0))?;
-    set_attribute(n, "tabindex", Some(&format!("{}", v as i64)));
+    let v = realm.to_int32(arg(args, 0))?;
+    set_attribute(n, "tabindex", Some(&v.to_string()));
     Ok(Value::Undefined)
 }
 
@@ -1623,16 +1627,7 @@ fn e_content_editable_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsR
 /// `contenteditable` value says so.
 fn e_is_content_editable(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "isContentEditable")?;
-    let editable = with_doc(n.doc, |doc| {
-        let mut cur = Some(n.node);
-        while let Some(c) = cur {
-            if let Some((on, _)) = content_editable_state(doc.attr(c, "contenteditable")) {
-                return on;
-            }
-            cur = doc.parent(c);
-        }
-        false
-    });
+    let editable = with_doc(n.doc, |doc| doc.editing_host(n.node).is_some());
     Ok(Value::Bool(editable))
 }
 
@@ -2585,11 +2580,53 @@ pub(crate) fn install(realm: &mut Realm) {
     m(realm, "releasePointerCapture", 1, e_noop);
     m(realm, "hasPointerCapture", 1, node_false);
     m(realm, "checkVisibility", 0, node_true);
-    reflect(realm, el, "role", "role", Reflect::Str);
-    for aria in ["label", "hidden", "expanded", "controls", "describedby", "labelledby", "live", "selected", "checked", "disabled", "pressed", "current", "haspopup", "valuenow", "valuemin", "valuemax", "valuetext", "level", "modal", "busy", "atomic", "orientation", "sort", "readonly", "required", "invalid", "multiline", "multiselectable", "placeholder", "roledescription", "keyshortcuts", "description", "colcount", "rowcount", "setsize", "posinset"] {
-        let prop = format!("aria{}{}", aria[..1].to_ascii_uppercase(), &aria[1..]);
-        let attr: &'static str = Box::leak(format!("aria-{aria}").into_boxed_str());
-        reflect(realm, el, &prop, attr, Reflect::Str);
+    for (prop, attr) in [
+        ("role", "role"),
+        ("ariaAtomic", "aria-atomic"),
+        ("ariaAutoComplete", "aria-autocomplete"),
+        ("ariaBrailleLabel", "aria-braillelabel"),
+        ("ariaBrailleRoleDescription", "aria-brailleroledescription"),
+        ("ariaBusy", "aria-busy"),
+        ("ariaChecked", "aria-checked"),
+        ("ariaColCount", "aria-colcount"),
+        ("ariaColIndex", "aria-colindex"),
+        ("ariaColIndexText", "aria-colindextext"),
+        ("ariaColSpan", "aria-colspan"),
+        ("ariaCurrent", "aria-current"),
+        ("ariaDescription", "aria-description"),
+        ("ariaDisabled", "aria-disabled"),
+        ("ariaExpanded", "aria-expanded"),
+        ("ariaHasPopup", "aria-haspopup"),
+        ("ariaHidden", "aria-hidden"),
+        ("ariaInvalid", "aria-invalid"),
+        ("ariaKeyShortcuts", "aria-keyshortcuts"),
+        ("ariaLabel", "aria-label"),
+        ("ariaLevel", "aria-level"),
+        ("ariaLive", "aria-live"),
+        ("ariaModal", "aria-modal"),
+        ("ariaMultiLine", "aria-multiline"),
+        ("ariaMultiSelectable", "aria-multiselectable"),
+        ("ariaOrientation", "aria-orientation"),
+        ("ariaPlaceholder", "aria-placeholder"),
+        ("ariaPosInSet", "aria-posinset"),
+        ("ariaPressed", "aria-pressed"),
+        ("ariaReadOnly", "aria-readonly"),
+        ("ariaRelevant", "aria-relevant"),
+        ("ariaRequired", "aria-required"),
+        ("ariaRoleDescription", "aria-roledescription"),
+        ("ariaRowCount", "aria-rowcount"),
+        ("ariaRowIndex", "aria-rowindex"),
+        ("ariaRowIndexText", "aria-rowindextext"),
+        ("ariaRowSpan", "aria-rowspan"),
+        ("ariaSelected", "aria-selected"),
+        ("ariaSetSize", "aria-setsize"),
+        ("ariaSort", "aria-sort"),
+        ("ariaValueMax", "aria-valuemax"),
+        ("ariaValueMin", "aria-valuemin"),
+        ("ariaValueNow", "aria-valuenow"),
+        ("ariaValueText", "aria-valuetext"),
+    ] {
+        reflect(realm, el, prop, attr, Reflect::NullableStr);
     }
     crate::events::install_handler_props(realm, el, EVENT_HANDLER_NAMES);
 
@@ -2608,9 +2645,10 @@ pub(crate) fn install(realm: &mut Realm) {
     hacc(realm, "offsetTop", e_offset_top, None);
     hacc(realm, "offsetLeft", e_offset_left, None);
     hacc(realm, "offsetParent", e_offset_parent, None);
-    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("dir", "dir"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize"), ("nonce", "nonce"), ("enterKeyHint", "enterkeyhint"), ("inputMode", "inputmode"), ("popover", "popover")] {
+    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize"), ("nonce", "nonce")] {
         reflect(realm, html, prop, attr, Reflect::Str);
     }
+    reflect(realm, html, "popover", "popover", Reflect::Popover);
     reflect(realm, html, "draggable", "draggable", Reflect::Bool);
     reflect(realm, html, "spellcheck", "spellcheck", Reflect::Bool);
     reflect(realm, html, "inert", "inert", Reflect::Bool);
@@ -2708,7 +2746,7 @@ pub(crate) fn install(realm: &mut Realm) {
         realm.define_accessor(a, name, Some(g), None, ACC);
     }
     realm.define_method(a, "toString", 0, a_to_string);
-    for (p, at) in [("target", "target"), ("rel", "rel"), ("download", "download"), ("hreflang", "hreflang"), ("type", "type"), ("referrerPolicy", "referrerpolicy"), ("ping", "ping"), ("name", "name")] {
+    for (p, at) in [("target", "target"), ("rel", "rel"), ("download", "download"), ("hreflang", "hreflang"), ("type", "type"), ("ping", "ping"), ("name", "name")] {
         reflect(realm, a, p, at, Reflect::Str);
     }
     realm.define_accessor(a, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
@@ -2716,6 +2754,7 @@ pub(crate) fn install(realm: &mut Realm) {
 
     // --- HTMLInputElement
     let input = define_class(realm, "HTMLInputElement", Some("HTMLElement"), crate::host::html_element_ctor);
+    realm.define_accessor(input, "popoverTargetElement", Some(popover_target_get), Some(popover_target_set), ACC);
     realm.define_accessor(input, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(input, "defaultValue", Some(input_default_value_get), Some(input_default_value_set), ACC);
     realm.define_accessor(input, "checked", Some(input_checked_get), Some(input_checked_set), ACC);
@@ -2843,7 +2882,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(img, "width", Some(e_offset_width), Some(img_width_set), ACC);
     realm.define_accessor(img, "height", Some(e_offset_height), Some(img_height_set), ACC);
     realm.define_method(img, "decode", 0, img_decode);
-    for (p, at) in [("alt", "alt"), ("sizes", "sizes"), ("crossOrigin", "crossorigin"), ("loading", "loading"), ("decoding", "decoding"), ("referrerPolicy", "referrerpolicy"), ("useMap", "usemap"), ("fetchPriority", "fetchpriority")] {
+    for (p, at) in [("alt", "alt"), ("sizes", "sizes"), ("useMap", "usemap")] {
         reflect(realm, img, p, at, Reflect::Str);
     }
     reflect(realm, img, "isMap", "ismap", Reflect::Bool);
@@ -2853,7 +2892,7 @@ pub(crate) fn install(realm: &mut Realm) {
     // --- HTMLScriptElement
     let script = define_class(realm, "HTMLScriptElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(script, "text", Some(script_text_get), Some(script_text_set), ACC);
-    for (p, at) in [("type", "type"), ("charset", "charset"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("referrerPolicy", "referrerpolicy"), ("nonce", "nonce")] {
+    for (p, at) in [("type", "type"), ("charset", "charset"), ("integrity", "integrity"), ("nonce", "nonce")] {
         reflect(realm, script, p, at, Reflect::Str);
     }
     reflect(realm, script, "src", "src", Reflect::Url);
@@ -2869,7 +2908,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(link, "sheet", Some(style_sheet), None, ACC);
     realm.define_accessor(link, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
     reflect(realm, link, "href", "href", Reflect::Url);
-    for (p, at) in [("rel", "rel"), ("type", "type"), ("media", "media"), ("as", "as"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("hreflang", "hreflang"), ("referrerPolicy", "referrerpolicy"), ("imageSrcset", "imagesrcset")] {
+    for (p, at) in [("rel", "rel"), ("type", "type"), ("media", "media"), ("integrity", "integrity"), ("hreflang", "hreflang"), ("imageSrcset", "imagesrcset")] {
         // (`sizes` is a DOMTokenList, reflected from the table in html.js.)
         reflect(realm, link, p, at, Reflect::Str);
     }
@@ -2880,7 +2919,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(iframe, "contentDocument", Some(iframe_content_document), None, ACC);
     reflect(realm, iframe, "src", "src", Reflect::Url);
     // (`sandbox` is a DOMTokenList, reflected from the table in html.js.)
-    for (p, at) in [("name", "name"), ("allow", "allow"), ("srcdoc", "srcdoc"), ("loading", "loading"), ("referrerPolicy", "referrerpolicy"), ("width", "width"), ("height", "height"), ("title", "title")] {
+    for (p, at) in [("name", "name"), ("allow", "allow"), ("srcdoc", "srcdoc"), ("width", "width"), ("height", "height"), ("title", "title")] {
         reflect(realm, iframe, p, at, Reflect::Str);
     }
     reflect(realm, iframe, "allowFullscreen", "allowfullscreen", Reflect::Bool);
@@ -2909,6 +2948,7 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, canvas, "height", "height", Reflect::Int(150));
     // --- HTMLButtonElement
     let button = define_class(realm, "HTMLButtonElement", Some("HTMLElement"), crate::host::html_element_ctor);
+    realm.define_accessor(button, "popoverTargetElement", Some(popover_target_get), Some(popover_target_set), ACC);
     realm.define_accessor(button, "type", Some(input_type_get), Some(input_type_set), ACC);
     realm.define_accessor(button, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(button, "form", Some(input_form), None, ACC);
@@ -2942,7 +2982,7 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, media, "src", "src", Reflect::Url);
     reflect(realm, media, "currentSrc", "src", Reflect::Url);
     reflect(realm, media, "poster", "poster", Reflect::Url);
-    for (p, at) in [("preload", "preload"), ("crossOrigin", "crossorigin")] {
+    for (p, at) in [("preload", "preload")] {
         reflect(realm, media, p, at, Reflect::Str);
     }
     for (p, at) in [("autoplay", "autoplay"), ("controls", "controls"), ("loop", "loop"), ("muted", "muted"), ("playsInline", "playsinline")] {
@@ -2956,6 +2996,7 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "HTMLAudioElement", Some("HTMLMediaElement"), crate::host::html_element_ctor);
     // --- SVGElement
     let svg = define_class(realm, "SVGElement", Some("Element"), illegal_ctor);
+    realm.define_accessor(svg, "tabIndex", Some(e_tab_index_get), Some(e_tab_index_set), ACC);
     realm.define_accessor(svg, "ownerSVGElement", Some(svg_owner), None, ACC);
     realm.define_accessor(svg, "style", Some(e_style), Some(e_style_set), ACC);
     realm.define_accessor(svg, "dataset", Some(e_dataset), None, ACC);
@@ -3041,9 +3082,32 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(rect, "toJSON", 0, dom_rect_to_json);
 }
 
+/// Opening a dialog closes auto and hint popovers above its highest
+/// popover ancestor. Dismiss through the normal event path, outside the
+/// document borrow, because beforetoggle can synchronously modify the DOM.
+fn dismiss_popovers_for_dialog(realm: &mut Realm, dialog: NodeRef) {
+    let popovers: Vec<_> = with_doc(dialog.doc, |doc| {
+        doc.light_dismiss_popovers().rev().take_while(|&popover| {
+            !std::iter::successors(doc.flat_parent(dialog.node), |&n| doc.flat_parent(n)).any(|n| n == popover)
+        }).collect()
+    });
+    for node in popovers {
+        if with_doc(dialog.doc, |doc| doc.popover_open(node)) {
+            crate::events::popover_action(realm, NodeRef { doc: dialog.doc, node }, true);
+        }
+    }
+}
+
 fn dialog_show(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "show")?;
+    if with_doc(n.doc, |doc| doc.attr(n.node, "open").is_some()) {
+        if with_doc(n.doc, |doc| doc.is_modal(n.node)) {
+            return Err(crate::misc::dom_exception(realm, "InvalidStateError", "The dialog is already open as a modal dialog."));
+        }
+        return Ok(Value::Undefined);
+    }
     set_attribute(n, "open", Some(""));
+    dismiss_popovers_for_dialog(realm, n);
     Ok(Value::Undefined)
 }
 
@@ -3051,7 +3115,10 @@ fn dialog_show(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 /// page over its `::backdrop`, `:modal`).
 fn dialog_show_modal(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "showModal")?;
-    let (open, modal, connected) = with_doc(n.doc, |doc| (doc.attr(n.node, "open").is_some(), doc.top_layer.contains(&n.node), doc.is_connected(n.node)));
+    let (open, modal, connected) = with_doc(n.doc, |doc| (doc.attr(n.node, "open").is_some(), doc.is_modal(n.node), doc.is_connected(n.node)));
+    if with_doc(n.doc, |doc| doc.popover_open(n.node)) {
+        return Err(crate::misc::dom_exception(realm, "InvalidStateError", "The dialog is showing as a popover."));
+    }
     if open && modal {
         return Ok(Value::Undefined);
     }
@@ -3063,6 +3130,7 @@ fn dialog_show_modal(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
     }
     with_doc(n.doc, |doc| doc.top_layer.push(n.node));
     set_attribute(n, "open", Some(""));
+    dismiss_popovers_for_dialog(realm, n);
     Ok(Value::Undefined)
 }
 
@@ -3214,6 +3282,49 @@ fn e_has_attribute_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let ns = ns_arg(realm, args, 0)?;
     let local = arg_str(realm, args, 1)?;
     Ok(Value::Bool(find_attr_ns(n, ns.as_deref(), &local).is_some()))
+}
+
+fn popover_target_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "popoverTargetElement")?;
+    let target = with_doc(n.doc, |doc| doc.popover_target(n.node));
+    Ok(target.map(|node| wrap(realm, NodeRef { doc: n.doc, node })).unwrap_or(Value::Null))
+}
+
+fn popover_target_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "popoverTargetElement")?;
+    let value = arg(args, 0);
+    if value.is_nullish() {
+        set_attribute(n, "popovertarget", None);
+    } else {
+        let target = node_of(realm, &value).filter(|t| with_doc(t.doc, |doc| doc.element(t.node).is_some()))
+            .ok_or_else(|| realm.throw_type_error("Expected an Element"))?;
+        set_attribute(n, "popovertarget", Some(""));
+        if n.doc == target.doc { with_doc(n.doc, |doc| doc.explicit_popover_targets.insert(n.node, target.node)); }
+    }
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn popover_state(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &arg(args, 0), "popover")?;
+    if let Some(value) = args.get(1) {
+        let open = realm.to_boolean(value);
+        let source = args.get(2).and_then(|v| node_of(realm, v)).filter(|s| s.doc == n.doc).map(|s| s.node);
+        with_doc(n.doc, |doc| {
+            if !open || doc.is_connected(n.node) && !doc.is_modal(n.node)
+                && doc.element(n.node).is_some_and(|el| el.ns == rabbithole_dom::Namespace::Html && el.attr("popover").is_some()) {
+                doc.set_popover_open_from(n.node, open, source);
+            }
+        });
+        if n.doc == 0 { mark_dirty(); }
+    }
+    Ok(Value::Bool(with_doc(n.doc, |doc| doc.popover_open(n.node))))
+}
+
+pub(crate) fn open_popovers(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &arg(args, 0), "popover")?;
+    let nodes: Vec<_> = with_doc(n.doc, |doc| doc.top_layer.iter().copied().filter(|&id| doc.popover_open(id)).collect());
+    let values = nodes.into_iter().map(|node| wrap(realm, NodeRef { doc: n.doc, node })).collect();
+    Ok(realm.new_array_value(values))
 }
 
 /// `__rhNative.attrNamespace(element, storedName)`: the attribute's

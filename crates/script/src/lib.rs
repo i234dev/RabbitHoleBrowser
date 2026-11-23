@@ -16,14 +16,18 @@ mod host;
 mod misc;
 mod modules;
 mod live;
+pub use live::SharedRange;
+pub use host::AuxiliaryDocument;
 mod media;
 mod node;
 mod canvas2d;
+mod webcrypto;
 mod webgl;
 mod natives;
 mod webanim;
 pub use webanim::{CssAnimationInfo, WebAnimEffect, WebAnimKeyframe, WebAnimRegistry, WebAnimations};
 mod sockets;
+mod rtc;
 mod observers;
 mod shadow;
 mod window;
@@ -98,6 +102,7 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:html.js", include_str!("js/html.js")),
     ("rabbithole:observers.js", include_str!("js/observers.js")),
     ("rabbithole:platform.js", include_str!("js/platform.js")),
+    ("rabbithole:editing.js", include_str!("js/editing.js")),
     ("rabbithole:idb.js", include_str!("js/idb.js")),
     ("rabbithole:crypto.js", include_str!("js/crypto.js")),
     ("rabbithole:canvas.js", include_str!("js/canvas.js")),
@@ -109,6 +114,7 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:svg.js", include_str!("js/svg.js")),
     ("rabbithole:media.js", include_str!("js/media.js")),
     ("rabbithole:webaudio.js", include_str!("js/webaudio.js")),
+    ("rabbithole:webrtc.js", include_str!("js/webrtc.js")),
     ("rabbithole:observable.js", include_str!("js/observable.js")),
     ("rabbithole:webidl.js", include_str!("js/webidl.js")),
 ];
@@ -150,7 +156,7 @@ pub enum EventDetail {
     /// (`deltaMode` 0).
     Wheel { x: f32, y: f32, dx: f32, dy: f32, ctrl: bool, shift: bool, alt: bool, meta: bool },
     Key { key: String, code: String, ctrl: bool, shift: bool, alt: bool, meta: bool, repeat: bool },
-    Input { data: Option<String>, input_type: String, is_composing: bool },
+    Input { data: Option<String>, input_type: String, is_composing: bool, target_range: Option<(rabbithole_dom::BoundaryPoint, rabbithole_dom::BoundaryPoint)> },
     /// `transition*` (TransitionEvent: `name` = propertyName) or
     /// `animation*` (AnimationEvent: `name` = animationName) events.
     Animation { name: String, elapsed: f32, pseudo: String, transition: bool },
@@ -248,6 +254,10 @@ pub enum FrameCall {
     Method { node: NodeId, name: String },
     /// Read global property `name` of the frame's window.
     GetGlobal { name: String },
+    /// Assign a structured-clone value to a property in the frame's realm.
+    SetGlobal { name: String, value: String },
+    /// Test for a property in the frame's realm, without calling its getter.
+    HasGlobal { name: String },
     /// Call the frame's global function `name` with the arguments (a
     /// structured clone, serialized).
     CallGlobal { name: String, args: String },
@@ -268,6 +278,10 @@ pub enum FrameReply {
     Bool(bool),
     /// A node of the frame's document.
     Node(NodeId),
+    /// A node belonging to a detached document returned by a same-origin realm.
+    AuxiliaryNode(AuxiliaryDocument, NodeId),
+    /// Shared live endpoints of a same-origin DOM Range.
+    Range(SharedRange),
     /// A function (the caller wraps it to call it through `CallGlobal`).
     Function,
     /// Any other value, as a serialized structured clone.
@@ -313,6 +327,8 @@ impl ScriptHost {
             child_lists: HashMap::default(),
             protos: HashMap::default(),
             url_links,
+            pair_iterator_owner: realm.new_private_symbol(rabbithole_js::JsStr::new("iterator.owner")),
+            form_data_files: realm.new_private_symbol(rabbithole_js::JsStr::new("FormData.files")),
             listeners: HashMap::default(),
             listener_counts: HashMap::default(),
             timers: Vec::new(),
@@ -526,7 +542,6 @@ impl ScriptHost {
         st.child_lists.retain(|k, _| k.doc != doc);
         st.ce_upgraded.retain(|k| k.doc != doc);
         st.ce_failed.retain(|k| k.doc != doc);
-        st.shadow.info.retain(|k, _| k.doc != doc);
         st.shadow.slot_cache.retain(|k, _| k.doc != doc);
         st.shadow.manual.retain(|k, _| k.doc != doc);
         st.listeners.retain(|k, _| !matches!(k, TargetKey::Node(n) if n.doc == doc));
@@ -562,6 +577,28 @@ impl ScriptHost {
             let r = events::dispatch(realm, TargetKey::Node(NodeRef::main(target)), event_type, init, true);
             shadow::flush(realm);
             r
+        })
+    }
+
+    pub fn popover_action(&mut self, env: &mut dyn HostEnv, target: NodeId, dismiss: bool) -> bool {
+        self.enter(env, |realm| {
+            let changed = events::popover_action(realm, NodeRef::main(target), dismiss);
+            shadow::flush(realm);
+            changed
+        })
+    }
+
+    /// Execute the default edit after a trusted beforeinput event. The
+    /// editing implementation is captured at startup and shared with
+    /// execCommand. The embedder sends input only if this changed the DOM.
+    pub fn user_edit(&mut self, env: &mut dyn HostEnv, target: NodeId, command: &str, text: &str) -> bool {
+        self.enter(env, |realm| {
+            let factory = state().borrow().factories.get("userEdit").cloned();
+            let Some(factory) = factory else { return false };
+            let host = host::wrap_main(realm, target);
+            let changed = host::call_logged(realm, &factory, Value::Undefined, &[host, Value::str(command), Value::str(text)], "keyboard editing");
+            shadow::flush(realm);
+            realm.to_boolean(&changed)
         })
     }
 

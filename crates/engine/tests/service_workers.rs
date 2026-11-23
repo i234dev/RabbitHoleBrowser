@@ -565,3 +565,67 @@ fn service_worker_messaging_round_trips_between_real_pages_and_worker_realm() {
     assert_eq!(engine.eval_in_page(&mut page, "broadcast.join()"), "'index.html:true'");
     assert_eq!(engine.eval_in_page(&mut second, "broadcast.join()"), "'other.html'");
 }
+
+#[test]
+fn form_submission_navigates_the_named_child_with_the_encoded_request() {
+    let html = r#"<!doctype html><iframe name="results"></iframe>
+        <form target="results" action="/receive" accept-charset="windows-1252">
+        <input name="q" value="&#233;"></form>"#;
+    let server = Server::new(&[("/form","text/html", html, &[]), ("/receive","text/html","<p>received</p>", &[])]);
+    let mut e = engine();
+    let mut page = e.load(&format!("{}/form", server.origin), Viewport { width: 640.0, height: 480.0 }).unwrap();
+    e.eval_in_page(&mut page, "document.forms[0].submit()");
+    wait(&e, &mut page, "document.querySelector('iframe').contentWindow.location.href.endsWith('/receive?q=%E9')");
+    assert_eq!(e.eval_in_page(&mut page, "document.querySelector('iframe').contentWindow.location.search"), "'?q=%E9'");
+    assert!(page.url.to_string().ends_with("/form"));
+}
+
+#[test]
+fn disconnected_forms_do_not_navigate_after_submit_handlers() {
+    let html = r#"<!doctype html><iframe name="result"></iframe>
+        <form id="form" action="/unexpected" target="result"><button>Submit</button></form>"#;
+    let server = Server::new(&[("/page", "text/html", html, &[]), ("/done", "text/html", "done", &[])]);
+    let mut e = engine();
+    let mut page = e.load(&format!("{}/page", server.origin), Viewport { width: 640.0, height: 480.0 }).unwrap();
+    e.eval_in_page(&mut page, r#"
+        const form = document.querySelector('form');
+        form.onsubmit = () => form.remove();
+        form.querySelector('button').click();
+        form.submit();
+        document.body.appendChild(form);
+        form.action = '/done';
+        form.submit();
+    "#);
+    wait(&e, &mut page, "document.querySelector('iframe').contentWindow.location.pathname === '/done'");
+    assert!(!server.requests.lock().unwrap().iter().any(|(path, _)| path.starts_with("/unexpected")));
+}
+
+#[test]
+fn fetch_and_xhr_send_the_effective_document_referrer_policy() {
+    let html = r#"<!doctype html><meta name="referrer" content="no-referrer"><script>
+        let completed = 0;
+        fetch('/fetch').then(() => completed++);
+        fetch(new Request('/override', {referrerPolicy:'origin'})).then(() => completed++);
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/xhr');
+        xhr.onload = () => completed++;
+        xhr.send();
+    </script>"#;
+    let server = Server::new(&[
+        ("/page", "text/html", html, &[("Referrer-Policy", "unsafe-url")]),
+        ("/fetch", "text/plain", "", &[]),
+        ("/override", "text/plain", "", &[]),
+        ("/xhr", "text/plain", "", &[]),
+    ]);
+    let mut engine = engine();
+    let mut page = engine.load(&format!("{}/page?private", server.origin), Viewport { width: 640.0, height: 480.0 }).unwrap();
+    wait(&engine, &mut page, "completed === 3");
+    let requests = server.requests.lock().unwrap();
+    let origin = format!("{}/", server.origin);
+    for (path, expected) in [("/fetch", None), ("/xhr", None), ("/override", Some(origin.as_str()))] {
+        let (_, headers) = requests.iter().find(|(p, _)| p == path).unwrap();
+        let referer = headers.lines().filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("referer")).map(|(_, value)| value.trim());
+        assert_eq!(referer, expected, "{path}");
+    }
+}

@@ -35,22 +35,13 @@
   }, true);
   method(Blob, 'textStream', function () { return this.stream().pipeThrough(new g.TextDecoderStream()); });
 
-  // File: a Blob with a name and modification time.
-  class File extends Blob {
-    constructor(bits, name, options = {}) {
-      if (arguments.length < 2) throw new TypeError(`Failed to construct 'File': 2 arguments required, but only ${arguments.length} present.`);
-      super(bits, options);
-      Object.setPrototypeOf(this, new.target.prototype);
-      hidden(this, S, { name: String(name).replace(/\//g, ':'), lastModified: options.lastModified !== undefined ? Number(options.lastModified) : Date.now(), relPath: '' });
-    }
-    get name() { return this[S] ? this[S].name : ''; }
-    get lastModified() { return this[S] ? this[S].lastModified : 0; }
-    get lastModifiedDate() { return new Date(this.lastModified); }
-    get webkitRelativePath() { return this[S] ? this[S].relPath : ''; }
-  }
-  tag(File, 'File');
-  define('File', File);
-  N.registerProto('File', File.prototype);
+  const File = g.File;
+  Object.setPrototypeOf(File, Blob);
+  Object.defineProperty(File, 'length', { value: 2, configurable: true });
+  defaults(File, {
+    lastModifiedDate() { return new Date(this.lastModified); },
+    webkitRelativePath: '',
+  });
   class FileList {
     constructor() { ILLEGAL(); }
     get length() { return this[S].length; }
@@ -72,6 +63,32 @@
   }
 
   // ----------------------------------------------------------- FileReader
+  const blobMime = Object.getOwnPropertyDescriptor(Blob.prototype, 'type').get;
+  const readBuffer = Blob.prototype.arrayBuffer;
+  function packageRead(buf, blob, kind, encoding) {
+    const bytes = new Uint8Array(buf);
+    switch (kind) {
+      case 'buffer': return buf;
+      case 'binary': { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); return s; }
+      case 'text': {
+        // File API "package data" for text: the encoding argument, else
+        // the type's charset, else UTF-8; a byte order mark wins.
+        const known = (l) => { try { return new g.TextDecoder(l).encoding; } catch (e) { return null; } };
+        let enc = encoding !== undefined ? known(String(encoding)) : null;
+        if (!enc) { const m = /;\s*charset=["']?([^;"'\s]+)/i.exec(blobMime.call(blob) || ''); if (m) enc = known(m[1]); }
+        if (!enc) enc = 'utf-8';
+        if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) enc = 'utf-8';
+        else if (bytes[0] === 0xFE && bytes[1] === 0xFF) enc = 'utf-16be';
+        else if (bytes[0] === 0xFF && bytes[1] === 0xFE) enc = 'utf-16le';
+        return new g.TextDecoder(enc).decode(bytes);
+      }
+      default: {
+        let s = '';
+        for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+        return `data:${blobMime.call(blob) || 'application/octet-stream'};base64,${g.btoa(s)}`;
+      }
+    }
+  }
   const FR_STATES = { EMPTY: 0, LOADING: 1, DONE: 2 };
   class FileReader extends g.EventTarget {
     constructor() { super(); hidden(this, S, { state: 0, result: null, error: null, gen: 0 }); }
@@ -87,7 +104,9 @@
       if (st.state === 0 || st.state === 2) { st.result = null; return; }
       st.gen++;
       st.state = 2; st.result = null;
-      fire(this, 'abort'); fire(this, 'loadend');
+      const generation = st.gen;
+      fire(this, 'abort');
+      if (st.gen === generation) fire(this, 'loadend');
     }
   }
   for (const [k, v] of Object.entries(FR_STATES)) { Object.defineProperty(FileReader, k, { value: v, enumerable: true }); Object.defineProperty(FileReader.prototype, k, { value: v, enumerable: true }); }
@@ -95,7 +114,8 @@
   N.installHandlers(FileReader.prototype, ['loadstart', 'progress', 'load', 'abort', 'error', 'loadend']);
   const fire = (target, type, init) => target.dispatchEvent(new g.ProgressEvent(type, init || {}));
   function read(fr, blob, kind, encoding) {
-    if (!(blob instanceof Blob)) throw new TypeError(`Failed to execute 'readAs...' on 'FileReader': parameter 1 is not of type 'Blob'.`);
+    blobMime.call(blob);
+    if (encoding !== undefined) encoding = `${encoding}`;
     const st = fr[S];
     if (st.state === 1) throw domError("Failed to execute 'readAs...' on 'FileReader': The object is already busy reading Blobs.", 'InvalidStateError');
     st.state = 1; st.result = null; st.error = null;
@@ -103,51 +123,41 @@
     setTimeout(() => {
       if (gen !== st.gen) return;
       fire(fr, 'loadstart');
-      blob.arrayBuffer().then((buf) => {
+      if (gen !== st.gen) return;
+      readBuffer.call(blob).then((buf) => {
         if (gen !== st.gen) return;
-        const bytes = new Uint8Array(buf);
-        let result;
-        switch (kind) {
-          case 'buffer': result = buf; break;
-          case 'binary': { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); result = s; break; }
-          case 'text': {
-            // File API "package data" for text: the encoding argument, else
-            // the type's charset, else UTF-8; a byte order mark wins.
-            const known = (l) => { try { return new g.TextDecoder(l).encoding; } catch (e) { return null; } };
-            let enc = encoding !== undefined ? known(String(encoding)) : null;
-            if (!enc) { const m = /;\s*charset=["']?([^;"'\s]+)/i.exec(blob.type || ''); if (m) enc = known(m[1]); }
-            if (!enc) enc = 'utf-8';
-            if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) enc = 'utf-8';
-            else if (bytes[0] === 0xFE && bytes[1] === 0xFF) enc = 'utf-16be';
-            else if (bytes[0] === 0xFF && bytes[1] === 0xFE) enc = 'utf-16le';
-            result = new g.TextDecoder(enc).decode(bytes);
-            break;
-          }
-          default: {
-            let s = '';
-            for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
-            result = `data:${blob.type || 'application/octet-stream'};base64,${g.btoa(s)}`;
-          }
-        }
-        fire(fr, 'progress', { lengthComputable: true, loaded: bytes.length, total: bytes.length });
+        const result = packageRead(buf, blob, kind, encoding);
+        const loaded = buf.byteLength;
+        if (loaded) fire(fr, 'progress', { lengthComputable: true, loaded, total: loaded });
+        if (gen !== st.gen) return;
         st.state = 2; st.result = result;
-        fire(fr, 'load', { lengthComputable: true, loaded: bytes.length, total: bytes.length });
-        if (st.state === 2) fire(fr, 'loadend', { lengthComputable: true, loaded: bytes.length, total: bytes.length });
+        fire(fr, 'load', { lengthComputable: true, loaded, total: loaded });
+        if (gen === st.gen) fire(fr, 'loadend', { lengthComputable: true, loaded, total: loaded });
       }, (e) => {
         if (gen !== st.gen) return;
         st.state = 2; st.error = domError(String(e && e.message || e), 'NotReadableError');
-        fire(fr, 'error'); fire(fr, 'loadend');
+        fire(fr, 'error');
+        if (st.gen === gen) fire(fr, 'loadend');
       });
     }, 0);
   }
   define('FileReader', FileReader);
-  class FileReaderSync {
-    constructor() { ILLEGAL(); }
+  if (N.readBlobBufferSync) {
+    class FileReaderSync {
+      #read(blob, kind, encoding) {
+        return packageRead(N.readBlobBufferSync(blob), blob, kind, encoding);
+      }
+      readAsArrayBuffer(blob) { return this.#read(blob, 'buffer'); }
+      readAsBinaryString(blob) { return this.#read(blob, 'binary'); }
+      readAsDataURL(blob) { return this.#read(blob, 'dataurl'); }
+      readAsText(blob, encoding) { return this.#read(blob, 'text', encoding); }
+    }
+    tag(FileReaderSync, 'FileReaderSync');
+    define('FileReaderSync', FileReaderSync);
   }
-  void FileReaderSync;
 
   // --------------------------------------------------------- TextEncoder
-  const TE = g.TextEncoder, TD = g.TextDecoder;
+  const TE = g.TextEncoder;
   defaults(TE, { encoding: 'utf-8' });
   method(TE, 'encodeInto', function (src, dest) {
     if (!(dest instanceof Uint8Array)) throw new TypeError("Failed to execute 'encodeInto' on 'TextEncoder': parameter 2 is not of type 'Uint8Array'.");
@@ -162,45 +172,6 @@
     }
     return { read, written };
   });
-  if (TD) {
-    const ctor = TD;
-    const labels = new WeakMap();
-    const Wrapped = function TextDecoder(label = 'utf-8', options = {}) {
-      if (!new.target) throw new TypeError("Failed to construct 'TextDecoder': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
-      const norm = normalizeLabel(label);
-      if (!norm) throw new RangeError(`Failed to construct 'TextDecoder': The encoding label provided ('${label}') is invalid.`);
-      const d = new ctor(norm, options);
-      Object.setPrototypeOf(d, new.target.prototype);
-      labels.set(d, { encoding: norm, fatal: !!(options && options.fatal), ignoreBOM: !!(options && options.ignoreBOM) });
-      return d;
-    };
-    Wrapped.prototype = ctor.prototype;
-    Object.defineProperty(ctor.prototype, 'constructor', { value: Wrapped, writable: true, configurable: true });
-    defaults(ctor, { encoding: function () { return (labels.get(this) || { encoding: 'utf-8' }).encoding; }, fatal: function () { return !!(labels.get(this) || {}).fatal; }, ignoreBOM: function () { return !!(labels.get(this) || {}).ignoreBOM; } });
-    define('TextDecoder', Wrapped);
-  }
-  function normalizeLabel(label) {
-    const l = String(label).trim().toLowerCase();
-    const MAP = {
-      'utf-8': ['unicode-1-1-utf-8', 'unicode11utf8', 'unicode20utf8', 'utf-8', 'utf8', 'x-unicode20utf8'],
-      'utf-16le': ['csunicode', 'iso-10646-ucs-2', 'ucs-2', 'unicode', 'unicodefeff', 'utf-16', 'utf-16le'],
-      'utf-16be': ['unicodefffe', 'utf-16be'],
-      'windows-1252': ['ansi_x3.4-1968', 'ascii', 'cp1252', 'cp819', 'csisolatin1', 'ibm819', 'iso-8859-1', 'iso-ir-100', 'iso8859-1', 'iso88591', 'iso_8859-1', 'iso_8859-1:1987', 'l1', 'latin1', 'us-ascii', 'windows-1252', 'x-cp1252'],
-      'iso-8859-2': ['csisolatin2', 'iso-8859-2', 'iso-ir-101', 'iso8859-2', 'iso88592', 'iso_8859-2', 'l2', 'latin2'],
-      'iso-8859-15': ['csisolatin9', 'iso-8859-15', 'iso8859-15', 'iso885915', 'iso_8859-15', 'l9'],
-      'windows-1251': ['cp1251', 'windows-1251', 'x-cp1251'],
-      'koi8-r': ['cskoi8r', 'koi', 'koi8', 'koi8-r', 'koi8_r'],
-      'shift_jis': ['csshiftjis', 'ms932', 'ms_kanji', 'shift-jis', 'shift_jis', 'sjis', 'windows-31j', 'x-sjis'],
-      'euc-jp': ['cseucpkdfmtjapanese', 'euc-jp', 'x-euc-jp'],
-      'gbk': ['chinese', 'csgb2312', 'csiso58gb231280', 'gb2312', 'gb_2312', 'gb_2312-80', 'gbk', 'iso-ir-58', 'x-gbk'],
-      'gb18030': ['gb18030'],
-      'big5': ['big5', 'big5-hkscs', 'cn-big5', 'csbig5', 'x-x-big5'],
-      'euc-kr': ['cseuckr', 'csksc56011987', 'euc-kr', 'iso-ir-149', 'korean', 'ks_c_5601-1987', 'ks_c_5601-1989', 'ksc5601', 'ksc_5601', 'windows-949'],
-    };
-    for (const [name, list] of Object.entries(MAP)) if (list.includes(l)) return name;
-    return /^(windows-12\d\d|iso-8859-\d+|ibm866|macintosh|x-mac-cyrillic|koi8-u|iso-2022-jp|x-user-defined)$/.test(l) ? l : null;
-  }
-
   // ------------------------------------------------------------------ URL
   defaults(g.URL, { username: function () { const m = /^[a-z][a-z0-9+.-]*:\/\/([^@/?#]*)@/i.exec(this.href); return m ? decodeURIComponent(m[1].split(':')[0]) && m[1].split(':')[0] : ''; }, password: function () { const m = /^[a-z][a-z0-9+.-]*:\/\/([^@/?#]*)@/i.exec(this.href); return m && m[1].includes(':') ? m[1].slice(m[1].indexOf(':') + 1) : ''; } });
 

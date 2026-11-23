@@ -70,6 +70,47 @@ pub struct CustomHighlight {
 }
 
 impl Document {
+    /// Changing document editability can change selectors anywhere in the tree.
+    pub fn set_design_mode(&mut self, enabled: bool) -> bool {
+        if self.design_mode == enabled {
+            return false;
+        }
+        self.design_mode = enabled;
+        self.epoch += 1;
+        if self.tracking {
+            self.log.overflow = true;
+        }
+        true
+    }
+
+    /// Outermost editable element within the nearest editing boundary.
+    pub fn editing_host(&self, node: NodeId) -> Option<NodeId> {
+        let mut host = None;
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n == Document::ROOT {
+                return if self.design_mode { self.html_element().or(host) } else { host };
+            }
+            if let Some(value) = self.attr(n, "contenteditable") {
+                if value.eq_ignore_ascii_case("false") { return host; }
+                if value.is_empty() || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("plaintext-only") {
+                    host = Some(n);
+                }
+            }
+            current = self.parent(n);
+        }
+        host
+    }
+
+    /// Focusing an editing host establishes its caret once. An explicit
+    /// removeAllRanges() afterwards leaves the editor without a caret.
+    pub fn focus_editing_host(&mut self, node: Option<NodeId>) {
+        let Some(host) = node.filter(|&n| self.editing_host(n) == Some(n)) else { return };
+        if self.selection().is_some_and(|s| self.editing_host(s.start.node) == Some(host) && self.editing_host(s.end.node) == Some(host)) { return; }
+        let point = BoundaryPoint { node: host, offset: 0 };
+        self.set_selection(point, point);
+    }
+
     /// The selection's range, if the selection is not empty.
     pub fn selection(&self) -> Option<SelectionRange> {
         let s = self.selection?;

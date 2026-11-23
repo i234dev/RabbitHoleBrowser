@@ -10,7 +10,7 @@ use rabbithole_net::Url;
 use rabbithole_script::{EventDetail, EventInit};
 
 use crate::forms::{control_kind, set_attr, ControlKind};
-use crate::scripting::{plain_init, ScriptOutcome};
+use crate::scripting::{plain_init, EngineEnv, ScriptOutcome};
 use crate::{Engine, Page};
 
 /// Keyboard modifiers held during a pointer event.
@@ -34,6 +34,8 @@ pub struct PointerState {
     pub hover: Option<NodeId>,
     /// Target and button of the press in progress.
     pub down: Option<(NodeId, u8)>,
+    /// The open popover related to the initial press (None for an outside press).
+    popover_press: Option<NodeId>,
     /// `pointerdown` was cancelled: compatibility mouse events
     /// (`mousedown`/`mouseup`) are suppressed until release.
     pub suppress_mouse: bool,
@@ -158,7 +160,7 @@ pub fn is_focusable(doc: &Document, n: NodeId) -> bool {
         "a" | "area" if el.attr("href").is_some() => true,
         "button" | "select" | "textarea" | "iframe" | "summary" => true,
         "input" => !el.attr("type").map(|t| t.eq_ignore_ascii_case("hidden")).unwrap_or(false),
-        _ => el.attr("tabindex").and_then(|t| t.trim().parse::<i32>().ok()).is_some() || el.attr("contenteditable").map(|v| !v.eq_ignore_ascii_case("false")).unwrap_or(false),
+        _ => doc.explicit_tab_index(n).is_some() || el.attr("contenteditable").map(|v| !v.eq_ignore_ascii_case("false")).unwrap_or(false),
     }
 }
 
@@ -172,7 +174,7 @@ impl Page {
             if !is_focusable(doc, n) || self.styles.get(n)?.visibility != Visibility::Visible {
                 return None;
             }
-            let index = doc.attr(n, "tabindex").and_then(|t| t.trim().parse::<i32>().ok()).unwrap_or(0);
+            let index = doc.explicit_tab_index(n).unwrap_or(0);
             if index < 0 || self.styles.get(n)?.display == Display::Contents {
                 return None;
             }
@@ -343,11 +345,34 @@ impl Engine {
         (prevented, out)
     }
 
+    fn popover_action(&self, page: &mut Page, node: NodeId, dismiss: bool) -> ScriptOutcome {
+        if let Some(mut host) = page.script.host.take() {
+            let mut env = EngineEnv { engine: self, page };
+            host.realm().begin_task();
+            host.popover_action(&mut env, node, dismiss);
+            host.run_jobs(&mut env);
+            host.realm().set_deadline(None);
+            page.script.host = Some(host);
+            return self.settle(page, false);
+        }
+        let target = if dismiss { Some(node) } else { page.doc.popover_target(node) };
+        if let Some(target) = target.filter(|&t| page.doc.attr(t, "popover").is_some() && !page.doc.is_modal(t)) {
+            let action = page.doc.attr(node, "popovertargetaction").unwrap_or("toggle");
+            let open = !dismiss && (action.eq_ignore_ascii_case("show") || !action.eq_ignore_ascii_case("hide") && !page.doc.popover_open(target));
+            page.doc.set_popover_open_from(target, open, (!dismiss).then_some(node));
+            self.restyle(page);
+            return ScriptOutcome { relayout: true, ..ScriptOutcome::default() };
+        }
+        ScriptOutcome::default()
+    }
+
     /// Escape with a modal dialog open: a cancelable `cancel` at the
     /// topmost one, then (unless cancelled) it closes (`close` event).
     /// None when no modal dialog is open.
     pub fn cancel_modal(&self, page: &mut Page) -> Option<ScriptOutcome> {
-        let top = page.doc.top_layer.iter().rev().copied().find(|&n| page.doc.is_connected(n))?;
+        let top = page.doc.top_layer.iter().rev().copied().find(|&n| page.doc.is_connected(n) &&
+            (page.doc.is_modal(n) || page.doc.attr(n, "popover").is_some_and(|v| Document::popover_mode(v) != "manual")))?;
+        if page.doc.popover_open(top) { return Some(self.popover_action(page, top, true)); }
         let mut out = ScriptOutcome::default();
         let prevented = self.dispatch_into(page, &mut out, top, "cancel", EventInit::simple(false, true));
         if !prevented && page.doc.top_layer.contains(&top) {
@@ -390,6 +415,7 @@ impl Engine {
             return PointerDown::default();
         };
         let document = page.doc.weak_identity();
+        page.pointer.popover_press = page.doc.related_open_popover(target);
         let disabled = chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n));
         let mut prevented = false;
         page.pointer.pointer_modality = true;
@@ -446,7 +472,19 @@ impl Engine {
             out.relayout = true;
         }
         let suppress = std::mem::take(&mut page.pointer.suppress_mouse);
+        let press_popover = page.pointer.popover_press.take();
         if let Some(t) = target {
+            if down.is_some_and(|(_, pressed)| pressed == button) && !page.doc.top_layer.is_empty() &&
+                page.doc.related_open_popover(t) == press_popover {
+                let dismiss: Vec<_> = page.doc.light_dismiss_popovers().rev().take_while(|&p| Some(p) != press_popover).collect();
+                for p in dismiss {
+                    if !document.is_for(&page.doc) { break; }
+                    if page.doc.popover_open(p) { out.merge(self.popover_action(page, p, true)); }
+                }
+                if !document.is_for(&page.doc) || !page.doc.is_connected(t) {
+                    return PointerUp { target: None, clicked: None, action: ClickAction::None, outcome: out };
+                }
+            }
             let disabled = chain(&page.doc, t).into_iter().any(|n| is_disabled_control(&page.doc, n));
             self.dispatch_into(page, &mut out, t, "pointerup", mouse(x, y, button, m, true, true));
             if !document.is_for(&page.doc) || !page.doc.is_connected(t) {
@@ -571,6 +609,11 @@ impl Engine {
             return (ClickAction::None, out);
         }
         let tag = page.doc.tag(a).unwrap_or("").to_string();
+        if page.doc.attr(a, "popovertarget").is_some() && page.doc.attr(a, "disabled").is_none()
+            && (kind == ControlKind::Button || matches!(kind, ControlKind::Reset | ControlKind::Submit) && page.form_of(a).is_none()) {
+            out.merge(self.popover_action(page, a, false));
+            return (ClickAction::Changed, out);
+        }
         let action = match tag.as_str() {
             "a" | "area" if is_javascript_url(page.doc.attr(a, "href").unwrap_or("")) => {
                 // `javascript:` links run their code in the page.

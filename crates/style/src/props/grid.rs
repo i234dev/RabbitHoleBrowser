@@ -185,6 +185,15 @@ fn subgrid_names(cur: &mut Cur) -> Option<Vec<SubgridLineNames>> {
     Some(result)
 }
 
+/// Subgrid has its own line-name grammar, independent of lengths or layout.
+pub(crate) fn valid_subgrid(toks: &[Token]) -> Option<bool> {
+    let mut cur = Cur::new(toks);
+    match cur.bump()? {
+        Token::Ident(name) if name.eq_ignore_ascii_case("subgrid") => Some(subgrid_names(&mut cur).is_some()),
+        _ => None,
+    }
+}
+
 /// Parse a full track list (`grid-template-columns` value).
 pub fn parse_track_list(toks: &[Token], ctx: &LengthContext) -> Option<Vec<TrackListItem>> {
     let mut cur = Cur::new(toks);

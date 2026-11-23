@@ -569,7 +569,7 @@ fn attrs_forms_validation_and_misc_dom() {
             "dom 8 8 12 html t function true",
             "cls true true true true",
             "table thead 1 0 0",
-            "file b:c.txt true 1 number windows-1252",
+            "file b/c.txt true 1 number windows-1252",
             "reflect true true true",
             "fr héllo 2 2",
         ]
@@ -847,8 +847,8 @@ fn web_crypto_digest_hmac_aes_pbkdf2() {
           const pk = await s.importKey('raw', enc.encode('password'), 'PBKDF2', false, ['deriveBits']);
           const bits = await s.deriveBits({ name: 'PBKDF2', salt: enc.encode('salt'), iterations: 2, hash: 'SHA-1' }, pk, 160);
           console.log('pbkdf2', hex(bits));
-          const bad = await s.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']).catch((e) => e.name);
-          console.log('ec', bad, crypto instanceof Crypto, crypto.subtle instanceof SubtleCrypto, gk instanceof CryptoKey);
+          const pair = await s.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+          console.log('ec', pair.privateKey.type, pair.publicKey.type, crypto instanceof Crypto, crypto.subtle instanceof SubtleCrypto, gk instanceof CryptoKey);
         })().catch((e) => console.log('ERR ' + e + ' ' + e.stack));
         "#,
     );
@@ -862,7 +862,7 @@ fn web_crypto_digest_hmac_aes_pbkdf2() {
             "aes 69c4e0d86a7b0430d8cdb78070b4c55a true",
             "gcm secret 22 A256GCM",
             "pbkdf2 ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957",
-            "ec NotSupportedError true true true",
+            "ec private public true true true",
         ]
     );
 }
@@ -1321,6 +1321,37 @@ fn imported_strict_worker_scripts_share_global_bindings() {
     }
     let out: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, text)| text.as_str()).collect();
     assert_eq!(out, ["43,41,undefined", "TypeError:import failed:true", "done:43"], "logs: {:?}", env.logs);
+}
+
+#[test]
+fn transferred_worker_ports_retain_identity_and_entanglement() {
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    env.fetches.insert("https://example.test/dir/relay.js".into(), (200, "text/javascript".into(), r#"
+        onmessage = e => {
+            const port = e.data.port;
+            if (port !== e.ports[0] || port !== e.data.again) return;
+            postMessage({ port, bytes: e.data.bytes }, [port, e.data.bytes]);
+        };
+    "#.into()));
+    run(&mut env, &mut host, r#"
+        const worker = new Worker('relay.js');
+        const channel = new MessageChannel();
+        const bytes = Uint8Array.of(73).buffer;
+        channel.port1.onmessage = e => console.log('reply', e.data);
+        worker.onmessage = e => {
+            console.log('received', e.data.port === e.ports[0], new Uint8Array(e.data.bytes)[0]);
+            e.data.port.postMessage('round trip');
+        };
+        worker.postMessage({ port: channel.port2, again: channel.port2, bytes }, [channel.port2, bytes]);
+        try { worker.postMessage(null, [channel.port2]); }
+        catch (e) { console.log('sent', e.name, bytes.byteLength); }
+    "#);
+    for step in 1..=15 {
+        host.run_timers(&mut env, 1000.0 + 10.0 * step as f64);
+        host.run_jobs(&mut env);
+    }
+    let logs: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, msg)| msg.as_str()).collect();
+    assert_eq!(logs, ["sent DataCloneError 0", "received true 73", "reply round trip"]);
 }
 
 #[test]
@@ -1825,4 +1856,773 @@ fn anchor_url_components_are_settable() {
         "#,
     );
     assert_eq!(out, "'https://example.test/v/clip.mp4?x=1||http://cdn.example.test/w/other.mp4?y=2#autoplay|cdn.example.test|null|'");
+}
+
+#[test]
+fn blob_and_fetch_decode_one_leading_utf8_signature() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const bytes = new Uint8Array([239,187,191,239,187,191,97]);
+        Promise.all([new Blob([bytes]).text(), new Response(bytes).text(),
+            new Response(new Uint8Array([239,187,191,49])).json()])
+            .then(([a, b, n]) => console.log(a === '\uFEFFa', a === b, n));
+    "#);
+    assert_eq!(out, ["true true 1"]);
+}
+
+#[test]
+fn blob_parts_follow_webidl_iteration_and_copy_buffer_views() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const data = new Uint8Array([48, 65, 49]);
+        const parts = [{toString() { parts.pop(); return 'x'; }}, new DataView(data.buffer, 1, 1), null, undefined, 'ignored'];
+        class Packet extends Blob {}
+        const blob = new Packet(parts, {type:'TEXT/PLAIN'});
+        data[1] = 66;
+        const response = new Response(blob);
+        console.log(blob instanceof Packet, response.headers.get('content-type'), blob.slice(0, 1, 'X/Y').type);
+        Promise.all([blob.text(), response.text(), new Response(new DataView(data.buffer, 1, 1)).text()])
+            .then(values => console.log(values.join('|')));
+    "#);
+    assert_eq!(out, ["true text/plain x/y", "xAnullundefined|xAnullundefined|B"]);
+}
+
+#[test]
+fn blob_slice_clamps_fractional_offsets_to_even() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const b = new Blob(['abcdef']);
+        Promise.all([b.slice(0.5, 1.5), b.slice(-3.5, -0.5), b.slice(-Infinity, Infinity),
+            b.slice(NaN, 2.5)].map(part => part.text())).then(parts => console.log(parts.join('|')));
+    "#);
+    assert_eq!(out, ["ab||abcdef|ab"]);
+}
+
+#[test]
+fn file_metadata_uses_webidl_conversion_order() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        class DocumentFile extends File {}
+        const log = [], parts = [{toString() { log.push('part'); return 'body'; }}];
+        const name = {toString() { log.push('name'); return 'dir/\uD800'; }};
+        const f = new DocumentFile(parts, name, {
+            get type() { log.push('type'); return 'TEXT/PLAIN'; },
+            get lastModified() { log.push('time'); return -4.75; }
+        });
+        console.log(log.join(','), f.name === 'dir/\uFFFD', f.lastModified, f instanceof DocumentFile, f.type);
+        console.log(new File([], 'a', null).name, new File([], 'b', {lastModified:Infinity}).lastModified);
+    "#);
+    assert_eq!(out, ["part,name,type,time true -4 true text/plain", "a 0"]);
+}
+
+#[test]
+fn form_data_preserves_files_and_serializes_entries_in_order() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const fd = Object.freeze(new FormData()), original = new File(['body'], 'a', {lastModified:5});
+        fd.append('file', original);
+        fd.append('text', 'one');
+        fd.append('file', 'duplicate');
+        console.log(fd.get('file') === original);
+        fd.set('file', original, 'b');
+        const renamed = fd.get('file');
+        console.log(renamed !== original, renamed.name, renamed.lastModified, fd.getAll('file').length, [...fd.keys()].join(','));
+        fd.append('plain', new Blob(['two']));
+        new Response(fd).text().then(s => console.log(s.includes('filename="b"'), s.indexOf('body') < s.indexOf('one'), fd.get('plain').name));
+    "#);
+    assert_eq!(out, ["true", "true b 5 1 file,text", "true true blob"]);
+}
+
+#[test]
+fn synchronous_file_readers_are_scoped_to_workers_and_copy_blob_bytes() {
+    let (mut env, mut page) = setup("<body></body>");
+    assert_eq!(run(&mut env, &mut page, "console.log(typeof FileReaderSync)"), ["undefined"]);
+    for shared in [false, true] {
+        let mut worker = crate::ScriptHost::new_inner(&mut env, Some(("reader".into(), shared, 1)));
+        let out = run(&mut env, &mut worker, r#"
+            const r = new FileReaderSync(), b = new Blob([new Uint8Array([0xff,0xfe,65,0])]);
+            const copy = new Uint8Array(r.readAsArrayBuffer(b));
+            copy.fill(0);
+            console.log(r.readAsText(b), r.readAsBinaryString(b).charCodeAt(0), r.readAsDataURL(b));
+            try { r.readAsText({}); } catch(e) { console.log(e.name); }
+        "#);
+        assert_eq!(out, ["A 255 data:application/octet-stream;base64,//5BAA==", "TypeError"]);
+    }
+}
+
+#[test]
+fn restarting_a_file_read_from_abort_suppresses_stale_events() {
+    let (mut env, mut host) = setup("<body></body>");
+    run(&mut env, &mut host, r#"
+        const reader = new FileReader();
+        const events = [];
+        reader.onabort = () => { events.push('abort'); reader.readAsText(new Blob([])); };
+        reader.onprogress = () => events.push('progress');
+        reader.onload = () => events.push('load');
+        reader.onloadend = () => { events.push('end'); console.log(events.join(',')); };
+        reader.readAsText(new Blob(['discarded']));
+        reader.abort();
+    "#);
+    host.run_timers(&mut env, 1010.0);
+    host.run_jobs(&mut env);
+    let output: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, text)| text.as_str()).collect();
+    assert_eq!(output, ["abort,load,end"]);
+}
+
+#[test]
+fn xhr_validates_methods_and_headers_before_sending() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const x = new XMLHttpRequest();
+        for (const operation of [
+            () => x.setRequestHeader('Accept', '*/*'), () => x.open('two words', '/'),
+            () => x.open('TrAcE', '/'), () => x.open('get', '/'),
+            () => x.setRequestHeader('bad name', 'x'), () => x.setRequestHeader('Accept', 'a\nb'),
+            () => x.setRequestHeader('Accept', '\u0100'), () => x.setRequestHeader('Accept', ' value '),
+            () => x.setRequestHeader('Accept')
+        ]) { try { operation(); console.log('ok'); } catch (e) { console.log(e.name); } }
+    "#);
+    assert_eq!(out, ["InvalidStateError","SyntaxError","SecurityError","ok","SyntaxError","SyntaxError","TypeError","ok","TypeError"]);
+}
+
+#[test]
+fn query_and_form_iterators_follow_mutations_until_exhaustion() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        for (const list of [new FormData(), new URLSearchParams()]) {
+            list.append('a','1'); list.append('b','2');
+            const it = list.entries();
+            console.log(it.next().value.join(''));
+            list.delete('b'); list.append('c','3');
+            console.log(it.next().value.join(''), it.next().done);
+            list.append('d','4');
+            console.log(it.next().done);
+            const keys = [];
+            list.forEach((v,k) => { keys.push(k); if (k === 'a') list.delete('c'); });
+            console.log(keys.join(''));
+        }
+    "#);
+    assert_eq!(out, ["a1","c3 true","true","ad","a1","c3 true","true","ad"]);
+}
+
+#[test]
+fn structured_clone_preserves_blob_and_file_slots_and_shared_references() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const file = new File([new Uint8Array([0,255])], 'dir/name', {type:'image/png',lastModified:-123});
+        const blob = file.slice(1);
+        Object.defineProperty(file, 'name', {get(){throw Error('observable getter')}});
+        Object.setPrototypeOf(blob, null);
+        const result = structuredClone([file, blob, file]);
+        console.log(result[0] !== file, result[0] === result[2], result[0] instanceof File, result[0].name, result[0].type, result[0].lastModified);
+        result[1].arrayBuffer().then(b => console.log(result[1] instanceof Blob, new Uint8Array(b)[0]));
+    "#);
+    assert_eq!(out, ["true true true dir/name image/png -123","true 255"]);
+}
+
+#[test]
+fn file_conversions_close_iterators_and_leave_failed_reads_empty() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const fail={}, parts={*[Symbol.iterator]() { try { yield {toString() { throw fail; }}; } finally { console.log('closed'); } }};
+        try { new File(parts, 'doc'); } catch(e) { console.log(e === fail); }
+        const reader = new FileReader();
+        try { reader.readAsText(new Blob(), {toString(){throw fail;}}); } catch(e) { console.log(e === fail, reader.readyState); }
+        try { reader.readAsText(Object.create(Blob.prototype)); } catch(e) { console.log(e.name, reader.readyState); }
+    "#);
+    assert_eq!(out, ["closed","true","true 0","TypeError 0"]);
+}
+
+#[test]
+fn text_decoder_uses_standard_labels_and_converts_options_once() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        let count = 0;
+        class Decoder extends TextDecoder {}
+        const d = new Decoder(' 866 ', { get fatal() { ++count; return true; } });
+        console.log(d.encoding, d.fatal, d instanceof Decoder, count);
+        try { new TextDecoder('\u2029sjis\u2029'); } catch(e) { console.log(e.name); }
+        try { TextDecoder(); } catch(e) { console.log(e.name); }
+    "#);
+    assert_eq!(out, ["ibm866 true true 1", "RangeError", "TypeError"]);
+}
+
+#[test]
+fn fetch_blob_and_clone_preserve_serialized_mime_parameter_values() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const ct = 'Text/Plain; Label="cAsE,é"';
+        new Response('x', {headers: {'Content-Type':ct}}).blob().then(b => {
+            console.log(b.type, structuredClone(b).type === b.type, new Blob([], {type:ct}).type === '');
+        });
+    "#);
+    assert_eq!(out, ["text/plain;label=\"cAsE,é\" true true"]);
+}
+
+#[test]
+fn transfer_lists_validate_all_entries_before_moving_buffers_and_ports() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const a = new Uint8Array([42]).buffer, c = new MessageChannel();
+        for (const invalid of [[a, new Blob()], [a, a]]) {
+            try { structuredClone({}, {transfer: invalid}); } catch (e) { console.log(e.name, a.byteLength); }
+        }
+        const copy = structuredClone([a, c.port1, c.port1], {transfer: [a, c.port1]});
+        console.log(a.byteLength, new Uint8Array(copy[0])[0], copy[1] === copy[2], copy[1] !== c.port1);
+        try { structuredClone(0, {transfer:[c.port1]}); } catch (e) { console.log(e.name); }
+    "#);
+    assert_eq!(out, ["DataCloneError 1", "DataCloneError 1", "0 42 true true", "DataCloneError"]);
+}
+
+#[test]
+fn transfer_checks_observe_detachment_after_payload_getters() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        for (const item of [new ArrayBuffer(4), new MessageChannel().port1]) {
+            const other = new ArrayBuffer(2);
+            try {
+                structuredClone({ get x() { structuredClone(null, {transfer: [item]}); } }, {transfer: [other, item]});
+            } catch (e) { console.log(e.name, other.byteLength); }
+            const marker = {};
+            try { structuredClone({ get x() { throw marker; } }, {transfer: [item]}); }
+            catch (e) { console.log(e === marker); }
+        }
+    "#);
+    assert_eq!(out, ["DataCloneError 2", "true", "DataCloneError 2", "true"]);
+}
+
+#[test]
+fn contextless_offscreen_canvas_transfers_with_its_final_dimensions() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const canvas = new OffscreenCanvas(3, 2);
+        try { structuredClone(canvas); } catch (e) { console.log(e.name); }
+        const copy = structuredClone({canvas, get resized() { canvas.width = 7; return canvas; }}, {transfer: [canvas]});
+        console.log(canvas.width, canvas.height, copy.canvas === copy.resized, copy.canvas.width, copy.canvas.height);
+        try { canvas.getContext('2d'); } catch (e) { console.log(e.name); }
+        copy.canvas.getContext('2d');
+        try { structuredClone(copy.canvas, {transfer: [copy.canvas]}); } catch (e) { console.log(e.name); }
+        try { structuredClone(0, {transfer: [canvas]}); } catch (e) { console.log(e.name); }
+    "#);
+    assert_eq!(out, ["DataCloneError", "0 0 true 7 2", "InvalidStateError", "InvalidStateError", "DataCloneError"]);
+}
+
+#[test]
+fn shared_worker_ports_forward_transferred_objects_in_the_message_graph() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/canvas-worker.js".into(), (200, "text/javascript".into(), r#"
+        onconnect = connection => {
+            const port = connection.ports[0];
+            port.onmessage = e => {
+                const canvas = e.data.canvas;
+                canvas.height += 2;
+                port.postMessage([canvas, canvas, e.ports.length], [canvas]);
+            };
+        };
+    "#.into()));
+    run(&mut env, &mut host, r#"
+        const {port} = new SharedWorker('canvas-worker.js');
+        const canvas = new OffscreenCanvas(11, 3);
+        port.onmessage = e => console.log(e.data[0] === e.data[1], e.data[0].width, e.data[0].height, e.ports.length, e.data[2]);
+        port.postMessage({canvas}, [canvas]);
+        console.log(canvas.width);
+    "#);
+    for i in 1..=10 {
+        host.run_timers(&mut env, 1000.0 + 10.0 * i as f64);
+        host.run_jobs(&mut env);
+    }
+    let logs: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, message)| message.as_str()).collect();
+    assert_eq!(logs, ["0", "true 11 5 0 0"]);
+}
+
+#[test]
+fn trickled_ice_replaces_only_the_matching_remote_description() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+        try {
+          a.createDataChannel('local');
+          const offer = await a.createOffer();
+          const sdp = offer.sdp.replace(/^a=(?:candidate:[^\r\n]*|end-of-candidates)\r?\n/gm, '');
+          await b.setRemoteDescription({type:'offer',sdp});
+          const previous = b.pendingRemoteDescription;
+          const mid = /^a=mid:([^\r\n]+)/m.exec(sdp)[1];
+          const fragment = /^a=ice-ufrag:([^\r\n]+)/m.exec(sdp)[1];
+          const candidate = 'candidate:7 1 udp 16777215 127.0.0.1 35001 typ host';
+          const init = {candidate,sdpMid:mid,usernameFragment:fragment,
+            get url() { throw Error('local-only field read'); }};
+          const accepted = b.addIceCandidate(init);
+          init.sdpMid = 'changed';
+          await accepted;
+          const updated = b.pendingRemoteDescription;
+          console.log(previous !== updated, previous.sdp === sdp, updated.sdp.includes('a=' + candidate));
+          await b.setLocalDescription();
+          const stable = b.currentRemoteDescription;
+          await b.addIceCandidate({sdpMLineIndex:0,usernameFragment:fragment});
+          console.log(b.currentRemoteDescription !== stable, !stable.sdp.includes('a=end-of-candidates'),
+                      b.remoteDescription.sdp.includes('a=end-of-candidates'));
+          const same = b.remoteDescription;
+          const error = await b.addIceCandidate({candidate,sdpMid:mid,usernameFragment:'obsolete'}).catch(e=>e.name);
+          console.log(error, b.remoteDescription === same);
+        } finally { a.close(); b.close(); }
+      })().catch(e => console.log(String(e)));
+    "#);
+    assert_eq!(out, ["true true true", "true true true", "OperationError true"]);
+}
+
+#[test]
+fn complete_html_replacement_commits_filtered_children_before_running_callbacks() {
+    let out = logs_of("<body><main id=host></main>", r#"
+        const root = document.getElementById('host').attachShadow({mode:'closed'});
+        const events = [];
+        customElements.define('sample-item', class extends HTMLElement {
+            static get observedAttributes() { return ['data-kind']; }
+            constructor() { super(); events.push('construct'); }
+            connectedCallback() { events.push('connect'); }
+            disconnectedCallback() { events.push('disconnect'); }
+            attributeChangedCallback(name, old, value) { events.push(value); }
+        });
+        root.setHTML("<script>unwanted text</script><section><b>kept</b></section>",
+            {sanitizer:{replaceWithChildrenElements:['section','script']}});
+        console.log(root.textContent, root.firstChild.localName);
+        root.setHTML("<sample-item></sample-item><div is='some-widget'>plain</div>");
+        console.log(root.childElementCount, root.firstChild.localName, root.firstChild.hasAttribute('is'), events.length);
+        root.setHTMLUnsafe("<section><sample-item data-kind='first'></sample-item></section><i>absent</i>",
+                           {sanitizer:{elements:['sample-item'],replaceWithChildrenElements:['section']}});
+        console.log(root.children.length, events.join(','));
+        events.length = 0;
+        window.readCompleteFragment = () => events.push(root.lastChild.textContent);
+        root.setHTMLUnsafe("<script>readCompleteFragment()</script><sample-item>complete</sample-item>",
+                           {runScripts:true});
+        console.log(events.join(','));
+    "#);
+    assert_eq!(out, ["kept b", "1 div false 0", "1 construct,first,connect", "complete,disconnect,construct,connect"]);
+}
+
+#[test]
+fn rtc_signaling_values_keep_local_metadata_out_of_signaling() {
+    let result = result_of("<body>", r#"
+        const line = 'candidate:aB/7 2 TCP 1024 2001:db8::8 9 typ srflx raddr local.example rport 5000 tcptype active';
+        const peer = new RTCIceCandidate({ candidate: line, sdpMLineIndex: 65537, relayProtocol: 'tls' });
+        const signaled = new RTCIceCandidate(peer.toJSON());
+        const attribute = new RTCIceCandidate({sdpMid:'audio', candidate:'a='+line});
+        if (attribute.foundation !== null || attribute.candidate !== 'a='+line) throw Error('Unexpected candidate attribute');
+        const desc = new RTCSessionDescription({type:'offer', sdp:'v=0\r\n'});
+        const malformed = new RTCIceCandidate({sdpMid:'audio', candidate:line.replace('1024', '1024x')});
+        window.result = [signaled.component, signaled.sdpMLineIndex, signaled.relatedPort, signaled.tcpType,
+          peer.relayProtocol, signaled.relayProtocol === null, malformed.priority === null,
+          malformed.candidate.endsWith('active'), desc.toJSON().sdp === 'v=0\r\n'].join('|');
+    "#);
+    assert_eq!(result, "'rtcp|1|5000|active|tls|true|true|true|true'");
+}
+
+#[test]
+fn editing_commands_use_the_document_selection_and_host() {
+    let result = result_of("<body><div id=editor contenteditable>first</div><p id=locked>other</p>", r#"
+        const d = document, e = d.getElementById('editor'), t = e.firstChild, sel = d.getSelection();
+        const calls = [];
+        e.addEventListener('input', ev => calls.push(ev.inputType));
+        sel.setBaseAndExtent(t, 1, t, 4);
+        const inserted = d.execCommand('insertText', false, 'oo');
+        d.execCommand('insertHTML', false, '<b>!</b>');
+        sel.collapse(d.getElementById('locked').firstChild, 0);
+        const disabled = !d.execCommand('delete');
+        d.execCommand('defaultParagraphSeparator', false, 'p');
+        d.designMode = 'ON';
+        const editable = d.getElementById('locked').isContentEditable;
+        d.designMode = 'off';
+        window.result = [inserted,e.innerHTML,disabled,editable,d.queryCommandValue('defaultParagraphSeparator'),calls[0]].join('|');
+    "#);
+    assert_eq!(result, "'true|foo<b>!</b>t|true|true|p|insertText'");
+}
+
+#[test]
+fn web_crypto_derivation_resumes_across_blocks() {
+    let out = logs_of("<body>", r#"
+        (async () => {
+          const s = crypto.subtle, e = new TextEncoder();
+          const k = await s.importKey('raw',e.encode('alpha'),'PBKDF2',false,['deriveBits']);
+          const params = {name:'PBKDF2',hash:'SHA-384',salt:e.encode('beta'),iterations:2057};
+          const output = await s.deriveBits(params,k,448);
+          console.log(Array.from(new Uint8Array(output), n=>n.toString(16).padStart(2,'0')).join(''));
+          console.log(await s.deriveBits({...params,iterations:-1},k,128).catch(e=>e.name));
+          console.log((await s.deriveBits(params,k,0)).byteLength);
+        })();
+    "#);
+    assert_eq!(out, ["fecfc52d97412573ed2650d10759e86dc7e0c198b2b7331df1e32516fb75d443aa8cbaadbc23a0e835aa0cf5c038e4ef26af9146a9a603cc", "TypeError", "0"]);
+}
+
+#[test]
+fn enumerated_attributes_preserve_raw_values_and_reflect_canonical_states() {
+    let out = result_of("<body><img id=im><span id=txt></span>", r#"
+        const img = document.getElementById('im'), txt=document.getElementById('txt');
+        txt.dir = ' RtL '; const invalid=txt.dir; txt.dir='RtL';
+        img.referrerPolicy='SAME-ORIGIN';
+        img.crossOrigin='invalid'; const anonymous=img.crossOrigin; img.crossOrigin=null;
+        document.dir='LtR';
+        txt.getAttribute=()=>{throw new Error('page override')};
+        window.result=[invalid,txt.dir,img.referrerPolicy,anonymous,img.crossOrigin===null,
+          document.dir,document.documentElement.getAttribute('dir')].join('|');
+    "#);
+    assert_eq!(out, "'|rtl|same-origin|anonymous|true|ltr|LtR'");
+}
+
+#[test]
+fn declarative_shadow_takeover_preserves_options_and_nested_parsing() {
+    let (mut env, mut host) = setup("<!doctype html><body><div id=host></div>");
+    let out = run(&mut env, &mut host, r#"
+        const outer = document.querySelector('#host').attachShadow({mode:'open'});
+        outer.setHTMLUnsafe('<section><template shadowrootmode=closed shadowrootserializable shadowrootdelegatesfocus shadowrootclonable><b>old</b></template></section>');
+        const el = outer.firstElementChild;
+        const root = el.attachShadow({mode:'closed'});
+        console.log(root.mode, root.delegatesFocus, root.clonable, root.serializable, root.childNodes.length, el.shadowRoot === null);
+        root.innerHTML = '<i>new</i>';
+        console.log(outer.getHTML({serializableShadowRoots:true}));
+        for (const host of [el, document.createElementNS('http://www.w3.org/2000/svg','div'), document.createElement('font-face')]) {
+            try { host.attachShadow({mode:'closed'}); } catch (e) { console.log(e.name); }
+        }
+    "#);
+    assert_eq!(out, ["closed true true true 0 true", "<section><template shadowrootmode=\"closed\" shadowrootdelegatesfocus=\"\" shadowrootserializable=\"\" shadowrootclonable=\"\"><i>new</i></template></section>", "NotSupportedError", "NotSupportedError", "NotSupportedError"]);
+}
+
+#[test]
+fn rtc_events_dispatch_candidates_and_structured_errors() {
+    let (mut env, mut host) = setup("<!doctype html><body>");
+    let out = run(&mut env, &mut host, r#"
+        const c = new RTCIceCandidate({sdpMid:'audio'});
+        document.addEventListener('icecandidate', e => console.log(e.candidate === c, e.bubbles, e.url));
+        document.dispatchEvent(new RTCPeerConnectionIceEvent('icecandidate', {candidate:c, bubbles:true, url:'stun:localhost'}));
+        const err = new RTCError({errorDetail:'sdp-syntax-error', sdpLineNumber:3}, 'invalid media line');
+        const e = new RTCErrorEvent('error', {error:err});
+        console.log(e.error === err, err instanceof DOMException, err.name, err.message, err.sdpLineNumber, err.sentAlert);
+        const fail = new RTCPeerConnectionIceErrorEvent('icecandidateerror', {port:65537, errorCode:701, errorText:'unreachable'});
+        console.log(fail.port, fail.errorCode, fail.errorText, fail.address);
+        try { new RTCErrorEvent('error', {error:{}}) } catch(e) { console.log(e.name) }
+    "#);
+    assert_eq!(out, ["true true stun:localhost", "true true OperationError invalid media line 3 null", "1 701 unreachable null", "TypeError"]);
+}
+
+#[test]
+fn shadow_hosts_follow_dom_local_name_rules() {
+    let out = result_of("<body>", r#"
+        const name = 'a-<widget';
+        customElements.define(name, class extends HTMLElement {});
+        const root = document.createElement(name).attachShadow({mode:'open'});
+        let rejected = false;
+        try { customElements.define('a-\0b', class extends HTMLElement {}) } catch (e) { rejected = e.name === 'SyntaxError' }
+        window.result = root.host.localName === name && rejected;
+    "#);
+    assert_eq!(out, "'true'");
+}
+
+#[test]
+fn html_reflection_preserves_accessor_names_and_integer_semantics() {
+    let out = result_of("<body><details><summary></summary><summary></summary></details><link>", r#"
+        const link = document.querySelector('link'), p = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, 'as');
+        link.as = 'SHAREDWORKER';
+        link.setAttribute('tabindex','  -0.6'); const positiveZero = Object.is(link.tabIndex, 0);
+        link.setAttribute('tabindex','+15%'); const prefix = link.tabIndex;
+        link.tabIndex = 4294967299;
+        const summaries = Array.from(document.querySelectorAll('summary'), s => s.tabIndex);
+        window.result = [link.as,p.get.name,p.set.name,positiveZero,prefix,link.getAttribute('tabindex'),...summaries].join('|');
+    "#);
+    assert_eq!(out, "'sharedworker|get as|set as|true|15|3|0|-1'");
+}
+
+#[test]
+fn css_supports_evaluates_conditions_and_separate_declaration_arguments() {
+    let out = result_of("<body>", r#"
+        const supported = CSS.supports('display:grid') && CSS.supports('(width: 10px) and (color: blue)')
+            && CSS.supports('COLOR','var(--foreground)') && CSS.supports('--custom','arbitrary');
+        const unsupported = ['invalid-property: inherit','width: cabbage','not (color: red)'].some(v => CSS.supports(v));
+        window.result = [supported,unsupported,CSS.supports('width','2px; color: red'),CSS.supports('invalid-property','var(--x)')].join('|');
+    "#);
+    assert_eq!(out, "'true|false|false|false'");
+}
+
+#[test]
+fn web_crypto_operations_use_the_keys_original_algorithm_and_usages() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle;
+        const key = await s.importKey('raw', new Uint8Array([1]), {name:'HMAC', hash:'SHA-256'}, false, ['sign']);
+        key.algorithm.hash.name = 'SHA-512';
+        const sig = await s.sign('HMAC', key, new Uint8Array([2]));
+        console.log(sig.byteLength, Object.isFrozen(key.usages), await s.exportKey('raw',key).catch(e=>e.name));
+        console.log(await s.sign('AES-CBC', key, new Uint8Array()).catch(e=>e.name));
+      })();
+    "#);
+    assert_eq!(out, ["32 true InvalidAccessError", "InvalidAccessError"]);
+}
+
+#[test]
+fn css_vendor_aliases_and_descriptors_agree_with_feature_queries() {
+    let out = result_of("<body>", r#"
+        const s = document.body.style;
+        s.WebkitTransform = 'scale(2)';
+        window.result=[s.webkitTransform,s.getPropertyValue('-webkit-transform'),
+            'WebkitTransform' in s, 'mozAnimation' in s, CSS.supports('unicode-range','inherit'),
+            CSS.supports('-moz-animation','inherit') === ('MozAnimation' in s)].join('|');
+    "#);
+    assert_eq!(out, "'scale(2)|scale(2)|true|false|false|true'");
+}
+
+#[test]
+fn web_crypto_ed25519_matches_rfc8032_and_round_trips_key_pairs() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const bytes = hex => Uint8Array.from(hex.match(/../g), h => parseInt(h,16));
+        const hex = data => Array.from(new Uint8Array(data), b => b.toString(16).padStart(2,'0')).join('');
+        const s = crypto.subtle, alg = 'Ed25519', msg = new Uint8Array();
+        const seed = bytes('9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60');
+        const pub = bytes('d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a');
+        const priv = await s.importKey('raw-seed', seed, alg, false, ['sign']);
+        const verify = await s.importKey('raw', pub, alg, false, ['verify']);
+        const sig = await s.sign(alg, priv, msg);
+        console.log(hex(sig), await s.verify(alg,verify,sig,msg));
+        console.log(await s.exportKey('pkcs8',priv).catch(e=>e.name));
+        const { publicKey, privateKey } = await s.generateKey(alg,true,['sign','verify']);
+        const a=await s.importKey('spki',await s.exportKey('spki',publicKey),alg,false,['verify']);
+        const b=await s.importKey('jwk',await s.exportKey('jwk',privateKey),alg,true,['sign']);
+        console.log(await s.verify(alg,a,await s.sign(alg,b,seed),seed),(await s.exportKey('pkcs8',b)).byteLength);
+      })();
+    "#);
+    assert_eq!(out, ["e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b true", "InvalidAccessError", "true 48"]);
+}
+
+#[test]
+fn cssom_color_declarations_validate_before_replacing_values() {
+    let out = result_of("<style>p { color: pink }</style><p style='color: #1234'></p>", r#"
+      const el = document.querySelector('p');
+      const seen = [el.style.color];
+      for (const style of [el.style, document.styleSheets[0].cssRules[0].style]) {
+        style.setProperty('color', 'color(display-p3 20% 0 2)', 'important');
+        style.color = 'rgb(4, 5 6)';
+        style.setProperty('color', 'red', 'invalid');
+        seen.push(style.color, style.getPropertyPriority('color'));
+        style.color = 'rgba(3, 2, 1, 0)';
+        seen.push(style.color);
+      }
+      window.result = seen.join('|');
+    "#);
+    assert_eq!(out, "'rgba(17, 34, 51, 0.267)|color(display-p3 0.2 0 2)|important|rgba(3, 2, 1, 0)|color(display-p3 0.2 0 2)|important|rgba(3, 2, 1, 0)'");
+}
+
+#[test]
+fn web_crypto_gcm_authenticates_truncated_tags_and_variable_ivs() {
+    let out = logs_of("<body>", r#"
+      (async()=>{
+        const s=crypto.subtle;
+        const bytes=hex=>Uint8Array.from(hex.match(/../g), v=>parseInt(v,16));
+        const hex=b=>Array.from(new Uint8Array(b),v=>v.toString(16).padStart(2,'0')).join('');
+        const key=await s.importKey('raw',bytes('feffe9928665731c6d6a8f9467308308'),'AES-GCM',false,['encrypt','decrypt']);
+        const alg={name:'AES-GCM',iv:bytes('cafebabefacedbad'),additionalData:bytes('feedfacedeadbeeffeedfacedeadbeefabaddad2'),tagLength:64};
+        const msg=bytes('d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39');
+        const enc=new Uint8Array(await s.encrypt(alg,key,msg));
+        console.log(hex(enc),hex(await s.decrypt(alg,key,enc))===hex(msg));
+        enc[enc.length-1]^=1;
+        console.log(await s.decrypt(alg,key,enc).catch(e=>e.name));
+      })();
+    "#);
+    assert_eq!(out, ["61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c742373806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f45983612d2e79e3b0785 true", "OperationError"]);
+}
+
+#[test]
+fn html_insertion_methods_require_markup_and_exclude_optional_arguments_from_length() {
+    let out=result_of("<section></section>",r#"
+        const root=document.querySelector('section').attachShadow({mode:'open'});
+        root.setHTMLUnsafe('text');
+        let error;
+        try {root.setHTMLUnsafe();} catch(e) {error=e.name;}
+        window.result=[root.setHTMLUnsafe.length,error,root.textContent].join('|');
+    "#);
+    assert_eq!(out,"'1|TypeError|text'");
+}
+
+#[test]
+fn web_crypto_x25519_matches_rfc7748_and_rejects_noncontributory_peers() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const bytes = hex => Uint8Array.from(hex.match(/../g), h => parseInt(h, 16));
+        const hex = data => Array.from(new Uint8Array(data), b => b.toString(16).padStart(2, '0')).join('');
+        const s = crypto.subtle, name = 'X25519';
+        const alice = await s.importKey('raw-seed', bytes('77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a'), name, false, ['deriveBits']);
+        const bob = await s.importKey('raw', bytes('de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f'), name, true, []);
+        const zero = await s.importKey('raw', new Uint8Array(32), name, false, []);
+        console.log(hex(await s.deriveBits({name, public:bob}, alice, null)));
+        console.log(hex(await s.deriveBits({name, public:bob}, alice, 13)),
+          await s.deriveBits({name, public:zero}, alice, 0).catch(e => e.name),
+          await s.exportKey('pkcs8', alice).catch(e => e.name));
+        const pair = await s.generateKey(name, true, ['deriveKey']);
+        const jwk = await s.exportKey('jwk', pair.privateKey);
+        console.log(await s.importKey('jwk', jwk, name, true, ['deriveBits']).catch(e => e.name));
+        const imported = await s.importKey('jwk', jwk, name, true, ['deriveKey']);
+        console.log(jwk.crv, 'alg' in jwk, (await s.exportKey('pkcs8', imported)).byteLength);
+      })();
+    "#);
+    assert_eq!(out, ["4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", "4a58 OperationError InvalidAccessError", "DataError", "X25519 false 48"]);
+}
+
+#[test]
+fn ecdh_checks_points_and_reuses_generated_and_imported_private_keys() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle, name = 'ECDH';
+        const bytes = hex => Uint8Array.from(hex.match(/../g), h => parseInt(h, 16));
+        const hex = data => Array.from(new Uint8Array(data), b => b.toString(16).padStart(2,'0')).join('');
+        const b64 = data => btoa(String.fromCharCode(...data)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+        const x = '6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296';
+        const y = '4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5';
+        const jwk = {kty:'EC',crv:'P-256',x:b64(bytes(x)),y:b64(bytes(y)),d:b64(bytes('00'.repeat(31)+'01'))};
+        const alg = { name, namedCurve:jwk.crv };
+        const key = await s.importKey('jwk',jwk,alg,false,['deriveBits']);
+        const pub = await s.importKey('raw',bytes('04'+x+y),alg,true,[]);
+        console.log(hex(await s.deriveBits({name,public:pub},key,null)) === x,
+          hex(await s.deriveBits({name,public:pub},key,13)),await s.exportKey('jwk',key).catch(e=>e.name));
+        console.log(await s.importKey('raw',bytes('04'+'00'.repeat(64)),alg,true,[]).catch(e=>e.name),
+          await s.importKey('jwk',{...jwk,d:b64(bytes('00'.repeat(31)+'02'))},alg,true,['deriveBits']).catch(e=>e.name));
+        for (const namedCurve of ['P-256','P-384','P-521']) {
+          const a={name,namedCurve}, local=await s.generateKey(a,true,['deriveBits']);
+          const peer=await s.generateKey(a,true,['deriveBits']);
+          const priv=await s.importKey('pkcs8',await s.exportKey('pkcs8',local.privateKey),a,false,['deriveBits']);
+          const pub=await s.importKey('spki',await s.exportKey('spki',peer.publicKey),a,false,[]);
+          const left=await s.deriveBits({name,public:pub},priv,null);
+          const right=await s.deriveBits({name,public:local.publicKey},peer.privateKey,null);
+          console.log(namedCurve,left.byteLength,hex(left)===hex(right));
+        }
+      })().catch(e=>console.log(e.name,e.message));
+    "#);
+    assert_eq!(out, ["true 6b10 InvalidAccessError", "DataError DataError", "P-256 32 true", "P-384 48 true", "P-521 66 true"]);
+}
+
+#[test]
+fn chacha_poly1305_authenticates_and_round_trips_secret_key_encodings() {
+    let output=logs_of("<body>", r#"
+      (async () => {
+        const s=crypto.subtle, name='ChaCha20-Poly1305';
+        const key=await s.importKey('raw-secret',new Uint8Array(32),name,true,['encrypt','decrypt']);
+        const algorithm={name,iv:new Uint8Array(12)};
+        const sealed=new Uint8Array(await s.encrypt(algorithm,key,new Uint8Array(0)));
+        const jwk=await s.exportKey('jwk',key), imported=await s.importKey('jwk',jwk,name,false,['decrypt']);
+        console.log(Array.from(sealed,b=>b.toString(16).padStart(2,'0')).join(''),
+          (await s.decrypt(algorithm,imported,sealed)).byteLength,jwk.alg);
+        sealed[0]^=1;
+        console.log(await s.decrypt(algorithm,imported,sealed).catch(e=>e.name),
+          await s.exportKey('raw-secret',imported).catch(e=>e.name));
+        const wrapper=await s.generateKey(name,false,['wrapKey','unwrapKey']);
+        const salt=new Uint8Array([7]), material=await s.importKey('raw',salt,'HKDF',false,['deriveKey']);
+        const derived=await s.deriveKey({name:'HKDF',hash:'SHA-256',salt,info:salt},material,name,true,['encrypt']);
+        const wrapped=await s.wrapKey('raw-secret',derived,wrapper,algorithm);
+        const recovered=await s.unwrapKey('raw-secret',wrapped,wrapper,algorithm,name,true,['encrypt']);
+        console.log(wrapped.byteLength,(await s.exportKey('jwk',recovered)).k === (await s.exportKey('jwk',derived)).k);
+      })();
+    "#);
+    assert_eq!(output, ["4eb972c9a8fb3a1b382bb4d36f5ffad1 0 C20P","OperationError InvalidAccessError","48 true"]);
+}
+
+#[test]
+fn ecdsa_verifies_a_published_signature_and_supports_independent_hash_selection() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle, name = 'ECDSA', msg = new TextEncoder().encode('sample');
+        const bytes = hex => Uint8Array.from(hex.match(/../g), v => parseInt(v,16));
+        // RFC 6979 A.2.5, NIST P-256, SHA-256, message "sample".
+        const point = bytes('0460FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB67903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299');
+        const sig = bytes('EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8');
+        const key = await s.importKey('raw',point,{name,namedCurve:'P-256'},true,['verify']);
+        console.log(await s.verify({name,hash:'SHA-256'},key,sig,msg),
+          await s.verify({name,hash:'SHA-384'},key,sig,msg),
+          await s.verify({name,hash:'SHA-256'},key,sig.slice(1),msg));
+        for (const namedCurve of ['P-256','P-384','P-521']) {
+          const alg = {name,namedCurve}, pair = await s.generateKey(alg,true,['sign','verify']);
+          const privateKey = await s.importKey('pkcs8',await s.exportKey('pkcs8',pair.privateKey),alg,false,['sign']);
+          const publicKey = await s.importKey('spki',await s.exportKey('spki',pair.publicKey),alg,true,['verify']);
+          const result = [];
+          for (const hash of ['SHA-1','SHA-256','SHA-384','SHA-512']) {
+            const sig = await s.sign({name,hash},privateKey,msg);
+            result.push(sig.byteLength + '/' + await s.verify({name,hash},publicKey,sig,msg));
+          }
+          console.log(namedCurve,result.join(','),await s.exportKey('jwk',privateKey).catch(e=>e.name));
+        }
+      })().catch(e=>console.log(e.name,e.message));
+    "#);
+    assert_eq!(out, ["true false false",
+        "P-256 64/true,64/true,64/true,64/true InvalidAccessError",
+        "P-384 96/true,96/true,96/true,96/true InvalidAccessError",
+        "P-521 132/true,132/true,132/true,132/true InvalidAccessError"]);
+}
+
+#[test]
+fn web_crypto_normalizes_cipher_parameters_before_copying_the_message() {
+    let output = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle, iv = new Uint8Array(12), name = 'AES-GCM';
+        const key = await s.generateKey({name,length:128},false,['encrypt','decrypt']);
+        const data = new Uint8Array([7,8,9]), view = new DataView(data.buffer,1,1);
+        const sealed = await s.encrypt({name,get iv() { data[1]=42; return iv; }},key,view);
+        data[1]=0;
+        const plain = new Uint8Array(await s.decrypt({name,iv},key,sealed));
+        const empty = await s.encrypt({get name() { data.buffer.transfer(); return name; },iv},key,data);
+        console.log(plain.length, plain[0], empty.byteLength);
+        console.log(await s.generateKey({name,length:65536+128},false,['encrypt']).catch(e=>e.name));
+      })().catch(e=>console.log(String(e)));
+    "#);
+    assert_eq!(output, ["1 42 16","TypeError"]);
+}
+
+#[test]
+fn aes_ctr_wraps_only_the_counter_bits_and_rejects_counter_reuse() {
+    let output = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle, name = 'AES-CTR';
+        const key = await s.importKey('raw',new Uint8Array(16),name,false,['encrypt']);
+        const counter = new Uint8Array(16);
+        counter[15] = 0xaf;
+        const two = new Uint8Array(await s.encrypt({name,counter,length:3},key,new Uint8Array(32)));
+        counter[15] = 0xa8;
+        const next = new Uint8Array(await s.encrypt({name,counter,length:128},key,new Uint8Array(16)));
+        console.log(next.every((b,i)=>b===two[16+i]));
+        console.log(await s.encrypt({name,counter,length:3},key,new Uint8Array(129)).catch(e=>e.name));
+      })().catch(e=>console.log(String(e)));
+    "#);
+    assert_eq!(output, ["true","OperationError"]);
+}
+
+#[test]
+fn web_crypto_rsa_binds_hash_padding_and_labels_to_native_key_operations() {
+    let (mut env, mut host) = setup("<body>");
+    run(&mut env, &mut host, r#"
+      (async () => {
+        const s=crypto.subtle, data=Uint8Array.of(1,2,3), label=Uint8Array.of(4,5);
+        const alg={name:'RSA-OAEP',hash:'SHA-256',modulusLength:1024,publicExponent:Uint8Array.of(1,0,1)};
+        const pair=await s.generateKey(alg,true,['encrypt','decrypt']);
+        const spki=await s.exportKey('spki',pair.publicKey), pkcs8=await s.exportKey('pkcs8',pair.privateKey);
+        const privateJwk=await s.exportKey('jwk',pair.privateKey);
+        const privateKey=await s.importKey('jwk',privateJwk,alg,false,['decrypt']);
+        const opts={name:alg.name,label};
+        const ciphertext=await s.encrypt(opts,pair.publicKey,data);
+        console.log(privateJwk.alg,new Uint8Array(await s.decrypt(opts,privateKey,ciphertext)).join(','),
+          await s.decrypt({name:alg.name},privateKey,ciphertext).catch(e=>e.name),
+          await s.exportKey('pkcs8',privateKey).catch(e=>e.name));
+        for (const name of ['RSA-PSS','RSASSA-PKCS1-v1_5']) {
+          const params={name,hash:'SHA-384'}, sigOpts={name,saltLength:0};
+          const pub=await s.importKey('spki',spki,params,true,['verify']);
+          const key=await s.importKey('pkcs8',pkcs8,params,false,['sign']);
+          const sig=await s.sign(sigOpts,key,data);
+          console.log(name,pub.algorithm.modulusLength,pub.algorithm.publicExponent.join(','),
+              await s.verify(sigOpts,pub,sig,data),await s.verify(sigOpts,pub,sig,label));
+          if (name==='RSA-PSS') console.log(await s.verify({name,saltLength:32},pub,sig,data));
+        }
+      })().catch(e=>console.log(e.name,e.message)).finally(()=>console.log('done'));
+    "#);
+    let start = std::time::Instant::now();
+    while !env.logs.iter().any(|(_, msg)| msg == "done") {
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "RSA promise did not settle");
+        host.run_timers(&mut env, 1100.0 + start.elapsed().as_secs_f64() * 1000.0);
+        host.run_jobs(&mut env);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let lines: Vec<_> = env.logs.iter().filter(|(level,_)| level=="log").map(|(_,line)| line.as_str()).collect();
+    assert_eq!(lines, ["RSA-OAEP-256 1,2,3 OperationError InvalidAccessError",
+        "RSA-PSS 1024 1,0,1 true false", "false", "RSASSA-PKCS1-v1_5 1024 1,0,1 true false", "done"]);
 }

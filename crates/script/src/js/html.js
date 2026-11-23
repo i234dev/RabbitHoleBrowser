@@ -14,7 +14,7 @@
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const S = Symbol('html');
-  const SD = Symbol('defaultValue'), SRV = Symbol('returnValue'), SPOP = Symbol('popoverOpen');
+  const SD = Symbol('defaultValue'), SRV = Symbol('returnValue');
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
   // Define accessors / methods only where the native bindings lack them.
@@ -142,25 +142,30 @@
     return document.importNode(t.content, true);
   }
   const E = g.Element, CD = g.CharacterData, SR = g.ShadowRoot, DF = g.DocumentFragment;
-  for (const [C, insert] of [[E, true], [SR, true]]) {
+  function insertMethod(pos, safe, declarative = false) {
+    return function(html, opts = undefined) {
+      if (!arguments.length) throw new TypeError('HTML markup is required');
+      parseHTMLInto(this, pos, safe, html, opts, declarative);
+    };
+  }
+  for (const C of [E, SR]) {
     // setHTML / setHTMLUnsafe: the children replaced by the markup parsed
     // with declarative shadow roots allowed.
-    method(C, 'setHTMLUnsafe', function (html, opts) { parseHTMLInto(this, 'html', false, html, opts, true); });
-    method(C, 'setHTML', function (html, opts) { parseHTMLInto(this, 'html', true, html, opts, true); });
-    method(C, 'getHTML', function (opts) {
+    method(C, 'setHTMLUnsafe', insertMethod('html', false, true));
+    method(C, 'setHTML', insertMethod('html', true, true));
+    method(C, 'getHTML', function (opts = undefined) {
       if (!opts || !opts.serializableShadowRoots) return this.innerHTML;
       return this.innerHTML;
     });
     for (const [name, pos] of [['appendHTML', 'append'], ['prependHTML', 'prepend']]) {
-      method(C, name + 'Unsafe', function (html, opts) { parseHTMLInto(this, pos, false, html, opts); });
-      method(C, name, function (html, opts) { parseHTMLInto(this, pos, true, html, opts); });
+      method(C, name + 'Unsafe', insertMethod(pos, false));
+      method(C, name, insertMethod(pos, true));
     }
-    void insert;
   }
   for (const C of [E, CD]) {
     for (const [name, pos] of [['beforeHTML', 'before'], ['afterHTML', 'after'], ['replaceWithHTML', 'replaceWith']]) {
-      method(C, name + 'Unsafe', function (html, opts) { parseHTMLInto(this, pos, false, html, opts); });
-      method(C, name, function (html, opts) { parseHTMLInto(this, pos, true, html, opts); });
+      method(C, name + 'Unsafe', insertMethod(pos, false));
+      method(C, name, insertMethod(pos, true));
     }
   }
   // {append,prepend,before,after,replaceWith}HTML{,Unsafe}(html, options):
@@ -193,6 +198,10 @@
     const runScripts = !safe && !!(opts && opts.runScripts);
     N.streamOpen(node, pos, { check: true });
     const cfg = streamSanitizerConfig(opts, safe);
+    if (pos === 'html') {
+      N.setFragmentHTML(node,markup,runScripts,cfg ? elements => sanitizeCreated(elements,cfg,safe) : null);
+      return;
+    }
     const h = N.streamOpen(node, pos, { runScripts, dsd: !!dsd });
     sanitizeCreated(N.streamWrite(h, markup), cfg, safe);
     sanitizeCreated(N.streamClose(h), cfg, safe);
@@ -206,7 +215,11 @@
   // variants never run scripts and sanitize what they insert.
   function streamSanitizerConfig(opts, safe) {
     const s = opts && opts.sanitizer;
-    if (s === undefined || s === null || s === 'default') return safe ? { elements: null, removeElements: DEFAULT_REMOVE.slice(), replaceWithChildrenElements: [], attributes: null, removeAttributes: [] } : null;
+    if (s === undefined || s === null || s === 'default') {
+      if (!safe && s !== 'default') return null;
+      return { useDefaults: true, elements: null, removeElements: DEFAULT_REMOVE,
+        replaceWithChildrenElements: [], attributes: null, removeAttributes: ['is'] };
+    }
     const cfg = (g.Sanitizer && s instanceof g.Sanitizer) ? s.get() : s;
     if (typeof cfg !== 'object') throw new TypeError("Failed to execute: the sanitizer option is not a Sanitizer or SanitizerConfig.");
     if (cfg.elements && cfg.removeElements) throw new TypeError("A sanitizer config cannot have both 'elements' and 'removeElements'.");
@@ -221,11 +234,16 @@
     if (!cfg) return;
     for (const el of els) {
       const name = el.localName;
-      if (cfg.removeElements.includes(name) || (cfg.elements && !cfg.elements.includes(name))) { el.remove(); continue; }
+      // HTML custom elements and customized built-ins require explicit opt-in.
+      if (cfg.removeElements.includes(name) ||
+          (cfg.useDefaults && el.namespaceURI === 'http://www.w3.org/1999/xhtml' && name.includes('-'))) {
+        el.remove(); continue;
+      }
       if (cfg.replaceWithChildrenElements.includes(name)) { el.replaceWith(...el.childNodes); continue; }
+      if (cfg.elements && !cfg.elements.includes(name)) { el.remove(); continue; }
       for (const a of Array.from(el.getAttributeNames())) {
         const v = el.getAttribute(a) || '';
-        if ((safe && (/^on/i.test(a) || ((a === 'href' || a === 'src' || a === 'action' || a === 'formaction') && /^\s*javascript:/i.test(v)))) || cfg.removeAttributes.includes(a) || (cfg.attributes && !cfg.attributes.includes(a))) el.removeAttribute(a);
+        if (((safe || cfg.useDefaults) && (/^on/i.test(a) || ((a === 'href' || a === 'src' || a === 'action' || a === 'formaction') && /^\s*javascript:/i.test(v)))) || cfg.removeAttributes.includes(a) || (cfg.attributes && !cfg.attributes.includes(a))) el.removeAttribute(a);
       }
     }
   }
@@ -409,7 +427,9 @@
   tag(ElementInternals, 'ElementInternals');
   // ARIA reflection on ElementInternals (role, aria*): stored, not rendered.
   for (const k of ['role', 'ariaActiveDescendantElement', 'ariaAtomic', 'ariaAutoComplete', 'ariaBrailleLabel', 'ariaBrailleRoleDescription', 'ariaBusy', 'ariaChecked', 'ariaColCount', 'ariaColIndex', 'ariaColIndexText', 'ariaColSpan', 'ariaControlsElements', 'ariaCurrent', 'ariaDescribedByElements', 'ariaDescription', 'ariaDetailsElements', 'ariaDisabled', 'ariaErrorMessageElements', 'ariaExpanded', 'ariaFlowToElements', 'ariaHasPopup', 'ariaHidden', 'ariaInvalid', 'ariaKeyShortcuts', 'ariaLabel', 'ariaLabelledByElements', 'ariaLevel', 'ariaLive', 'ariaModal', 'ariaMultiLine', 'ariaMultiSelectable', 'ariaOrientation', 'ariaOwnsElements', 'ariaPlaceholder', 'ariaPosInSet', 'ariaPressed', 'ariaReadOnly', 'ariaRelevant', 'ariaRequired', 'ariaRoleDescription', 'ariaRowCount', 'ariaRowIndex', 'ariaRowIndexText', 'ariaRowSpan', 'ariaSelected', 'ariaSetSize', 'ariaSort', 'ariaValueMax', 'ariaValueMin', 'ariaValueNow', 'ariaValueText']) {
-    Object.defineProperty(ElementInternals.prototype, k, { get() { return this[S].aria[k] ?? null; }, set(v) { this[S].aria[k] = v; }, configurable: true, enumerable: true });
+    Object.defineProperty(ElementInternals.prototype, k, { get() { return this[S].aria[k] ?? null; }, set(v) {
+      this[S].aria[k] = v == null ? null : /Elements?$/.test(k) ? v : `${v}`;
+    }, configurable: true, enumerable: true });
   }
   const formAssociated = (el) => { try { const C = customElements.get(el.localName); return !!(C && C.formAssociated); } catch (e) { return false; } };
   method(HE, 'attachInternals', function () {
@@ -633,7 +653,6 @@
     });
   }
   for (const C of [g.HTMLButtonElement, g.HTMLInputElement]) {
-    acc(C, 'popoverTargetElement', function () { const id = this.getAttribute('popovertarget'); return id ? document.getElementById(id) : null; }, function (el) { if (el && el.id) this.setAttribute('popovertarget', el.id); else this.removeAttribute('popovertarget'); });
     acc(C, 'popoverTargetAction', function () { const v = (this.getAttribute('popovertargetaction') || '').toLowerCase(); return ['show', 'hide'].includes(v) ? v : 'toggle'; }, function (v) { this.setAttribute('popovertargetaction', v); });
   }
   acc(g.HTMLButtonElement, 'commandForElement', function () { const id = this.getAttribute('commandfor'); return id ? document.getElementById(id) : null; }, function (el) { if (el && el.id) this.setAttribute('commandfor', el.id); else this.removeAttribute('commandfor'); });
@@ -1021,13 +1040,110 @@
 
   // ---------------------------------------------------- HTMLElement misc
 
-  // Popover API (state only; top-layer rendering not available).
-  for (const [name, fn] of [
-    ['showPopover', function () { if (!this.hasAttribute('popover')) throw domError("Failed to execute 'showPopover' on 'HTMLElement': Not supported on elements that do not have a valid value for the 'popover' attribute.", 'NotSupportedError'); if (!this[SPOP]) { this[SPOP] = true; this.dispatchEvent(new ToggleEventCtor('toggle', { oldState: 'closed', newState: 'open' })); } }],
-    ['hidePopover', function () { if (this[SPOP]) { this[SPOP] = false; this.dispatchEvent(new ToggleEventCtor('toggle', { oldState: 'open', newState: 'closed' })); } }],
-    ['togglePopover', function (force) { const open = typeof force === 'boolean' ? force : typeof force === 'object' && force && typeof force.force === 'boolean' ? force.force : !this[SPOP]; if (open) this.showPopover(); else this.hidePopover(); return open; }],
-  ]) method(HE, name, fn, true);
-  const ToggleEventCtor = g.ToggleEvent || g.Event;
+  const pendingPopoverToggles = new WeakMap();
+  const changingPopovers = new WeakSet();
+  const closingPopoverStacks = new WeakSet();
+  const previousPopoverFocus = new WeakMap();
+  const ToggleEventCtor = g.ToggleEvent;
+  function queuePopoverToggle(element, oldState, newState, source) {
+    const pending = pendingPopoverToggles.get(element);
+    if (pending) {
+      oldState = pending.oldState;
+      clearTimeout(pending.timer);
+    }
+    const timer = setTimeout(() => {
+      pendingPopoverToggles.delete(element);
+      element.dispatchEvent(new ToggleEventCtor('toggle', {oldState, newState, source}));
+    }, 0);
+    pendingPopoverToggles.set(element, {oldState, timer});
+  }
+  function popoverContains(ancestor, node) {
+    for (let el = node; el; el = el.assignedSlot || el.parentNode || el.host) {
+      if (el === ancestor) return true;
+    }
+    return false;
+  }
+  function checkPopover(element, open) {
+    if (element.popover === null) throw domError('The element has no popover attribute.', 'NotSupportedError');
+    if (!element.ownerDocument.defaultView) throw domError('The document is not active.', 'InvalidStateError');
+    if (N.popoverState(element) === open) return false;
+    if (!element.isConnected || element.matches(':modal') || element.ownerDocument.fullscreenElement === element)
+      throw domError('The element cannot change its popover state.', 'InvalidStateError');
+    return true;
+  }
+  function changePopover(element, open, source) {
+    if (!checkPopover(element, open) || changingPopovers.has(element)) return;
+    const oldState = open ? 'closed' : 'open', newState = open ? 'open' : 'closed';
+    const doc = element.ownerDocument;
+    if (open && element.popover !== 'manual' && closingPopoverStacks.has(doc))
+      throw domError('The popover stack is being dismissed.', 'InvalidStateError');
+    const markClosing = !open && element.popover !== 'manual' && !closingPopoverStacks.has(doc);
+    if (markClosing) closingPopoverStacks.add(doc);
+    changingPopovers.add(element);
+    try {
+      if (!element.dispatchEvent(new ToggleEventCtor('beforetoggle', {oldState,newState,source,cancelable:open}))) return;
+      if (!checkPopover(element, open)) return;
+      const mode = element.popover;
+      if (mode !== 'manual') {
+        const stack = N.openPopovers(element).filter(p => p.popover !== 'manual');
+        let keep = -1;
+        if (open) {
+          for (let i = 0; i < stack.length; i++) {
+            const p = stack[i];
+            if (mode === 'hint' && p.popover === 'auto' ||
+                (mode === 'hint' || p.popover === 'auto') && (popoverContains(p, element) || popoverContains(p, source))) keep = i;
+          }
+        } else {
+          keep = stack.indexOf(element);
+        }
+        for (let i = stack.length - 1; i > keep; i--) {
+          const p = stack[i];
+          if (N.popoverState(p)) changePopover(p, false, null);
+        }
+        if (element.popover !== mode) throw domError('The popover mode changed while updating the top layer.', 'InvalidStateError');
+        if (!checkPopover(element, open)) return;
+      }
+      const focused = element.ownerDocument.activeElement;
+      N.popoverState(element, open, source);
+      if (open) {
+        if (mode !== 'manual' && !N.openPopovers(element).some(p => p !== element && p.popover !== 'manual'))
+          previousPopoverFocus.set(element, focused);
+        const autofocus = element.hasAttribute('autofocus') ? element : element.querySelector('[autofocus]');
+        if (autofocus) autofocus.focus();
+      } else {
+        const previous = previousPopoverFocus.get(element);
+        previousPopoverFocus.delete(element);
+        if (previous && popoverContains(element, focused)) previous.focus();
+      }
+      queuePopoverToggle(element, oldState, newState, source);
+    } finally {
+      changingPopovers.delete(element);
+      if (markClosing) closingPopoverStacks.delete(doc);
+    }
+  }
+  N.setFactory('popoverAction', (element, dismiss) => {
+    if (dismiss) { changePopover(element, false, null); return true; }
+    const target = element.popoverTargetElement;
+    if (!target || target.popover == null || element.matches(':disabled')) return false;
+    const action = element.popoverTargetAction;
+    const open = action === 'show' || (action !== 'hide' && !N.popoverState(target));
+    changePopover(target, open, element);
+    return true;
+  });
+  function popoverSource(opts) {
+    const source = opts?.source;
+    if (source == null) return null;
+    if (!(source instanceof g.HTMLElement)) throw new TypeError('Expected an HTMLElement source');
+    return source;
+  }
+  method(HE, 'showPopover', function (options = {}) { changePopover(this, true, popoverSource(options)); }, true);
+  method(HE, 'hidePopover', function () { changePopover(this, false, null); }, true);
+  method(HE, 'togglePopover', function (options) {
+    const dictionary = options != null && (typeof options === 'object' || typeof options === 'function');
+    const force = dictionary ? options.force : options;
+    changePopover(this, force === undefined ? !N.popoverState(this) : !!force, dictionary ? popoverSource(options) : null);
+    return N.popoverState(this);
+  }, true);
 
   // -------------------------------------------------------- DOMStringMap
 

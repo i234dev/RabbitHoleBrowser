@@ -198,6 +198,9 @@ pub fn form_data_set(
 /// Build the HTTP request for submitting `form` (HTML §4.10.21.3).
 pub fn submission_request(page: &Page, form: NodeId, submitter: Option<NodeId>, files: &dyn Fn(NodeId) -> Vec<ChosenFile>) -> Option<Request> {
     let doc = &page.doc;
+    if !doc.is_connected(form) {
+        return None;
+    }
     let attr = |name: &str| -> Option<String> {
         // Submitter attributes (formaction, formmethod, formenctype) override.
         submitter

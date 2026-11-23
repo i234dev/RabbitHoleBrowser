@@ -42,7 +42,7 @@ fn parse_transitions(comps: &[&[Token]]) -> Vec<Transition> {
     }
     let mut out = Vec::new();
     for item in values::split_commas(comps) {
-        let mut t = Transition { property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into() };
+        let mut t = Transition { allow_discrete: false, property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into() };
         let mut times = 0;
         for c in item {
             if let Some(s) = super::seconds(c) {
@@ -55,7 +55,11 @@ fn parse_transitions(comps: &[&[Token]]) -> Vec<Transition> {
             } else if let Some(tn) = timing_name(c) {
                 t.timing = tn;
             } else if let Some(kw) = values::ident(c) {
-                t.property = kw;
+                match kw.as_str() {
+                    "normal" => t.allow_discrete = false,
+                    "allow-discrete" => t.allow_discrete = true,
+                    _ => t.property = kw,
+                }
             }
         }
         out.push(t);
@@ -124,7 +128,7 @@ fn each_transition<T: Clone>(style: &mut ComputedStyle, vals: Vec<T>, f: impl Fn
         return;
     }
     if style.transitions.len() < vals.len() {
-        style.transitions.resize(vals.len(), Transition { property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into() });
+        style.transitions.resize(vals.len(), Transition { allow_discrete: false, property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into() });
     }
     let n = style.transitions.len();
     for i in 0..n {
@@ -347,7 +351,15 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 each_transition(style, v, |t, f| t.timing = f);
             }
         }
-        "transition-behavior" => {}
+        "transition-behavior" => {
+            if let Some(v) = single_list(comps, |c| match values::ident(c)?.as_str() {
+                "normal" => Some(false),
+                "allow-discrete" => Some(true),
+                _ => None,
+            }) {
+                each_transition(style, v, |t, allow| t.allow_discrete = allow);
+            }
+        }
         "animation" => style.animations = parse_animations(comps),
         "animation-name" => {
             let v = single_list(comps, |c| match c {
@@ -405,7 +417,12 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 each_animation(style, v, |a, k| a.paused = k == "paused");
             }
         }
-        "animation-composition" | "animation-timeline" => {}
+        "animation-composition" => {
+            if let Some(list) = single_list(comps, |c| AnimationComposition::parse(&values::ident(c)?)) {
+                style.animation_composition = Some(list.into());
+            }
+        }
+        "animation-timeline" => {}
         "scroll-margin-top" | "scroll-margin" => {
             if let Some(v) = super::px(c0, ctx) {
                 style.scroll_margin_top = v;
@@ -578,7 +595,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         | "-webkit-margin-before" | "-webkit-margin-after" | "-webkit-margin-start" | "-webkit-margin-end"
         | "-webkit-padding-start" | "-webkit-padding-end" | "-webkit-border-image" | "border-image" | "border-image-source"
         | "border-image-slice" | "border-image-width" | "border-image-outset" | "border-image-repeat" | "cursor-x"
-        | "nav-index" | "ime-mode" | "src" | "unicode-range" | "font-display" | "behavior" | "filter-x" | "-ms-filter"
+        | "nav-index" | "ime-mode" | "behavior" | "filter-x" | "-ms-filter"
         | "-ms-interpolation-mode" | "-ms-overflow-style" | "-ms-high-contrast-adjust" | "-moz-force-broken-image-icon" => {}
         _ => return false,
     }

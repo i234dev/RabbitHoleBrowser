@@ -11,6 +11,7 @@ use rabbithole_js::{JsResult, Realm, Value};
 /// State of the "update the rendering" hook (Intersection/Resize observers).
 #[derive(Default)]
 pub struct RenderState {
+    pub sheets_pending: bool,
     pub hook: Option<Value>,
     pub active: bool,
     pub dirty: bool,
@@ -137,6 +138,11 @@ fn set_adopted_styles(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
     if n.doc == 0 && changed {
         mark_dirty();
     }
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn set_sheets_pending(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    state().borrow_mut().render.sheets_pending = realm.to_boolean(&arg(args, 0));
     Ok(Value::Undefined)
 }
 
@@ -465,7 +471,9 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "webidlEnumerable", 1, webidl_enumerable);
     realm.define_method(o, "inflate", 2, native_inflate);
     realm.define_method(o, "deflate", 2, native_deflate);
+    crate::webcrypto::install(realm, o);
     crate::sockets::install(realm, o);
+    crate::rtc::install(realm, o);
     crate::media::install(realm, o);
     crate::canvas2d::install(realm, o);
     crate::webgl::install(realm, o);
@@ -484,17 +492,38 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "requestRenderUpdate", 0, request_render_update);
     realm.define_method(o, "setFactory", 2, set_factory);
     realm.define_method(o, "setAdoptedStyles", 2, set_adopted_styles);
+    realm.define_method(o, "cssomTryName", 1, crate::cssom::cssom_try_name);
+    realm.define_method(o, "cssomTryDescriptors", 0, crate::cssom::cssom_try_descriptors);
+    realm.define_method(o, "cssomSerializeSelector", 2, crate::cssom::cssom_serialize_selector);
+    realm.define_method(o, "cssomKeyframeSelector", 1, crate::cssom::cssom_keyframe_selector);
+    realm.define_method(o, "cssomNamespace", 1, crate::cssom::cssom_namespace);
+    realm.define_method(o, "cssomValidSelector", 3, crate::cssom::cssom_valid_selector);
+    realm.define_method(o, "cssomExpandPlace", 2, crate::cssom::cssom_expand_place);
+    realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
+    realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
+    realm.define_method(o, "setSheetsPending", 1, set_sheets_pending);
     realm.define_method(o, "setSheetText", 2, set_sheet_text);
     realm.define_method(o, "fetchText", 1, fetch_text);
     realm.define_method(o, "isShadowRoot", 1, is_shadow_root);
     realm.define_method(o, "nodeKey", 1, node_key);
     realm.define_method(o, "documentNode", 0, document_root);
+    let dedicated_or_shared = {
+        let state = state();
+        let host = state.borrow();
+        host.worker_info.is_some() && !crate::service_worker::is_worker(&host.service_worker)
+    };
+    if dedicated_or_shared {
+        realm.define_method(o, "readBlobBufferSync", 1, crate::fetch::read_blob_buffer_sync);
+    }
     crate::workers::install_natives(realm, o);
     crate::live::install(realm, o);
     realm.define_method(o, "createDoctype", 4, crate::document::create_doctype);
     realm.define_method(o, "createXMLDocument", 0, crate::document::create_xml_document);
+    realm.define_method(o, "popoverState", 1, crate::element::popover_state);
+    realm.define_method(o, "openPopovers", 1, crate::element::open_popovers);
     realm.define_method(o, "attrNamespace", 2, crate::element::attr_namespace_native);
     realm.define_method(o, "validateQName", 1, crate::document::validate_qname);
+    realm.define_method(o, "setFragmentHTML", 4, crate::docparser::set_fragment_html);
     realm.define_method(o, "streamOpen", 3, crate::docparser::stream_open);
     realm.define_method(o, "contextualFragment", 2, crate::misc::contextual_fragment_native);
     realm.define_method(o, "streamWrite", 2, crate::docparser::stream_write);

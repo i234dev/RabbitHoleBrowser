@@ -1,15 +1,16 @@
 // Web Cryptography: Crypto / CryptoKey / SubtleCrypto with SHA-1/256/384/
 // 512 digests, HMAC, AES-CBC / AES-CTR / AES-GCM / AES-KW, PBKDF2, HKDF
 // (generate/import/export raw+jwk, sign/verify, encrypt/decrypt, derive,
-// wrap/unwrap). Public-key algorithms (RSA, EC, Ed25519, X25519) reject
-// with NotSupportedError.
+// wrap/unwrap). Ed25519 signing and verification use native key objects.
 (function () {
   'use strict';
   const g = globalThis;
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
-  const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
-  const S = Symbol('crypto');
+  const keySlots = new WeakMap();
+  const keyInfo = WeakMap.prototype.get.bind(keySlots);
+  const recordKey = WeakMap.prototype.set.bind(keySlots);
+  const hasKey = WeakMap.prototype.has.bind(keySlots);
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const err = (name, msg) => new g.DOMException(msg, name);
   const native = g.crypto;
@@ -17,122 +18,21 @@
   const nativeUUID = native.randomUUID.bind(native);
 
   // ------------------------------------------------------------- hashes
-  const bytesOf = (data) => {
-    if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
-    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
-    throw new TypeError("Failed to execute on 'SubtleCrypto': The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.");
-  };
-  const K256 = new Uint32Array([0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]);
-  function pad(msg, blockLen, lenBytes) {
-    const bitLen = msg.length * 8;
-    let total = msg.length + 1 + lenBytes;
-    total = Math.ceil(total / blockLen) * blockLen;
-    const out = new Uint8Array(total);
-    out.set(msg);
-    out[msg.length] = 0x80;
-    // Bit length, big-endian (low 53 bits are enough).
-    let v = bitLen;
-    for (let i = 0; i < 8; i++) { out[total - 1 - i] = v & 0xff; v = Math.floor(v / 256); }
-    return out;
+  const N = g.__rhNative, defer = g.setTimeout;
+  const bytesOf = data => new Uint8Array(N.cryptoCopyBuffer(data));
+  function unsigned(value, maximum) {
+    if (value === undefined) throw new TypeError('Missing algorithm parameter');
+    const number = Math.trunc(+value);
+    if (!Number.isFinite(number) || number < 0 || number > maximum) throw new TypeError('Algorithm parameter out of range');
+    return number;
   }
-  function sha256(msg) {
-    const p = pad(msg, 64, 8);
-    const h = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
-    const w = new Uint32Array(64);
-    for (let off = 0; off < p.length; off += 64) {
-      for (let i = 0; i < 16; i++) w[i] = (p[off + i * 4] << 24) | (p[off + i * 4 + 1] << 16) | (p[off + i * 4 + 2] << 8) | p[off + i * 4 + 3];
-      for (let i = 16; i < 64; i++) {
-        const s0 = ((w[i - 15] >>> 7) | (w[i - 15] << 25)) ^ ((w[i - 15] >>> 18) | (w[i - 15] << 14)) ^ (w[i - 15] >>> 3);
-        const s1 = ((w[i - 2] >>> 17) | (w[i - 2] << 15)) ^ ((w[i - 2] >>> 19) | (w[i - 2] << 13)) ^ (w[i - 2] >>> 10);
-        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
-      }
-      let [a, b, c, d, e, f, gg, hh] = h;
-      for (let i = 0; i < 64; i++) {
-        const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
-        const ch = (e & f) ^ (~e & gg);
-        const t1 = (hh + S1 + ch + K256[i] + w[i]) | 0;
-        const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
-        const maj = (a & b) ^ (a & c) ^ (b & c);
-        const t2 = (S0 + maj) | 0;
-        hh = gg; gg = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
-      }
-      h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += gg; h[7] += hh;
-    }
-    const out = new Uint8Array(32);
-    for (let i = 0; i < 8; i++) { out[i * 4] = h[i] >>> 24; out[i * 4 + 1] = (h[i] >>> 16) & 255; out[i * 4 + 2] = (h[i] >>> 8) & 255; out[i * 4 + 3] = h[i] & 255; }
-    return out;
-  }
-  function sha1(msg) {
-    const p = pad(msg, 64, 8);
-    const h = new Uint32Array([0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]);
-    const w = new Uint32Array(80);
-    for (let off = 0; off < p.length; off += 64) {
-      for (let i = 0; i < 16; i++) w[i] = (p[off + i * 4] << 24) | (p[off + i * 4 + 1] << 16) | (p[off + i * 4 + 2] << 8) | p[off + i * 4 + 3];
-      for (let i = 16; i < 80; i++) { const x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]; w[i] = (x << 1) | (x >>> 31); }
-      let [a, b, c, d, e] = h;
-      for (let i = 0; i < 80; i++) {
-        const [f, k] = i < 20 ? [(b & c) | (~b & d), 0x5a827999] : i < 40 ? [b ^ c ^ d, 0x6ed9eba1] : i < 60 ? [(b & c) | (b & d) | (c & d), 0x8f1bbcdc] : [b ^ c ^ d, 0xca62c1d6];
-        const t = (((a << 5) | (a >>> 27)) + f + e + k + w[i]) | 0;
-        e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
-      }
-      h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
-    }
-    const out = new Uint8Array(20);
-    for (let i = 0; i < 5; i++) { out[i * 4] = h[i] >>> 24; out[i * 4 + 1] = (h[i] >>> 16) & 255; out[i * 4 + 2] = (h[i] >>> 8) & 255; out[i * 4 + 3] = h[i] & 255; }
-    return out;
-  }
-  // SHA-384/512 with BigInt words.
-  const K512 = ['428a2f98d728ae22', '7137449123ef65cd', 'b5c0fbcfec4d3b2f', 'e9b5dba58189dbbc', '3956c25bf348b538', '59f111f1b605d019', '923f82a4af194f9b', 'ab1c5ed5da6d8118', 'd807aa98a3030242', '12835b0145706fbe', '243185be4ee4b28c', '550c7dc3d5ffb4e2', '72be5d74f27b896f', '80deb1fe3b1696b1', '9bdc06a725c71235', 'c19bf174cf692694', 'e49b69c19ef14ad2', 'efbe4786384f25e3', '0fc19dc68b8cd5b5', '240ca1cc77ac9c65', '2de92c6f592b0275', '4a7484aa6ea6e483', '5cb0a9dcbd41fbd4', '76f988da831153b5', '983e5152ee66dfab', 'a831c66d2db43210', 'b00327c898fb213f', 'bf597fc7beef0ee4', 'c6e00bf33da88fc2', 'd5a79147930aa725', '06ca6351e003826f', '142929670a0e6e70', '27b70a8546d22ffc', '2e1b21385c26c926', '4d2c6dfc5ac42aed', '53380d139d95b3df', '650a73548baf63de', '766a0abb3c77b2a8', '81c2c92e47edaee6', '92722c851482353b', 'a2bfe8a14cf10364', 'a81a664bbc423001', 'c24b8b70d0f89791', 'c76c51a30654be30', 'd192e819d6ef5218', 'd69906245565a910', 'f40e35855771202a', '106aa07032bbd1b8', '19a4c116b8d2d0c8', '1e376c085141ab53', '2748774cdf8eeb99', '34b0bcb5e19b48a8', '391c0cb3c5c95a63', '4ed8aa4ae3418acb', '5b9cca4f7763e373', '682e6ff3d6b2b8a3', '748f82ee5defb2fc', '78a5636f43172f60', '84c87814a1f0ab72', '8cc702081a6439ec', '90befffa23631e28', 'a4506cebde82bde9', 'bef9a3f7b2c67915', 'c67178f2e372532b', 'ca273eceea26619c', 'd186b8c721c0c207', 'eada7dd6cde0eb1e', 'f57d4f7fee6ed178', '06f067aa72176fba', '0a637dc5a2c898a6', '113f9804bef90dae', '1b710b35131c471b', '28db77f523047d84', '32caab7b40c72493', '3c9ebe0a15c9bebc', '431d67c49c100d4c', '4cc5d4becb3e42b6', '597f299cfc657e2a', '5fcb6fab3ad6faec', '6c44198c4a475817'].map((x) => BigInt('0x' + x));
-  const M64 = (1n << 64n) - 1n;
-  const rotr = (x, n) => ((x >> n) | (x << (64n - n))) & M64;
-  function sha512(msg, outLen) {
-    const p = pad(msg, 128, 16);
-    const h = outLen === 48
-      ? ['cbbb9d5dc1059ed8', '629a292a367cd507', '9159015a3070dd17', '152fecd8f70e5939', '67332667ffc00b31', '8eb44a8768581511', 'db0c2e0d64f98fa7', '47b5481dbefa4fa4'].map((x) => BigInt('0x' + x))
-      : ['6a09e667f3bcc908', 'bb67ae8584caa73b', '3c6ef372fe94f82b', 'a54ff53a5f1d36f1', '510e527fade682d1', '9b05688c2b3e6c1f', '1f83d9abfb41bd6b', '5be0cd19137e2179'].map((x) => BigInt('0x' + x));
-    const w = new Array(80);
-    for (let off = 0; off < p.length; off += 128) {
-      for (let i = 0; i < 16; i++) { let v = 0n; for (let j = 0; j < 8; j++) v = (v << 8n) | BigInt(p[off + i * 8 + j]); w[i] = v; }
-      for (let i = 16; i < 80; i++) {
-        const s0 = rotr(w[i - 15], 1n) ^ rotr(w[i - 15], 8n) ^ (w[i - 15] >> 7n);
-        const s1 = rotr(w[i - 2], 19n) ^ rotr(w[i - 2], 61n) ^ (w[i - 2] >> 6n);
-        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & M64;
-      }
-      let [a, b, c, d, e, f, gg, hh] = h;
-      for (let i = 0; i < 80; i++) {
-        const S1 = rotr(e, 14n) ^ rotr(e, 18n) ^ rotr(e, 41n);
-        const ch = (e & f) ^ (~e & M64 & gg);
-        const t1 = (hh + S1 + ch + K512[i] + w[i]) & M64;
-        const S0 = rotr(a, 28n) ^ rotr(a, 34n) ^ rotr(a, 39n);
-        const maj = (a & b) ^ (a & c) ^ (b & c);
-        const t2 = (S0 + maj) & M64;
-        hh = gg; gg = f; f = e; e = (d + t1) & M64; d = c; c = b; b = a; a = (t1 + t2) & M64;
-      }
-      const add = [a, b, c, d, e, f, gg, hh];
-      for (let i = 0; i < 8; i++) h[i] = (h[i] + add[i]) & M64;
-    }
-    const out = new Uint8Array(64);
-    for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) out[i * 8 + j] = Number((h[i] >> BigInt(56 - j * 8)) & 255n);
-    return out.slice(0, outLen);
-  }
-  const HASHES = { 'SHA-1': [sha1, 64, 20], 'SHA-256': [sha256, 64, 32], 'SHA-384': [(m) => sha512(m, 48), 128, 48], 'SHA-512': [(m) => sha512(m, 64), 128, 64] };
+  const HASHES = { 'SHA-1': [64,20], 'SHA-256': [64,32], 'SHA-384': [128,48], 'SHA-512': [128,64] };
   function hashName(h) {
     const n = (typeof h === 'string' ? h : h && h.name || '').toUpperCase();
     if (!HASHES[n]) throw err('NotSupportedError', `Unrecognized algorithm name`);
     return n;
   }
-  function hmac(hash, key, msg) {
-    const [fn, block] = HASHES[hash];
-    let k = key.length > block ? fn(key) : key;
-    const kk = new Uint8Array(block); kk.set(k);
-    const ipad = new Uint8Array(block + msg.length), opad = new Uint8Array(block);
-    for (let i = 0; i < block; i++) { ipad[i] = kk[i] ^ 0x36; opad[i] = kk[i] ^ 0x5c; }
-    ipad.set(msg, block);
-    const inner = fn(ipad);
-    const outer = new Uint8Array(block + inner.length); outer.set(opad); outer.set(inner, block);
-    return fn(outer);
-  }
-
+  const hmac = (hash, key, msg) => new Uint8Array(N.cryptoHmac(hash, key, msg));
   // ---------------------------------------------------------------- AES
   const SBOX = new Uint8Array(256), INV = new Uint8Array(256);
   (() => {
@@ -221,7 +121,8 @@
     if (n < 1 || n > 16 || out.slice(out.length - n).some((x) => x !== n)) throw err('OperationError', 'The decryption failed (bad padding).');
     return out.slice(0, out.length - n);
   }
-  function ctr(key, counter, data, length = 128) {
+  function ctr(key, counter, data, length) {
+    if (Math.ceil(data.length / 16) > 2 ** length) throw err('OperationError', 'AES-CTR counter would repeat');
     const ks = expandKey(key);
     const block = new Uint8Array(counter);
     const out = new Uint8Array(data.length);
@@ -229,52 +130,13 @@
       const ksb = encBlock(ks, block);
       for (let j = 0; j < 16 && i + j < data.length; j++) out[i + j] = data[i + j] ^ ksb[j];
       // Increment the rightmost `length` bits.
-      for (let k = 15, carry = 1, bits = length; k >= 0 && carry && bits > 0; k--, bits -= 8) { const v = block[k] + carry; block[k] = v & 255; carry = v >> 8; }
+      for (let k = 15, bits = length; bits > 0; --k, bits -= 8) {
+        const mask = (1 << Math.min(bits, 8)) - 1;
+        const low = (block[k] + 1) & mask;
+        block[k] = (block[k] & ~mask) | low;
+        if (low) break;
+      }
     }
-    return out;
-  }
-  // GCM: GHASH over GF(2^128).
-  function gmul(x, y) {
-    const z = new Uint8Array(16), v = new Uint8Array(y);
-    for (let i = 0; i < 128; i++) {
-      if ((x[i >> 3] >> (7 - (i & 7))) & 1) for (let j = 0; j < 16; j++) z[j] ^= v[j];
-      const lsb = v[15] & 1;
-      for (let j = 15; j > 0; j--) v[j] = (v[j] >> 1) | ((v[j - 1] & 1) << 7);
-      v[0] >>= 1;
-      if (lsb) v[0] ^= 0xe1;
-    }
-    return z;
-  }
-  function ghash(h, aad, c) {
-    let y = new Uint8Array(16);
-    const blocks = (d) => { for (let i = 0; i < d.length; i += 16) { const b = new Uint8Array(16); b.set(d.slice(i, i + 16)); for (let j = 0; j < 16; j++) y[j] ^= b[j]; y = gmul(y, h); } };
-    blocks(aad); blocks(c);
-    const len = new Uint8Array(16);
-    const put = (off, n) => { let v = n * 8; for (let i = 7; i >= 0; i--) { len[off + i] = v % 256; v = Math.floor(v / 256); } };
-    put(0, aad.length); put(8, c.length);
-    for (let j = 0; j < 16; j++) y[j] ^= len[j];
-    return gmul(y, h);
-  }
-  function gcm(key, iv, data, aad, tagLen, decrypt) {
-    const ks = expandKey(key);
-    const h = encBlock(ks, new Uint8Array(16));
-    let j0;
-    if (iv.length === 12) { j0 = new Uint8Array(16); j0.set(iv); j0[15] = 1; }
-    else j0 = ghash(h, new Uint8Array(0), iv);
-    const inc = (b) => { const c = new Uint8Array(b); for (let k = 15; k >= 12; k--) { c[k] = (c[k] + 1) & 255; if (c[k]) break; } return c; };
-    const tlen = tagLen / 8;
-    if (decrypt) {
-      if (data.length < tlen) throw err('OperationError', 'The provided data is too small.');
-      const ct = data.slice(0, data.length - tlen), tg = data.slice(data.length - tlen);
-      const s = ghash(h, aad, ct), ek = encBlock(ks, j0);
-      for (let i = 0; i < tlen; i++) if ((s[i] ^ ek[i]) !== tg[i]) throw err('OperationError', 'The operation failed for an operation-specific reason');
-      return ctr(key, inc(j0), ct, 32);
-    }
-    const ct = ctr(key, inc(j0), data, 32);
-    const s = ghash(h, aad, ct), ek = encBlock(ks, j0);
-    const out = new Uint8Array(ct.length + tlen);
-    out.set(ct);
-    for (let i = 0; i < tlen; i++) out[ct.length + i] = s[i] ^ ek[i];
     return out;
   }
   function aesKw(key, data, unwrap) {
@@ -309,29 +171,390 @@
   // ------------------------------------------------------------ CryptoKey
   class CryptoKey {
     constructor() { ILLEGAL(); }
-    get type() { return this[S].type; }
-    get extractable() { return this[S].extractable; }
-    get algorithm() { return this[S].algorithm; }
-    get usages() { return this[S].usages.slice(); }
+    get type() { return keyInfo(this).type; }
+    get extractable() { return keyInfo(this).extractable; }
+    get algorithm() { return keyInfo(this).publicAlgorithm; }
+    get usages() { return keyInfo(this).usages; }
   }
   tag(CryptoKey, 'CryptoKey');
-  const newKey = (type, extractable, algorithm, usages, raw) => { const k = Object.create(CryptoKey.prototype); hidden(k, S, { type, extractable: !!extractable, algorithm, usages: Array.from(usages), raw }); return k; };
+  function newKey(type, extractable, algorithm, usages, raw) {
+    const k = Object.create(CryptoKey.prototype);
+    const publicAlgorithm = { ...algorithm };
+    if (algorithm.publicExponent) publicAlgorithm.publicExponent = algorithm.publicExponent.slice();
+    if (algorithm.hash) publicAlgorithm.hash = { ...algorithm.hash };
+    recordKey(k, { type, extractable: !!extractable, algorithm, publicAlgorithm,
+      usages: Object.freeze(Array.from(new Set(usages))), raw });
+    return k;
+  }
 
-  const normAlg = (a) => (typeof a === 'string' ? { name: a } : Object.assign({}, a));
-  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ECDH', 'ED25519', 'X25519', 'ED448', 'X448'];
+  const normAlg = a => typeof a === 'object' && a !== null ? a : { name: `${a}` };
+  const UNSUPPORTED = ['ED448', 'X448'];
   function algName(a) {
-    const n = String(normAlg(a).name || '').toUpperCase();
-    const map = { 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
+    const id = normAlg(a);
+    const name = id.name;
+    if (name === undefined) throw new TypeError('An algorithm name is required');
+    const n = String(name).toUpperCase();
+    const map = { 'RSASSA-PKCS1-V1_5':'RSASSA-PKCS1-v1_5', 'RSA-PSS':'RSA-PSS', 'RSA-OAEP':'RSA-OAEP', 'CHACHA20-POLY1305': 'ChaCha20-Poly1305', ECDSA: 'ECDSA', ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
     throw err('NotSupportedError', 'Algorithm: Unrecognized name');
   }
   const b64u = (bytes) => g.btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const unb64u = (s) => { const t = String(s).replace(/-/g, '+').replace(/_/g, '/'); const bin = g.atob(t + '==='.slice((t.length + 3) % 4)); return Uint8Array.from(bin, (c) => c.charCodeAt(0)); };
-  const usageCheck = (usages, allowed) => { for (const u of usages) if (!allowed.includes(u)) throw new SyntaxError(`Cannot create a key using the specified key usages.`); };
+  const usageCheck = (usages, allowed) => { for (const u of usages) if (!allowed.includes(u)) throw err('SyntaxError', `Cannot create a key using the specified key usages.`); };
+
+  // RFC 8410 encodes the 32-byte public value in a BIT STRING and the
+  // private seed in a nested OCTET STRING. Algorithm parameters are absent.
+  function octetCurve(oid, key, keyBytes, privateUsages, publicUsages, use) {
+    return { key, keyBytes, privateUsages, publicUsages, use,
+      spki: Uint8Array.of(0x30,42,0x30,5,6,3,0x2b,0x65,oid,3,33,0),
+      pkcs8: Uint8Array.of(0x30,46,2,1,0,0x30,5,6,3,0x2b,0x65,oid,4,34,4,32) };
+  }
+  const okp = {
+    __proto__: null,
+    Ed25519: octetCurve(0x70, N.ed25519Key, N.ed25519KeyBytes, ['sign'], ['verify'], 'sig'),
+    X25519: octetCurve(0x6e, N.x25519Key, N.x25519KeyBytes, ['deriveBits', 'deriveKey'], [], 'enc')
+  };
+  const keyDataError = () => err('DataError', 'Invalid octet curve key encoding');
+  function decodeKeyPart(text) {
+    if (typeof text !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(text)) throw keyDataError();
+    const raw = unb64u(text);
+    if (raw.length !== 32 || b64u(raw) !== text) throw keyDataError();
+    return raw;
+  }
+  function encodeKeyDer(prefix, raw) {
+    const result = new Uint8Array(prefix.length + raw.length);
+    result.set(prefix); result.set(raw, prefix.length);
+    return result.buffer;
+  }
+  function importOctetKey(name, format, data, extractable, usages) {
+    const curve = okp[name];
+    const jwk = format === 'jwk';
+    const privateKey = format === 'pkcs8' || format === 'raw-seed' || (jwk && data?.d !== undefined);
+    usageCheck(usages, privateKey ? curve.privateUsages : curve.publicUsages);
+    if (privateKey && !usages.length) throw err('SyntaxError', 'A private key requires a usage');
+    let raw, publicBytes;
+    if (jwk) {
+      if (!data || data.kty !== 'OKP' || data.crv !== name ||
+          (name === 'Ed25519' && data.alg !== undefined && data.alg !== 'EdDSA' && data.alg !== 'Ed25519') ||
+          (usages.length && data.use !== undefined && data.use !== curve.use) ||
+          (data.ext === false && extractable)) throw keyDataError();
+      if (data.key_ops !== undefined) {
+        const ops = Array.from(data.key_ops);
+        if (new Set(ops).size !== ops.length || usages.some(u => !ops.includes(u))) throw keyDataError();
+      }
+      publicBytes = decodeKeyPart(data.x);
+      raw = privateKey ? decodeKeyPart(data.d) : publicBytes;
+    } else {
+      raw = bytesOf(data);
+      if (format === 'pkcs8' || format === 'spki') {
+        const prefix = privateKey ? curve.pkcs8 : curve.spki;
+        if (raw.length !== prefix.length + 32 || !prefix.every((v, i) => raw[i] === v)) throw keyDataError();
+        raw = raw.subarray(prefix.length);
+      } else if (!['raw', 'raw-public', 'raw-seed'].includes(format)) {
+        throw err('NotSupportedError', 'Unsupported octet curve key format');
+      }
+      if (raw.length !== 32) throw keyDataError();
+    }
+    const material = privateKey ? curve.key(raw, publicBytes, !!extractable) : raw;
+    return newKey(privateKey ? 'private' : 'public', extractable, { name }, usages, material);
+  }
+  function exportOctetKey(format, k) {
+    const name = k.algorithm.name, curve = okp[name];
+    const priv = k.type === 'private';
+    if (format === 'jwk') {
+      const publicBytes = priv ? new Uint8Array(curve.keyBytes(k.raw, false)) : k.raw;
+      const jwk = { kty:'OKP', crv:name, x:b64u(publicBytes), ext:true, key_ops:k.usages.slice() };
+      if (name === 'Ed25519') jwk.alg = name;
+      if (priv) jwk.d = b64u(new Uint8Array(curve.keyBytes(k.raw, true)));
+      return jwk;
+    }
+    if ((format === 'raw' || format === 'raw-public') && !priv) return k.raw.slice().buffer;
+    if (format === 'raw-seed' && priv) return curve.keyBytes(k.raw, true);
+    if (format === 'spki' && !priv) return encodeKeyDer(curve.spki, k.raw);
+    if (format === 'pkcs8' && priv) return encodeKeyDer(curve.pkcs8, new Uint8Array(curve.keyBytes(k.raw, true)));
+    throw err('InvalidAccessError', 'The key type cannot be exported in this format');
+  }
+
+  const ecCurves = {
+    __proto__: null,
+    'P-256': {size:32, oid:[0x2a,0x86,0x48,0xce,0x3d,3,1,7]},
+    'P-384': {size:48, oid:[0x2b,0x81,4,0,0x22]},
+    'P-521': {size:66, oid:[0x2b,0x81,4,0,0x23]},
+  };
+  const ecError = () => err('DataError','Invalid elliptic curve key encoding');
+  function ecCurve(alg) {
+    const curve = normAlg(alg).namedCurve;
+    if (curve === undefined) throw new TypeError('An EC namedCurve is required');
+    const name = `${curve}`;
+    if (!ecCurves[name]) throw err('NotSupportedError','Unsupported named curve');
+    return name;
+  }
+  function ecDigest(alg, message) {
+    const hash = normAlg(alg).hash;
+    if (hash === undefined) throw new TypeError('ECDSA requires a hash algorithm');
+    return N.cryptoDigest(hashName(hash), message);
+  }
+  function ecPart(value, size) {
+    if (typeof value !== 'string' || value.length !== Math.ceil(size * 4 / 3) ||
+        !/^[A-Za-z0-9_-]+$/.test(value)) throw ecError();
+    const bytes = unb64u(value);
+    if (bytes.length !== size || b64u(bytes) !== value) throw ecError();
+    return bytes;
+  }
+  // EC public key SPKI (RFC 5480) uses a named-curve OID and a BIT STRING.
+  // PKCS #8 uses the same AlgorithmIdentifier, followed by an OCTET STRING.
+  function ecDerField(bytes, start, tag) {
+    if (bytes[start++] !== tag || start >= bytes.length) throw ecError();
+    let length = bytes[start++];
+    if (length & 128) {
+      const count = length & 127;
+      if (!count || count > 4 || bytes[start] === 0 || start + count > bytes.length) throw ecError();
+      length = 0;
+      for (let i = 0; i < count; ++i) length = length * 256 + bytes[start++];
+      if (length < 128) throw ecError();
+    }
+    if (start + length > bytes.length) throw ecError();
+    return {data: bytes.subarray(start,start + length), end:start + length};
+  }
+  function ecAlgIdentifier(curve) {
+    const oid = ecCurves[curve].oid;
+    return Uint8Array.of(6,7,0x2a,0x86,0x48,0xce,0x3d,2,1,6,oid.length,...oid);
+  }
+  function parseEcDer(bytes, curve, priv) {
+    const outer = ecDerField(bytes,0,0x30);
+    if (outer.end !== bytes.length) throw ecError();
+    let start = 0;
+    if (priv) {
+      const version = ecDerField(outer.data,0,2);
+      if (version.data.length !== 1 || version.data[0] !== 0) throw ecError();
+      start = version.end;
+    }
+    const alg = ecDerField(outer.data,start,0x30), want = ecAlgIdentifier(curve);
+    if (alg.data.length !== want.length || !want.every((b,i)=>b === alg.data[i])) throw ecError();
+    const key = ecDerField(outer.data,alg.end,priv ? 4 : 3);
+    if (priv) return bytes; // Native decoder checks the private key and optional attributes.
+    if (key.end !== outer.data.length || key.data[0] !== 0) throw ecError();
+    return key.data.slice(1);
+  }
+  function encodeEcSpki(curve, bytes) {
+    function field(tag, body) {
+      const len = body.length;
+      return [tag, ...(len < 128 ? [len] : [0x81,len]), ...body];
+    }
+    return Uint8Array.from(field(0x30,[...field(0x30,ecAlgIdentifier(curve)),...field(3,[0,...bytes])])).buffer;
+  }
+  function importEc(name, format, data, alg, extractable, usages) {
+    const curve = ecCurve(alg), size = ecCurves[curve].size;
+    const priv = format === 'pkcs8' || (format === 'jwk' && data?.d !== undefined);
+    const signing = name === 'ECDSA';
+    usageCheck(usages, priv ? (signing ? ['sign'] : ['deriveBits','deriveKey']) : (signing ? ['verify'] : []));
+    if (priv && !usages.length) throw err('SyntaxError','A private key requires a usage');
+    let point, handle;
+    if (format === 'jwk') {
+      if (data?.kty !== 'EC' || data.crv !== curve || (usages.length && data.use !== undefined && data.use !== (signing ? 'sig' : 'enc')) ||
+          (signing && data.alg !== undefined && data.alg !== ({'P-256':'ES256','P-384':'ES384','P-521':'ES512'})[curve]) ||
+          (data.ext === false && extractable)) throw ecError();
+      if (data.key_ops !== undefined) {
+        const ops = Array.from(data.key_ops);
+        if (new Set(ops).size !== ops.length || usages.some(u => !ops.includes(u))) throw ecError();
+      }
+      point = Uint8Array.of(4,...ecPart(data.x,size),...ecPart(data.y,size));
+      if (priv) {
+        handle = N.ecdhKey(curve,'scalar',ecPart(data.d,size),!!extractable,signing);
+        const actual = new Uint8Array(N.ecdhExport(handle,'public'));
+        if (!actual.every((b,i)=>b === point[i])) throw ecError();
+      }
+    } else if (format === 'pkcs8') {
+      handle = N.ecdhKey(curve,'pkcs8',parseEcDer(bytesOf(data),curve,true),!!extractable,signing);
+    } else if (format === 'spki') {
+      point = parseEcDer(bytesOf(data),curve,false);
+    } else if (format === 'raw' || format === 'raw-public') {
+      point = bytesOf(data);
+    } else throw err('NotSupportedError','Unsupported EC import format');
+    if (!priv) N.ecdhValidate(curve,point);
+    return newKey(priv ? 'private' : 'public',extractable,{name,namedCurve:curve},usages,priv ? handle : point.slice());
+  }
+  function exportEc(format, k) {
+    const curve = k.algorithm.namedCurve, priv = k.type === 'private';
+    if (format === 'pkcs8' && priv) return N.ecdhExport(k.raw,format);
+    const point = priv ? new Uint8Array(N.ecdhExport(k.raw,'public')) : k.raw;
+    if (!priv && (format === 'raw' || format === 'raw-public')) return point.slice().buffer;
+    if (!priv && format === 'spki') return encodeEcSpki(curve,point);
+    if (format === 'jwk') {
+      const split = 1 + ecCurves[curve].size;
+      const jwk = {kty:'EC',crv:curve,x:b64u(point.subarray(1,split)),y:b64u(point.subarray(split)),ext:true,key_ops:k.usages.slice()};
+      if (priv) jwk.d = b64u(new Uint8Array(N.ecdhExport(k.raw,'scalar')));
+      return jwk;
+    }
+    throw err('InvalidAccessError','The EC key type cannot be exported in this format');
+  }
+
+  const rsaAlgorithms = new Set(['RSASSA-PKCS1-v1_5','RSA-PSS','RSA-OAEP']);
+  const rsaNumbers = ['n','e','d','p','q','dp','dq','qi'];
+  const rsaIdentifier = [6,9,42,134,72,134,247,13,1,1,1,5,0];
+  const rsaError = () => err('DataError','Invalid RSA key encoding');
+  function rsaUsages(name, priv) {
+    if (name === 'RSA-OAEP') return priv ? ['decrypt','unwrapKey'] : ['encrypt','wrapKey'];
+    return priv ? ['sign'] : ['verify'];
+  }
+  function rsaJwa(name, hash) {
+    const size = hash.slice(4);
+    if (name === 'RSA-OAEP') return hash === 'SHA-1' ? name : name+'-'+size;
+    return (name === 'RSA-PSS' ? 'PS' : 'RS')+size;
+  }
+  function derField(tag, data) {
+    const length = [];
+    for (let n=data.length; n; n=Math.floor(n/256)) length.unshift(n & 255);
+    return Uint8Array.from([tag,...(data.length < 128 ? [data.length] : [128|length.length,...length]),...data]);
+  }
+  function rsaIntegers(der, priv) {
+    const seq = ecDerField(der,0,48);
+    if (seq.end !== der.length) throw rsaError();
+    let pos = 0;
+    if (priv) {
+      const version=ecDerField(seq.data,pos,2);
+      if (version.data.length !== 1 || version.data[0] !== 0) throw rsaError();
+      pos=version.end;
+    }
+    const parts = [];
+    for (let i=0; i<(priv ? 8 : 2); ++i) {
+      const integer=ecDerField(seq.data,pos,2), bytes=integer.data;
+      if (!bytes.length || bytes[0]>=128 || (bytes[0]===0 && (bytes.length===1 || bytes[1]<128))) throw rsaError();
+      parts.push(bytes[0]===0 ? bytes.subarray(1) : bytes);
+      pos=integer.end;
+    }
+    if (pos !== seq.data.length) throw rsaError();
+    return parts;
+  }
+  function rsaJwkDer(jwk, priv) {
+    const bytes = priv ? [2,1,0] : [];
+    for (const key of rsaNumbers.slice(0,priv ? 8 : 2)) {
+      const text=jwk[key];
+      if (typeof text!=='string' || !/^[A-Za-z0-9_-]+$/.test(text)) throw rsaError();
+      const v=unb64u(text);
+      if (!v.length || !v[0] || b64u(v)!==text) throw rsaError();
+      bytes.push(...derField(2, v[0]>=128 ? [0,...v] : v));
+    }
+    return derField(48,bytes);
+  }
+  function rsaContainer(key, priv) {
+    const alg=derField(48,rsaIdentifier);
+    return derField(48,priv ? [2,1,0,...alg,...derField(4,key)] : [...alg,...derField(3,[0,...key])]).buffer;
+  }
+  function unpackRsa(der, priv) {
+    const outer=ecDerField(der,0,48);
+    if (outer.end !== der.length) throw rsaError();
+    let pos=0;
+    if (priv) {
+      const version=ecDerField(outer.data,pos,2);
+      if (version.data.length!==1 || version.data[0]!==0) throw rsaError();
+      pos=version.end;
+    }
+    const alg=ecDerField(outer.data,pos,48);
+    if (![11,13].includes(alg.data.length) || !alg.data.every((b,i)=>b===rsaIdentifier[i])) throw rsaError();
+    const field=ecDerField(outer.data,alg.end,priv ? 4 : 3);
+    if (!priv && field.data[0]!==0) throw rsaError();
+    if (field.end !== outer.data.length && (!priv || ecDerField(outer.data,field.end,160).end !== outer.data.length)) throw rsaError();
+    return priv ? field.data : field.data.subarray(1);
+  }
+  function rsaKey(name, hash, handle, extractable, usages, priv) {
+    const parts=rsaIntegers(new Uint8Array(N.rsaExport(handle,false)),false);
+    const modulusLength=8*(parts[0].length-1)+32-Math.clz32(parts[0][0]);
+    return newKey(priv ? 'private' : 'public',extractable,
+      {name,hash:{name:hash},modulusLength,publicExponent:parts[1].slice()},usages,handle);
+  }
+  function importRsa(name, format, data, alg, extractable, usages) {
+    const h=normAlg(alg).hash;
+    if (h===undefined) throw new TypeError('RSA requires a hash algorithm');
+    const hash=hashName(h);
+    if (!['spki','pkcs8','jwk'].includes(format)) throw err('NotSupportedError','Unsupported RSA key format');
+    const priv=format==='pkcs8' || (format==='jwk' && data?.d !== undefined);
+    usageCheck(usages,rsaUsages(name,priv));
+    let encoded;
+    if (format==='jwk') {
+      if (data?.kty!=='RSA' || (data.alg!==undefined && data.alg!==rsaJwa(name,hash)) ||
+          (usages.length && data.use!==undefined && data.use!==(name==='RSA-OAEP' ? 'enc' : 'sig')) ||
+          (data.ext===false && extractable) || data.oth!==undefined) throw rsaError();
+      if (data.key_ops!==undefined) {
+        const ops=Array.from(data.key_ops);
+        if (new Set(ops).size!==ops.length || usages.some(u=>!ops.includes(u))) throw rsaError();
+      }
+      encoded=rsaJwkDer(data,priv);
+    } else encoded=unpackRsa(bytesOf(data),priv);
+    const handle=N.rsaImport(encoded,priv,!!extractable);
+    if (priv && !usages.length) throw err('SyntaxError','A private key requires a usage');
+    return rsaKey(name,hash,handle,extractable,usages,priv);
+  }
+  function exportRsa(format,k) {
+    const priv=k.type==='private';
+    if (!['spki','pkcs8','jwk'].includes(format)) throw err('NotSupportedError','Unsupported RSA key format');
+    if (format!=='jwk' && (format==='pkcs8')!==priv) throw err('InvalidAccessError','Wrong RSA key type for this format');
+    const der=new Uint8Array(N.rsaExport(k.raw,priv));
+    if (format!=='jwk') return rsaContainer(der,priv);
+    const parts=rsaIntegers(der,priv), a=k.algorithm;
+    const jwk={kty:'RSA',alg:rsaJwa(a.name,a.hash.name),key_ops:k.usages.slice(),ext:true};
+    parts.forEach((v,i)=>{jwk[rsaNumbers[i]]=b64u(v);});
+    return jwk;
+  }
+  function generateRsa(name,alg,extractable,usages) {
+    const a=normAlg(alg), hashValue=a.hash;
+    if (hashValue===undefined) throw new TypeError('RSA requires a hash algorithm');
+    const hash=hashName(hashValue), bits=unsigned(a.modulusLength,0xffffffff), e=a.publicExponent;
+    const exponent=N.rsaExponent(e);
+    const priv=rsaUsages(name,true), pub=rsaUsages(name,false);
+    usageCheck(usages,[...pub,...priv]);
+    const privateUsages=usages.filter(u=>priv.includes(u)), publicUsages=usages.filter(u=>pub.includes(u));
+    if (!privateUsages.length) throw err('SyntaxError','A private key requires a usage');
+    const job=N.rsaGenerate(bits,exponent,!!extractable);
+    return new Promise((resolve,reject) => {
+      function poll() {
+        try {
+          const handle=N.rsaGenerated(job);
+          if (!handle) { defer(poll,1); return; }
+          const publicHandle=N.rsaImport(N.rsaExport(handle,false),false,true);
+          resolve({publicKey:rsaKey(name,hash,publicHandle,true,publicUsages,false),
+            privateKey:rsaKey(name,hash,handle,extractable,privateUsages,true)});
+        } catch (e) { reject(e); }
+      }
+      defer(poll,1);
+    });
+  }
+  function rsaSignature(k,op,alg,msg,sig) {
+    const hash=k.algorithm.hash.name;
+    const salt=k.algorithm.name==='RSA-PSS' ? unsigned(normAlg(alg).saltLength,0xffffffff) : null;
+    const digest=N.cryptoDigest(hash,bytesOf(msg));
+    return N.rsaOperate(k.raw,op,hash,salt,digest,
+      op==='sign' ? new Uint8Array(0) : bytesOf(sig));
+  }
 
   function importSecret(format, keyData, alg, extractable, usages) {
     const name = algName(alg);
+    if (rsaAlgorithms.has(name)) return importRsa(name,format,keyData,alg,extractable,Array.from(usages));
+    if (name === 'ECDH' || name === 'ECDSA') return importEc(name,format,keyData,alg,extractable,Array.from(usages));
+    if (okp[name]) return importOctetKey(name, format, keyData, extractable, Array.from(usages));
+    if (name === 'ChaCha20-Poly1305') {
+      const requested = Array.from(usages);
+      usageCheck(requested,['encrypt','decrypt','wrapKey','unwrapKey']);
+      if (format !== 'raw-secret' && format !== 'jwk') throw err('NotSupportedError','Unsupported ChaCha20-Poly1305 key format');
+      let bytes;
+      if (format === 'jwk') {
+        if (!keyData || keyData.kty !== 'oct' || typeof keyData.k !== 'string' ||
+            (keyData.alg !== undefined && keyData.alg !== 'C20P') ||
+            (requested.length && keyData.use !== undefined && keyData.use !== 'enc') ||
+            (extractable && keyData.ext === false)) throw err('DataError','Invalid ChaCha20-Poly1305 JWK');
+        if (keyData.key_ops !== undefined) {
+          const ops = Array.from(keyData.key_ops);
+          if (new Set(ops).size !== ops.length || requested.some(u=>!ops.includes(u))) throw err('DataError','Invalid JWK key operations');
+        }
+        if (!/^[a-zA-Z0-9_-]{43}$/.test(keyData.k)) throw err('DataError','Invalid ChaCha20-Poly1305 JWK key');
+        bytes = unb64u(keyData.k);
+        if (b64u(bytes) !== keyData.k) throw err('DataError','Invalid ChaCha20-Poly1305 JWK key');
+      } else bytes = bytesOf(keyData);
+      if (bytes.length !== 32) throw err('DataError','ChaCha20-Poly1305 requires a 256-bit key');
+      if (!requested.length) throw err('SyntaxError','A secret key requires a usage');
+      return newKey('secret',extractable,{name},requested,bytes);
+    }
     let raw;
     if (format === 'raw' || format === 'raw-secret') raw = bytesOf(keyData);
     else if (format === 'jwk') {
@@ -351,7 +574,7 @@
         return newKey('secret', extractable, { name, length: raw.length * 8 }, usages, raw);
       }
       case 'PBKDF2': case 'HKDF':
-        if (extractable) throw new SyntaxError(`${name} keys are not extractable.`);
+        if (extractable) throw err('SyntaxError', `${name} keys are not extractable.`);
         usageCheck(usages, ['deriveKey', 'deriveBits']);
         return newKey('secret', false, { name }, usages, raw);
       default: throw err('NotSupportedError', `Algorithm ${name} cannot import keys.`);
@@ -360,28 +583,48 @@
   function deriveBitsImpl(alg, key, length) {
     const name = algName(alg);
     const a = normAlg(alg);
-    if (key[S].algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key.');
-    if (length === null || length === undefined || length % 8) throw err('OperationError', 'The length must be a multiple of 8.');
+    if (keyInfo(key).algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key.');
+    if (name === 'X25519' || name === 'ECDH') {
+      const peer = a.public;
+      if (!hasKey(peer)) throw new TypeError('A public CryptoKey is required');
+      const priv = keyInfo(key), pub = keyInfo(peer);
+      if (priv.type !== 'private' || pub.type !== 'public' || pub.algorithm.name !== name ||
+          priv.algorithm.namedCurve !== pub.algorithm.namedCurve)
+        throw err('InvalidAccessError', 'Key agreement requires compatible private and public keys');
+      const secret = name === 'ECDH' ? N.ecdhDerive(priv.raw,pub.raw) : N.x25519Derive(priv.raw,pub.raw);
+      const bits = length == null ? secret.byteLength * 8 : Number(length) >>> 0;
+      if (bits > secret.byteLength * 8) throw err('OperationError', 'Requested length exceeds the shared secret');
+      const result = new Uint8Array(secret, 0, Math.ceil(bits / 8)).slice();
+      if (bits % 8) result[result.length - 1] &= 0xff << (8 - bits % 8);
+      return result.buffer;
+    }
+    if (length == null || !Number.isInteger(length) || length < 0 || length > 0xffffffff || length % 8)
+      throw err('OperationError', 'The length must be a multiple of 8.');
     const n = length / 8;
     const hash = hashName(a.hash);
     if (name === 'PBKDF2') {
-      const salt = bytesOf(a.salt), iterations = a.iterations >>> 0;
+      const salt = bytesOf(a.salt), iterations = Math.trunc(+a.iterations);
+      if (!Number.isFinite(iterations) || iterations < 0 || iterations > 0xffffffff) throw new TypeError('Invalid iteration count');
       if (!iterations) throw err('OperationError', 'PBKDF2 iterations must be greater than 0.');
-      const hl = HASHES[hash][2];
-      const out = new Uint8Array(n);
-      for (let block = 1, off = 0; off < n; block++, off += hl) {
-        const s = new Uint8Array(salt.length + 4); s.set(salt); s[salt.length] = block >>> 24; s[salt.length + 1] = (block >>> 16) & 255; s[salt.length + 2] = (block >>> 8) & 255; s[salt.length + 3] = block & 255;
-        let u = hmac(hash, key[S].raw, s);
-        const t = new Uint8Array(u);
-        for (let i = 1; i < iterations; i++) { u = hmac(hash, key[S].raw, u); for (let j = 0; j < t.length; j++) t[j] ^= u[j]; }
-        out.set(t.slice(0, Math.min(hl, n - off)), off);
-      }
-      return out;
+      if (!n) return new ArrayBuffer(0);
+      const op = N.pbkdfStart(hash, keyInfo(key).raw, salt, iterations, n);
+      const output = N.pbkdfStep(op);
+      if (output) return output;
+      return new Promise((resolve, reject) => {
+        function next() {
+          try {
+            const result = N.pbkdfStep(op);
+            if (result) resolve(result); else defer(next, 0);
+          } catch (error) { reject(error); }
+        }
+        defer(next, 0);
+      });
     }
-    // HKDF
     const salt = bytesOf(a.salt), info = bytesOf(a.info);
-    const hl = HASHES[hash][2];
-    const prk = hmac(hash, salt.length ? salt : new Uint8Array(hl), key[S].raw);
+    if (!n) return new ArrayBuffer(0);
+    const hl = HASHES[hash][1];
+    if (n > 255 * hl) throw err('OperationError', 'HKDF output exceeds 255 blocks.');
+    const prk = hmac(hash, salt.length ? salt : new Uint8Array(hl), keyInfo(key).raw);
     const out = new Uint8Array(n);
     let t = new Uint8Array(0);
     for (let i = 1, off = 0; off < n; i++) {
@@ -390,56 +633,103 @@
       out.set(t.slice(0, Math.min(hl, n - off)), off);
       off += hl;
     }
-    return out;
+    return out.buffer;
   }
-  const keyLength = (alg) => { const a = normAlg(alg); const n = algName(alg); if (n === 'HMAC') return a.length || HASHES[hashName(a.hash)][1] * 8; return a.length; };
+  const keyLength = (alg) => { const a = normAlg(alg); const n = algName(alg); if (n === 'ChaCha20-Poly1305') return 256; if (n === 'HMAC') return a.length === undefined ? HASHES[hashName(a.hash)][0] * 8 : unsigned(a.length,0xffffffff); return unsigned(a.length,65535); };
 
   class SubtleCrypto {
     constructor() { ILLEGAL(); }
-    digest(alg, data) { return run(() => { const n = algName(alg); if (!HASHES[n]) throw err('NotSupportedError', 'Unrecognized digest algorithm'); return HASHES[n][0](bytesOf(data)).buffer; }); }
+    digest(alg, data) { return run(() => { const n = algName(alg); if (!HASHES[n]) throw err('NotSupportedError', 'Unrecognized digest algorithm'); return N.cryptoDigest(n, bytesOf(data)); }); }
     generateKey(alg, extractable, usages) {
       return run(() => {
         const name = algName(alg);
+        if (rsaAlgorithms.has(name)) return generateRsa(name,alg,extractable,Array.from(usages));
+        if (name === 'ECDH' || name === 'ECDSA') {
+          const namedCurve = ecCurve(alg), requested = Array.from(usages), signing = name === 'ECDSA';
+          const privateOps = signing ? ['sign'] : ['deriveBits','deriveKey'];
+          const publicOps = signing ? ['verify'] : [];
+          usageCheck(requested, [...privateOps,...publicOps]);
+          const privateUsages = requested.filter(u => privateOps.includes(u));
+          if (!privateUsages.length) throw err('SyntaxError','A private key requires a usage');
+          const handle = N.ecdhKey(namedCurve,'generate',null,!!extractable,signing);
+          return {
+            publicKey: newKey('public',true,{name,namedCurve},requested.filter(u => publicOps.includes(u)),new Uint8Array(N.ecdhExport(handle,'public'))),
+            privateKey: newKey('private',extractable,{name,namedCurve},privateUsages,handle),
+          };
+        }
+        if (okp[name]) {
+          const curve = okp[name], requested = Array.from(usages);
+          usageCheck(requested, [...curve.privateUsages, ...curve.publicUsages]);
+          const privateUsages = requested.filter(u => curve.privateUsages.includes(u));
+          if (!privateUsages.length) throw err('SyntaxError', 'A private key requires a usage');
+          const handle = curve.key(null, null, !!extractable);
+          const privateKey = newKey('private', extractable, {name}, privateUsages, handle);
+          const publicKey = newKey('public', true, {name}, requested.filter(u => curve.publicUsages.includes(u)), new Uint8Array(curve.keyBytes(handle, false)));
+          return { publicKey, privateKey };
+        }
         const len = keyLength(alg);
         if (name !== 'HMAC' && ![128, 192, 256].includes(len)) throw err('OperationError', 'AES key length must be 128, 192 or 256 bits.');
         const raw = new Uint8Array(Math.ceil(len / 8));
         nativeRandom(raw);
-        if (!usages || !usages.length) throw new SyntaxError('Usages cannot be empty when creating a key.');
-        return importSecret('raw', raw, alg, extractable, usages);
+        if (!usages || !usages.length) throw err('SyntaxError', 'Usages cannot be empty when creating a key.');
+        return importSecret(name === 'ChaCha20-Poly1305' ? 'raw-secret' : 'raw', raw, alg, extractable, usages);
       });
     }
     importKey(format, keyData, alg, extractable, usages) { return run(() => importSecret(format, keyData, alg, extractable, usages)); }
     exportKey(format, key) {
       return run(() => {
-        if (!(key instanceof CryptoKey)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
-        if (!key[S].extractable) throw err('InvalidAccessError', 'key is not extractable');
-        const raw = key[S].raw;
+        if (!hasKey(key)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
+        if (!keyInfo(key).extractable) throw err('InvalidAccessError', 'key is not extractable');
+        if (rsaAlgorithms.has(keyInfo(key).algorithm.name)) return exportRsa(format,keyInfo(key));
+        if (['ECDH','ECDSA'].includes(keyInfo(key).algorithm.name)) return exportEc(format,keyInfo(key));
+        if (okp[keyInfo(key).algorithm.name]) return exportOctetKey(format, keyInfo(key));
+        if (keyInfo(key).algorithm.name === 'ChaCha20-Poly1305') {
+          const {raw,usages} = keyInfo(key);
+          if (format === 'raw-secret') return raw.slice().buffer;
+          if (format === 'jwk') return {kty:'oct', k:b64u(raw), alg:'C20P', key_ops:usages.slice(), ext:true};
+          throw err('NotSupportedError','Unsupported ChaCha20-Poly1305 key format');
+        }
+        const raw = keyInfo(key).raw;
         if (format === 'raw' || format === 'raw-secret') return raw.slice().buffer;
         if (format === 'jwk') {
-          const a = key[S].algorithm;
+          const a = keyInfo(key).algorithm;
           const alg = a.name === 'HMAC' ? 'HS' + a.hash.name.slice(4) : 'A' + a.length + (a.name === 'AES-KW' ? 'KW' : a.name.slice(4));
-          return { kty: 'oct', k: b64u(raw), alg, key_ops: key[S].usages.slice(), ext: true };
+          return { kty: 'oct', k: b64u(raw), alg, key_ops: keyInfo(key).usages.slice(), ext: true };
         }
         throw err('NotSupportedError', `Unsupported export format '${format}'.`);
       });
     }
-    sign(alg, key, data) { return run(() => { checkKey(key, 'HMAC', 'sign'); return hmac(key[S].algorithm.hash.name, key[S].raw, bytesOf(data)).buffer; }); }
-    verify(alg, key, signature, data) { return run(() => { checkKey(key, 'HMAC', 'verify'); const mac = hmac(key[S].algorithm.hash.name, key[S].raw, bytesOf(data)); const sig = bytesOf(signature); return sig.length === mac.length && sig.every((b, i) => b === mac[i]); }); }
-    encrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), false, 'encrypt').buffer); }
-    decrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), true, 'decrypt').buffer); }
-    deriveBits(alg, key, length) { return run(() => { checkKey(key, algName(alg), 'deriveBits'); return deriveBitsImpl(alg, key, length).buffer; }); }
-    deriveKey(alg, key, derivedAlg, extractable, usages) { return run(() => { checkKey(key, algName(alg), 'deriveKey'); const bits = deriveBitsImpl(alg, key, keyLength(derivedAlg)); return importSecret('raw', bits, derivedAlg, extractable, usages); }); }
+    sign(alg, key, data) { return run(() => {
+      const name = algName(alg);
+      checkKey(key, name, 'sign');
+      if (rsaAlgorithms.has(name)) return rsaSignature(keyInfo(key),'sign',alg,data);
+      const k = keyInfo(key), msg = bytesOf(data);
+      if (name === 'ECDSA') return N.ecdsaSign(k.raw, ecDigest(alg,msg));
+      return name === 'Ed25519' ? N.ed25519Sign(k.raw, msg) : hmac(k.algorithm.hash.name, k.raw, msg).buffer;
+    }); }
+    verify(alg, key, signature, data) { return run(() => {
+      const name = algName(alg);
+      checkKey(key, name, 'verify');
+      if (rsaAlgorithms.has(name)) return rsaSignature(keyInfo(key),'verify',alg,data,signature);
+      const k = keyInfo(key), msg = bytesOf(data), sig = bytesOf(signature);
+      if (name === 'ECDSA') return N.ecdsaVerify(encodeEcSpki(k.algorithm.namedCurve,k.raw), ecDigest(alg,msg), sig);
+      return name === 'Ed25519' ? N.ed25519Verify(k.raw, msg, sig) : N.cryptoHmac(k.algorithm.hash.name, k.raw, msg, sig);
+    }); }
+    encrypt(alg, key, data) { return run(() => cipher(alg, key, data, false, 'encrypt').buffer); }
+    decrypt(alg, key, data) { return run(() => cipher(alg, key, data, true, 'decrypt').buffer); }
+    deriveBits(alg, key, length) { return run(() => { checkKey(key, algName(alg), 'deriveBits'); return deriveBitsImpl(alg, key, length); }); }
+    deriveKey(alg, key, derivedAlg, extractable, usages) { return run(() => { checkKey(key, algName(alg), 'deriveKey'); return Promise.resolve(deriveBitsImpl(alg, key, keyLength(derivedAlg))).then(bits => importSecret(algName(derivedAlg) === 'ChaCha20-Poly1305' ? 'raw-secret' : 'raw', bits, derivedAlg, extractable, usages)); }); }
     wrapKey(format, key, wrappingKey, wrapAlg) {
       return this.exportKey(format, key).then((exported) => {
         const bytes = format === 'jwk' ? new TextEncoder().encode(JSON.stringify(exported)) : new Uint8Array(exported);
-        if (!wrappingKey[S].usages.includes('wrapKey')) throw err('InvalidAccessError', 'The wrapping key does not support wrapKey.');
-        return algName(wrapAlg) === 'AES-KW' ? aesKw(wrappingKey[S].raw, bytes, false).buffer : cipher(wrapAlg, wrappingKey, bytes, false, null).buffer;
+        checkKey(wrappingKey, algName(wrapAlg), 'wrapKey');
+        return algName(wrapAlg) === 'AES-KW' ? aesKw(keyInfo(wrappingKey).raw, bytes, false).buffer : cipher(wrapAlg, wrappingKey, bytes, false, null).buffer;
       });
     }
     unwrapKey(format, wrapped, unwrappingKey, unwrapAlg, keyAlg, extractable, usages) {
       return run(() => {
-        if (!unwrappingKey[S].usages.includes('unwrapKey')) throw err('InvalidAccessError', 'The unwrapping key does not support unwrapKey.');
-        const bytes = algName(unwrapAlg) === 'AES-KW' ? aesKw(unwrappingKey[S].raw, bytesOf(wrapped), true) : cipher(unwrapAlg, unwrappingKey, bytesOf(wrapped), true, null);
+        checkKey(unwrappingKey, algName(unwrapAlg), 'unwrapKey');
+        const bytes = algName(unwrapAlg) === 'AES-KW' ? aesKw(keyInfo(unwrappingKey).raw, bytesOf(wrapped), true) : cipher(unwrapAlg, unwrappingKey, wrapped, true, null);
         const data = format === 'jwk' ? JSON.parse(new TextDecoder().decode(bytes)) : bytes;
         return importSecret(format, data, keyAlg, extractable, usages);
       });
@@ -448,18 +738,37 @@
   tag(SubtleCrypto, 'SubtleCrypto');
   function run(fn) { try { return Promise.resolve(fn()); } catch (e) { return Promise.reject(e); } }
   function checkKey(key, name, usage) {
-    if (!(key instanceof CryptoKey)) throw new TypeError("parameter is not of type 'CryptoKey'.");
-    if (key[S].algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key');
-    if (usage && !key[S].usages.includes(usage)) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key');
+    if (!hasKey(key)) throw new TypeError("parameter is not of type 'CryptoKey'.");
+    if (keyInfo(key).algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key');
+    if (usage && !keyInfo(key).usages.includes(usage)) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key');
   }
   function cipher(alg, key, data, decrypt, usage) {
     const name = algName(alg);
     checkKey(key, name, usage);
     const a = normAlg(alg);
     switch (name) {
-      case 'AES-CBC': return cbc(key[S].raw, bytesOf(a.iv), data, decrypt);
-      case 'AES-CTR': { const c = bytesOf(a.counter); if (c.length !== 16) throw err('OperationError', 'The counter must be 16 bytes.'); return ctr(key[S].raw, c, data, a.length || 64); }
-      case 'AES-GCM': { const tl = a.tagLength === undefined ? 128 : a.tagLength; if (![32, 64, 96, 104, 112, 120, 128].includes(tl)) throw err('OperationError', 'Invalid tag length.'); return gcm(key[S].raw, bytesOf(a.iv), data, a.additionalData ? bytesOf(a.additionalData) : new Uint8Array(0), tl, decrypt); }
+      case 'RSA-OAEP': {
+        const label=a.label, k=keyInfo(key);
+        const extra=label===undefined ? new Uint8Array(0) : bytesOf(label);
+        return new Uint8Array(N.rsaOperate(k.raw,decrypt ? 'decrypt' : 'encrypt',k.algorithm.hash.name,null,bytesOf(data),extra));
+      }
+      case 'ChaCha20-Poly1305': {
+        const aad = a.additionalData === undefined ? new Uint8Array(0) : bytesOf(a.additionalData);
+        return new Uint8Array(N.chachaPoly1305(keyInfo(key).raw, bytesOf(a.iv), bytesOf(data), aad, decrypt));
+      }
+      case 'AES-CBC': return cbc(keyInfo(key).raw, bytesOf(a.iv), bytesOf(data), decrypt);
+      case 'AES-CTR': {
+        const counter = bytesOf(a.counter), length = unsigned(a.length,255);
+        if (counter.length !== 16 || !length || length > 128) throw err('OperationError', 'Invalid AES-CTR counter or bit length');
+        return ctr(keyInfo(key).raw, counter, bytesOf(data), length);
+      }
+      case 'AES-GCM': {
+        const additional = a.additionalData, aad = additional === undefined ? new Uint8Array(0) : bytesOf(additional);
+        const iv = bytesOf(a.iv), tagLength = a.tagLength;
+        const tag = tagLength === undefined ? 128 : unsigned(tagLength,255);
+        if (![32, 64, 96, 104, 112, 120, 128].includes(tag)) throw err('OperationError', 'Invalid tag length.');
+        return new Uint8Array(N.aesGcm(keyInfo(key).raw, iv, bytesOf(data), aad, tag / 8, decrypt));
+      }
       default: throw err('NotSupportedError', `${name} does not support encryption.`);
     }
   }

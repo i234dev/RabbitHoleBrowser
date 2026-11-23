@@ -1,5 +1,6 @@
 //! `Document`: lookup, creation, `write`, `cookie`, ready state, etc.
 
+use rabbithole_dom::valid_element_local_name;
 use crate::env::with_env;
 use rabbithole_js::V;
 use crate::host::*;
@@ -227,20 +228,6 @@ fn d_style_sheets(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
         sheets.push(s);
     }
     Ok(realm.new_array_value(sheets))
-}
-
-/// XML `Name` production (simplified to the BMP ranges that matter).
-/// DOM "valid element local name".
-pub(crate) fn valid_element_local_name(s: &str) -> bool {
-    let mut it = s.chars();
-    let Some(first) = it.next() else { return false };
-    if first.is_ascii_alphabetic() {
-        return !s.chars().any(|c| matches!(c, '\0' | '\t' | '\n' | '\u{c}' | '\r' | ' ' | '/' | '>'));
-    }
-    if !(first == ':' || first == '_' || first as u32 >= 0x80) {
-        return false;
-    }
-    it.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':' | '_') || c as u32 >= 0x80)
 }
 
 /// DOM "valid attribute local name".
@@ -528,12 +515,50 @@ fn d_has_focus(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value>
     Ok(Value::Bool(true))
 }
 
-fn d_exec_command(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(false))
+fn d_dir_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    let value = with_doc(d, |doc| {
+        let raw = doc.html_element().and_then(|root| doc.attr(root, "dir")).unwrap_or("");
+        ["ltr", "rtl", "auto"].into_iter().find(|keyword| raw.eq_ignore_ascii_case(keyword)).unwrap_or("")
+    });
+    Ok(Value::str(value))
 }
 
-fn d_query_command_supported(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(false))
+fn d_dir_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    let value = arg_str(realm, args, 0)?;
+    if let Some(root) = with_doc(d, |doc| doc.html_element()) {
+        crate::element::set_attribute(NodeRef { doc: d, node: root }, "dir", Some(&value));
+    }
+    Ok(Value::Undefined)
+}
+
+fn d_design_mode(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    Ok(Value::str(if with_doc(d, |doc| doc.design_mode) { "on" } else { "off" }))
+}
+
+fn d_design_mode_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    let raw = arg_str(realm, args, 0)?;
+    let on = raw.eq_ignore_ascii_case("on");
+    if !on && !raw.eq_ignore_ascii_case("off") { return Ok(Value::Undefined); }
+    if !with_doc(d, |doc| doc.set_design_mode(on)) {
+        return Ok(Value::Undefined);
+    }
+    if d == 0 { mark_dirty(); }
+    let focus = with_doc(d, |doc| {
+        if !on { return None; }
+        let node = doc.child_elements(Document::ROOT).next()?;
+        let point = rabbithole_dom::BoundaryPoint { node, offset: 0 };
+        doc.set_selection(point, point);
+        Some(node)
+    });
+    if let Some(node) = focus {
+        let element = wrap_opt(realm, d, Some(node));
+        crate::element::e_focus(realm, element, &[])?;
+    }
+    Ok(Value::Undefined)
 }
 
 fn d_element_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -698,7 +723,7 @@ pub(crate) fn new_aux_document_from(realm: &mut Realm, doc: Document) -> Value {
     let key = {
         let st = state();
         let mut st = st.borrow_mut();
-        st.extra_docs.push(doc);
+        st.extra_docs.push(doc.into());
         st.extra_docs.len() as u32
     };
     wrap(realm, NodeRef { doc: key, node: Document::ROOT })
@@ -803,13 +828,7 @@ pub(crate) fn create_xml_document(realm: &mut Realm, _this: Value, args: &[Value
         _ => "application/xml",
     }
     .to_string();
-    let key = {
-        let st = state();
-        let mut st = st.borrow_mut();
-        st.extra_docs.push(doc);
-        st.extra_docs.len() as u32
-    };
-    Ok(wrap(realm, NodeRef { doc: key, node: Document::ROOT }))
+    Ok(new_aux_document_from(realm, doc))
 }
 
 /// `__rhNative.validateQName(name)`: throws the DOMException of "validate"
@@ -865,7 +884,9 @@ pub(crate) fn install(realm: &mut Realm) {
         acc(realm, name, d_character_set, None);
     }
     acc(realm, "contentType", d_content_type, None);
-    for (name, val) in [("visibilityState", "visible"), ("designMode", "off"), ("dir", "")] {
+    acc(realm, "designMode", d_design_mode, Some(d_design_mode_set));
+    acc(realm, "dir", d_dir_get, Some(d_dir_set));
+    for (name, val) in [("visibilityState", "visible")] {
         let data: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(val.to_string());
         let g = realm.new_native_function_full(&format!("get {name}"), 0, d_constant_str, Some(data), vec![], false);
         realm.define_accessor_values(d, name, Some(Value::Object(g)), None, ACC);
@@ -891,10 +912,6 @@ pub(crate) fn install(realm: &mut Realm) {
     m(realm, "importNode", 2, d_import_node);
     m(realm, "adoptNode", 1, d_adopt_node);
     m(realm, "hasFocus", 0, d_has_focus);
-    m(realm, "execCommand", 3, d_exec_command);
-    m(realm, "queryCommandSupported", 1, d_query_command_supported);
-    m(realm, "queryCommandEnabled", 1, d_query_command_supported);
-    m(realm, "queryCommandState", 1, d_query_command_supported);
     m(realm, "elementFromPoint", 2, d_element_from_point);
     m(realm, "elementsFromPoint", 2, d_elements_from_point);
     m(realm, "caretRangeFromPoint", 2, d_null);

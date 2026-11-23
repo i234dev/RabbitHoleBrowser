@@ -544,3 +544,1131 @@ fn media_text_tracks_include_track_children() {
     );
     assert_eq!(eval(&e, &mut page, "r"), "2,showing,captions,metadata,disabled,t2|3,true,true,hidden,true,true");
 }
+
+#[test]
+fn resolved_insets_follow_the_positioning_scheme() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, r#"<div style="transform:scale(1);width:240px;height:120px;padding:10px">
+        <div id=f style="position:fixed;top:25%;left:0;width:40px;height:10px"></div>
+        <section style="width:160px"><div id=r style="position:relative;right:25%"></div></section>
+        <div id=s style="top:30%"></div><div id=n style="display:none;position:absolute;left:10%"></div></div>"#);
+    let out = eval(&e, &mut page, "[getComputedStyle(f).top,getComputedStyle(f).right,getComputedStyle(r).left,getComputedStyle(s).top,getComputedStyle(n).left].join('|')");
+    assert_eq!(out, "35px|220px|-40px|30%|10%");
+}
+
+#[test]
+fn css_style_property_detection_and_color_serialization() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div id=box style='color:rgba(1,2,3,0.5);background-color:rgba(6,5,4,0.00392)'></div>");
+    let out = eval(&e, &mut page, "var b=document.getElementById('box'),s=getComputedStyle(b); [s.color,s.backgroundColor,'color' in s,'background-color' in s,'fontSize' in b.style,'notAProperty' in s,'notAProperty' in b.style,'toString' in s].join('|')");
+    assert_eq!(out, "rgba(1, 2, 3, 0.5)|rgba(6, 5, 4, 0.004)|true|true|true|false|false|true");
+}
+
+#[test]
+fn inline_editing_preserves_unselected_text_and_caret_format() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div id=ed contenteditable>abcdef</div>");
+    let out = eval(&e, &mut page, r#"(()=>{
+        const d=document,h=d.getElementById('ed'),s=getSelection();
+        s.setBaseAndExtent(h.firstChild,1,h.firstChild,5);
+        d.execCommand('bold');
+        const before=h.innerHTML, on=d.queryCommandState('bold');
+        const text=h.querySelector('b').firstChild;
+        s.setBaseAndExtent(text,1,text,3);
+        d.execCommand('bold');
+        const after=h.innerHTML;
+        s.collapse(h.lastChild,1);
+        d.execCommand('italic');
+        d.execCommand('insertText',false,'!');
+        return [before,on,after,h.lastElementChild.outerHTML].join('|');
+    })()"#);
+    assert_eq!(out, "a<b>bcde</b>f|true|a<b>b</b>cd<b>e</b>f|<i>!</i>");
+}
+
+#[test]
+fn keyboard_edits_the_selection_only_after_uncanceled_beforeinput() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section contenteditable id=ed>xyz</section>");
+    eval(&e,&mut page,r#"
+        var ed=document.getElementById('ed'), events=[];
+        ed.focus();getSelection().setBaseAndExtent(ed.firstChild,1,ed.firstChild,2);
+        ed.addEventListener('beforeinput',e=>{events.push(e.type+' '+e.inputType);if(e.data==='!')e.preventDefault()});
+        ed.addEventListener('input',e=>events.push(e.type+' '+e.isTrusted));
+    "#);
+    e.key_input(&mut page,"!","Digit1",true,Modifiers::default());
+    e.key_input(&mut page,"0","Digit0",true,Modifiers::default());
+    assert_eq!(eval(&e,&mut page,"ed.innerHTML+'|'+events.join('|')"),"x0z|beforeinput insertText|beforeinput insertText|input true");
+}
+
+#[test]
+fn keyboard_target_ranges_snapshot_the_edit_and_clear_after_dispatch() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section contenteditable>xyz</section>");
+    eval(&e,&mut page,r#"
+        var ed = document.querySelector('section'), node=ed.firstChild, seen=[], saved;
+        ed.focus();
+        getSelection().collapse(node,2);
+        ed.onbeforeinput = e => {
+            saved = e;
+            const r = e.getTargetRanges()[0];
+            seen.push(r instanceof StaticRange, r.startContainer === node, r.startOffset, r.endOffset);
+            getSelection().collapse(node,3);
+            seen.push(e.getTargetRanges()[0].endOffset);
+        };
+    "#);
+    e.key_input(&mut page,"Backspace","Backspace",true,Modifiers::default());
+    assert_eq!(eval(&e,&mut page,"[ed.textContent,...seen,saved.getTargetRanges().length].join('|')"), "xy|true|true|1|2|2|0");
+    eval(&e,&mut page,"getSelection().removeAllRanges();seen.length=0");
+    e.key_input(&mut page,"a","KeyA",true,Modifiers::default());
+    assert_eq!(eval(&e,&mut page,"[ed.textContent,seen.length].join('|')"), "xy|0");
+}
+
+#[test]
+fn computed_colors_preserve_coordinates_through_inheritance_and_shorthands() {
+    let mut engine = engine(true);
+    let mut page = load(&mut engine, "<section style='color:color(display-p3 120% 0 40% / 50%)'><i style='background:currentcolor'></i></section>");
+    let result = eval(&engine, &mut page, r#"
+        const el = document.querySelector('i');
+        const colors = [getComputedStyle(el).color, getComputedStyle(el).backgroundColor];
+        el.style.background = 'none';
+        el.style.color = 'oklch(120% -2 1turn / none)';
+        colors.push(getComputedStyle(el).color, getComputedStyle(el).backgroundColor);
+        el.style.color = 'rgb(from rgb(51 102 153 / 0.8) r g b)';
+        colors.push(getComputedStyle(el).color);
+        colors.join('|')
+    "#);
+    assert_eq!(result, "color(display-p3 1.2 0 0.4 / 0.5)|color(display-p3 1.2 0 0.4 / 0.5)|oklch(1 0 0 / none)|rgba(0, 0, 0, 0)|color(srgb 0.2 0.4 0.6 / 0.8)");
+}
+
+#[test]
+fn editing_applies_color_and_font_values_to_ranges_and_typed_text() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<p id=ed contenteditable>abc</p>");
+    let out = eval(&e, &mut page, r#"(()=>{
+        const d=document, sel=getSelection(), text=ed.firstChild;
+        sel.setBaseAndExtent(text,2,text,1);
+        d.execCommand('foreColor', false, 'blue');
+        const color=d.queryCommandValue('foreColor'), backward=sel.anchorOffset>sel.focusOffset;
+        sel.collapse(ed.lastChild,1);
+        d.execCommand('fontSize', false, '+1');
+        const size=d.queryCommandValue('fontSize');
+        d.execCommand('insertText',false,'!');
+        return [ed.innerHTML,color,backward,size,d.execCommand('foreColor',false,'invalid')].join('|');
+    })()"#);
+    assert_eq!(out, "a<font color=\"#0000ff\">b</font>c<font size=\"4\">!</font>|rgb(0, 0, 255)|true|4|false");
+}
+
+#[test]
+fn peer_connections_deliver_over_an_authenticated_data_channel() {
+    use std::time::{Duration, Instant};
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<main></main>");
+    eval(&e, &mut page, r#"
+        var rtcResult = '', first, second = new RTCPeerConnection();
+        (async () => {
+            const algorithm = {name:'ECDSA',namedCurve:'P-256'};
+            const expired = await RTCPeerConnection.generateCertificate({...algorithm,expires:0});
+            let rejected = false;
+            try { new RTCPeerConnection({certificates:[expired]}); } catch (e) { rejected = e.name === 'InvalidAccessError'; }
+            if (!rejected) throw Error('Expired DTLS identity accepted');
+            const certificate = await RTCPeerConnection.generateCertificate({...algorithm,expires:60000});
+            first = new RTCPeerConnection({certificates:[certificate]});
+            if (!(certificate instanceof RTCCertificate) || first.getConfiguration().certificates[0] !== certificate)
+                throw Error('Configuration lost the supplied certificate');
+            second.ondatachannel = e => {
+                e.channel.onmessage = msg => e.channel.send(msg.data + '!');
+            };
+            const channel = first.createDataChannel('messages');
+            channel.onopen = () => channel.send('hello');
+            channel.onmessage = async e => {
+                const stats = await first.getStats();
+                const dc = [...stats.values()].find(r => r.type === 'data-channel');
+                const pc = [...stats.values()].find(r => r.type === 'peer-connection');
+                rtcResult = [channel.label, first.connectionState, e.data, stats instanceof RTCStatsReport,
+                    stats.get(dc.id) === dc, pc.dataChannelsOpened, dc.messagesSent, dc.bytesSent,
+                    dc.messagesReceived, dc.bytesReceived].join('|');
+                first.close(); second.close();
+            };
+            await first.setLocalDescription(await first.createOffer());
+            const fingerprint = certificate.getFingerprints()[0];
+            if (!first.localDescription.sdp.toLowerCase().includes('a=fingerprint:' + fingerprint.algorithm + ' ' + fingerprint.value))
+                throw Error('Offer fingerprint differs from supplied identity');
+            await second.setRemoteDescription(first.localDescription);
+            await second.setLocalDescription(await second.createAnswer());
+            await first.setRemoteDescription(second.localDescription);
+        })().catch(e => {rtcResult = String(e); first?.close(); second.close();});
+    "#);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        e.tick(&mut page);
+        let result = eval(&e, &mut page, "rtcResult");
+        if !result.is_empty() {
+            assert_eq!(result, "messages|connected|hello!|true|true|1|1|5|1|6");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", eval(&e, &mut page,
+            "[first?.signalingState,first?.iceConnectionState,first?.connectionState,second.connectionState].join('|')"));
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+#[test]
+fn css_color_layers_composite_in_paint_order_and_alpha_preserves_the_origin_space() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<div id=box style='background-color:color-layers(multiply, yellow, cyan)'></div>");
+    let result=eval(&e,&mut page,r#"(()=>{
+        const bg=getComputedStyle(box).backgroundColor;
+        box.style.color='alpha(from color(display-p3 1 0.2 0 / 0.5) / calc(alpha * 0.25))';
+        const color=getComputedStyle(box).color;
+        box.style.backgroundColor='color-layers(normal, red, blue)';
+        return [bg,color,box.style.backgroundColor,getComputedStyle(box).backgroundColor].join('|');
+    })()"#);
+    assert_eq!(result,"rgb(0, 255, 0)|color(display-p3 1 0.2 0 / 0.125)|color-layers(red, blue)|rgb(255, 0, 0)");
+}
+
+#[test]
+fn editing_aligns_only_selected_paragraphs_and_preserves_the_selection() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<section contenteditable id=ed>plain<p>second</p><p>third</p></section>");
+    let out=eval(&e,&mut page,r#"(()=>{
+        const sel=getSelection(), a=ed.firstChild, b=ed.children[0].firstChild;
+        sel.setBaseAndExtent(b,3,a,2);
+        document.execCommand('justifyCenter');
+        const aligned=[document.queryCommandValue('justifyCenter'),document.queryCommandState('justifyCenter'),
+            getComputedStyle(ed.lastChild).textAlign,sel.anchorNode===b,sel.focusNode===a];
+        sel.collapse(b,2);
+        document.execCommand('formatBlock',false,'<h2>');
+        return [...aligned,document.queryCommandValue('formatBlock'),sel.anchorNode===b,sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(out,"center|true|start|true|true|h2|true|2");
+}
+
+#[test]
+fn editing_rechecks_text_control_visibility_when_commands_run() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section><textarea id=field>abc</textarea></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        field.focus();
+        field.setSelectionRange(1, 2);
+        const parent = field.parentElement;
+        parent.style.display = 'none';
+        const hidden = document.execCommand('delete');
+        const unchanged = field.value;
+        parent.style.display = 'block';
+        field.focus();
+        field.setSelectionRange(1, 2);
+        const shown = document.execCommand('insertText', false, '!');
+        return [hidden, unchanged, shown, field.value].join('|');
+    })()"#);
+    assert_eq!(result, "false|abc|true|a!c");
+}
+
+#[test]
+fn alignment_cssom_preserves_modifiers_and_resolves_inherited_legacy_alignment() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>section { justify-items: right legacy } p { justify-items: legacy }</style><section><p id=box>x</p></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const before = getComputedStyle(box).justifyItems;
+        box.style.placeContent = 'first baseline';
+        box.style.placeContent = 'baseline unsafe stretch';
+        box.style.alignSelf = 'unsafe flex-end';
+        const resolved = getComputedStyle(box);
+        return [before, box.style.placeContent, resolved.placeContent, box.style.alignSelf,
+            resolved.alignSelf, CSS.supports('align-content', 'safe self-end')].join('|');
+    })()"#);
+    assert_eq!(result, "legacy right|baseline start|baseline start|unsafe flex-end|unsafe flow-end|false");
+}
+
+#[test]
+fn font_size_commands_validate_the_entire_numeric_argument() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<p id=ed contenteditable>type</p>");
+    let out = eval(&e, &mut page, r#"(() => {
+        getSelection().collapse(ed.firstChild, 2);
+        const set = v => document.execCommand('fontSize', false, v);
+        return [set('+2.5'), document.queryCommandValue('fontSize'), set('2em'),
+                set('3e+'), document.queryCommandValue('fontSize')].join('|');
+    })()"#);
+    assert_eq!(out, "true|5|false|false|5");
+}
+
+#[test]
+fn paragraph_deletion_moves_one_line_and_preserves_its_whitespace() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section contenteditable id=ed><p>left</p>\n<div style='white-space:pre-wrap'><b>two  spaces<br>next</b></div></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const sel = getSelection(), left = ed.firstChild.firstChild;
+        const right = ed.lastChild.firstChild.firstChild;
+        sel.collapse(right, 0);
+        document.execCommand('delete');
+        const moved = ed.firstChild.querySelector('b');
+        return [ed.firstChild.textContent, getComputedStyle(moved).whiteSpace,
+                ed.lastChild.textContent, sel.anchorNode === left, sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result, "lefttwo  spaces|pre-wrap|next|true|4");
+}
+
+#[test]
+fn selectors_distinguish_empty_and_wildcard_namespaces() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=host></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const a = document.createElement('entry'), b = document.createElementNS(null,'entry');
+        a.setAttributeNS('urn:fixture','a:level','one');
+        a.setAttributeNS('urn:second','b:level','two');
+        b.setAttribute('level','plain');
+        host.append(a,b);
+        return [a.matches('|entry'), b.matches('|entry'), a.matches('*|entry'),
+            a.matches('[*|level="two"]'), a.matches('[|level]'), b.matches('[|level]')].join('|');
+    })()"#);
+    assert_eq!(result, "false|true|true|true|false|true");
+}
+
+#[test]
+fn css_style_rule_selector_changes_are_atomic() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=sheet>.selected { color: red }</style><article class=selected id=item>x</article>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const rule = document.querySelector('#sheet').sheet.cssRules[0];
+        rule.selectorText = 'article, .broken:unknown-pseudo';
+        const original = [rule.selectorText, getComputedStyle(item).color];
+        rule.selectorText = 'section, :is(.other, :unknown-pseudo)';
+        return [...original, rule.selectorText, getComputedStyle(item).color].join('|');
+    })()"#);
+    assert_eq!(result, ".selected|rgb(255, 0, 0)|section, :is(.other, :unknown-pseudo)|rgb(0, 0, 0)");
+}
+
+#[test]
+fn a_preserved_newline_ends_the_line_moved_by_delete() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=ed contenteditable><p>old</p><div style='white-space:pre-wrap'><i>first\nsecond</i></div></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const start = ed.firstChild.firstChild;
+        getSelection().collapse(start, start.length);
+        document.execCommand('forwardDelete');
+        return [ed.firstChild.textContent, ed.lastChild.innerHTML,
+                ed.firstChild.querySelector('i').textContent].join('|');
+    })()"#);
+    assert_eq!(result, "oldfirst|<i>second</i>|first");
+}
+
+#[test]
+fn inline_and_rule_declarations_convert_null_and_undefined_per_cssom() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=sheet>p {color:blue}</style><p id=box></p>");
+    let result = eval(&e, &mut page, r#"(() => {
+        return [box.style, sheet.sheet.cssRules[0].style].map(s => {
+            s.setProperty('color','red',null);
+            s.setProperty('color',undefined);
+            s.setProperty('--example',undefined);
+            const result = [s.color, s.getPropertyValue('--example')];
+            s.setProperty('color',null);
+            return [...result,s.color].join('/');
+        }).join('|');
+    })()"#);
+    assert_eq!(result, "red/undefined/|red/undefined/");
+}
+
+#[test]
+fn selector_queries_follow_focus_and_preserve_scope_on_indexed_subjects() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=group><input id=field></section><a id=link href='#local'>x</a>");
+    let result = eval(&e, &mut page, r#"(() => {
+        field.focus();
+        const focused = [field.matches(':focus-visible'), field.closest('section:focus-within') === group,
+            document.querySelector('#field:focus') === field, group.querySelector(':scope > :focus') === field,
+            link.matches(':link'), link.matches(':visited')];
+        field.blur();
+        return [...focused, document.querySelectorAll(':focus').length].join('|');
+    })()"#);
+    assert_eq!(result, "true|true|true|true|true|false|0");
+}
+
+#[test]
+fn editable_viewport_restyles_and_keeps_author_focus_indicators() {
+    use rabbithole_style::BorderStyle;
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>article:read-write {color:green}</style><article id=bodytext>x</article><p contenteditable=false id=locked>y</p>");
+    let root = page.doc.html_element().unwrap();
+    let state = eval(&e, &mut page, r#"(() => {
+        document.designMode = 'on';
+        return [document.activeElement === document.documentElement,
+            document.documentElement.matches(':focus-visible'),
+            getComputedStyle(bodytext).color, locked.matches(':read-write')].join('|');
+    })()"#);
+    assert_eq!(state, "true|true|rgb(0, 128, 0)|false");
+    e.flush_style(&mut page);
+    assert_eq!(page.styles.get(root).unwrap().outline_style, BorderStyle::None);
+    eval(&e, &mut page, "document.documentElement.style.outline='3px dashed red'");
+    e.flush_style(&mut page);
+    assert_eq!(page.styles.get(root).unwrap().outline_style, BorderStyle::Dashed);
+    let color = eval(&e, &mut page, "document.designMode='off'; getComputedStyle(bodytext).color");
+    assert_eq!(color, "rgb(0, 0, 0)");
+}
+
+#[test]
+fn aria_dom_strings_reflect_absence_and_keep_their_content_attributes() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=el></section><svg id=icon></svg>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const initial = el.ariaLabel === null;
+        el.ariaColIndexText = 4;
+        icon.ariaRoleDescription = 'marker';
+        el.role = 'button';
+        el.ariaLabel = '';
+        const values = [initial, el.hasAttribute('aria-label'), el.getAttribute('aria-colindextext'),
+            icon.getAttribute('aria-roledescription'), el.getAttribute('role')];
+        el.ariaLabel = undefined;
+        el.role = null;
+        return [...values, el.ariaLabel === null, el.hasAttribute('role')].join('|');
+    })()"#);
+    assert_eq!(result, "true|true|4|marker|button|true|false");
+}
+
+#[test]
+fn data_channel_transports_report_negotiated_limits_and_the_selected_ice_pair() {
+    use std::time::{Duration, Instant};
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<main></main>");
+    eval(&e, &mut page, r#"
+        var result = '', step = 'offer';
+        var sender = new RTCPeerConnection(), receiver = new RTCPeerConnection();
+        (async () => {
+            const states = [];
+            receiver.oniceconnectionstatechange = () => {
+                if (receiver.iceConnectionState === 'connected')
+                    states.push(!!receiver.sctp.transport.iceTransport.getSelectedCandidatePair());
+            };
+            const channel = sender.createDataChannel('transport');
+            const message = new Promise(resolve => channel.onmessage = event => resolve(event.data));
+            receiver.ondatachannel = ({channel}) => {
+                const reply = () => {
+                    try {
+                        let oversized = false;
+                        try { channel.send('four'); } catch (error) { oversized = error instanceof TypeError; }
+                        if (!oversized) throw Error('negotiated limit ignored');
+                        channel.send('abc');
+                    } catch (error) { result = String(error); }
+                };
+                if (channel.readyState === 'open') reply(); else channel.onopen = reply;
+            };
+            await sender.setLocalDescription(await sender.createOffer());
+            const offer = sender.localDescription.sdp.replace(/a=max-message-size:[0-9]+/, 'a=max-message-size:3');
+            await receiver.setRemoteDescription({type:'offer',sdp:offer});
+            await receiver.setLocalDescription(await receiver.createAnswer());
+            await sender.setRemoteDescription(receiver.localDescription);
+            step = 'message';
+            const data = await message;
+            const sctp = receiver.sctp, dtls = sctp.transport, ice = dtls.iceTransport;
+            step = 'pair';
+            while (!ice.getSelectedCandidatePair()) await new Promise(resolve => setTimeout(resolve, 10));
+            await receiver.addIceCandidate(null);
+            while (ice.state !== 'completed') await new Promise(resolve => setTimeout(resolve, 5));
+            if (states.join() !== 'true') throw Error('ICE selection was unavailable on connection');
+            const pair = ice.getSelectedCandidatePair();
+            const properties = [data, sctp instanceof RTCSctpTransport, dtls instanceof RTCDtlsTransport,
+                ice instanceof RTCIceTransport, sctp.state, dtls.state, ice.role, sctp.maxMessageSize,
+                ice.getLocalCandidates().includes(pair.local), ice.getRemoteCandidates().includes(pair.remote),
+                ice.getLocalParameters().usernameFragment === sender.sctp.transport.iceTransport.getRemoteParameters().usernameFragment];
+            const closed = new Promise(resolve => dtls.onstatechange = () => {
+                if (dtls.state === 'closed') resolve();
+            });
+            step = 'close';
+            sender.close();
+            await closed;
+            result = properties.concat([sctp.state, sender.sctp.state]).join('|');
+            receiver.close();
+        })().catch(error => { result = String(error); });
+    "#);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        e.tick(&mut page);
+        let result = eval(&e, &mut page, "result");
+        if !result.is_empty() {
+            assert_eq!(result, "abc|true|true|true|connected|connected|controlled|3|true|true|true|closed|closed");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", eval(&e, &mut page, "step"));
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+#[test]
+fn rich_editing_preserves_paragraph_styles_typing_formats_and_preformatted_newlines() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>.code{white-space:pre-wrap}</style><main id=ed contenteditable><p class=code><b>ab</b></p></main>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const sel = getSelection(), doc = document;
+        ed.focus();
+        sel.collapse(ed.querySelector('b').firstChild, 1);
+        doc.execCommand('insertLineBreak');
+        const soft = ed.querySelector('p').textContent;
+        doc.execCommand('insertParagraph');
+        doc.execCommand('italic');
+        doc.execCommand('insertText', false, 'Y');
+        const p = ed.lastChild;
+        sel.collapse(p, p.childNodes.length);
+        doc.execCommand('insertParagraph');
+        return [soft,ed.firstChild.className,p.className,p.querySelector('b').textContent,
+            p.querySelector('i').textContent,ed.lastChild.className,!!ed.lastChild.querySelector('br')].join('|');
+    })()"#);
+    assert_eq!(result, "a\nb|code|code|Yb|Y|code|true");
+}
+
+#[test]
+fn stylesheet_namespaces_limit_type_and_attribute_selectors_in_nested_rules() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, r#"<style id=sheet>@namespace H url(http://www.w3.org/1999/xhtml);
+      @namespace S "http://www.w3.org/2000/svg"; @namespace a "urn:flag";
+      @media all { H|*.item { opacity: 0.2 } S|*.item[a|flag] { opacity: 0.6 } }
+      .absent { opacity: 0.8 }</style><div id=h class=item></div><svg><g id=s class=item></g></svg>"#);
+    let result = eval(&e, &mut page, r#"(() => {
+        s.setAttributeNS('urn:flag','flag','set');
+        const rules = sheet.sheet.cssRules, rule = rules[rules.length - 1];
+        const before = [getComputedStyle(h).opacity,getComputedStyle(s).opacity];
+        rule.selectorText = 'unknown|g';
+        const rejected = rule.selectorText;
+        rule.selectorText = 'S|g.item[a|flag]';
+        return [...before, rules[0].prefix, rules[0].namespaceURI, rejected,
+            rule.selectorText, getComputedStyle(s).opacity].join('|');
+    })()"#);
+    assert_eq!(result, "0.2|0.6|H|http://www.w3.org/1999/xhtml|.absent|S|g.item[a|flag]|0.8");
+}
+
+#[test]
+fn script_formatting_switches_baseline_semantics_on_only_the_selected_text() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<main id=ed contenteditable><sub>abc</sub><span style='vertical-align:super'>tail</span></main>");
+    let value=eval(&e,&mut page,r#"(() => {
+        const sel=getSelection(), text=ed.firstChild.firstChild;
+        sel.setBaseAndExtent(text,1,text,2);
+        document.execCommand('styleWithCSS',false,'true');
+        document.execCommand('superscript');
+        const changed=ed.querySelector('sup');
+        const state=document.queryCommandState('superscript');
+        sel.selectAllChildren(ed.lastChild);
+        return [ed.textContent,changed?.textContent,[...ed.querySelectorAll('sub')].map(e=>e.textContent).join(','),
+          state,document.queryCommandState('superscript'),ed.lastChild.style.verticalAlign].join('|');
+    })()"#);
+    assert_eq!(value,"abctail|b|a,c|true|false|super");
+}
+
+#[test]
+fn css_supports_preserves_selector_combinators_and_checks_anchor_grammar() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, r#"<style>
+        @supports selector(div span) and (left: anchor(--origin right, 2px)) {
+            #result { width: 73px; }
+        }
+    </style><div id=result></div>"#);
+    let value = eval(&e,&mut page,r#"
+        (() => {
+          result.style.shapeOutside = 'initial';
+          return [getComputedStyle(result).width,result.style.shapeOutside,
+            CSS.supports('shape-outside','circle(20px at 30% 50%)'),
+            CSS.supports('top','anchor(--origin bottom)'),
+            CSS.supports('width','anchor(--origin bottom)'),
+            CSS.supports('position-try-fallbacks','--try flip-inline'),
+            CSS.supports('anchor-scope','--first, --second')].join('|');
+        })()
+    "#);
+    assert_eq!(value,"73px|initial|true|true|false|true|true");
+}
+
+#[test]
+fn animated_float_exclusion_margin_clamps_after_extrapolation() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<div id=box></div>");
+    let value = eval(&e,&mut page,r#"
+        (() => {
+            const animation=box.animate([{shapeMargin:'0px'},{shapeMargin:'20px'}],
+                {duration:1000,easing:'cubic-bezier(0.5,-1,0.5,-1)'});
+            animation.pause(); animation.currentTime=500;
+            return getComputedStyle(box).shapeMargin;
+        })()
+    "#);
+    assert_eq!(value,"0px");
+}
+
+#[test]
+fn empty_text_replaces_a_selection_and_preserves_a_collapsed_caret() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div contenteditable id=ed>abcde</div>");
+    let result = eval(&e, &mut page, r#"(() => {
+        ed.focus();
+        const events = [];
+        ed.addEventListener('input', e => events.push([e.inputType, e.data]));
+        const sel = getSelection(), text = ed.firstChild;
+        sel.setBaseAndExtent(text, 4, text, 1);
+        document.execCommand('insertText', false, '');
+        document.execCommand('insertText', false, '');
+        return JSON.stringify([ed.textContent, sel.isCollapsed, sel.focusOffset, events]);
+    })()"#);
+    assert_eq!(result, r#"["ae",true,1,[["insertText",""]]]"#);
+}
+
+#[test]
+fn editing_keeps_neighboring_inline_spaces_and_releases_trailing_space_when_typing() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<div id=ed contenteditable>a&nbsp; <b>&nbsp;b</b></div><div id=plain contenteditable=plaintext-only style=white-space:normal><br></div>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const sel = getSelection();
+        ed.focus(); sel.collapse(ed.firstChild,3);
+        document.execCommand('delete');
+        const untouched = ed.innerHTML;
+        plain.focus(); sel.collapse(plain,0);
+        document.execCommand('insertText',false,' ');
+        const first = plain.innerHTML;
+        ed.textContent = 'x'; ed.focus(); sel.collapse(ed.firstChild,1);
+        document.execCommand('insertText',false,' ');
+        document.execCommand('insertText',false,'y');
+        const typed = [ed.textContent,sel.focusOffset];
+        ed.innerHTML = 'a&nbsp;&nbsp;<i>&nbsp;b</i>';
+        sel.collapse(ed.firstChild,1);
+        document.execCommand('forwardDelete');
+        const joined = ed.innerHTML;
+        ed.innerHTML = 'a&nbsp;<i style="white-space:pre">b</i>';
+        sel.collapse(ed.firstChild,2);
+        document.execCommand('insertText',false,'\u00a0');
+        return [untouched,first,...typed,joined,ed.firstChild.data].join('|');
+    })()"#);
+    assert_eq!(result,"a&nbsp;<b>&nbsp;b</b>|&nbsp;|x y|3|a&nbsp;<i>&nbsp;b</i>|a\u{a0}\u{a0}");
+}
+
+#[test]
+fn editing_preserves_visible_spaces_across_inline_markup_and_leaves_preformatted_text_literal() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<div id=ed contenteditable>a<b> </b>z</div><pre id=literal contenteditable>x</pre>");
+    let value=eval(&e,&mut page,r#"(() => {
+        const sel=getSelection(), mark=s=>s.replaceAll('\u00a0','_');
+        ed.focus();
+        sel.collapse(ed.firstChild,1);
+        document.execCommand('insertText',false,' ');
+        const inserted=ed.innerHTML;
+        ed.textContent='x \u00a0';
+        sel.collapse(ed.firstChild,3);
+        document.execCommand('delete');
+        const deleted=mark(ed.textContent);
+        literal.focus(); sel.collapse(literal.firstChild,1);
+        document.execCommand('insertText',false,'  ');
+        return [inserted,deleted,literal.textContent,sel.focusOffset].join('|');
+    })()"#);
+    assert_eq!(value,"a&nbsp;<b> </b>z|x_|x  |3");
+}
+
+#[test]
+fn float_exclusion_shapes_wrap_lines_without_moving_the_float() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>*{margin:0}main{width:300px;line-height:20px}#f{float:left;width:100px;height:100px;shape-outside:inset(0 70px 0 0);shape-margin:5px}i{display:inline-block;width:8px;height:10px}</style><main><div id=f></div><i id=mark></i><br><i></i></main>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const left=()=>mark.getBoundingClientRect().left-f.getBoundingClientRect().left;
+        const inset=left(), value=getComputedStyle(f).shapeOutside;
+        f.style.shapeOutside='polygon(0px 0px, 60px 0px, 60px 80px, 0px 80px)';
+        const polygon=left();
+        const animation=f.animate([{shapeMargin:'0px'},{shapeMargin:'20px'}],1000);
+        animation.pause(); animation.currentTime=500;
+        const animated=left();
+        animation.cancel();
+        f.style.shapeOutside='none';
+        return [inset,polygon,animated,left(),f.getBoundingClientRect().width,value].join('|');
+    })()"#);
+    assert_eq!(result, "35|65|70|100|100|inset(0px 70px 0px 0px)");
+}
+
+#[test]
+fn link_editing_preserves_existing_attributes_and_customizes_typed_text() {
+    let mut e = engine(true);
+    let mut page=load(&mut e,"<main contenteditable id=ed><p><a href='/old' title='title'>old</a> plain</p><p>next</p></main>");
+    let result=eval(&e,&mut page,r#"(() => {
+        const sel=getSelection(), old=ed.querySelector('a'), text=ed.lastChild.firstChild;
+        sel.setBaseAndExtent(text,2,old.firstChild,1);
+        const made=document.execCommand('createLink',false,'/new');
+        const linked=[...ed.querySelectorAll('a')].map(a=>a.getAttribute('href')).join(',');
+        const backwards=sel.direction;
+        document.execCommand('unlink');
+        sel.collapse(text,0);
+        document.execCommand('createLink',false,'/typed');
+        document.execCommand('insertText',false,'x');
+        return [made,linked,backwards,old.title,ed.querySelector('a[href]').textContent,ed.querySelector('a[href]').getAttribute('href')].join('|');
+    })()"#);
+    assert_eq!(result,"true|/new,/new,/new|backward|title|x|/typed");
+}
+
+#[test]
+fn typing_a_new_link_inside_a_link_keeps_the_surrounding_destination() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div id=ed contenteditable><a href='/old'><em>ab</em></a></div>");
+    let result = eval(&e, &mut page, r#"(() => {
+        getSelection().collapse(ed.querySelector('em').firstChild, 1);
+        document.execCommand('createLink', false, '/new');
+        document.execCommand('insertText', false, 'X');
+        return Array.from(ed.querySelectorAll('a'), a => a.getAttribute('href') + '=' + a.textContent).join(',');
+    })()"#);
+    assert_eq!(result, "/old=a,/new=X,/old=b");
+}
+
+#[test]
+fn removing_rich_formatting_preserves_links_unselected_text_and_selection_direction() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div contenteditable id=ed><b>abc</b><a href='#n'><i>de</i></a><span contenteditable=false>locked</span></div>");
+    let result = eval(&e, &mut page, r#"(() => {
+        ed.focus();
+        const sel = getSelection();
+        sel.setBaseAndExtent(ed.querySelector('i').firstChild,1,ed.querySelector('b').firstChild,1);
+        const events = [];
+        ed.oninput = event => events.push(event.inputType);
+        const ok = document.execCommand('removeFormat');
+        return [ok,ed.innerHTML,sel.toString(),sel.direction,events.join(',')].join('|');
+    })()"#);
+    assert_eq!(result, "true|<b>a</b>bc<a href=\"#n\">d<i>e</i></a><span contenteditable=\"false\">locked</span>|bcd|backward|formatRemove");
+    let nested = eval(&e, &mut page, r##"(() => {
+        ed.innerHTML = '<b><a href="#n">abc</a></b>';
+        const sel = getSelection(), text = ed.querySelector('a').firstChild;
+        sel.setBaseAndExtent(text,1,text,2);
+        document.execCommand('removeFormat');
+        const middle = sel.anchorNode, html = ed.innerHTML;
+        ed.style.color = 'red';
+        document.execCommand('removeFormat');
+        return [html, sel.anchorNode === middle, sel.toString()].join('|');
+    })()"##);
+    assert_eq!(nested, r##"<b><a href="#n">a</a></b><a href="#n">b</a><b><a href="#n">c</a></b>|true|b"##);
+
+}
+
+#[test]
+fn rich_list_commands_group_paragraphs_and_split_only_selected_items() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=ed contenteditable><p>one</p><p>two</p><p>three</p></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const sel=getSelection(), first=ed.firstChild.firstChild, middle=ed.children[1].firstChild;
+        ed.focus();
+        sel.setBaseAndExtent(middle,2,first,1);
+        document.execCommand('insertOrderedList');
+        const initial = [ed.innerHTML,sel.direction,sel.anchorNode===middle,document.queryCommandState('insertorderedlist')];
+        sel.collapse(middle,1);
+        document.execCommand('insertUnorderedList');
+        const converted = ed.innerHTML;
+        document.execCommand('insertUnorderedList');
+        return [...initial,converted,ed.innerHTML,sel.anchorNode===middle,sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result,"<ol><li>one</li><li>two</li></ol><p>three</p>|backward|true|true|<ol><li>one</li></ol><ul><li>two</li></ul><p>three</p>|<ol><li>one</li></ol><div>two</div><p>three</p>|true|1");
+}
+
+#[test]
+fn physical_cssom_geometry_survives_nested_orthogonal_writing_modes() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, r#"<style>
+      #v { writing-mode:vertical-rl; position:relative; width:164px; height:88px; padding:6px 18px; border:3px solid }
+      #i { writing-mode:horizontal-tb; position:absolute; left:10%; top:25%; width:26px; height:14px }
+      </style><div id=v><div id=i>x</div></div>"#);
+    let result = eval(&e, &mut page, r#"(() => {
+      const rect=v.getBoundingClientRect(), inner=i.getBoundingClientRect(), css=getComputedStyle(i);
+      return [v.clientWidth,v.clientHeight,rect.width,rect.height,inner.width,inner.height,css.left,css.top].join('|');
+    })()"#);
+    assert_eq!(result,"200|100|206|106|26|14|20px|25px");
+}
+
+#[test]
+fn retained_computed_declaration_observes_rule_mutations_within_a_script() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=sheet>.inactive{opacity:.2}</style><span id=target></span>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const css=getComputedStyle(target), rule=sheet.sheet.cssRules[0];
+        const before=css.opacity;
+        rule.selectorText='#target';
+        const matched=css.opacity;
+        rule.style.setProperty('opacity','0.7');
+        return [before,matched,css.getPropertyValue('opacity')].join('|');
+    })()"#);
+    assert_eq!(result,"1|0.2|0.7");
+}
+
+#[test]
+fn computed_gradient_layers_retain_geometry_and_color_interpolation() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<style>#sample {font-size:10px;background-image:radial-gradient(ellipse 50% 4em at right center, red, blue),linear-gradient(in oklch longer hue to right, color(srgb 1 0 0), blue);mask-image:conic-gradient(from 30deg,black,white)}</style><div id=sample></div>");
+    let result = eval(&e,&mut page,"[getComputedStyle(sample).backgroundImage,getComputedStyle(sample).maskImage].join('|')");
+    assert_eq!(result,"radial-gradient(50% 40px at 100% 50%, rgb(255, 0, 0), rgb(0, 0, 255)), linear-gradient(to right in oklch longer hue, color(srgb 1 0 0), rgb(0, 0, 255))|conic-gradient(from 30deg, rgb(0, 0, 0), rgb(255, 255, 255))");
+}
+
+#[test]
+fn rich_list_commands_respect_sublists_and_table_cell_boundaries() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=ed contenteditable><ul><li>outer<ul><li>inner</li></ul></li></ul><table><tr><td><b>cell</b></td></tr></table></section>");
+    let result = eval(&e,&mut page,r#"(() => {
+        ed.focus();
+        const sel=getSelection(), outer=ed.querySelector('li').firstChild, cell=ed.querySelector('td');
+        sel.collapse(outer,2);
+        document.execCommand('insertOrderedList');
+        const mixed=[document.queryCommandState('insertOrderedList'),document.queryCommandIndeterm('insertOrderedList')];
+        sel.collapse(ed.querySelector('ul li').firstChild,2);
+        document.execCommand('insertUnorderedList');
+        const lifted=ed.firstChild.lastChild.textContent;
+        const text=cell.firstChild.firstChild;
+        sel.setBaseAndExtent(text,1,text,3);
+        document.execCommand('insertOrderedList');
+        document.execCommand('insertOrderedList');
+        return [...mixed,lifted,cell.innerHTML,sel.anchorNode===text,sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result,"false|true|inner|<b>cell</b>|true|1");
+}
+
+#[test]
+fn indent_and_outdent_preserve_paragraphs_formatting_and_selection() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<div id=ed contenteditable><p>one</p><p><b>two</b></p><p>three</p></div>");
+    let result=eval(&e,&mut page,r#"(() => {
+        ed.focus();
+        const sel=getSelection(), a=ed.firstChild.firstChild, b=ed.querySelector('b').firstChild;
+        sel.setBaseAndExtent(b,2,a,1);
+        document.execCommand('indent');
+        const grouped=ed.firstChild.outerHTML, backwards=sel.direction;
+        sel.collapse(b,1);
+        document.execCommand('outdent');
+        return [grouped,backwards,ed.innerHTML,sel.anchorNode===b,sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result,"<blockquote><p>one</p><p><b>two</b></p></blockquote>|backward|<blockquote><p>one</p></blockquote><p><b>two</b></p><p>three</p>|true|1");
+}
+
+#[test]
+fn data_channels_added_during_an_empty_offer_trigger_one_followup_negotiation() {
+    use std::time::{Duration, Instant};
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<p>RTC negotiation</p>");
+    eval(&e, &mut page, r#"
+      var negotiationResult = '';
+      (async () => {
+        const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+        let calls = 0;
+        await a.setLocalDescription();
+        a.onnegotiationneeded = async () => {
+          try {
+            ++calls;
+            await a.setLocalDescription();
+            if (!a.localDescription.sdp.includes('m=application')) throw Error('missing SCTP');
+            await b.setRemoteDescription(a.localDescription);
+            await b.setLocalDescription();
+            await a.setRemoteDescription(b.localDescription);
+          } catch (e) { negotiationResult = String(e); }
+        };
+        const first = a.createDataChannel('one');
+        a.createDataChannel('two');
+        first.onopen = () => {
+          a.createDataChannel('three');
+          setTimeout(() => { negotiationResult = calls + '|' + a.signalingState; a.close(); b.close(); }, 10);
+        };
+        await b.setRemoteDescription(a.localDescription);
+        await b.setLocalDescription();
+        await a.setRemoteDescription(b.localDescription);
+      })().catch(e => negotiationResult = String(e));
+    "#);
+    let until = Instant::now() + Duration::from_secs(8);
+    loop {
+        e.tick(&mut page);
+        let result = eval(&e, &mut page, "negotiationResult");
+        if !result.is_empty() { assert_eq!(result, "1|stable"); break; }
+        assert!(Instant::now() < until, "data channel negotiation did not finish");
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+#[test]
+fn closing_a_data_channel_delivers_queued_blob_and_text_in_order() {
+    use std::time::{Duration, Instant};
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<p>data channel drain</p>");
+    eval(&e,&mut page,r#"
+      var drainResult='';
+      (async () => {
+        const a=new RTCPeerConnection(), b=new RTCPeerConnection();
+        b.ondatachannel=e=>{
+          const incoming=e.channel, messages=[];
+          incoming.onmessage=event=>messages.push(typeof event.data==='string'?event.data:event.data.byteLength);
+          incoming.onclose=()=>{drainResult=[...messages,c.bufferedAmount].join('|');a.close();b.close();};
+        };
+        const c=a.createDataChannel('drain');
+        c.onopen=()=>{c.send(new Blob([new Uint8Array(4096)]));c.send('done');c.close();};
+        await a.setLocalDescription(await a.createOffer());
+        await b.setRemoteDescription(a.localDescription);
+        await b.setLocalDescription(await b.createAnswer());
+        await a.setRemoteDescription(b.localDescription);
+      })().catch(e=>drainResult=String(e));
+    "#);
+    let until=Instant::now()+Duration::from_secs(8);
+    loop {
+        e.tick(&mut page);
+        let value=eval(&e,&mut page,"drainResult");
+        if !value.is_empty() { assert_eq!(value,"4096|done|0"); break; }
+        assert!(Instant::now()<until,"remote channel did not receive and close");
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+#[test]
+fn indent_at_a_boundary_between_blocks_preserves_both_paragraphs() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div id=ed contenteditable><p>first</p><div>second</div></div>");
+    let result = eval(&e, &mut page, r#"(() => {
+        ed.focus();
+        const selection = getSelection();
+        selection.collapse(ed, 1);
+        document.execCommand('indent');
+        document.execCommand('outdent');
+        return [ed.innerHTML, selection.anchorNode === ed, selection.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result, "<p>first</p><div>second</div>|true|1");
+}
+
+#[test]
+fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<p>test</p>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const doc = document.implementation.createHTMLDocument('other');
+        const text = doc.body.appendChild(doc.createTextNode('abcdef'));
+        const range = doc.createRange();
+        range.setStart(text, 2);
+        range.setEnd(text, 5);
+        const errors = [];
+        for (const bad of [doc, doc.body]) {
+            try { range.insertNode(bad); } catch (e) { errors.push(e.name); }
+        }
+        const copy = range.cloneContents();
+        return [...errors, copy.ownerDocument === doc, copy.textContent,
+                text.data, doc.body.childNodes.length, range.endContainer === text, range.endOffset].join('|');
+    })()"#);
+    assert_eq!(result, "HierarchyRequestError|HierarchyRequestError|true|cde|abcdef|1|true|5");
+}
+
+#[test]
+fn ordered_position_fallbacks_include_the_original_inset_space_and_keep_ties_stable() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<style>#cb{position:relative;width:300px;height:100px}#item{position:absolute;left:180px;width:20px;height:10px;position-try:most-width --narrow,--wide,--equal}@position-try --narrow{left:110px}@position-try --wide{left:30px}@position-try --equal{right:30px;left:auto}</style><div id=cb><div id=item></div></div>");
+    let value=eval(&e,&mut page,r#"(() => {
+        const wide=item.offsetLeft;
+        item.style.positionTry='normal --narrow, --wide';
+        const first=item.offsetLeft;
+        const fields=[item.style.positionTryOrder,item.style.positionTryFallbacks,item.style.positionTry];
+        item.style.left='10px'; item.style.positionTryOrder='most-width';
+        return [wide,first,item.offsetLeft,...fields].join('|');
+    })()"#);
+    assert_eq!(value,"30|180|10|normal|--narrow, --wide|--narrow, --wide");
+}
+
+#[test]
+fn fallback_alignment_reflects_logical_edges_and_exchanges_axes() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<style>#cb{position:relative;width:180px;height:120px}#target{position:absolute;left:250px;width:30px;height:20px;position-try-fallbacks:--fit flip-inline}@position-try --fit {inset:0;justify-self:start;align-self:end}</style><div id=cb><div id=target></div></div>");
+    let value = eval(&e,&mut page,r#"(() => {
+        const pos=()=>[target.offsetLeft,target.offsetTop].join(',');
+        const inline=pos();
+        target.style.positionTryFallbacks='--fit flip-start';
+        const swap=[pos(),target.offsetWidth,target.offsetHeight].join(',');
+        cb.style.direction='rtl';
+        target.style.positionTryFallbacks='--fit flip-inline';
+        return [inline,swap,pos()].join('|');
+    })()"#);
+    assert_eq!(value,"150,100|160,0,20,30|0,100");
+}
+
+#[test]
+fn fallback_tactics_reflect_anchor_sides_and_preserve_try_order() {
+    let mut e = engine(true);
+    let mut page=load(&mut e,"<style>#cb{position:relative;width:180px;height:140px}#a{position:absolute;left:120px;top:100px;width:20px;height:20px;anchor-name:--a}#t{position:absolute;position-anchor:--a;width:55px;height:35px;left:anchor(right);top:anchor(bottom);position-try-fallbacks:flip-block,flip-inline,flip-block flip-inline}</style><main id=cb><i id=a></i><div id=t></div></main>");
+    let result=eval(&e,&mut page,r#"(() => {
+        const pos=()=>[t.offsetLeft,t.offsetTop].join(',');
+        const first=pos();
+        cb.style.width='240px';
+        const second=pos();
+        cb.style.height='200px';
+        return [first,second,pos()].join('|');
+    })()"#);
+    assert_eq!(result,"65,65|140,65|140,120");
+}
+
+#[test]
+fn position_try_descriptors_are_live_and_fallbacks_follow_layout() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=rules>@position-try --fit { left: 12px; top: 8px; color:red; height:1px!important } #cb{width:80px;height:60px;position:relative}#target{position:absolute;left:65px;top:0;width:25px;height:12px;position-try-fallbacks:--missing,--fit}</style><div id=cb><i id=target></i></div>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const rule = rules.sheet.cssRules[0], s = rule.style;
+        const x = () => target.getBoundingClientRect().left - cb.getBoundingClientRect().left;
+        const fields = [rule instanceof CSSPositionTryRule, s instanceof CSSPositionTryDescriptors, rule.name,
+            s.length, s.getPropertyValue('height'), s.color, x()];
+        s.left = '20px';
+        fields.push(x(), getComputedStyle(target).top);
+        s.setProperty('background-color','blue');
+        s.setProperty('left','30px','important');
+        fields.push(s.left, s.length);
+        cb.style.width='120px';
+        fields.push(x());
+        cb.style.width='25px';
+        fields.push(x());
+        return fields.join('|');
+    })()"#);
+    assert_eq!(result,"true|true|--fit|2|||12|20|8px|20px|2|65|65");
+}
+
+#[test]
+fn anchor_math_serialization_preserves_grouping_and_sorts_numeric_terms() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<i id=box></i>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const s=box.style;
+        s.left='calc(anchor(--p right) + 3%)';
+        s.top='anchor(--p top, calc(0.5 * anchor(--q bottom)))';
+        s.width='calc(2 * (anchor-size(--p width) + 5px))';
+        return [s.left,s.top,s.width].join('|');
+    })()"#);
+    assert_eq!(result, "calc(3% + anchor(--p right))|anchor(--p top, calc(0.5 * anchor(--q bottom)))|calc(2 * (5px + anchor-size(--p width)))");
+}
+
+#[test]
+fn anchor_lookup_observes_containing_blocks_and_out_of_flow_order() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<style>section{position:relative}aside{position:absolute}i{display:block;width:35px;anchor-name:--x}.target{position:absolute;width:anchor-size(--x width, 7px);height:5px}</style><section><div class=target id=early></div><aside><i></i></aside><div class=target id=late></div></section><section><i style='width:90px'></i></section>");
+    let result=eval(&e,&mut page,"[early.offsetWidth,late.offsetWidth].join(',')");
+    assert_eq!(result,"7,35");
+}
+
+#[test]
+fn anchor_functions_resolve_distinct_boxes_and_nested_fallbacks() {
+    let mut e = engine(true);
+    let mut page=load(&mut e,"<style>body{margin:0}section{position:relative;width:300px;height:240px}.a{width:40px;height:20px;margin-left:30px;anchor-name:--a}.b{width:80px;height:32px;margin-left:120px;anchor-name:--b}#tip{position:absolute;left:anchor(right --a);top:anchor(bottom --b);width:anchor-size(--b width);height:anchor-size(--missing height, anchor-size(--a height))}</style><section><div class=a id=a></div><div class=b id=b></div><div id=tip></div></section>");
+    let result=eval(&e,&mut page,r#"(() => {
+        const sample=()=>{const r=tip.getBoundingClientRect();return [r.x,r.y,r.width,r.height].join(',')};
+        const first=sample();
+        tip.style.left='anchor(top --a, 9px)';
+        const specified=tip.style.left, second=sample();
+        tip.style.left='anchor(right --b)';
+        b.style.width='90px';
+        const third=sample(), left=getComputedStyle(tip).left;
+        tip.style.left='calc((anchor(--a right) + anchor(--b left)) / 2)';
+        tip.style.maxWidth='max(anchor-size(--a width), 15px)';
+        tip.style.left='anchor(bogus right)';
+        return [first,specified,second,third,left,sample()].join('|');
+    })()"#);
+    assert_eq!(result,"70,52,80,20|anchor(--a top, 9px)|9,52,80,20|210,52,90,20|210px|95,52,40,20");
+}
+
+#[test]
+fn local_anchor_names_follow_the_nearest_matching_inclusive_scope() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>body{margin:0}.anchor{anchor-name:--box;width:20px;height:20px}.target{position:absolute;position-anchor:--box;position-area:bottom right;width:10px;height:10px}section{anchor-scope:--box}#a{margin-left:30px}#b{margin-left:120px}</style><div id=a class=anchor></div><section id=scope><div id=b class=anchor></div><div id=inside class=target></div></section><div id=outside class=target></div>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const left = node => node.getBoundingClientRect().x;
+        const before = [getComputedStyle(scope).anchorScope,left(inside),left(outside)];
+        scope.style.anchorScope='--other';
+        return [...before,left(inside),left(outside)].join('|');
+    })()"#);
+    assert_eq!(result,"--box|140|50|140|140");
+}
+
+#[test]
+fn reopening_a_popover_uses_its_current_invoker_as_the_implicit_anchor() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>button{position:absolute;top:20px;width:40px;height:30px}#first{left:30px}#next{left:120px}#panel{position:fixed;position-area:bottom left;inset:auto;margin:0;width:10px;height:10px;padding:0;border:0}</style><button id=first></button><div id=panel popover></div><button id=next></button>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const sample = source => {
+            panel.showPopover({source});
+            const rect = panel.getBoundingClientRect();
+            panel.hidePopover();
+            return [rect.x,rect.y].join(',');
+        };
+        return [sample(first),sample(next)].join('|');
+    })()"#);
+    assert_eq!(result,"20,50|110,50");
+}
+
+#[test]
+fn named_anchor_areas_reposition_and_resize_the_target_after_style_changes() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>*{box-sizing:border-box}body{margin:0}section{position:relative;width:300px;height:200px}#a{position:absolute;left:40px;top:60px;width:50px;height:30px;anchor-name:--card, --other}#t{position:absolute;position-anchor:--card;position-area:bottom left;width:20px;height:10px}#b{position:absolute;left:150px;top:20px;width:10px;height:10px;anchor-name:--second}</style><section><div id=a></div><div id=b></div><div id=t></div></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const geometry = () => { const r=t.getBoundingClientRect(); return [r.x,r.y,r.width,r.height].join(','); };
+        const initial=geometry();
+        a.style.top='80px';
+        const moved=geometry();
+        t.style.positionAnchor='--second';
+        t.style.positionArea='right center';
+        t.style.width='50%';
+        const changed=geometry();
+        return [getComputedStyle(a).anchorName,getComputedStyle(t).positionArea,initial,moved,changed].join('|');
+    })()"#);
+    assert_eq!(result,"--card, --other|right center|20,90,20,10|20,110,20,10|160,20,70,10");
+}
+
+#[test]
+fn joining_an_inline_line_preserves_contextual_whitespace_on_the_moved_fragment() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>#ed > .code { white-space:pre-wrap }</style><main contenteditable id=ed><p>left</p><span class=code><b>two  words<br>right</b></span></main>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const first=ed.firstChild.firstChild;
+        getSelection().collapse(first,first.length);
+        document.execCommand('forwardDelete');
+        const moved=ed.firstChild.querySelector('.code');
+        return [moved.textContent,getComputedStyle(moved).whiteSpace,ed.lastChild.textContent].join('|');
+    })()"#);
+    assert_eq!(result,"two  words|pre-wrap|right");
+}
+
+#[test]
+fn alignment_shorthands_expand_and_follow_their_longhand_priorities() {
+    let mut e = engine(true);
+    let mut page=load(&mut e,"<style id=sheet>#target { place-items: safe center end !important }</style><p id=target style='place-items:safe center end !important'></p>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const inspect = style => {
+            const first=[style.alignItems,style.justifyItems,style.getPropertyPriority('place-items')];
+            style.justifyItems='start';
+            const mixed=style.placeItems;
+            style.setProperty('align-items','end');
+            const combined=style.placeItems;
+            const old=style.removeProperty('place-items');
+            return [...first,mixed,combined,old,style.alignItems,style.justifyItems].join(',');
+        };
+        return [inspect(target.style),inspect(sheet.sheet.cssRules[0].style)].join('|');
+    })()"#);
+    let expected = "safe center,end,important,,end start,end start,,";
+    assert_eq!(result,format!("{expected}|{expected}"));
+}
+
+#[test]
+fn keyframe_selectors_validate_one_list_across_stylesheets_and_cssom() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=keyframes>@keyframes fade { from, .5% { opacity: .1 } 30%, bad { opacity: .8 } to { opacity: .9 } }</style>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const frames = document.getElementById('keyframes').sheet.cssRules[0];
+        const first = frames.cssRules[0], last = frames.findRule('100%');
+        frames.appendRule('TO { opacity: .4 }');
+        const duplicate = frames.findRule('to');
+        frames.deleteRule('to');
+        first.keyText = 'ENTRY 2e1%, FROM';
+        let error;
+        try { first.keyText = '25%, 101%'; } catch (e) { error = e.name; }
+        const wrongReceiver = callback => {
+            try { callback(); } catch (e) { return e.name; }
+        };
+        const setter = Object.getOwnPropertyDescriptor(CSSKeyframeRule.prototype,'keyText').set;
+        const wrongSetter = wrongReceiver(() => setter.call(frames,'bad'));
+        const wrongAppend = wrongReceiver(() => frames.appendRule.call(first,''));
+        return [wrongSetter, wrongAppend, frames.cssRules.length, last === frames.findRule('to'), duplicate.parentRule,
+            first.keyText, frames.findRule('entry 20%, 0%') === first, error].join('|');
+    })()"#);
+    assert_eq!(result, "TypeError|TypeError|2|true||entry 20%, 0%|true|SyntaxError");
+}
+
+#[test]
+fn selector_text_preserves_namespace_matching_and_quoted_attribute_spaces() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=namespaces>@namespace url(urn:default); @namespace a url(urn:default); @namespace b url(urn:other); a|*.x > b|*[*|key='a  b'] { color: red }</style>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const sheet = document.getElementById('namespaces').sheet, rule = sheet.cssRules[3];
+        const parsed = rule.selectorText;
+        rule.selectorText = '*|*.x > a|span';
+        const assigned = rule.selectorText;
+        const plain = new CSSStyleSheet();
+        plain.replaceSync('*|*#a > *|span:is(*.x) { color: red }');
+        return [parsed,assigned,plain.cssRules[0].selectorText].join(' / ');
+    })()"#);
+    assert_eq!(result, ".x > b|*[*|key='a  b'] / *|*.x > span / #a > span:is(.x)");
+}

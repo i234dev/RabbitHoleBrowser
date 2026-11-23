@@ -213,11 +213,11 @@ pub fn parse_basic_shape(c: &[Token], ctx: &LengthContext) -> Option<BasicShape>
             let groups = values::split_commas(&comps);
             let (evenodd, d) = match groups.as_slice() {
                 [d] => (false, d),
-                [r, d] => (fill_rule(r.first()?)?, d),
+                [r, d] if r.len() == 1 => (fill_rule(r[0])?, d),
                 _ => return None,
             };
             let [[Token::String(s)]] = d.as_slice() else { return None };
-            let path = rabbithole_gfx::path::parse_svg_path(s);
+            let path = rabbithole_gfx::path::parse_css_path(s)?;
             Some(BasicShape::Path { evenodd, path })
         }
         "shape" => parse_shape_fn(&comps, ctx),

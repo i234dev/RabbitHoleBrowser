@@ -35,7 +35,10 @@ pub(crate) fn install(realm: &mut Realm) {
             return;
         }
     };
-    match realm.call(factory, Value::Undefined, &[Value::Object(post), Value::Object(info), Value::str(&namespace)]) {
+    let encode_blob = realm.new_native_function("serializeBlob", 1, crate::fetch::serialize_blob);
+    let decode_blob = realm.new_native_function("deserializeBlob", 4, crate::fetch::deserialize_blob);
+    let args = [Value::Object(post), Value::Object(info), Value::str(&namespace), Value::Object(encode_blob), Value::Object(decode_blob)];
+    match realm.call(factory, Value::Undefined, &args) {
         Ok(api) if api.is_object() => {
             let id = api.as_object().unwrap();
             root_value(realm, &api);
@@ -131,6 +134,8 @@ pub(crate) fn foreign(realm: &mut Realm, call: crate::FrameCall) -> crate::Frame
             realm.invoke(n, &name, &[]).map(|_| Value::Undefined)
         }
         FrameCall::GetGlobal { name } => api_call(realm, "foreignGet", &[Value::str(&name)]),
+        FrameCall::SetGlobal { name, value } => api_call(realm, "foreignSet", &[Value::str(&name), Value::str(&value)]),
+        FrameCall::HasGlobal { name } => api_call(realm, "foreignHas", &[Value::str(&name)]),
         FrameCall::CallGlobal { name, args } => api_call(realm, "foreignCall", &[Value::str(&name), Value::str(&args)]),
         FrameCall::Document { op } => return crate::docparser::foreign_op(realm, op),
     };
@@ -140,10 +145,13 @@ pub(crate) fn foreign(realm: &mut Realm, call: crate::FrameCall) -> crate::Frame
             rabbithole_js::V::Bool(b) => FrameReply::Bool(b),
             rabbithole_js::V::Undefined => FrameReply::Undefined,
             rabbithole_js::V::String(s) => FrameReply::Value(s.to_rust_string()),
+            // foreignGet/foreignCall use an empty array for a function.
+            rabbithole_js::V::Object(o) if realm.obj(o).is_array() => FrameReply::Function,
             rabbithole_js::V::Object(_) => match crate::host::node_of(realm, &v) {
                 Some(n) if n.doc == 0 => FrameReply::Node(n.node),
-                // The API returns a function marker as an empty array.
-                _ => FrameReply::Function,
+                Some(n) => crate::AuxiliaryDocument::lookup(n.doc)
+                    .map_or(FrameReply::Undefined, |doc| FrameReply::AuxiliaryNode(doc,n.node)),
+                None => crate::SharedRange::export(realm,v).map_or(FrameReply::Undefined,FrameReply::Range),
             },
             _ => FrameReply::Undefined,
         },
@@ -158,6 +166,11 @@ fn reply_value(realm: &mut Realm, id: u64, r: Option<crate::FrameReply>) -> JsRe
         Some(FrameReply::Bool(b)) => Ok(Value::Bool(b)),
         Some(FrameReply::Node(node)) if id < crate::host::FRAME_DOC as u64 => Ok(crate::host::wrap(realm, crate::host::NodeRef { doc: crate::host::FRAME_DOC | id as u32, node })),
         Some(FrameReply::Node(_)) => Ok(Value::Null),
+        Some(FrameReply::AuxiliaryNode(doc,node)) => {
+            let local = crate::host::NodeRef { doc: doc.local_id(), node };
+            Ok(crate::host::wrap(realm,local))
+        }
+        Some(FrameReply::Range(range)) => range.wrapper(realm),
         Some(FrameReply::Function) => Ok(Value::str("\u{0}function")),
         Some(FrameReply::Value(s)) => Ok(Value::str(&s)),
         Some(FrameReply::Error(m)) => Err(realm.throw_type_error(&m)),
@@ -217,6 +230,17 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         "global" => {
             let name = realm.to_rust_string(arg(args, 2))?;
             let r = call_frame(id, crate::FrameCall::GetGlobal { name });
+            reply_value(realm, id, r)?
+        }
+        "set" => {
+            let name = realm.to_rust_string(arg(args, 2))?;
+            let value = realm.to_rust_string(arg(args, 3))?;
+            let r = call_frame(id, crate::FrameCall::SetGlobal { name, value });
+            reply_value(realm, id, r)?
+        }
+        "has" => {
+            let name = realm.to_rust_string(arg(args, 2))?;
+            let r = call_frame(id, crate::FrameCall::HasGlobal { name });
             reply_value(realm, id, r)?
         }
         "call" => {

@@ -88,3 +88,17 @@ fn same_origin_frames_read_their_own_current_grid_and_their_ancestors_grid() {
     assert_eq!(eval(&e,&mut p,"var f=document.getElementById('f');var o=document.getElementById('other');[getComputedStyle(f.contentDocument.getElementById('g')).gridTemplateColumns,f.contentWindow.own(),getComputedStyle(o.contentDocument.getElementById('g')).gridTemplateColumns,f.contentWindow.ancestor()].join('|')"),"20px 20px 20px 20px|20px 20px 20px 20px|20px 20px|70px 30px");
     assert_eq!(eval(&e,&mut p,"f.contentDocument.getElementById('g').style.width='20px';getComputedStyle(f.contentDocument.getElementById('g')).gridTemplateColumns+'|'+f.contentWindow.own()"),"20px|20px");
 }
+
+#[test]
+fn feature_queries_enable_implemented_subgrid_projection_and_3d_compositing() {
+    let mut e = engine();
+    let mut p = load(&mut e, r#"<style>
+       #parent { display: grid; grid-template-columns: 20px 60px }
+       @supports (grid-template-columns: subgrid) and (transform-style: preserve-3d) {
+         #nested { display:grid; grid-column:span 2; grid-template-columns: subgrid [line]; transform-style:preserve-3d }
+       }
+    </style><section id=parent><div id=nested><span></span><i id=end></i></div></section>"#, 200.);
+    assert_eq!(eval(&e, &mut p, r#"[CSS.supports('mix-blend-mode','plus-darker'),
+        CSS.supports('grid-template-rows','subgrid 12px'), getComputedStyle(nested).transformStyle,
+        end.getBoundingClientRect().width].join('|')"#), "true|false|preserve-3d|60");
+}

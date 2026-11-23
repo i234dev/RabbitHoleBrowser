@@ -14,19 +14,16 @@
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const S = Symbol('messaging');
+  const C = g.__rhClone;
+  const knownPorts = new WeakSet();
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
   const task = (f) => setTimeout(f, 0);
   const origin = () => g.location.origin;
 
   function cloneWithPorts(data, transfer) {
-    const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
-    const ports = list.filter((t) => t instanceof MessagePort);
-    for (const p of ports) if (p[S].detached) throw domError('Port at index 0 is already neutered.', 'DataCloneError');
-    const cloned = g.structuredClone(data);
-    // Transferred buffers are detached in the sender.
-    for (const t of list) if (t instanceof ArrayBuffer && typeof t.transfer === 'function' && !t.detached) t.transfer();
-    return { data: cloned, ports };
+    const packet = C.pack(data, transfer);
+    return { data: C.deserialize(packet.d, packet.ports), ports: packet.ports };
   }
 
   // --------------------------------------------------------------- ports
@@ -35,11 +32,7 @@
     postMessage(message, transfer) {
       const st = this[S];
       if (st.closed) return;
-      const { data, ports } = cloneWithPorts(message, transfer);
-      const target = st.entangled;
-      if (!target) return;
-      target[S].queue.push({ data, ports });
-      if (target[S].started) flush(target);
+      enqueuePeer(this, C.pack(message, transfer));
     }
     start() { this[S].started = true; flush(this); }
     close() { const st = this[S]; st.closed = true; if (st.entangled) { st.entangled[S].entangled = null; st.entangled.dispatchEvent(new Event('close')); } st.entangled = null; }
@@ -49,7 +42,34 @@
   // Setting onmessage implicitly starts the port.
   const onmsg = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage');
   Object.defineProperty(MessagePort.prototype, 'onmessage', { get: onmsg.get, set(v) { onmsg.set.call(this, v); this.start(); }, configurable: true, enumerable: true });
-  function newPort() { const p = Object.create(MessagePort.prototype); hidden(p, S, { entangled: null, queue: [], started: false, closed: false, scheduled: false }); return p; }
+  function newPort() { const p = Object.create(MessagePort.prototype); knownPorts.add(p); hidden(p, S, { entangled: null, queue: [], started: false, closed: false, scheduled: false }); return p; }
+  C.isPort = value => knownPorts.has(value);
+  C.portDetached = port => !!port[S].detached;
+  C.movePort = port => {
+    const old = port[S], copy = newPort(), state = copy[S];
+    state.entangled = old.entangled;
+    if (state.entangled) state.entangled[S].entangled = copy;
+    state.queue = old.queue;
+    state.closed = old.closed;
+    old.queue = [];
+    old.entangled = null;
+    old.closed = old.detached = true;
+    return copy;
+  };
+  function enqueuePeer(port, packet) {
+    const target = port[S].entangled;
+    if (!target) return;
+    target[S].queue.push(packet);
+    if (target[S].started) flush(target);
+  }
+  // A realm bridge relays the serialized graph unchanged. Only the receiving
+  // event materializes its objects; event.ports lists MessagePorts exclusively.
+  C.enqueuePeer = enqueuePeer;
+  C.forwardPort = (port, forward) => {
+    port[S].forward = forward;
+    port[S].started = true;
+    flush(port);
+  };
   function flush(port) {
     const st = port[S];
     if (st.scheduled || !st.queue.length) return;
@@ -59,8 +79,14 @@
     task(() => {
       st.scheduled = false;
       if (!st.queue.length || !st.started) return;
-      const { data, ports } = st.queue.shift();
-      port.dispatchEvent(new g.MessageEvent('message', { data, ports, origin: '' }));
+      const packet = st.queue.shift();
+      if (st.forward) st.forward(packet);
+      else {
+        let data;
+        try { data = C.deserialize(packet.d, packet.ports); }
+        catch (_) { port.dispatchEvent(new g.MessageEvent('messageerror')); flush(port); return; }
+        port.dispatchEvent(new g.MessageEvent('message', { data, ports: packet.ports, origin: '' }));
+      }
       flush(port);
     });
   }
@@ -118,7 +144,6 @@
   // ---------------------------------------------------------------- workers
   // Each worker runs in its own realm (see workers.rs): messages are
   // structured clones serialized to JSON; MessagePorts are bridged by id.
-  const C = g.__rhClone;
   function loadScript(url) {
     if (/^data:/i.test(url)) {
       const m = /^data:([^,]*?)(;base64)?,(.*)$/is.exec(url);
@@ -136,20 +161,15 @@
   const send = (id, msg) => N.workerSend(id, JSON.stringify(msg));
   function bridgeTo(id, port, b) {
     workerBridges.set(b, port);
-    port.onmessage = (ev) => send(id, { t: 'port', b, d: C.serialize(ev.data), ports: outgoingWorkerPorts(id, ev.ports) });
+    C.forwardPort(port, packet => send(id, { t: 'port', b, ...workerPacket(id, packet) }));
   }
-  function transferredPorts(transfer) {
-    const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
-    const ports = list.filter((t) => t instanceof MessagePort);
-    for (const p of ports) if (p[S].detached) throw domError('Port at index 0 is already neutered.', 'DataCloneError');
-    return ports;
-  }
-  function outgoingWorkerPorts(id, transfer) {
-    return transferredPorts(transfer).map((p) => {
+  function workerPacket(id, packet) {
+    const ports = packet.ports.map(port => {
       const b = 'o' + nextWorkerBridge++;
-      bridgeTo(id, p, b);
+      bridgeTo(id, port, b);
       return b;
     });
+    return { d: packet.d, ports };
   }
   function incomingWorkerPorts(id, bridges) {
     return (bridges || []).map((b) => {
@@ -164,7 +184,10 @@
     try { m = JSON.parse(text); } catch (e) { return; }
     if (m.t === 'port') {
       const p = workerBridges.get(m.b);
-      if (p) p.postMessage(C.deserialize(m.d), incomingWorkerPorts(id, m.ports));
+      if (p) {
+        const ports = incomingWorkerPorts(id, m.ports);
+        C.enqueuePeer(p, { d: m.d, ports });
+      }
       return;
     }
     const w = workerObjects.get(id);
@@ -176,8 +199,8 @@
     }
     if (m.t === 'msg') {
       let data;
-      try { data = C.deserialize(m.d); } catch (e) { w.dispatchEvent(new g.MessageEvent('messageerror', {})); return; }
       const ports = incomingWorkerPorts(id, m.ports);
+      try { data = C.deserialize(m.d, ports); } catch (e) { w.dispatchEvent(new g.MessageEvent('messageerror', {})); return; }
       w.dispatchEvent(new g.MessageEvent('message', { data, ports }));
     }
   });
@@ -194,9 +217,7 @@
     postMessage(message, transfer) {
       const st = this[S];
       if (st.terminated) return;
-      const d = C.serialize(message);
-      const ports = outgoingWorkerPorts(st.id, transfer);
-      send(st.id, { t: 'msg', d, ports });
+      send(st.id, { t: 'msg', ...workerPacket(st.id, C.pack(message, transfer)) });
     }
     terminate() {
       const st = this[S];

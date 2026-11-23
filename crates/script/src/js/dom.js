@@ -363,6 +363,36 @@
   }
   tag(StaticRange, 'StaticRange');
 
+  // A beforeinput event captures its target before any listener can move
+  // the selection. Keep the boundary nodes private as it crosses shadows.
+  const eventRanges = new WeakMap();
+  const nodeRoot = g.Node.prototype.getRootNode;
+  const currentTarget = Object.getOwnPropertyDescriptor(g.Event.prototype, 'currentTarget').get;
+  N.setFactory('inputRanges', function (first, startOffset, endContainer, endOffset) {
+    if (!arguments.length) { eventRanges.delete(this); return false; }
+    let ranges;
+    if (arguments.length === 4) {
+      ranges = [new StaticRange({ startContainer:first, startOffset, endContainer, endOffset })];
+    } else {
+      if (first == null || typeof first[Symbol.iterator] !== 'function') throw new TypeError('Expected a sequence of StaticRange objects');
+      ranges = Array.from(first, r => {
+        if (!(r instanceof StaticRange) || !r[S]) throw new TypeError('Expected a StaticRange');
+        return r;
+      });
+    }
+    if (ranges.length) eventRanges.set(this, ranges);
+    return !!ranges.length;
+  });
+  method(g.InputEvent, 'getTargetRanges', function getTargetRanges() {
+    const receiver = currentTarget.call(this);
+    const ranges = eventRanges.get(this);
+    if (!ranges) return [];
+    if (!receiver) return ranges.slice();
+    const root = receiver === g ? document : receiver instanceof g.Node ? nodeRoot.call(receiver) : null;
+    return ranges.filter(r => nodeRoot.call(r[S].sc) === root && nodeRoot.call(r[S].ec) === root);
+  });
+
+
   // A live range's boundary points are native live points: tree and text
   // mutations update them (DOM §5.5).
   class RangeState {
@@ -411,8 +441,8 @@
     deleteContents() { removeContents(this, false); }
     extractContents() { return removeContents(this, true); }
     cloneContents() {
-      const frag = document.createDocumentFragment();
       const s = this[S];
+      const frag = (s.sc.nodeType === 9 ? s.sc : s.sc.ownerDocument).createDocumentFragment();
       if (this.collapsed) return frag;
       if (s.sc === s.ec && isCharData(s.sc)) { const c = s.sc.cloneNode(); c.data = s.sc.data.slice(s.so, s.eo); frag.appendChild(c); return frag; }
       for (const n of containedTop(this)) frag.appendChild(cloneBounded(this, n));
@@ -420,15 +450,18 @@
     }
     insertNode(node) {
       const s = this[S];
-      if ((s.sc.nodeType === 8 || s.sc.nodeType === 7) || (s.sc.nodeType === 3 && !s.sc.parentNode) || s.sc === node) throw domError("Failed to execute 'insertNode' on 'Range': The range start is in an invalid position.", 'HierarchyRequestError');
+      rangeNode(node);
+      const text = s.sc.nodeType === 3 || s.sc.nodeType === 4;
+      if ((s.sc.nodeType === 8 || s.sc.nodeType === 7) || (text && !s.sc.parentNode) || s.sc === node) throw domError("Failed to execute 'insertNode' on 'Range': The range start is in an invalid position.", 'HierarchyRequestError');
       let ref = null, parent;
-      if (s.sc.nodeType === 3) { ref = s.sc.splitText(s.so); parent = ref.parentNode; }
-      else { parent = s.sc; ref = s.sc.childNodes[s.so] || null; }
+      if (text) {
+        parent = s.sc.parentNode;
+        N.checkRangeInsertion(parent, node, s.sc);
+        ref = s.sc.splitText(s.so);
+      } else { parent = s.sc; ref = s.sc.childNodes[s.so] || null; }
       if (ref === node) ref = node.nextSibling;
-      const count = node.nodeType === 11 ? node.childNodes.length : 1;
       parent.insertBefore(node, ref);
       if (this.collapsed) { s.ec = parent; s.eo = (ref ? index(ref) : parent.childNodes.length); }
-      void count;
     }
     surroundContents(newParent) {
       const s = this[S];
@@ -639,6 +672,24 @@
   define('StaticRange', StaticRange);
   define('Range', Range);
   N.registerProto('Range', Range.prototype);
+  const sharedRanges = new Map();
+  N.setFactory('rangePoints', range => {
+    const state = range[S];
+    return state instanceof RangeState ? [state.a,state.b] : null;
+  });
+  N.setFactory('sharedRange', (key, original, a, b) => {
+    let range = original || sharedRanges.get(key)?.deref();
+    if (!range) {
+      range = Object.create(Range.prototype);
+      const points = Object.create(RangeState.prototype);
+      hidden(points,'a',a); hidden(points,'b',b);
+      hidden(range,S,points);
+    }
+    if (sharedRanges.size && sharedRanges.size % 64 === 0)
+      for (const [k,ref] of sharedRanges) if (!ref.deref()) sharedRanges.delete(k);
+    sharedRanges.set(key,new WeakRef(range));
+    return range;
+  });
   method(g.Document, 'createRange', function () { const r = Object.create(Range.prototype); hidden(r, S, new RangeState(this)); return r; }, true);
   // The caret position at a viewport point: in the text under it when the
   // layout has some there, else at the start of the element hit.

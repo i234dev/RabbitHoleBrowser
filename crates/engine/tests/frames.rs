@@ -567,3 +567,68 @@ fn same_origin_frame_window_is_a_window() {
     );
     assert_eq!(r, "true,Window,true,true,[object Window],function");
 }
+
+#[test]
+fn same_origin_window_assignment_runs_property_setters_in_the_child() {
+    let mut e = engine();
+    let inner = r#"<script>
+        let writes = 0;
+        Object.defineProperty(window, 'count', {
+            get() { return writes; }, set(value) { writes += value; }
+        });
+        Object.defineProperty(window, 'fixed', {value: 1});
+        function read() { return [count, initial, typeof missing].join(','); }
+    </script>"#;
+    let mut page = load(&mut e, &format!(r#"<iframe srcdoc="{}"></iframe>"#, escape_attr(inner)));
+    let output = eval(&e, &mut page, r#"(() => {
+        const child = window.frames[0];
+        child.count = 5;
+        child.initial = 'from parent';
+        child.missing = undefined;
+        return [child.read(), 'missing' in child, 'absent' in child, Reflect.set(child, 'fixed', 4)].join('|');
+    })()"#);
+    assert_eq!(output, "5,from parent,undefined|true|false|false");
+}
+
+#[test]
+fn a_same_origin_frames_range_keeps_its_identity_and_tracks_both_realms_edits() {
+    let mut e = engine();
+    let inner = "<p id=text>alphabet</p><script>var live=document.createRange();live.setStart(text.firstChild,1);live.setEnd(text.firstChild,5);function contents(){return live.toString()} function move(){live.setStart(text.firstChild,2)}</script>";
+    let mut page = load(&mut e,&format!(r#"<iframe id="child" srcdoc="{}"></iframe>"#,escape_attr(inner)));
+    let result = eval(&e,&mut page,r#"(() => {
+      const w=child.contentWindow, r=w.live, t=child.contentDocument.getElementById('text').firstChild;
+      const initial=[r instanceof Range,r===w.live,r.startContainer===t,r.toString()];
+      r.setEnd(t,6);
+      const changed=w.contents();
+      w.move();
+      t.insertData(0,'x');
+      return [...initial,changed,r.startOffset,r.endOffset,r.toString(),w.contents()].join('|');
+    })()"#);
+    assert_eq!(result,"true|true|true|lpha|lphab|3|7|phab|phab");
+}
+
+#[test]
+fn same_origin_frames_share_detached_documents_and_their_live_ranges() {
+    let mut e = engine();
+    let inner = r#"<script>
+        var detached = new DOMParser().parseFromString('<p>alphabet</p>', 'text/html');
+        var text = detached.body.firstChild.firstChild;
+        var live = detached.createRange();
+        live.setStart(text, 1);
+        live.setEnd(text, 5);
+        function contents() { return live.toString(); }
+    </script>"#;
+    let mut page = load(&mut e, &format!(r#"<iframe id="child" srcdoc="{}"></iframe>"#, escape_attr(inner)));
+    let result = eval(&e, &mut page, r#"(() => {
+        const local = document.implementation.createHTMLDocument('separate');
+        const w = child.contentWindow, doc = w.detached, r = w.live, text = w.text;
+        const identities = [doc !== local, text.ownerDocument === doc,
+                            r.startContainer === text, doc === w.detached];
+        text.insertData(0, 'x');
+        r.setEnd(text, 7);
+        const shared = w.contents();
+        child.remove();
+        return [...identities, shared, r.toString(), local.title].join('|');
+    })()"#);
+    assert_eq!(result, "true|true|true|true|lphab|lphab|separate");
+}

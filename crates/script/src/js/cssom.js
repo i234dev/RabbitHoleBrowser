@@ -31,6 +31,7 @@
     let depth = 0, prelude = null, blockStart = 0;
     while (i < n) {
       const c = src[i];
+      if (c === '\\') { i += 2; continue; }
       if (c === '/' && src[i + 1] === '*') {
         const e = src.indexOf('*/', i + 2);
         if (depth === 0 && prelude === null) {
@@ -70,7 +71,72 @@
   }
 
   // Parse "a: b; c: d !important" into [[name, value, important]].
-  function parseDecls(text) {
+  const checkedProperties = new Set(['offset-path', 'offset-distance', 'offset-rotate', 'offset-position', 'offset-anchor', 'shape-outside', 'shape-margin', 'color', 'background-color', 'border-top-color', 'border-right-color',
+    'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
+    'accent-color', 'column-rule-color', 'align-self', 'align-items', 'align-content', 'justify-self', 'justify-items',
+    'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-try', 'position-try-order', 'position-try-fallbacks', 'position-anchor', 'anchor-name', 'anchor-scope']);
+  const pairedLonghands = new Map([
+    ['place-items',['align-items','justify-items']], ['place-self',['align-self','justify-self']],
+    ['position-try',['position-try-order','position-try-fallbacks']],
+    ['place-content',['align-content','justify-content']]
+  ]);
+  const cssWide = new Set(['initial','inherit','unset','revert','revert-layer']);
+  function appendDeclaration(list, name, value, important) {
+    const pair = pairedLonghands.has(name) && N.cssomExpandPlace(name,value);
+    if (pair) list.push([pair[0],pair[1],important],[pair[2],pair[3],important]);
+    else list.push([name,value,important]);
+  }
+  function dropDeclaration(list,name) {
+    const pair = pairedLonghands.get(name);
+    return list.filter(([k]) => k !== name && !pair?.includes(k));
+  }
+  function declarationValue(list,name) {
+    function direct(k) {
+      let last;
+      for (let i=list.length-1; i>=0; i--) if (list[i][0]===k) {
+        if (list[i][2]) return list[i];
+        last ||= list[i];
+      }
+      return last;
+    }
+    const found = direct(name);
+    if (found) return found;
+    const pair = pairedLonghands.get(name);
+    if (pair) {
+      const a=direct(pair[0]), b=direct(pair[1]);
+      if (a && b && a[2]===b[2]) {
+        if (name === 'position-try' && a[1] === 'normal' && !cssWide.has(b[1])) return [name,b[1],a[2]];
+        if (a[1]===b[1]) return [name,a[1],a[2]];
+        if (!cssWide.has(a[1]) && !cssWide.has(b[1])) return [name,a[1]+' '+b[1],a[2]];
+      }
+    }
+    return [name,'',false];
+  }
+  function declarationText(list) {
+    const out = [];
+    for (let i=0; i<list.length; i++) {
+      let [name,value,priority] = list[i];
+      const other = list[i+1];
+      if (other && name === 'position-try-order' && other[0] === 'position-try-fallbacks' && other[2] === priority &&
+          (value === other[1] || (!cssWide.has(value) && !cssWide.has(other[1])))) {
+        name = 'position-try';
+        if (value === 'normal') value = other[1];
+        else if (value !== other[1]) value += ' '+other[1];
+        i++;
+      } else if (other && name.startsWith('align-') && other[0] === 'justify-'+name.slice(6) &&
+          other[2] === priority && (value === other[1] || (!cssWide.has(value) && !cssWide.has(other[1])))) {
+        const shorthand = 'place-'+name.slice(6);
+        if (pairedLonghands.has(shorthand)) {
+          name = shorthand;
+          if (value !== other[1]) value += ' '+other[1];
+          i++;
+        }
+      }
+      out.push(name+': '+value+(priority ? ' !important;' : ';'));
+    }
+    return out.join(' ');
+  }
+  function parseDecls(text, allowed) {
     const out = [];
     let i = 0, start = 0, depth = 0;
     const n = text.length;
@@ -86,7 +152,12 @@
       const m = /!\s*important\s*$/i.exec(value);
       if (m) { important = true; value = value.slice(0, m.index).trim(); }
       if (!name.startsWith('--')) name = name.toLowerCase();
-      out.push([name, value, important]);
+      if (allowed && (important || !allowed.has(name) || !CSS.supports(name, value))) return;
+      if (checkedProperties.has(name) || /anchor(?:-size)?\(/i.test(value)) {
+        value = N.cssomSpecifiedValue(name, value);
+        if (value === null) return;
+      }
+      appendDeclaration(out,name,value,important);
     };
     while (i < n) {
       const c = text[i];
@@ -100,38 +171,50 @@
     return out;
   }
 
-  const kebab = (p) => p === 'cssFloat' ? 'float' : p.startsWith('--') ? p : p.replace(/^(webkit|moz|ms)(?=[A-Z])/, '-$1').replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+  const kebab = (p) => p === 'cssFloat' ? 'float' : p.startsWith('--') ? p : p.replace(/^(webkit)(?=[A-Z])/, '-$1').replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
 
   // ------------------------------------------------ CSSStyleDeclaration
 
   // Declarations of a rule: a Proxy so `style.color = ...` works like the
   // element.style object (whose prototype, CSSStyleDeclaration, it shares).
-  function makeDecl(rule, text) {
+  function makeDecl(rule, text, allowed) {
     // Parsed on first use: most rules are only serialized back.
     const st = { raw: text || '', parsed: null, rule };
-    Object.defineProperty(st, 'decls', { get() { if (!this.parsed) this.parsed = parseDecls(this.raw); return this.parsed; }, set(v) { this.parsed = v; } });
+    Object.defineProperty(st, 'decls', { get() { if (!this.parsed) this.parsed = parseDecls(this.raw, allowed); return this.parsed; }, set(v) { this.parsed = v; } });
     const changed = () => { if (st.rule) touch(st.rule); };
-    const get = (p) => { for (let i = st.decls.length - 1; i >= 0; i--) if (st.decls[i][0] === p) return st.decls[i][1]; return ''; };
+    const get = (p) => declarationValue(st.decls,p)[1];
     const set = (p, v, imp) => {
-      v = v == null ? '' : String(v).trim();
-      st.decls = st.decls.filter((d) => d[0] !== p);
-      if (v !== '') st.decls.push([p, v, !!imp]);
+      v = v === null ? '' : `${v}`.trim();
+      if (allowed && (!allowed.has(p) || imp || (v && !CSS.supports(p,v)))) return;
+      if (v && (checkedProperties.has(p) || /anchor(?:-size)?\(/i.test(v))) {
+        v = N.cssomSpecifiedValue(p, v);
+        if (v === null) return;
+      }
+      st.decls = dropDeclaration(st.decls,p);
+      if (v !== '') appendDeclaration(st.decls,p,v,!!imp);
       changed();
     };
     const cssText = () => {
-      if (st.parsed) return st.parsed.map(([k, v, i]) => `${k}: ${v}${i ? ' !important' : ''};`).join(' ');
+      if (allowed || st.parsed) return declarationText(st.decls);
       const t = st.raw.trim();
       return t && !t.endsWith(';') ? t + ';' : t;
     };
     const methods = {
       getPropertyValue: (p) => get(String(p).startsWith('--') ? String(p) : String(p).toLowerCase()),
-      getPropertyPriority: (p) => (st.decls.find((d) => d[0] === String(p).toLowerCase() && d[2]) ? 'important' : ''),
-      setProperty: (p, v, prio) => set(String(p).startsWith('--') ? String(p) : String(p).toLowerCase(), v, String(prio || '').toLowerCase() === 'important'),
-      removeProperty: (p) => { p = String(p).toLowerCase(); const old = get(p); st.decls = st.decls.filter((d) => d[0] !== p); changed(); return old; },
+      getPropertyPriority: (p) => (declarationValue(st.decls,String(p).toLowerCase())[2] ? 'important' : ''),
+      setProperty(p, v, prio = '') {
+        if (arguments.length < 2) throw new TypeError('setProperty requires a name and a value');
+        p = `${p}`;
+        const value = v === null ? '' : `${v}`;
+        const priority = prio === null ? '' : `${prio}`.toLowerCase();
+        if (!value || !priority || priority === 'important')
+          set(p.startsWith('--') ? p : p.toLowerCase(), value, priority === 'important');
+      },
+      removeProperty: (p) => { p = String(p).toLowerCase(); const old = get(p); st.decls = dropDeclaration(st.decls,p); changed(); return old; },
       item: (i) => (st.decls[i] ? st.decls[i][0] : ''),
       toString: () => '[object CSSStyleDeclaration]',
     };
-    const target = Object.create(g.CSSStyleDeclaration ? g.CSSStyleDeclaration.prototype : Object.prototype);
+    const target = Object.create(allowed ? CSSPositionTryDescriptors.prototype : (g.CSSStyleDeclaration ? g.CSSStyleDeclaration.prototype : Object.prototype));
     for (const k in methods) hidden(target, k, methods[k]);
     hidden(target, S, st);
     const proxy = new Proxy(target, {
@@ -141,18 +224,20 @@
         if (k === 'cssText') return cssText();
         if (k === 'length') return st.decls.length;
         if (k === 'parentRule') return st.rule || null;
-        if (k === 'cssFloat') return get('float');
+        if (k === 'cssFloat' && !allowed) return get('float');
         if (/^\d+$/.test(k)) return methods.item(+k);
         if (k in Object.prototype || k === 'constructor') return t[k];
+        if (allowed && !allowed.has(kebab(k))) return t[k];
         return get(kebab(k));
       },
       set(t, k, v) {
         if (typeof k === 'symbol') { t[k] = v; return true; }
-        if (k === 'cssText') { st.decls = parseDecls(String(v)); changed(); return true; }
+        if (k === 'cssText') { st.decls = parseDecls(String(v), allowed); changed(); return true; }
+        if (allowed && !allowed.has(kebab(k))) { t[k] = v; return true; }
         set(kebab(k), v, false);
         return true;
       },
-      has(t, k) { return typeof k === 'string' ? true : k in t; },
+      has(t, k) { return typeof k === 'string' && !allowed ? true : k in t; },
       ownKeys() { return st.decls.map((_, i) => String(i)); },
       getOwnPropertyDescriptor(t, k) {
         if (typeof k === 'string' && /^\d+$/.test(k) && +k < st.decls.length) return { value: st.decls[+k][0], enumerable: true, configurable: true, writable: false };
@@ -233,9 +318,32 @@
     if (sheet) sheetChanged(sheet);
   }
 
+  function selectorNamespaces(rule) {
+    const sheet = rule[S].sheet;
+    if (!sheet) return '';
+    const declarations = [];
+    for (const r of sheet[S].rules) {
+      if (r instanceof CSSNamespaceRule) declarations.push(r[S].condition);
+      else if (!(r instanceof CSSImportRule || r instanceof CSSLayerStatementRule)) break;
+    }
+    return declarations.join(';');
+  }
+
   class CSSStyleRule extends CSSRule {
-    get selectorText() { return this[S].selector; }
-    set selectorText(v) { this[S].selector = String(v).trim(); touch(this); }
+    get selectorText() {
+      const selector = this[S].selector;
+      if (!/[\s*|]/.test(selector)) return selector;
+      return N.cssomSerializeSelector(selector, selector.includes('|') || selector.includes('*') ? selectorNamespaces(this) : '');
+    }
+    set selectorText(v) {
+      const selector = `${v}`.trim();
+      let parent = this[S].parentRule;
+      while (parent && !(parent instanceof CSSStyleRule)) parent = parent[S].parentRule;
+      const namespaces = selector.includes('|') ? selectorNamespaces(this) : '';
+      if (!N.cssomValidSelector(selector, !!parent, namespaces)) return;
+      this[S].selector = selector;
+      touch(this);
+    }
     get style() { return this[S].style; }
     set style(v) { this[S].style.cssText = v; }
     get styleMap() { return null; }
@@ -294,6 +402,25 @@
     get style() { return this[S].style; }
   }
   tag(CSSMarginRule, 'CSSMarginRule');
+  class CSSPositionTryDescriptors extends CSSStyleDeclaration {}
+  tag(CSSPositionTryDescriptors, 'CSSPositionTryDescriptors');
+  const tryDescriptors = new Set(N.cssomTryDescriptors());
+  for (const name of tryDescriptors) {
+    const idl = name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    for (const key of new Set([name, idl])) {
+      Object.defineProperty(CSSPositionTryDescriptors.prototype, key, {
+        enumerable: true, configurable: true,
+        get() { return this.getPropertyValue(name); },
+        set(value) { this.setProperty(name, value); }
+      });
+    }
+  }
+  class CSSPositionTryRule extends CSSRule {
+    get name() { return this[S].condition; }
+    get style() { return this[S].style; }
+    set style(value) { this[S].style.cssText = value; }
+  }
+  tag(CSSPositionTryRule, 'CSSPositionTryRule');
   class CSSFontFaceRule extends CSSRule { get style() { return this[S].style; } }
   tag(CSSFontFaceRule, 'CSSFontFaceRule');
   class CSSImportRule extends CSSRule {
@@ -305,13 +432,19 @@
   }
   tag(CSSImportRule, 'CSSImportRule');
   class CSSNamespaceRule extends CSSRule {
-    get namespaceURI() { const m = /(?:url\(\s*)?["']([^"']*)["']/.exec(this[S].condition); return m ? m[1] : ''; }
-    get prefix() { const m = /^([a-zA-Z_][\w-]*)\s+/.exec(this[S].condition); return m && !/^url$/i.test(m[1]) ? m[1] : ''; }
+    get namespaceURI() { return this[S].namespace[1]; }
+    get prefix() { return this[S].namespace[0]; }
   }
   tag(CSSNamespaceRule, 'CSSNamespaceRule');
   class CSSKeyframeRule extends CSSRule {
     get keyText() { return this[S].selector; }
-    set keyText(v) { this[S].selector = String(v).trim(); touch(this); }
+    set keyText(v) {
+      if (this[S]?.type !== TYPES.KEYFRAME_RULE) throw new TypeError('Illegal invocation');
+      const selector = normKey(v);
+      if (selector === null) throw domError('Invalid keyframe selector', 'SyntaxError');
+      this[S].selector = selector;
+      touch(this);
+    }
     get style() { return this[S].style; }
   }
   tag(CSSKeyframeRule, 'CSSKeyframeRule');
@@ -320,12 +453,29 @@
     set name(v) { this[S].condition = String(v).trim(); touch(this); }
     get cssRules() { return makeRuleList(() => this[S].children); }
     get length() { return this[S].children.length; }
-    appendRule(text) { const r = parseChunk(splitRules(`${text}`)[0] || { prelude: '', block: '' }, this[S].sheet, this, true); if (r) { this[S].children.push(r); touch(this); } }
-    deleteRule(key) { const i = this[S].children.findIndex((r) => r[S].selector === normKey(key)); if (i >= 0) { this[S].children.splice(i, 1); touch(this); } }
-    findRule(key) { const k = normKey(key); for (let i = this[S].children.length - 1; i >= 0; i--) if (this[S].children[i][S].selector === k) return this[S].children[i]; return null; }
+    appendRule(text) {
+      if (this[S]?.type !== TYPES.KEYFRAMES_RULE) throw new TypeError('Illegal invocation');
+      const chunks = splitRules(`${text}`);
+      if (chunks.length !== 1) return;
+      const r = parseChunk(chunks[0], this[S].sheet, this, true);
+      if (r) { this[S].children.push(r); touch(this); }
+    }
+    deleteRule(key) {
+      const rule = this.findRule(key);
+      if (!rule) return;
+      this[S].children.splice(this[S].children.indexOf(rule), 1);
+      rule[S].parentRule = rule[S].sheet = null;
+      touch(this);
+    }
+    findRule(key) {
+      const selector = normKey(key), children = this[S].children;
+      for (let i = children.length - 1; i >= 0; --i) if (children[i][S].selector === selector) return children[i];
+      return null;
+    }
   }
   tag(CSSKeyframesRule, 'CSSKeyframesRule');
-  const normKey = (k) => String(k).split(',').map((s) => { s = s.trim().toLowerCase(); return s === 'from' ? '0%' : s === 'to' ? '100%' : s; }).join(', ');
+  const normKey = k => N.cssomKeyframeSelector(`${k}`);
+
   class CSSCounterStyleRule extends CSSRule {
     get name() { return this[S].condition; }
   }
@@ -356,7 +506,9 @@
     const { prelude, block } = chunk;
     let r;
     if (inKeyframes) {
-      r = newRule(CSSKeyframeRule, TYPES.KEYFRAME_RULE, { selector: normKey(prelude) });
+      const selector = normKey(prelude);
+      if (block === null || selector === null) return null;
+      r = newRule(CSSKeyframeRule, TYPES.KEYFRAME_RULE, { selector });
       r[S].style = makeDecl(r, block || '');
       r[S].text = () => `${r[S].selector} { ${r[S].style.cssText} }`;
     } else if (prelude[0] === '@') {
@@ -379,9 +531,20 @@
         case 'document': case '-moz-document': r = group(CSSGroupingRule, 0, name); break;
         case 'keyframes': case '-webkit-keyframes': case '-moz-keyframes': {
           r = newRule(CSSKeyframesRule, TYPES.KEYFRAMES_RULE, { condition: unq(rest) });
-          r[S].children = splitRules(block || '').map((c) => parseChunk(c, sheet, r, true));
+          r[S].children = splitRules(block || '').map((c) => parseChunk(c, sheet, r, true)).filter(Boolean);
           const kw = name;
           r[S].text = () => `@${kw} ${r[S].condition} {\n${serializeChildren(r)}\n}`;
+          break;
+        }
+        case 'position-try': {
+          const ident = N.cssomTryName(rest);
+          if (ident === null || (parent && !(parent instanceof CSSGroupingRule))) return null;
+          r = newRule(CSSPositionTryRule, 0, { condition: CSS.escape(ident) });
+          r[S].style = makeDecl(r, block, tryDescriptors);
+          r[S].text = () => {
+            const text = r[S].style.cssText;
+            return `@position-try ${r.name} { ${text}${text ? ' ' : ''}}`;
+          };
           break;
         }
         case 'font-face':
@@ -415,7 +578,11 @@
           r[S].text = () => `@import ${r[S].condition};`;
           break;
         case 'namespace;':
-          r = newRule(CSSNamespaceRule, TYPES.NAMESPACE_RULE, { condition: rest });
+          {
+            const namespace = N.cssomNamespace(rest);
+            if (!namespace) return null;
+            r = newRule(CSSNamespaceRule, TYPES.NAMESPACE_RULE, { condition: rest, namespace });
+          }
           r[S].text = () => `@namespace ${r[S].condition};`;
           break;
         case 'layer;':
@@ -436,15 +603,15 @@
       }
     } else {
       if (!prelude) return null;
-      r = newRule(CSSStyleRule, TYPES.STYLE_RULE, { selector: prelude.replace(/\s+/g, ' ') });
+      r = newRule(CSSStyleRule, TYPES.STYLE_RULE, { selector: prelude });
       // CSS nesting: nested rules inside the block.
       const nested = block.indexOf('{') >= 0 ? splitNested(block) : null;
       r[S].style = makeDecl(r, nested ? nested.decls : block);
       if (nested) r[S].children = nested.rules.map((c) => parseChunk(c, sheet, r, false)).filter(Boolean);
       r[S].text = () => {
         const decls = r[S].style.cssText;
-        if (!r[S].children.length) return `${r[S].selector} { ${decls}${decls ? ' ' : ''}}`;
-        return `${r[S].selector} {${decls ? ' ' + decls : ''}\n${serializeChildren(r)}\n}`;
+        if (!r[S].children.length) return `${r.selectorText} { ${decls}${decls ? ' ' : ''}}`;
+        return `${r.selectorText} {${decls ? ' ' + decls : ''}\n${serializeChildren(r)}\n}`;
       };
     }
     r[S].sheet = sheet;
@@ -575,6 +742,8 @@
   let flushQueued = false;
   function flushSheets() {
     flushQueued = false;
+    if (!pendingSheets.size) return;
+    N.setSheetsPending(false);
     const list = Array.from(pendingSheets);
     pendingSheets.clear();
     const targets = new Set();
@@ -590,8 +759,9 @@
   }
   function sheetChanged(sheet) {
     pendingSheets.add(sheet);
-    if (!flushQueued) { flushQueued = true; queueMicrotask(flushSheets); }
+    if (!flushQueued) { flushQueued = true; N.setSheetsPending(true); queueMicrotask(flushSheets); }
   }
+  N.setFactory('flushSheets',flushSheets);
   const gcs = g.getComputedStyle;
   if (gcs) hidden(g, 'getComputedStyle', function getComputedStyle(el, pseudo) { if (pendingSheets.size) flushSheets(); return gcs.call(this, el, pseudo); });
   // Geometry queries see pending CSSOM changes too.
@@ -736,6 +906,8 @@
   define('CSSPageRule', CSSPageRule);
   define('CSSMarginRule', CSSMarginRule);
   define('CSSFontFaceRule', CSSFontFaceRule);
+  define('CSSPositionTryRule', CSSPositionTryRule);
+  define('CSSPositionTryDescriptors', CSSPositionTryDescriptors);
   define('CSSImportRule', CSSImportRule);
   define('CSSNamespaceRule', CSSNamespaceRule);
   define('CSSKeyframeRule', CSSKeyframeRule);

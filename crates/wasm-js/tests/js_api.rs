@@ -293,3 +293,24 @@ fn gc_objects_cross_js() {
     );
     assert_eq!(out, "object|41|true|true|-5|1|0|true|s");
 }
+
+#[test]
+fn address_width_is_preserved_at_the_javascript_boundary() {
+    let mut r = realm();
+    define_module(&mut r, "bytes", r#"(module (import "env" "table" (table i64 1 4 externref)))"#);
+    assert_eq!(eval_str(&mut r, r#"
+        const t = new WebAssembly.Table({ address: "i64", element: "externref", initial: 1n, maximum: 4n });
+        new WebAssembly.Instance(new WebAssembly.Module(bytes), {env: {table: t}});
+        const item = {};
+        t.set(0n, item);
+        const oldLength = t.grow(1n, item);
+        const mem = new WebAssembly.Memory({address: "i64", initial: 0n, maximum: 1n});
+        const failures = [
+          () => t.get(0), () => t.get(-1n), () => t.set(1n << 128n, item),
+          () => t.grow(0), () => mem.grow(1), () => new WebAssembly.Table({element: "anyfunc", initial: 0n}),
+          () => new WebAssembly.Memory({address: "other", initial: 0})
+        ].every(f => { try { f(); } catch (e) { return e instanceof TypeError } return false });
+        [oldLength === 1n, t.length === 2n, t.get(0n) === item, t.get("1") === item,
+         mem.grow(1n) === 0n, mem.buffer.byteLength, failures].join("|")
+    "#), "true|true|true|true|true|65536|true");
+}

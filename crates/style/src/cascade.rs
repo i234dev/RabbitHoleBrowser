@@ -2148,10 +2148,10 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
             }
         }
     }
-    if tag == "ul" {
+    if tag == "ul" || tag == "li" {
         if let Some(t) = el.attr("type") {
             let t = t.to_ascii_lowercase();
-            if matches!(t.as_str(), "disc" | "circle" | "square") {
+            if matches!(t.as_str(), "disc" | "circle" | "square" | "none") {
                 css.push_str(&format!("list-style-type:{t};"));
             }
         }
@@ -2223,6 +2223,16 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.grid_lanes = from.grid_lanes;
         }
         "position" => to.position = from.position,
+        "position-area" => to.position_area = from.position_area,
+        "position-try" => {
+            to.position_try_order = from.position_try_order;
+            to.position_try_fallbacks = from.position_try_fallbacks.clone();
+        }
+        "position-try-order" => to.position_try_order = from.position_try_order,
+        "position-try-fallbacks" => to.position_try_fallbacks = from.position_try_fallbacks.clone(),
+        "position-anchor" => to.position_anchor = from.position_anchor.clone(),
+        "anchor-scope" => to.anchor_scope = from.anchor_scope.clone(),
+        "anchor-name" => to.anchor_names = from.anchor_names.clone(),
         "float" => to.float = from.float,
         "clear" => to.clear = from.clear,
         "flex-direction" => to.flex_direction = from.flex_direction,
@@ -2298,13 +2308,20 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "bottom" => to.inset.bottom = from.inset.bottom,
         "left" => to.inset.left = from.inset.left,
         "inset" => to.inset = from.inset,
-        "color" => to.color = from.color,
+        "color" => {
+            to.color = from.color;
+            to.color_components = from.color_components.clone();
+        }
         "background" => {
             to.background_color = from.background_color;
+            to.background_color_components = from.background_color_components.clone();
             to.background_image = from.background_image.clone();
             to.background_layers = from.background_layers.clone();
         }
-        "background-color" => to.background_color = from.background_color,
+        "background-color" => {
+            to.background_color = from.background_color;
+            to.background_color_components = from.background_color_components.clone();
+        }
         "opacity" => to.opacity = from.opacity,
         "font" => {
             to.font_family = from.font_family;
@@ -2482,6 +2499,12 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.creates_stacking_context = from.creates_stacking_context;
         }
         "clip" => to.clip_rect = from.clip_rect,
+        "shape-outside" => {
+            to.shape_outside = from.shape_outside.clone();
+            to.shape_outside_position_explicit = from.shape_outside_position_explicit;
+        }
+        p if props::motion::property(p) => props::motion::copy(p, from, to),
+        "shape-margin" => to.shape_margin = from.shape_margin,
         "border-shape" => to.border_shape = from.border_shape.clone(),
         "corner-shape" | "corner-top-left-shape" | "corner-top-right-shape" | "corner-bottom-right-shape" | "corner-bottom-left-shape" => {
             to.corner_shape = from.corner_shape
@@ -2679,9 +2702,21 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "user-select" => to.user_select = from.user_select,
         "resize" => to.resize = from.resize,
         "appearance" | "-webkit-appearance" => to.appearance = from.appearance,
+        "transition-behavior" => {
+            let behavior = &from.transitions;
+            if to.transitions.len() < behavior.len() {
+                to.transitions.resize_with(behavior.len(), || Transition {
+                    property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into(), allow_discrete: false,
+                });
+            }
+            for (i, entry) in to.transitions.iter_mut().enumerate() {
+                entry.allow_discrete = !behavior.is_empty() && behavior[i % behavior.len()].allow_discrete;
+            }
+        }
         "transition" | "transition-property" | "transition-duration" | "transition-delay" | "transition-timing-function" => {
             to.transitions = from.transitions.clone()
         }
+        "animation-composition" => to.animation_composition.clone_from(&from.animation_composition),
         "animation" | "animation-name" | "animation-duration" | "animation-delay" | "animation-timing-function"
         | "animation-iteration-count" | "animation-direction" | "animation-fill-mode" => to.animations = from.animations.clone(),
         "border-collapse" => to.border_collapse = from.border_collapse,
@@ -2779,10 +2814,6 @@ fn fit_content_fn(c: &[Token], ctx: &LengthContext, width: bool) -> Option<Lengt
         _ => return None,
     };
     Some(Length::Math(intern_math(MathNode::FitContent(Box::new(node)))))
-}
-
-fn resolve_len(c: &[Token], ctx: &LengthContext) -> Option<Length> {
-    values::parse_length(c).map(|l| l.resolve(ctx))
 }
 
 /// Resolve a length that may not be `auto` or negative-sensitive.
@@ -3431,6 +3462,35 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.run_in = comps.iter().any(|c| values::is_ident(c, "run-in"));
             }
         }
+        "anchor-scope" => {
+            if let Some(scope) = props::anchor::AnchorScope::parse(&comps) { style.anchor_scope = scope; }
+        }
+        "anchor-name" => {
+            if let Some(names) = props::anchor::names(&comps) { style.anchor_names = (!names.is_empty()).then(|| names.into()); }
+        }
+        "position-anchor" if comps.len() == 1 => {
+            if values::is_ident(c0,"auto") { style.position_anchor = None; }
+            else if let Some(name) = props::anchor::dashed_ident(c0) { style.position_anchor = Some(name.into()); }
+        }
+        "position-try" => {
+            if let Some((order,list)) = props::anchor::TryOrder::shorthand(&comps) {
+                style.position_try_order = order;
+                style.position_try_fallbacks = (!list.is_empty()).then(|| list.into());
+            }
+        }
+        "position-try-order" => {
+            if let [part] = comps.as_slice() {
+                if let Some(order) = props::anchor::TryOrder::parse(part) { style.position_try_order = order; }
+            }
+        }
+        "position-try-fallbacks" => {
+            if let Some(list) = props::anchor::TryOption::parse_list(&comps) {
+                style.position_try_fallbacks = (!list.is_empty()).then(|| list.into());
+            }
+        }
+        "position-area" => {
+            if let Some(area) = props::anchor::PositionArea::parse(&comps) { style.position_area = area; }
+        }
         "position" => {
             if let Some(kw) = values::ident(c0) {
                 style.position = match kw.as_str() {
@@ -3515,7 +3575,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
                 fit_content_fn(c0, ctx, name.ends_with("width")).unwrap_or(Length::FitContent)
             } else {
-                match resolve_len(c0, ctx) {
+                match props::anchor_length::length(c0, false, ctx) {
                     // Negative sizes are invalid.
                     Some(Length::Px(v)) | Some(Length::Percent(v)) if v < 0.0 => return,
                     Some(l) => l,
@@ -3547,7 +3607,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
                 fit_content_fn(c0, ctx, name == "max-width").unwrap_or(Length::FitContent)
             } else {
-                match resolve_len_no_auto(c0, ctx) {
+                match props::anchor_length::length(c0, false, ctx).filter(|l| !l.is_auto()) {
                     Some(Length::Px(v)) | Some(Length::Percent(v)) if v < 0.0 => return,
                     Some(l) => l,
                     None => return,
@@ -3560,13 +3620,13 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "margin" => {
-            if let Some(e) = parse_edges(&comps, |c| resolve_len(c, ctx)) {
+            if let Some(e) = parse_edges(&comps, |c| props::anchor_length::length(c, false, ctx)) {
                 style.margin = e;
             }
         }
         "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
             if comps.len() == 1 {
-                if let Some(l) = resolve_len(c0, ctx) {
+                if let Some(l) = props::anchor_length::length(c0, false, ctx) {
                     match name {
                         "margin-top" => style.margin.top = l,
                         "margin-right" => style.margin.right = l,
@@ -3577,7 +3637,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "margin-inline" | "margin-block" => {
-            if let Some(v) = two_values(&comps, |c| resolve_len(c, ctx)) {
+            if let Some(v) = two_values(&comps, |c| props::anchor_length::length(c, false, ctx)) {
                 if name == "margin-inline" {
                     style.margin.left = v.0;
                     style.margin.right = v.1;
@@ -3692,7 +3752,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         }
         "top" | "right" | "bottom" | "left" => {
             if comps.len() == 1 {
-                if let Some(l) = resolve_len(c0, ctx) {
+                if let Some(l) = props::anchor_length::length(c0, true, ctx) {
                     match name {
                         "top" => style.inset.top = l,
                         "right" => style.inset.right = l,
@@ -3703,15 +3763,21 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "inset" => {
-            if let Some(e) = parse_edges(&comps, |c| resolve_len(c, ctx)) {
+            if let Some(e) = parse_edges(&comps, |c| props::anchor_length::length(c, true, ctx)) {
                 style.inset = e;
             }
         }
         "color" => {
             if comps.len() == 1 {
                 match values::parse_color_component(c0) {
-                    Some(ColorValue::Color(c)) => style.color = c,
-                    Some(ColorValue::CurrentColor) => style.color = parent.color,
+                    Some(ColorValue::Color(c)) => {
+                        style.color = c;
+                        style.color_components = crate::ComputedColor::parse(c0);
+                    }
+                    Some(ColorValue::CurrentColor) => {
+                        style.color = parent.color;
+                        style.color_components = parent.color_components.clone();
+                    }
                     None => {}
                 }
             }
@@ -3720,6 +3786,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             if comps.len() == 1 {
                 if let Some(c) = color_of(c0, style) {
                     style.background_color = c;
+                    style.background_color_components = style.resolve_color_components(c0);
                 }
             }
         }
@@ -4051,6 +4118,8 @@ thread_local! {
 /// value: a valid value of one of these properties changes either the
 /// initial style or this one.
 const SUPPORTS_PROBE: &[(&str, &str)] = &[
+    ("offset-path", "border-box"), ("offset-distance", "2px"), ("offset-position", "2px 3px"), ("offset-anchor", "2px 3px"), ("offset-rotate", "2deg"),
+    ("shape-outside", "border-box"), ("shape-margin", "2px"),
     ("display", "table-cell"), ("position", "relative"), ("float", "left"), ("clear", "both"), ("visibility", "hidden"),
     ("margin", "7px 8px 9px 10px"), ("padding", "7px 8px 9px 10px"), ("top", "7px"), ("right", "7px"), ("bottom", "7px"), ("left", "7px"),
     ("width", "7px"), ("height", "7px"), ("min-width", "7px"), ("min-height", "7px"), ("max-width", "7px"), ("max-height", "7px"),
@@ -4063,6 +4132,8 @@ const SUPPORTS_PROBE: &[(&str, &str)] = &[
 
 /// Properties every value of which `SUPPORTS_PROBE` detects.
 const SUPPORTS_CHECKED: &[&str] = &[
+    "offset-path", "offset-distance", "offset-rotate", "offset-anchor", "offset-position",
+    "shape-outside", "shape-margin",
     "display", "position", "float", "clear", "visibility", "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", "padding",
     "padding-top", "padding-right", "padding-bottom", "padding-left", "top", "right", "bottom", "left", "width", "height", "min-width",
     "min-height", "max-width", "max-height", "color", "background-color", "opacity", "z-index", "box-sizing", "text-align", "white-space",
@@ -4075,14 +4146,59 @@ fn probe_apply(base: &ComputedStyle, name: &str, value: &[Token]) -> ComputedSty
     apply_over(base, &initial, std::slice::from_ref(&decl), 16.0, (800.0, 600.0))
 }
 
+/// Whether a standard property is recognized by the cascade, independent
+/// of its value or of the styles currently applied to an element.
+pub fn recognizes_property(name: &str) -> bool {
+    if name.starts_with("--") || !rabbithole_css::supports::property_enabled(name) { return false; }
+    if name == "all" { return true; }
+    thread_local! {
+        static KNOWN: std::cell::RefCell<std::collections::HashSet<String>> = Default::default();
+    }
+    KNOWN.with(|known| {
+        if known.borrow().contains(name) { return true; }
+        let initial = ComputedStyle::initial();
+        let old = UNKNOWN_PROPERTY.with(|flag| flag.replace(false));
+        let _ = probe_apply(&initial, name, &[Token::Ident("normal".into())]);
+        let recognized = !UNKNOWN_PROPERTY.with(|flag| flag.replace(old));
+        if recognized { known.borrow_mut().insert(name.to_owned()); }
+        recognized
+    })
+}
+
 /// The `@supports` validator: `Some(false)` for an unknown property or a
 /// value a checked property rejects; `None` when it cannot tell.
 pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     if name.starts_with("--") {
         return Some(true);
     }
+    if wide_keyword(value).is_some() {
+        return Some(recognizes_property(name));
+    }
     if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
-        return None;
+        return Some(recognizes_property(name));
+    }
+    if let Some(result) = props::anchor_length::specified(name,value,&|_| String::new()) {
+        return Some(result.is_some());
+    }
+    if name == "anchor-scope" { return Some(props::anchor::AnchorScope::parse(&values::components(value)).is_some()); }
+    if name == "anchor-name" { return Some(props::anchor::names(&values::components(value)).is_some()); }
+    if name == "position-anchor" { return Some(matches!(values::components(value).as_slice(), [c] if values::is_ident(c,"auto") || props::anchor::dashed_ident(c).is_some())); }
+    if name == "position-try" { return Some(props::anchor::TryOrder::shorthand(&values::components(value)).is_some()); }
+    if name == "position-try-order" { return Some(matches!(values::components(value).as_slice(), [v] if props::anchor::TryOrder::parse(v).is_some())); }
+    if name == "position-try-fallbacks" { return Some(props::anchor::TryOption::parse_list(&values::components(value)).is_some()); }
+    if name == "position-area" { return Some(props::anchor::PositionArea::parse(&values::components(value)).is_some()); }
+    if matches!(name, "grid-template-columns" | "grid-template-rows") {
+        if let Some(valid) = crate::props::grid::valid_subgrid(value) { return Some(valid); }
+    }
+    if matches!(name, "transform-style" | "mix-blend-mode") {
+        let parts = values::components(value);
+        return Some(matches!(parts.as_slice(), [c] if values::ident(c).is_some_and(|k| {
+            if name == "transform-style" { matches!(k.as_str(), "flat" | "preserve-3d") }
+            else { rabbithole_gfx::blend_mode_index(&k).is_some() }
+        })));
+    }
+    if crate::props::flex::alignment_property(name) {
+        return Some(crate::props::flex::specified_alignment(name, &values::components(value)).is_some());
     }
     let initial = ComputedStyle::initial();
     UNKNOWN_PROPERTY.with(|u| u.set(false));

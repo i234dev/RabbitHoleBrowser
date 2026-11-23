@@ -121,12 +121,11 @@ pub(crate) fn parse_selectors(realm: &mut Realm, src: &str) -> JsResult<Vec<Sele
 /// `querySelectorAll` over the descendants of `root` (exclusive).
 pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first_only: bool) -> JsResult<Vec<NodeRef>> {
     let list = parse_selectors(realm, selectors)?;
-    Ok(with_doc(root.doc, |doc| {
-        if let Some(found) = indexed_query(doc, root.node, &list, first_only) {
+    Ok(with_selector_scope(root, |doc, state| {
+        if let Some(found) = indexed_query(doc, root.node, &list, first_only, state) {
             return found.into_iter().map(|node| NodeRef { doc: root.doc, node }).collect();
         }
-        let state = scoped_state(doc, root.node);
-        let matcher = SelectorMatcher::new(doc, &state);
+        let matcher = SelectorMatcher::new(doc, state);
         let mut out = Vec::new();
         for n in doc.descendants(root.node).skip(1) {
             if doc.element(n).is_none() {
@@ -146,7 +145,7 @@ pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first
 /// `querySelector(All)` through the document's lookup indexes, when every
 /// selector's subject has an id, an `[attr=value]` or a class to look up
 /// and few elements are candidates; `None`: scan the tree instead.
-fn indexed_query(doc: &mut Document, root: NodeId, list: &[Selector], first_only: bool) -> Option<Vec<NodeId>> {
+fn indexed_query(doc: &mut Document, root: NodeId, list: &[Selector], first_only: bool, state: &rabbithole_css::MatchState) -> Option<Vec<NodeId>> {
     use rabbithole_css::selector::AttrOp;
     // A scan of a small subtree beats checking many candidates.
     let max = if root == Document::ROOT { 256 } else { 16 };
@@ -172,8 +171,7 @@ fn indexed_query(doc: &mut Document, root: NodeId, list: &[Selector], first_only
     }
     let doc: &Document = doc;
     doc.retain_descendants_in_order(root, &mut found);
-    let state = scoped_state(doc, root);
-    let matcher = SelectorMatcher::new(doc, &state);
+    let matcher = SelectorMatcher::new(doc, state);
     let mut out = Vec::new();
     for n in found {
         if list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, n)) {
@@ -189,16 +187,24 @@ fn indexed_query(doc: &mut Document, root: NodeId, list: &[Selector], first_only
 /// Match state whose `:scope` is `root` when it is an element (`:scope`
 /// in `el.querySelectorAll(':scope > div')` is `el`); for a document or a
 /// fragment it stays the root element.
-pub(crate) fn scoped_state(doc: &Document, root: NodeId) -> rabbithole_css::MatchState {
-    let scope = doc.element(root).filter(|e| e.tag != "#fragment" && e.tag != "#shadow-root").map(|_| root);
-    rabbithole_css::MatchState { scope, ..Default::default() }
+pub(crate) fn with_selector_scope<R>(root: NodeRef, f: impl FnOnce(&mut Document, &rabbithole_css::MatchState) -> R) -> R {
+    let mut state = if root.doc == 0 {
+        with_env(|env| env.selector_state(None))
+    } else if root.doc & FRAME_DOC != 0 {
+        with_env(|env| env.selector_state(Some((root.doc & !FRAME_DOC) as u64)))
+    } else {
+        Default::default()
+    };
+    with_doc(root.doc, |doc| {
+        state.scope = doc.element(root.node).filter(|e| e.tag != "#fragment" && e.tag != "#shadow-root").map(|_| root.node);
+        f(doc, &state)
+    })
 }
 
 pub(crate) fn element_matches(realm: &mut Realm, n: NodeRef, selectors: &str) -> JsResult<bool> {
     let list = parse_selectors(realm, selectors)?;
-    Ok(with_doc(n.doc, |doc| {
-        let state = scoped_state(doc, n.node);
-        let matcher = SelectorMatcher::new(doc, &state);
+    Ok(with_selector_scope(n, |doc, state| {
+        let matcher = SelectorMatcher::new(doc, state);
         doc.element(n.node).is_some() && list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, n.node))
     }))
 }
@@ -305,6 +311,9 @@ pub(crate) fn ensure_insert_validity(realm: &mut Realm, parent: NodeRef, node: N
     let parent_kind = with_doc(parent.doc, |doc| kind_of(doc, parent.node));
     if !matches!(parent_kind, Kind::Document | Kind::Fragment | Kind::Element) {
         return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "This node type does not support this method."));
+    }
+    if node.doc == parent.doc && (node.node == parent.node || with_doc(parent.doc, |doc| doc.is_ancestor(node.node, parent.node))) {
+        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
     }
     let (node_kind, frag_elements, frag_text) = with_doc(node.doc, |doc| {
         let k = kind_of(doc, node.node);
@@ -457,23 +466,6 @@ pub(crate) fn record_character_data(target: NodeRef, old: Option<String>) {
     }
 }
 
-/// Document access while the state is already borrowed (main doc via env).
-fn with_doc_in_state<R>(st: &HostState, doc: u32, f: impl FnOnce(&Document) -> R) -> R {
-    if doc == 0 {
-        with_env(|env| f(env.doc()))
-    } else if doc & crate::host::FRAME_DOC != 0 {
-        with_env(|env| match env.frame_document((doc & !crate::host::FRAME_DOC) as u64) {
-            Some(d) => f(d),
-            None => f(&Document::new()),
-        })
-    } else {
-        match st.extra_docs.get((doc - 1) as usize) {
-            Some(d) => f(d),
-            None => f(&Document::new()),
-        }
-    }
-}
-
 /// Insert `child` (or a fragment's children) into `parent` before `before`.
 pub(crate) fn insert_node(realm: &mut Realm, parent: NodeRef, child: NodeRef, before: Option<NodeId>) -> JsResult<()> {
     insert_node_checked(realm, parent, child, before, true)
@@ -482,9 +474,6 @@ pub(crate) fn insert_node(realm: &mut Realm, parent: NodeRef, child: NodeRef, be
 /// `insert_node`; `validate` runs the pre-insertion checks (callers that
 /// already ran the "replace" checks pass false).
 pub(crate) fn insert_node_checked(realm: &mut Realm, parent: NodeRef, child: NodeRef, before: Option<NodeId>, validate: bool) -> JsResult<()> {
-    if child.doc == parent.doc && (child.node == parent.node || with_doc(parent.doc, |doc| doc.is_ancestor(child.node, parent.node))) {
-        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
-    }
     if validate {
         ensure_insert_validity(realm, parent, child, before, false)?;
     }
@@ -1240,9 +1229,6 @@ fn n_replace_child(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     };
     if with_doc(n.doc, |doc| doc.parent(old.node)) != Some(n.node) {
         return Err(crate::misc::dom_exception(realm, "NotFoundError", "The node to be replaced is not a child of this node."));
-    }
-    if new.doc == n.doc && (new.node == n.node || with_doc(n.doc, |doc| doc.is_ancestor(new.node, n.node))) {
-        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
     }
     ensure_insert_validity(realm, n, new, Some(old.node), true)?;
     let next = with_doc(n.doc, |doc| doc.next_sibling(old.node));

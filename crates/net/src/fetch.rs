@@ -151,6 +151,20 @@ pub struct Body {
     pub data: Vec<u8>,
 }
 
+/// An entry in the ordered list encoded by multipart/form-data.
+pub enum MultipartValue<'a> {
+    Text(&'a str),
+    File { filename: &'a str, mime: &'a str, bytes: &'a [u8] },
+}
+
+fn form_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n").replace('\n', "\r\n")
+}
+
+fn escape_form_parameter(value: &str) -> String {
+    value.replace('\r', "%0D").replace('\n', "%0A").replace('"', "%22")
+}
+
 impl Body {
     /// `application/x-www-form-urlencoded` body from (name, value) pairs.
     pub fn form(fields: &[(String, String)]) -> Body {
@@ -164,24 +178,29 @@ impl Body {
 
     /// `multipart/form-data` body; `files` are (field name, file name, mime, bytes).
     pub fn multipart(fields: &[(String, String)], files: &[(String, String, String, Vec<u8>)]) -> Body {
+        let text = fields.iter().map(|(key, value)| (key.as_str(), MultipartValue::Text(value)));
+        let files = files.iter().map(|(key, filename, mime, bytes)| (key.as_str(), MultipartValue::File { filename, mime, bytes }));
+        Self::multipart_entries(text.chain(files))
+    }
+
+    pub fn multipart_entries<'a>(entries: impl IntoIterator<Item = (&'a str, MultipartValue<'a>)>) -> Body {
         let boundary = format!("----RabbitHoleBoundary{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
         let mut data = Vec::new();
-        for (k, v) in fields {
-            data.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n", k.replace('"', "%22")).as_bytes());
-            data.extend_from_slice(v.as_bytes());
-            data.extend_from_slice(b"\r\n");
-        }
-        for (k, name, mime, bytes) in files {
-            data.extend_from_slice(
-                format!(
-                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
-                    k.replace('"', "%22"),
-                    name.replace('"', "%22"),
-                    if mime.is_empty() { "application/octet-stream" } else { mime }
-                )
-                .as_bytes(),
-            );
-            data.extend_from_slice(bytes);
+        for (name, value) in entries {
+            let name = escape_form_parameter(&form_line_endings(name));
+            data.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"").as_bytes());
+            match value {
+                MultipartValue::Text(text) => {
+                    data.extend_from_slice(b"\r\n\r\n");
+                    data.extend_from_slice(form_line_endings(text).as_bytes());
+                }
+                MultipartValue::File { filename, mime, bytes } => {
+                    let filename = escape_form_parameter(filename);
+                    let mime = if mime.is_empty() || !mime.bytes().all(|c| (0x20..=0x7e).contains(&c)) { "application/octet-stream" } else { mime };
+                    data.extend_from_slice(format!("; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n").as_bytes());
+                    data.extend_from_slice(bytes);
+                }
+            }
             data.extend_from_slice(b"\r\n");
         }
         data.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
@@ -1251,6 +1270,9 @@ impl Fetcher {
         if let Some(context) = &req.navigation_redirect { cookie_ctx.same_site_chain &= context.same_site_chain; }
         let author_headers: Vec<(String, String)> = req.headers.iter().filter(|(k, _)| !(req.mode.is_some() && cors::is_forbidden_request_header(k))).cloned().collect();
         for _hop in 0..20 {
+            if url.port.is_some_and(crate::url::is_bad_port) {
+                return Err(FetchError::Other("Restricted network port".into()));
+            }
             let referer = referrer_source.as_ref().and_then(|r| cors::referrer_for(r, &url, policy));
             referrer_source = referer.as_deref().and_then(Url::parse_absolute);
             let same_origin = origin_str.as_ref().map(|o| *o == url.origin()).unwrap_or(true);
@@ -1754,6 +1776,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn multipart_preserves_entry_order_and_file_bytes() {
+        let body = Body::multipart_entries([
+            ("a\nb", MultipartValue::Text("first\rline\n")),
+            ("upload", MultipartValue::File { filename: "x\n\"y", mime: "", bytes: b"\x00\n\xff" }),
+            ("a\nb", MultipartValue::Text("last")),
+        ]);
+        let boundary = body.content_type.split_once("boundary=").unwrap().1;
+        let mut expected = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"a%0D%0Ab\"\r\n\r\nfirst\r\nline\r\n\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"x%0A%22y\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
+        expected.extend_from_slice(b"\x00\n\xff");
+        expected.extend_from_slice(format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"a%0D%0Ab\"\r\n\r\nlast\r\n--{boundary}--\r\n").as_bytes());
+        assert_eq!(body.data, expected);
+    }
+
+
+    #[test]
     fn base64() {
         assert_eq!(base64_decode("SGVsbG8=").unwrap(), b"Hello");
         assert_eq!(base64_decode("SGVsbG8").unwrap(), b"Hello");
@@ -1856,6 +1893,18 @@ mod tests {
         assert_eq!(mime_for_extension("HTM"), "text/html");
         assert_eq!(mime_for_extension("svg"), "image/svg+xml");
         assert_eq!(mime_for_extension("bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn restricted_ports_fail_before_cache_or_transport() {
+        let fetcher = Fetcher::default();
+        for url in ["http://127.0.0.1:0/", "https://127.0.0.1:4190/"] {
+            let req = Request::get(Url::parse_absolute(url).unwrap());
+            assert!(matches!(fetcher.fetch_api(&req),
+                Err(FetchError::Other(message)) if message == "Restricted network port"));
+        }
+        assert!(!crate::url::is_bad_port(443));
+        assert!(!crate::url::is_bad_port(8443));
     }
 
     #[test]

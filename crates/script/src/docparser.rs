@@ -421,6 +421,113 @@ fn task_load(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
 
 // ------------------------------------------------------ streaming methods
 
+/// Parse a complete replacement off-tree. Sanitization and parsing finish
+/// before observers, scripts and custom elements can see the new children.
+pub(crate) fn set_fragment_html(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    use crate::host::{arg, arg_str, this_node, wrap};
+    let target = this_node(realm, &arg(args, 0), "setHTML")?;
+    if !with_doc(target.doc, |doc| {
+        doc.is_shadow_root(target.node) || doc.element(target.node).is_some_and(|el| !el.tag.starts_with('#'))
+    }) {
+        return Err(realm.throw_type_error("Expected an Element or ShadowRoot"));
+    }
+    let html = arg_str(realm, args, 1)?;
+    let run_scripts = realm.to_boolean(&arg(args, 2));
+    let sanitize = arg(args, 3);
+    let d = target.doc;
+    let (container, context, staging, existing_shadow, first) = with_doc(d, |doc| {
+        let ctx = doc.shadow_host(target.node).unwrap_or(target.node);
+        let el = doc.element(ctx).expect("fragment context element");
+        let (tag, ns) = (el.tag.clone(), el.ns.clone());
+        let container = if doc.is_element(target.node, "template") {
+            doc.template_content(target.node)
+        } else {
+            target.node
+        };
+        let form = doc.ancestor_or_self(ctx, |node| doc.is_element(node, "form"));
+        let staging = doc.clone_subtree(ctx, false);
+        let existing_shadow = doc.shadow_root(ctx).is_some();
+        if existing_shadow {
+            doc.attach_shadow(staging);
+        }
+        let first = doc.node_count();
+        let mut parser = Parser::new_fragment(staging, &tag, ns, staging, None, form, d == 0 || d & FRAME_DOC != 0, true);
+        parser.append(&html);
+        parser.close();
+        while parser.run(doc) != ParseStatus::Finished {}
+        (container, ctx, staging, existing_shadow, first)
+    });
+    // Include template contents and closed shadow roots in the sanitizer's
+    // input. All of these nodes still belong to the detached fragment.
+    if realm.is_callable(&sanitize) {
+        let elements: Vec<_> = with_doc(d, |doc| {
+            (first..doc.node_count())
+                .filter(|&id| doc.element(id).is_some_and(|el| !el.tag.starts_with('#')))
+                .collect()
+        });
+        let nodes = elements.into_iter().map(|node| wrap(realm, NodeRef { doc: d, node })).collect();
+        let nodes = realm.new_array_value(nodes);
+        realm.call(sanitize, Value::Undefined, &[nodes])?;
+    }
+    let parent = NodeRef { doc: d, node: container };
+    let removed = crate::node::children_of(parent);
+    let (added, scripts, shadow_children) = with_doc(d, |doc| {
+        let children: Vec<_> = doc.children(staging).collect();
+        doc.clear_children(container);
+        for &child in &children {
+            doc.append_child(container, child);
+        }
+        let mut shadow_children = Vec::new();
+        if !existing_shadow && doc.shadow_root(context).is_none() {
+            if let Some(root) = doc.shadow_roots.remove(&staging) {
+                doc.shadow_roots.insert(context, root);
+                doc.shadow_hosts.insert(root, context);
+                shadow_children.extend(doc.children(root));
+            }
+        }
+        let scripts: Vec<_> = shadow_children
+            .iter()
+            .chain(&children)
+            .flat_map(|&id| doc.shadow_including_descendants(id))
+            .filter(|&id| doc.is_element(id, "script"))
+            .collect();
+        for &id in &scripts {
+            if run_scripts {
+                doc.script_started.remove(&id);
+            } else {
+                doc.script_started.insert(id);
+            }
+        }
+        (
+            children.into_iter().map(|node| NodeRef { doc: d, node }).collect(),
+            scripts,
+            shadow_children,
+        )
+    });
+    crate::node::record_child_list(parent, added, removed);
+    if !shadow_children.is_empty() {
+        if let Some(root) = with_doc(d, |doc| doc.shadow_root(context)) {
+            crate::node::record_child_list(
+                NodeRef { doc: d, node: root },
+                shadow_children.into_iter().map(|node| NodeRef { doc: d, node }).collect(),
+                Vec::new(),
+            );
+        }
+    }
+    if d == 0 {
+        mark_dirty();
+        if run_scripts {
+            for node in scripts {
+                if with_doc(d, |doc| doc.is_connected(node)) {
+                    crate::node::run_script_element(realm, NodeRef { doc: d, node });
+                }
+            }
+        }
+    }
+    crate::shadow::flush(realm);
+    Ok(Value::Undefined)
+}
+
 /// A streaming fragment parser (`streamHTML()`, `streamAppendHTML()`, ...)
 /// writing into a live container.
 struct StreamParser {

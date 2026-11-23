@@ -44,6 +44,8 @@ pub struct EventData {
     pub initialized: bool,
     /// DOM "in passive listener flag": preventDefault() is ignored.
     pub in_passive: bool,
+    has_input_ranges: bool,
+    toggle: Option<Box<ToggleData>>,
 }
 
 fn event_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a mut EventData> {
@@ -77,6 +79,8 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             path: Vec::new(),
             initialized: true,
             in_passive: false,
+            has_input_ranges: false,
+            toggle: None,
         }),
     );
     realm.set_class_name(id, class);
@@ -156,11 +160,17 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             }
             realm.define_method(id, "getModifierState", 1, key_get_modifier_state);
         }
-        Some(EventDetail::Input { data, input_type, is_composing }) => {
+        Some(EventDetail::Input { data, input_type, is_composing, target_range }) => {
             realm.define_property(id, "data", data.as_deref().map(Value::str).unwrap_or(Value::Null), ACC);
             realm.define_property(id, "inputType", Value::str(input_type), ACC);
             realm.define_property(id, "isComposing", Value::Bool(*is_composing), ACC);
             realm.define_property(id, "dataTransfer", Value::Null, ACC);
+            if let Some((a, b)) = target_range {
+                let _keep = realm.root_object(id);
+                let start = wrap_main(realm, a.node);
+                let end = wrap_main(realm, b.node);
+                let _ = input_ranges(realm, id, &[start, Value::Number(a.offset as f64), end, Value::Number(b.offset as f64)]);
+            }
         }
         Some(EventDetail::Animation { name, elapsed, pseudo, transition }) => {
             realm.define_property(id, if *transition { "propertyName" } else { "animationName" }, Value::str(name), ACC);
@@ -379,10 +389,24 @@ fn keyboard_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
     Ok(Value::Object(id))
 }
 
+/// StaticRange objects and their node wrappers live in the JS realm.
+fn input_ranges(realm: &mut Realm, event: ObjectId, args: &[Value]) -> JsResult<()> {
+    let factory = state().borrow().factories.get("inputRanges").cloned();
+    if let Some(factory) = factory {
+        let result = realm.call(factory, Value::Object(event), args)?;
+        let nonempty = realm.to_boolean(&result);
+        realm.host_data_mut::<EventData>(event).unwrap().has_input_ranges = nonempty;
+    }
+    Ok(())
+}
+
 fn input_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = event_ctor_generic(realm, "InputEvent", args)?;
+    let _keep = realm.root_object(id);
     let dict = arg(args, 1);
     copy_dict_props(realm, id, &dict, &[("data", Value::Null), ("inputType", Value::str("")), ("isComposing", Value::Bool(false)), ("dataTransfer", Value::Null)])?;
+    let ranges = dict_value(realm, &dict, "targetRanges")?;
+    if !ranges.is_undefined() { input_ranges(realm, id, &[ranges])?; }
     Ok(Value::Object(id))
 }
 
@@ -437,6 +461,52 @@ fn progress_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
     let dict = arg(args, 1);
     copy_dict_props(realm, id, &dict, &[("lengthComputable", Value::Bool(false)), ("loaded", Value::Number(0.0)), ("total", Value::Number(0.0))])?;
     Ok(Value::Object(id))
+}
+
+struct ToggleData {
+    old_state: String,
+    new_state: String,
+    source: Option<NodeRef>,
+}
+
+fn toggle_event_ctor(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    if realm.new_target().is_undefined() || args.is_empty() {
+        return Err(realm.throw_type_error("ToggleEvent requires construction with an event type"));
+    }
+    let dict = arg(args, 1);
+    if !dict.is_nullish() && !dict.is_object() { return Err(realm.throw_type_error("Expected a ToggleEventInit dictionary")); }
+    let id = event_ctor_generic(realm, "ToggleEvent", args)?;
+    let _root = realm.root_object(id);
+    let new_state = dict_str(realm, &dict, "newState")?.unwrap_or_default();
+    let old_state = dict_str(realm, &dict, "oldState")?.unwrap_or_default();
+    let value = dict_value(realm, &dict, "source")?;
+    let source = if value.is_nullish() { None } else {
+        let node = node_of(realm, &value).filter(|n| with_doc(n.doc, |doc| doc.element(n.node).is_some()))
+            .ok_or_else(|| realm.throw_type_error("ToggleEvent source must be an Element"))?;
+        Some(node)
+    };
+    realm.host_data_mut::<EventData>(id).unwrap().toggle = Some(Box::new(ToggleData { old_state, new_state, source }));
+    Ok(Value::Object(id))
+}
+
+fn toggle_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a ToggleData> {
+    let Some(id) = this.as_object().filter(|&id| realm.host_data::<EventData>(id).is_some_and(|d| d.toggle.is_some())) else {
+        return Err(realm.throw_type_error("Expected a ToggleEvent"));
+    };
+    Ok(realm.host_data::<EventData>(id).unwrap().toggle.as_deref().unwrap())
+}
+fn toggle_old_state(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::str(&toggle_data(realm, &this)?.old_state))
+}
+fn toggle_new_state(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::str(&toggle_data(realm, &this)?.new_state))
+}
+fn toggle_source(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let Some(source) = toggle_data(realm, &this)?.source else { return Ok(Value::Null) };
+    let current = event_data(realm, &this)?.current_target.clone();
+    let against = node_of(realm, &current).filter(|n| n.doc == source.doc).map_or(Document::ROOT, |n| n.node);
+    let node = with_doc(source.doc, |doc| crate::shadow::retarget(doc, source.node, against));
+    Ok(wrap(realm, NodeRef { node, ..source }))
 }
 
 fn generic_sub_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -988,22 +1058,6 @@ fn any_listener_on_path(realm: &mut Realm, key: TargetKey, ty: &str) -> bool {
     }
 }
 
-fn with_doc_in_state<R>(st: &HostState, doc: u32, f: impl FnOnce(&Document) -> R) -> R {
-    if doc == 0 {
-        with_env(|env| f(env.doc()))
-    } else if doc & crate::host::FRAME_DOC != 0 {
-        with_env(|env| match env.frame_document((doc & !crate::host::FRAME_DOC) as u64) {
-            Some(d) => f(d),
-            None => f(&Document::new()),
-        })
-    } else {
-        match st.extra_docs.get((doc - 1) as usize) {
-            Some(d) => f(d),
-            None => f(&Document::new()),
-        }
-    }
-}
-
 /// Default action the embedder should perform after an uncancelled event.
 fn default_action_for(realm: &mut Realm, key: TargetKey, ty: &str) -> DefaultAction {
     let _ = realm;
@@ -1218,6 +1272,7 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
     }
     d.path.clear();
     let default_prevented = d.default_prevented;
+    if d.has_input_ranges { let _ = input_ranges(realm, eid, &[]); }
     if related.is_some() || matches!(key, TargetKey::Node(_)) {
         clear_targets(realm, eid, &path, related);
     }
@@ -1505,7 +1560,10 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "ClipboardEvent", Some("Event"), generic_sub_event_ctor);
     define_class(realm, "PromiseRejectionEvent", Some("Event"), generic_sub_event_ctor);
     define_class(realm, "SecurityPolicyViolationEvent", Some("Event"), generic_sub_event_ctor);
-    define_class(realm, "ToggleEvent", Some("Event"), generic_sub_event_ctor);
+    let toggle = define_class(realm, "ToggleEvent", Some("Event"), toggle_event_ctor);
+    realm.define_accessor(toggle, "oldState", Some(toggle_old_state), None, ACC);
+    realm.define_accessor(toggle, "newState", Some(toggle_new_state), None, ACC);
+    realm.define_accessor(toggle, "source", Some(toggle_source), None, ACC);
     let _ = ALL;
 }
 
@@ -1655,6 +1713,14 @@ fn pre_activation(path: &[(TargetKey, Value, Value)], bubbles: bool) -> Option<P
     Some(pre)
 }
 
+pub(crate) fn popover_action(realm: &mut Realm, n: NodeRef, dismiss: bool) -> bool {
+    let callback = state().borrow().factories.get("popoverAction").cloned();
+    let Some(callback) = callback else { return false };
+    let target = wrap(realm, n);
+    let result = call_logged(realm, &callback, Value::Undefined, &[target, Value::Bool(dismiss)], "popover activation");
+    realm.to_boolean(&result)
+}
+
 /// After the dispatch: the activation behavior, or (canceled) the
 /// legacy-canceled-activation behavior.
 fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target: Option<NodeRef>) {
@@ -1691,7 +1757,10 @@ fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target
                 return;
             }
             let form = with_doc(n.doc, |doc| form_owner(doc, n.node));
-            let Some(f) = form else { return };
+            let Some(f) = form else {
+                if with_doc(n.doc, |doc| doc.attr(n.node, "popovertarget").is_some()) { popover_action(realm, n, false); }
+                return;
+            };
             let fw = wrap(realm, NodeRef { doc: n.doc, node: f });
             if pre.kind == Activation::Reset {
                 let _ = realm.invoke(fw, "reset", &[]);
@@ -1746,7 +1815,9 @@ fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target
                 }
             }
         }
-        Activation::Button => {}
+        Activation::Button => {
+            if connected && with_doc(n.doc, |doc| doc.attr(n.node, "popovertarget").is_some()) { popover_action(realm, n, false); }
+        }
     }
 }
 

@@ -1434,7 +1434,7 @@ impl TreeBuilder {
         let host = self.adjusted_current();
         let declarative = self.allow_dsd && matches!(mode.as_deref(), Some("open" | "closed")) && host.is_some() && host != self.open.first().copied();
         let host = match host {
-            Some(h) if declarative && !self.doc.shadow_roots.contains_key(&h) && self.valid_shadow_host(h) => h,
+            Some(h) if declarative && !self.doc.shadow_roots.contains_key(&h) && self.doc.can_host_shadow(h) => h,
             _ => {
                 self.insert_html(t);
                 return;
@@ -1443,33 +1443,14 @@ impl TreeBuilder {
         let template = self.create_element(t, Namespace::Html);
         self.open.push(template);
         let root = self.doc.attach_shadow(host);
-        self.doc.declarative_shadow.insert(root, mode.as_deref() == Some("open"));
         let flag = |n: &str| t.attrs.iter().any(|(a, _)| a == n);
-        let mut bits = 0u8;
-        if flag("shadowrootclonable") {
-            bits |= 1;
-        }
-        if flag("shadowrootserializable") {
-            bits |= 2;
-        }
-        if flag("shadowrootdelegatesfocus") {
-            bits |= 4;
-        }
-        if bits != 0 {
-            self.doc.declarative_shadow_flags.insert(root, bits);
-        }
+        self.doc.shadow_info.insert(root, rabbithole_dom::ShadowInfo {
+            open: mode.as_deref() == Some("open"), declarative: true, manual: false,
+            clonable: flag("shadowrootclonable"),
+            serializable: flag("shadowrootserializable"),
+            delegates_focus: flag("shadowrootdelegatesfocus"),
+        });
         self.dsd_contents.insert(template, root);
-    }
-
-    /// Elements `attachShadow()` accepts: custom elements (a valid custom
-    /// element name) and a fixed list of HTML elements.
-    fn valid_shadow_host(&self, n: NodeId) -> bool {
-        let (t, ns) = self.el(n);
-        if *ns != Namespace::Html {
-            return false;
-        }
-        matches!(t, "article" | "aside" | "blockquote" | "body" | "div" | "footer" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header" | "main" | "nav" | "p" | "section" | "span")
-            || (t.contains('-') && t.starts_with(|c: char| c.is_ascii_lowercase()) && !matches!(t, "annotation-xml" | "color-profile" | "font-face" | "font-face-src" | "font-face-uri" | "font-face-format" | "font-face-name" | "missing-glyph"))
     }
 
     fn generic_raw(&mut self, t: &Tag, state: State) {

@@ -210,6 +210,37 @@ impl<T> std::ops::DerefMut for Tracked<T> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShadowInfo {
+    pub open: bool,
+    pub delegates_focus: bool,
+    pub manual: bool,
+    pub clonable: bool,
+    pub serializable: bool,
+    pub declarative: bool,
+}
+
+/// DOM "valid element local name".
+pub fn valid_element_local_name(s: &str) -> bool {
+    let mut it = s.chars();
+    let Some(first) = it.next() else { return false };
+    if first.is_ascii_alphabetic() {
+        return !s.chars().any(|c| matches!(c, '\0' | '\t' | '\n' | '\u{c}' | '\r' | ' ' | '/' | '>'));
+    }
+    if !(first == ':' || first == '_' || first as u32 >= 0x80) {
+        return false;
+    }
+    it.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':' | '_') || c as u32 >= 0x80)
+}
+
+/// HTML custom element names are valid DOM local names with an ASCII
+/// lowercase initial, at least one hyphen and no ASCII uppercase letters.
+pub fn valid_custom_element_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase()) && name.contains('-')
+        && !name.bytes().any(|c| c.is_ascii_uppercase()) && valid_element_local_name(name)
+        && !matches!(name, "annotation-xml" | "color-profile" | "font-face" | "font-face-src" | "font-face-uri" | "font-face-format" | "font-face-name" | "missing-glyph")
+}
+
 /// Identity of one live document incarnation. A rendering/DOM clone owns a
 /// fresh identity, so snapshots cannot keep the original incarnation alive.
 struct DocumentIdentity(std::sync::Arc<()>);
@@ -258,13 +289,8 @@ pub struct Document {
     /// `<template>` element → its content (a parentless `#fragment` node):
     /// a template's children live there, not in the tree.
     pub template_contents: HashMap<NodeId, NodeId>,
-    /// Shadow roots created by declarative shadow DOM
-    /// (`<template shadowrootmode>`), with whether they are open; the
-    /// first `attachShadow()` on the host takes such a root over.
-    pub declarative_shadow: HashMap<NodeId, bool>,
-    /// Options of declarative shadow roots: bit 1 clonable, 2 serializable,
-    /// 4 delegatesFocus (absent: none set).
-    pub declarative_shadow_flags: HashMap<NodeId, u8>,
+    /// Attachment options belong to the root for its entire lifetime.
+    pub shadow_info: HashMap<NodeId, ShadowInfo>,
     /// Text nodes that are CDATA sections (`CDATASection`).
     pub cdata: std::collections::HashSet<NodeId>,
     /// Comment nodes that are processing instructions, with their target
@@ -279,6 +305,8 @@ pub struct Document {
     /// An HTML document (`false` for XML documents made by
     /// `createDocument`): decides `tagName` upper-casing.
     pub is_html: bool,
+    /// Whether the document is an HTML editing host.
+    pub design_mode: bool,
     /// Live range boundary points, updated by tree and text mutations
     /// (DOM §5.5 "live ranges"). Slots are freed with `remove_live_point`.
     pub live_points: Vec<Option<BoundaryPoint>>,
@@ -315,10 +343,10 @@ pub struct Document {
     /// The document's URL when it differs from its browsing context's
     /// (documents made by `DOMParser` take their creator's URL).
     pub url: Option<String>,
-    /// The top layer (HTML §"top layer"): modal dialogs, in the order they
-    /// were opened (last = topmost). Painted above everything else, each
-    /// over its `::backdrop`; matched by `:modal`.
+    /// Elements painted above the document, in opening order.
     pub top_layer: Vec<NodeId>,
+    open_popovers: HashMap<NodeId, Option<NodeId>>,
+    pub explicit_popover_targets: HashMap<NodeId, NodeId>,
     /// Elements by attribute value and class, for queries.
     lookup: index::LookupIndex,
 }
@@ -385,13 +413,13 @@ impl Document {
             sheet_overrides: Tracked::default(),
             defined_custom: std::collections::HashSet::new(),
             template_contents: HashMap::new(),
-            declarative_shadow: HashMap::new(),
-            declarative_shadow_flags: HashMap::new(),
+            shadow_info: HashMap::new(),
             cdata: std::collections::HashSet::new(),
             pi_targets: HashMap::new(),
             script_started: std::collections::HashSet::new(),
             quirks_mode: QuirksMode::NoQuirks,
             is_html: true,
+            design_mode: false,
             live_points: Vec::new(),
             live_iterators: Vec::new(),
             selection: None,
@@ -407,6 +435,8 @@ impl Document {
             attr_namespaces: HashMap::new(),
             url: None,
             top_layer: Vec::new(),
+            open_popovers: HashMap::new(),
+            explicit_popover_targets: HashMap::new(),
             lookup: index::LookupIndex::default(),
         }
     }
@@ -582,6 +612,68 @@ impl Document {
         &self.nodes[id]
     }
 
+    pub fn popover_mode(value: &str) -> &'static str {
+        if value.is_empty() || value.eq_ignore_ascii_case("auto") { "auto" }
+        else if value.eq_ignore_ascii_case("hint") { "hint" }
+        else { "manual" }
+    }
+
+    pub fn popover_target(&self, invoker: NodeId) -> Option<NodeId> {
+        if let Some(&node) = self.explicit_popover_targets.get(&invoker) {
+            return self.is_shadow_including_inclusive_ancestor(self.tree_root(node), invoker).then_some(node);
+        }
+        let id = self.attr(invoker, "popovertarget").filter(|id| !id.is_empty())?;
+        let root = self.tree_root(invoker);
+        if root == Self::ROOT { return self.element_by_id(id); }
+        self.descendants(root).find(|&node| self.attr(node, "id") == Some(id))
+    }
+
+    pub fn popover_open(&self, node: NodeId) -> bool {
+        self.open_popovers.contains_key(&node)
+    }
+
+    /// The element that invoked an open popover is its implicit anchor.
+    pub fn popover_invoker(&self, node: NodeId) -> Option<NodeId> {
+        self.open_popovers.get(&node).copied().flatten()
+    }
+
+    pub fn light_dismiss_popovers(&self) -> impl DoubleEndedIterator<Item = NodeId> + '_ {
+        self.top_layer.iter().copied().filter(|&n| self.popover_open(n) &&
+            self.attr(n, "popover").is_some_and(|v| Self::popover_mode(v) != "manual"))
+    }
+
+    pub fn related_open_popover(&self, target: NodeId) -> Option<NodeId> {
+        self.light_dismiss_popovers().rev().find(|&popover| {
+            let source = self.open_popovers[&popover];
+            let mut current = Some(target);
+            while let Some(node) = current {
+                if node == popover || source == Some(node) { return true; }
+                current = self.flat_parent(node);
+            }
+            false
+        })
+    }
+
+    pub fn is_modal(&self, node: NodeId) -> bool {
+        self.top_layer.contains(&node) && !self.popover_open(node)
+    }
+
+    pub fn set_popover_open(&mut self, node: NodeId, open: bool) {
+        self.set_popover_open_from(node, open, None);
+    }
+
+    pub fn set_popover_open_from(&mut self, node: NodeId, open: bool, source: Option<NodeId>) {
+        if open {
+            if self.popover_open(node) { return; }
+            self.open_popovers.insert(node, source);
+            self.top_layer.push(node);
+        } else {
+            if self.open_popovers.remove(&node).is_none() { return; }
+            self.top_layer.retain(|&id| id != node);
+        }
+        self.record(Mutation::Node { node });
+    }
+
     /// Raw mutable access; recorded as an unknown change of the node.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
         self.record(Mutation::Node { node: id });
@@ -597,6 +689,11 @@ impl Document {
     /// None). No-op for the document node.
     pub fn detach(&mut self, child: NodeId) {
         let Some(parent) = self.nodes[child].parent else { return };
+        if !self.open_popovers.is_empty() {
+            let removed: Vec<_> = self.open_popovers.keys().copied()
+                .filter(|&n| self.is_shadow_including_inclusive_ancestor(child, n)).collect();
+            for node in removed { self.set_popover_open(node, false); }
+        }
         if self.has_live_positions() {
             self.live_before_remove(parent, child);
         }
@@ -894,6 +991,7 @@ impl Document {
         let is_html = self.is_html;
         let NodeData::Element(el) = &mut self.nodes[id].data else { return };
         let name = if is_html && el.ns == Namespace::Html { name.to_ascii_lowercase() } else { name.to_string() };
+        if name == "popovertarget" { self.explicit_popover_targets.remove(&id); }
         let old = match value {
             Some(v) => match el.attrs.iter_mut().find(|(k, _)| *k == name) {
                 Some(slot) => {
@@ -919,6 +1017,9 @@ impl Document {
                 None => return,
             },
         };
+        if name == "popover" && self.popover_open(id) && old.as_deref().map(Self::popover_mode) != value.map(Self::popover_mode) {
+            self.set_popover_open(id, false);
+        }
         self.select_attribute_changed(id, &name, old.is_some(), value.is_some());
         if self.lookup.active() {
             self.lookup.attr_changed(id, &name, old.as_deref(), value);
@@ -983,11 +1084,17 @@ impl Document {
         // Innermost first, so nested templates end up in their parent's content.
         for t in templates.into_iter().rev() {
             let mode = if declarative_shadow { self.attr(t, "shadowrootmode").map(|m| m.to_ascii_lowercase()) } else { None };
-            let host = self.parent(t).filter(|&p| self.element(p).is_some() && !self.shadow_roots.contains_key(&p));
+            let host = self.parent(t).filter(|&p| self.can_host_shadow(p) && !self.shadow_roots.contains_key(&p));
             let target = match (mode.as_deref(), host) {
                 (Some(m @ ("open" | "closed")), Some(h)) => {
                     let r = self.attach_shadow(h);
-                    self.declarative_shadow.insert(r, m == "open");
+                    let info = ShadowInfo {
+                        open: m == "open", declarative: true, manual: false,
+                        clonable: self.attr(t, "shadowrootclonable").is_some(),
+                        serializable: self.attr(t, "shadowrootserializable").is_some(),
+                        delegates_focus: self.attr(t, "shadowrootdelegatesfocus").is_some(),
+                    };
+                    self.shadow_info.insert(r, info);
                     r
                 }
                 _ => self.template_content(t),
@@ -1004,6 +1111,12 @@ impl Document {
     }
 
     // ---------------------------------------------------------- shadow DOM
+
+    pub fn can_host_shadow(&self, host: NodeId) -> bool {
+        let Some(el) = self.element(host) else { return false };
+        el.ns == Namespace::Html && (valid_custom_element_name(&el.tag) || matches!(el.tag.as_str(),
+            "article" | "aside" | "blockquote" | "body" | "div" | "footer" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header" | "main" | "nav" | "p" | "section" | "span"))
+    }
 
     /// Attach a shadow root to `host` (or return the existing one).
     pub fn attach_shadow(&mut self, host: NodeId) -> NodeId {
@@ -1360,6 +1473,28 @@ impl Document {
             NodeData::Element(e) => Some(e),
             _ => None,
         }
+    }
+
+    /// HTML integer parsing consumes the initial signed decimal digits.
+    pub fn explicit_tab_index(&self, id: NodeId) -> Option<i32> {
+        let text = self.attr(id, "tabindex")?.trim_start_matches([' ', '\t', '\r', '\n', '\x0c']);
+        let sign = usize::from(text.starts_with(['+', '-']));
+        let digits = text[sign..].bytes().take_while(u8::is_ascii_digit).count();
+        text[..sign + digits].parse().ok()
+    }
+
+    pub fn tab_index(&self, id: NodeId) -> i32 {
+        if let Some(index) = self.explicit_tab_index(id) { return index; }
+        let Some(el) = self.element(id) else { return -1 };
+        if el.ns == Namespace::Svg && el.tag == "a" { return 0; }
+        if el.ns != Namespace::Html { return -1; }
+        let zero = match el.tag.as_str() {
+            "a" | "area" | "button" | "frame" | "iframe" | "input" | "object" | "select" | "textarea" => true,
+            "summary" => self.parent(id).filter(|&p| self.is_element(p, "details"))
+                .and_then(|p| self.child_elements(p).find(|&c| self.is_element(c, "summary"))) == Some(id),
+            _ => false,
+        };
+        if zero { 0 } else { -1 }
     }
 
     pub fn tag(&self, id: NodeId) -> Option<&str> {

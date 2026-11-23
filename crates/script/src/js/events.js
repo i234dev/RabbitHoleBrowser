@@ -85,7 +85,6 @@
   });
   defaults(g.FocusEvent, { relatedTarget: null });
   defaults(g.InputEvent, { data: null, isComposing: false, inputType: '', dataTransfer: null });
-  method(g.InputEvent, 'getTargetRanges', function () { return []; });
   defaults(g.CompositionEvent, { data: '' });
   method(g.CompositionEvent, 'initCompositionEvent', function (type, bubbles, cancelable, view, data) { this.initEvent(type, bubbles, cancelable); Object.defineProperty(this, 'data', { value: String(data ?? ''), configurable: true }); });
   class TextEvent extends g.UIEvent {

@@ -1172,7 +1172,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     }
 
     fn start_line(&mut self, y: f32) {
-        let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
+        let (l, r) = self.bfc.inline_available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
         self.cur.y = y;
         self.cur.left = l;
         self.cur.align_right = r;
@@ -1604,7 +1604,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // when the box does not fit beside them.
             let h = self.children[c].margin_rect().h.max(self.strut_h());
             for _ in 0..64 {
-                let (l, r) = self.bfc.available(self.cur.y, h, self.content_x, self.content_w);
+                let (l, r) = self.bfc.inline_available(self.cur.y, h, self.content_x, self.content_w);
                 let unchanged = (l - self.cur.left).abs() < 0.01 && (r - self.cur.align_right).abs() < 0.01;
                 if unchanged && w <= r - l + 0.01 {
                     break;
@@ -1643,7 +1643,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // otherwise it waits for the next line.
             self.layout_float_at(c, y);
             let placed_here = self.bfc.last().map(|r| (r.y - y).abs() < 0.01).unwrap_or(false);
-            let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
+            let (l, r) = self.bfc.inline_available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
             let used = self.cur.x - self.cur.left;
             if !placed_here || r - l + 0.01 < used {
                 self.bfc.pop();
@@ -1654,7 +1654,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             self.layout_float_at(c, y);
         }
         // The current (empty) line shrinks around the new float.
-        let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
+        let (l, r) = self.bfc.inline_available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
         self.narrow_line(l, r);
     }
 

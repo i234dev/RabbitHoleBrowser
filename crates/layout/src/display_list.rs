@@ -1031,12 +1031,14 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         self.push_scope(HitScope::Fixed);
         let vp = Rect::new(0.0, 0.0, self.ctx.viewport_width, self.ctx.viewport_height);
         self.bounds = vp;
+        let mut backdrop_hit = self.ctx.doc.is_modal(node);
         if let Some(bs) = crate::pseudo_style(self.ctx.styles, node, rabbithole_css::PseudoElement::Marker) {
+            backdrop_hit = bs.pointer_events != PointerEvents::None && bs.visibility != Visibility::Hidden;
             if !bs.background_color.is_transparent() && bs.visibility != Visibility::Hidden {
                 self.list.push(DisplayItem::Rect { rect: vp, color: bs.background_color.scale_alpha(bs.opacity.clamp(0.0, 1.0)), radius: 0.0 });
             }
         }
-        self.record_hit(vp, Some(node));
+        if backdrop_hit { self.record_hit(vp, Some(node)); }
         self.list.fixed_bounds.push(vp);
         if b.fixed && b.flow == Flow::Absolute {
             self.paint_stacking_context(b, vp);

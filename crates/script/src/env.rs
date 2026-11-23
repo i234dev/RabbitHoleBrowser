@@ -19,6 +19,7 @@ pub trait HostEnv {
     fn service_worker_scope(&self) -> Option<crate::ServiceWorkerScope> { None }
     fn doc(&mut self) -> &mut Document;
     fn document_url(&self) -> Url;
+    fn referrer_policy(&self) -> rabbithole_net::ReferrerPolicy { Default::default() }
     /// The document can finish loading before its first script realm exists.
     fn document_is_complete(&self) -> bool { false }
     /// Effective origin, including inheritance by an initial about:blank.
@@ -61,6 +62,7 @@ pub trait HostEnv {
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>>;
     /// Final Grid axis metadata after bringing this document's layout up to
     /// date. None for no box, a stacking axis or an unsupported completion.
+    fn anchor_style(&mut self, _frame: Option<u64>, _node: NodeId) -> Option<Rc<ComputedStyle>> { None }
     fn used_grid_tracks(&mut self, _node: NodeId, _rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> { None }
     /// Scroll state of an element's box (after layout): (scroll offset,
     /// scroll size). `None` = no box / not supported.
@@ -132,6 +134,11 @@ pub trait HostEnv {
     fn random_bytes(&mut self, buf: &mut [u8]);
     /// `window.open` / `target=_blank`.
     fn open_window(&mut self, url: Url);
+    /// Interaction state visible to DOM selector queries in an active document.
+    fn selector_state(&mut self, _frame: Option<u64>) -> rabbithole_css::MatchState {
+        rabbithole_css::MatchState::default()
+    }
+
     fn focus_node(&mut self, node: Option<NodeId>);
     /// Submit a form (build the request and navigate); `submitter` is the
     /// button used, if any.
@@ -202,6 +209,8 @@ pub trait HostEnv {
     fn frame_computed_style(&mut self, _id: u64, _node: NodeId) -> Option<Rc<ComputedStyle>> {
         None
     }
+    /// Viewport of a same-origin frame, in CSS pixels.
+    fn frame_viewport(&mut self, _id: u64) -> Option<(f32, f32)> { None }
     /// As used_grid_tracks, in the identified same-origin document.
     fn frame_used_grid_tracks(&mut self, _id: u64, _node: NodeId, _rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> { None }
     /// Border box of a node of a same-origin frame's document (frame

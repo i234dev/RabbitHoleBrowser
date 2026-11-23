@@ -869,15 +869,15 @@ mod tests {
     #[test]
     fn stops_distribute_evenly() {
         let stops = vec![
-            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None },
-            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None },
-            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None },
+            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None, components: None },
+            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None, components: None },
+            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None, components: None },
         ];
         let r = resolve_stops(&stops, 100.0);
         assert_eq!(r.iter().map(|s| s.offset).collect::<Vec<_>>(), vec![0.0, 0.5, 1.0]);
         let stops = vec![
-            GradientStop { color: Color::BLACK, position: Some(Length::Px(20.0)), hint: false, wide: None },
-            GradientStop { color: Color::WHITE, position: Some(Length::Percent(10.0)), hint: false, wide: None },
+            GradientStop { color: Color::BLACK, position: Some(Length::Px(20.0)), hint: false, wide: None, components: None },
+            GradientStop { color: Color::WHITE, position: Some(Length::Percent(10.0)), hint: false, wide: None, components: None },
         ];
         let r = resolve_stops(&stops, 100.0);
         assert_eq!(r[1].offset, 0.2, "never decreasing");
@@ -886,9 +886,9 @@ mod tests {
     #[test]
     fn color_hints_curve_the_transition() {
         let stops = vec![
-            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None },
-            GradientStop { color: Color::TRANSPARENT, position: Some(Length::Percent(20.0)), hint: true, wide: None },
-            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None },
+            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None, components: None },
+            GradientStop { color: Color::TRANSPARENT, position: Some(Length::Percent(20.0)), hint: true, wide: None, components: None },
+            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None, components: None },
         ];
         let r = resolve_stops(&stops, 100.0);
         // Expanded into intermediate stops; halfway in color at the hint.
@@ -926,8 +926,8 @@ mod tests {
     fn linear_geometry() {
         let tile = Rect::new(0.0, 0.0, 100.0, 50.0);
         let stops = vec![
-            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None },
-            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None },
+            GradientStop { color: Color::BLACK, position: None, hint: false, wide: None, components: None },
+            GradientStop { color: Color::WHITE, position: None, hint: false, wide: None, components: None },
         ];
         match linear_paint(&GradientDirection::Angle(std::f32::consts::FRAC_PI_2), &stops, false, ColorInterp::default(), tile).unwrap() {
             Paint::Linear { start, end, .. } => {

@@ -19,7 +19,7 @@ mod vars;
 mod color_spaces;
 
 pub use computed::*;
-pub use color_spaces::{color_to_wide, interpolate as interpolate_color, interpolate_wide, wide_to_color, ColorInterp, HueMethod, InterpSpace, Wide};
+pub use color_spaces::{alpha_parts, layer_parts, color_to_wide, interpolate as interpolate_color, interpolate_wide, wide_to_color, ComputedColor, ColorInterp, HueMethod, InterpSpace, Wide};
 pub use restyle::{RestyleOutcome, StyleChange, StyleEngine};
 pub use rabbithole_css::{Declaration, MatchState, MediaEnv, PseudoElement, Stylesheet};
 
@@ -84,6 +84,10 @@ pub struct StyledTree {
     /// `::first-letter` / `::first-line` style.
     pub any_first_letter: bool,
     pub any_first_line: bool,
+    pub any_position_area: bool,
+    pub any_motion_path: bool,
+    /// @position-try names belong to the tree scope that owns the sheet.
+    pub position_tries: HashMap<NodeId, HashMap<String, Vec<Declaration>>>,
     pub font_faces: Vec<FontFace>,
     /// `@keyframes` by name: (offsets, declarations) per frame, raw.
     pub keyframes: HashMap<String, Vec<(Vec<f32>, Vec<Declaration>)>>,
@@ -109,7 +113,7 @@ impl StyledTree {
         v.get(id).and_then(|s| s.as_ref())
     }
 
-    pub(crate) fn empty() -> StyledTree {
+    pub fn empty() -> StyledTree {
         StyledTree {
             styles: Vec::new(),
             before: Vec::new(),
@@ -119,6 +123,9 @@ impl StyledTree {
             first_line: Vec::new(),
             any_first_letter: false,
             any_first_line: false,
+            any_position_area: false,
+            any_motion_path: false,
+            position_tries: HashMap::new(),
             font_faces: Vec::new(),
             keyframes: HashMap::new(),
             root_font_size: 16.0,

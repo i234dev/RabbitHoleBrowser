@@ -21,6 +21,8 @@ pub enum AttrOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttrSelector {
+    pub any_namespace: bool,
+    pub namespace: Option<Arc<str>>,
     pub name: String,
     pub op: AttrOp,
     pub value: String,
@@ -73,9 +75,10 @@ pub enum Pseudo {
     Default,
     /// `:open` (open `<details>` / `<dialog>`).
     Open,
-    /// `:modal` (an element in the document's top layer).
+    /// A modal dialog in the top layer.
     Modal,
-    /// `:modal`, `:popover-open`, `:fullscreen`, `:autofill`, ... states
+    PopoverOpen,
+    /// `:fullscreen`, `:autofill`, ... states
     /// we are never in, but which are valid selectors.
     NeverState,
     /// `:scope` outside scoped contexts is `:root`.
@@ -116,6 +119,8 @@ enum PseudoParse {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Compound {
+    /// A required namespace URI. The empty URI selects unnamespaced elements.
+    pub namespace: Option<Arc<str>>,
     pub tag: Option<String>,
     pub id: Option<String>,
     pub classes: Vec<String>,
@@ -321,7 +326,10 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
 
 // ---------------------------------------------------------------- parsing
 
+pub(crate) type Namespaces = Option<Arc<HashMap<String, Arc<str>>>>;
+
 pub struct SelectorParser<'a> {
+    pub(crate) namespaces: Namespaces,
     parent: Option<Arc<Vec<Selector>>>,
     implicit_parent: bool,
     in_has: bool,
@@ -331,15 +339,15 @@ pub struct SelectorParser<'a> {
 
 impl<'a> SelectorParser<'a> {
     pub fn new(toks: &'a [Token]) -> Self {
-        SelectorParser { toks, pos: 0, parent: None, implicit_parent: false, in_has: false }
+        SelectorParser { namespaces: None, toks, pos: 0, parent: None, implicit_parent: false, in_has: false }
     }
 
     pub(crate) fn nested(toks: &'a [Token], parent: Arc<Vec<Selector>>) -> Self {
-        Self { toks, pos: 0, parent: Some(parent), implicit_parent: true, in_has: false }
+        Self { namespaces: None, toks, pos: 0, parent: Some(parent), implicit_parent: true, in_has: false }
     }
 
     fn subparser(&self, toks: &'a [Token]) -> Self {
-        Self { toks, pos: 0, parent: self.parent.clone(), implicit_parent: false, in_has: self.in_has }
+        Self { namespaces: self.namespaces.clone(), toks, pos: 0, parent: self.parent.clone(), implicit_parent: false, in_has: self.in_has }
     }
 
     fn nesting(&self) -> Pseudo {
@@ -444,6 +452,7 @@ impl<'a> SelectorParser<'a> {
     fn parse_compound(&mut self) -> Option<Compound> {
         let mut c = Compound::default();
         let mut any = false;
+        let prefix_start = self.pos;
         // Type / universal
         match self.peek() {
             Some(Token::Ident(name)) => {
@@ -458,14 +467,22 @@ impl<'a> SelectorParser<'a> {
             }
             _ => {}
         }
-        // Namespace prefix `*|` or `svg|` – accept and ignore
+        // Resolve prefixes in the stylesheet that contains this selector.
         if self.peek() == Some(&Token::Delim('|')) {
+            c.namespace = match &self.toks[prefix_start] {
+                Token::Ident(prefix) => Some(self.namespaces.as_ref()?.get(prefix)?.clone()),
+                Token::Delim('*') => None,
+                _ => Some(Arc::from("")),
+            };
+            any = true;
             self.pos += 1;
             match self.bump() {
                 Some(Token::Ident(name)) => c.tag = Some(name.to_ascii_lowercase()),
                 Some(Token::Delim('*')) => c.tag = Some("*".into()),
                 _ => return None,
             }
+        } else {
+            c.namespace = self.namespaces.as_ref().and_then(|names| names.get("")).cloned();
         }
         loop {
             match self.peek() {
@@ -517,6 +534,17 @@ impl<'a> SelectorParser<'a> {
 
     fn parse_attr(&mut self) -> Option<AttrSelector> {
         self.skip_ws();
+        let mut any_namespace = false;
+        let mut namespace = None;
+        match self.toks.get(self.pos..) {
+            Some([Token::Delim('*'), Token::Delim('|'), ..]) => { any_namespace = true; self.pos += 2; }
+            Some([Token::Ident(prefix), Token::Delim('|'), Token::Ident(_), ..]) => {
+                namespace = Some(self.namespaces.as_ref()?.get(prefix)?.clone());
+                self.pos += 2;
+            }
+            Some([Token::Delim('|'), ..]) => self.pos += 1,
+            _ => {}
+        }
         let name = match self.bump() {
             Some(Token::Ident(n)) => n.to_ascii_lowercase(),
             _ => return None,
@@ -526,6 +554,7 @@ impl<'a> SelectorParser<'a> {
             Some(Token::CloseBracket) => {
                 self.pos += 1;
                 return Some(AttrSelector {
+                    any_namespace, namespace,
                     name,
                     op: AttrOp::Exists,
                     value: String::new(),
@@ -562,6 +591,7 @@ impl<'a> SelectorParser<'a> {
         let mut ci = false;
         if let Some(Token::Ident(flag)) = self.peek() {
             ci = flag.eq_ignore_ascii_case("i");
+            if !ci && !flag.eq_ignore_ascii_case("s") { return None; }
             self.pos += 1;
             self.skip_ws();
         }
@@ -569,6 +599,7 @@ impl<'a> SelectorParser<'a> {
             return None;
         }
         Some(AttrSelector {
+            any_namespace, namespace,
             name,
             op,
             value,
@@ -633,7 +664,8 @@ impl<'a> SelectorParser<'a> {
                     "open" => Pseudo::Open,
                     "scope" => Pseudo::Scope,
                     "modal" => Pseudo::Modal,
-                    "popover-open" | "fullscreen" | "-webkit-full-screen" | "picture-in-picture" | "autofill" | "-webkit-autofill" | "user-invalid"
+                    "popover-open" => Pseudo::PopoverOpen,
+                    "fullscreen" | "-webkit-full-screen" | "picture-in-picture" | "autofill" | "-webkit-autofill" | "user-invalid"
                     | "user-valid" | "-moz-ui-invalid" | "-moz-ui-valid" | "blank" | "closed" | "playing" | "paused" | "seeking" | "buffering" | "stalled" | "muted"
                     | "volume-locked" | "target-within" | "local-link" | "current" | "past" | "future" | "-moz-focusring" => Pseudo::NeverState,
                     "hover" => Pseudo::Hover,
@@ -697,7 +729,14 @@ impl<'a> SelectorParser<'a> {
                     "not" | "is" | "where" | "matches" | "-webkit-any" | "-moz-any" => {
                         let mut sub = self.subparser(inner);
                         // Forgiving selector list: drop invalid parts.
-                        let mut list = sub.parse_list_forgiving();
+                        let mut list = if lname == "not" { sub.parse_list()? } else { sub.parse_list_forgiving() };
+                        // The default namespace applies to the subject of a logical
+                        // combination only when it has an explicit type or universal.
+                        for selector in &mut list {
+                            if let Some(subject) = selector.compounds.last_mut() {
+                                if subject.tag.is_none() { subject.namespace = None; }
+                            }
+                        }
                         if lname != "not" { list.retain(|s| s.pseudo_element.is_none()); }
                         match lname.as_str() {
                             "not" => Pseudo::Not(list),
@@ -843,6 +882,92 @@ impl<'a> SelectorParser<'a> {
         }
         list
     }
+}
+
+/// Validate a selector list in CSSOM's style-rule context. Forgiving
+/// functional pseudo-classes can contain unsupported alternatives.
+pub fn valid_rule_selector(tokens: &[Token], nested: bool) -> bool {
+    valid_rule_selector_with_namespaces(tokens, nested, &[])
+}
+
+pub fn valid_rule_selector_with_namespaces(tokens: &[Token], nested: bool, declarations: &[Token]) -> bool {
+    fn valid(sel: &Selector) -> bool {
+        sel.compounds.iter().all(|c| c.pseudos.iter().all(|p| match p {
+            Pseudo::Never => false,
+            Pseudo::Not(list) | Pseudo::Host(list) | Pseudo::HostContext(list) |
+            Pseudo::Slotted(list) | Pseudo::NthChildOf(_, _, list) | Pseudo::NthLastChildOf(_, _, list) =>
+                list.iter().all(valid),
+            Pseudo::Has(list) => list.iter().all(|(_, s)| valid(s)),
+            _ => true,
+        }))
+    }
+    let mut parser = if nested { SelectorParser::nested(tokens, Arc::new(Vec::new())) } else { SelectorParser::new(tokens) };
+    for declaration in declarations.split(|t| *t == Token::Semicolon) {
+        if let Some((prefix, uri)) = crate::parse_namespace(declaration) {
+            let names = parser.namespaces.get_or_insert_with(Default::default);
+            Arc::make_mut(names).insert(prefix.to_owned(), Arc::from(uri));
+        }
+    }
+    parser.parse_list().is_some_and(|list| list.iter().all(valid))
+}
+
+/// Omit redundant universal type selectors and namespace qualifiers. Keep
+/// source slices for significant tokens so CSS escapes and strings survive
+/// serialization. Attribute selectors have different namespace defaults.
+pub fn serialize_type_selectors(source: &str, declarations: &[Token]) -> String {
+    let names: std::collections::HashMap<_, _> = declarations.split(|t| *t == Token::Semicolon)
+        .filter_map(crate::parse_namespace).collect();
+    let default = names.get("");
+    let mut lexer = crate::Tokenizer::new(source);
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    while let Some(token) = lexer.next_token() {
+        let end = lexer.position();
+        tokens.push((token, &source[start..end]));
+        start = end;
+    }
+    let mut result = String::new();
+    let mut contexts = Vec::new();
+    let (mut selector, mut compound) = (true, true);
+    let token = |i| tokens.get(i).map(|(token, _): &(Token, &str)| token);
+    let mut i = 0;
+    while i < tokens.len() {
+        if selector && compound {
+            let mut qualified = false;
+            if matches!(token(i), Some(Token::Ident(_) | Token::Delim('*'))) && token(i+1) == Some(&Token::Delim('|')) {
+                let redundant = match token(i) {
+                    Some(Token::Ident(prefix)) => default.is_some() && names.get(prefix.as_str()) == default,
+                    _ => default.is_none(),
+                };
+                if redundant { i += 2; } else { qualified = true; }
+            }
+            // Without an explicit type, logical pseudo-class subjects can
+            // match any namespace. Preserve an explicit default there.
+            let removable = !qualified && (contexts.is_empty() || default.is_none());
+            if removable && token(i) == Some(&Token::Delim('*')) &&
+                matches!(token(i+1), Some(Token::Delim('.') | Token::Hash(_) | Token::Colon | Token::OpenBracket)) {
+                i += 1;
+            }
+            compound = false;
+            if i == tokens.len() { break; }
+        }
+        let (t, raw) = &tokens[i];
+        match t {
+            Token::Function(name) => {
+                contexts.push(selector);
+                selector = selector && ["is","not","has","where","host","host-context","slotted","matches","-webkit-any","-moz-any"]
+                    .iter().any(|n| name.eq_ignore_ascii_case(n));
+                compound = selector;
+            }
+            Token::OpenBracket | Token::OpenParen => { contexts.push(selector); selector = false; }
+            Token::CloseBracket | Token::CloseParen => { selector = contexts.pop().unwrap_or(false); compound = false; }
+            Token::Whitespace | Token::Comma | Token::Delim('>' | '+' | '~') => compound = selector,
+            _ => compound = false,
+        }
+        if *t == Token::Whitespace { result.push(' '); } else { result.push_str(raw); }
+        i += 1;
+    }
+    result.trim().to_owned()
 }
 
 /// Parse `an+b` micro-syntax from tokens.
@@ -1171,6 +1296,7 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
         Some(e) => e,
         None => return false,
     };
+    if c.namespace.as_deref().is_some_and(|uri| el.ns.uri().unwrap_or("") != uri) { return false; }
     if let Some(t) = &c.tag {
         // Selectors are lower-cased; SVG / XML elements keep their case
         // (`linearGradient`, `Foo`), so compare without ASCII case.
@@ -1195,16 +1321,20 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
         }
     }
     for a in &c.attrs {
-        let v = match el.attr(&a.name) {
-            Some(v) => v,
-            None => return false,
-        };
-        let ok = if a.op == AttrOp::Exists {
-            true
-        } else if a.case_insensitive {
+        let matches_value = |v: &str| a.op == AttrOp::Exists || if a.case_insensitive {
             attr_op_matches(&a.op, &v.to_ascii_lowercase(), &a.value.to_ascii_lowercase())
         } else {
             attr_op_matches(&a.op, v, &a.value)
+        };
+        let ok = if a.any_namespace || a.namespace.is_some() {
+            el.attrs.iter().any(|(name, value)| {
+                let ns = doc.attr_namespace(node, name);
+                if !a.any_namespace && ns.unwrap_or("") != a.namespace.as_deref().unwrap_or("") { return false; }
+                let local = if ns.is_some() { name.rsplit(':').next().unwrap_or(name) } else { name };
+                local == a.name && matches_value(value)
+            })
+        } else {
+            el.attr(&a.name).is_some_and(|v| matches_value(v) && doc.attr_namespace(node, &a.name).is_none())
         };
         if !ok {
             return false;
@@ -1313,7 +1443,8 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
                 _ => false,
             },
             Pseudo::Open => matches!(el.tag.as_str(), "details" | "dialog") && el.attr("open").is_some(),
-            Pseudo::Modal => doc.top_layer.contains(&node),
+            Pseudo::Modal => doc.is_modal(node),
+            Pseudo::PopoverOpen => doc.popover_open(node),
             Pseudo::NeverState => false,
             Pseudo::Scope => match state.scope {
                 Some(scope) => node == scope,
@@ -1414,17 +1545,7 @@ fn is_read_write(doc: &Document, node: NodeId) -> bool {
             let mutable = is_text_input(&t) || matches!(t.as_str(), "date" | "month" | "week" | "time" | "datetime-local");
             mutable && el.attr("readonly").is_none() && !is_disabled_control(doc, node)
         }
-        _ => {
-            // Editing hosts and their descendants.
-            let mut cur = Some(node);
-            while let Some(n) = cur {
-                if let Some(v) = doc.attr(n, "contenteditable") {
-                    return !v.trim().eq_ignore_ascii_case("false");
-                }
-                cur = doc.parent(n);
-            }
-            false
-        }
+        _ => doc.editing_host(node).is_some(),
     }
 }
 

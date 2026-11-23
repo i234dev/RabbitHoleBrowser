@@ -3,7 +3,7 @@
 // `event.source`), cross-realm `postMessage` with structured cloning.
 // Evaluated once per realm; `post(targetId, data, targetOrigin)` and
 // `info(id, what, index)` are natives implemented by the engine.
-(function (post, info, bridgeNamespace) {
+(function (post, info, bridgeNamespace, encodeBlob, decodeBlob) {
   'use strict';
   if (typeof bridgeNamespace !== 'string' || !bridgeNamespace) throw new TypeError('Missing frame bridge namespace');
   const SELF = info(-1, 'self', 0);
@@ -30,11 +30,29 @@
     return typeof DOMException === 'function' ? new DOMException(msg, 'DataCloneError') : new TypeError(msg);
   }
 
+  const bufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
+  const bufferDetached = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
+  const transferBuffer = ArrayBuffer.prototype.transfer;
+  function transferList(value) {
+    if (value == null) return [];
+    const sequence = typeof value === 'object' && !(Symbol.iterator in value) ? value.transfer : value;
+    if (sequence === undefined) return [];
+    if (sequence === null || typeof sequence[Symbol.iterator] !== 'function') throw new TypeError('Expected a transfer sequence');
+    const entries = Array.from(sequence);
+    if (new Set(entries).size !== entries.length) throw cloneError('Duplicate transferable');
+    for (const entry of entries) {
+      if (codec.isPort(entry) || codec.offscreen.has(entry)) continue;
+      try { bufferLength.call(entry); } catch (_) { throw cloneError('Non-transferable object'); }
+    }
+    return entries;
+  }
+
   // ---- structured clone (serialize to a JSON string, rebuild in the target realm)
   // `ports` (optional): a Map from transferred MessagePorts to their index
   // in the transfer list; those ports may appear in the value and are
   // rebuilt from deserialize's `ports` array. Other ports cannot be cloned.
-  function serialize(value, ports) {
+  function serialize(value, ports, offscreen) {
+    const pendingCanvases = [];
     const seen = new Map();
     let next = 0;
     function enc(v) {
@@ -53,6 +71,14 @@
       if (seen.has(v)) return { t: 'ref', id: seen.get(v) };
       const id = next++;
       seen.set(v, id);
+      if (codec.offscreen.has(v)) {
+        if (!offscreen || !offscreen.has(v)) throw cloneError('OffscreenCanvas without transfer');
+        const record = { t: 'canvas', id };
+        append(pendingCanvases, [v, record]);
+        return record;
+      }
+      const blob = encodeBlob(v);
+      if (blob !== null) return { t: 'blob', id, v: blob };
       const tag = Object.prototype.toString.call(v).slice(8, -1);
       switch (tag) {
         case 'Array': return { t: 'a', id, v: Array.prototype.map.call(v, enc), l: v.length };
@@ -68,17 +94,19 @@
         const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
         return { t: 'ta', id, k: tag, v: Array.from(bytes) };
       }
-      if (ports && typeof MessagePort === 'function' && v instanceof MessagePort) {
-        if (!ports.has(v)) throw cloneError(tag);
-        return { t: 'port', i: ports.get(v) };
+      if (codec.isPort(v)) {
+        if (!ports || !ports.has(v)) throw cloneError(tag);
+        return { t: 'port', id, i: ports.get(v) };
       }
       if (typeof Node === 'function' && v instanceof Node) throw cloneError(tag);
-      if (typeof Blob === 'function' && v instanceof Blob) throw cloneError(tag);
       const props = [];
       for (const k of Object.keys(v)) append(props, [k, enc(v[k])]);
       return { t: 'o', id, v: props };
     }
-    return JSON.stringify(enc(value));
+    const encoded = enc(value);
+    // Snapshot after visiting the full graph: a later getter may resize the canvas.
+    for (const [canvas, record] of pendingCanvases) record.size = codec.canvasSize(canvas);
+    return JSON.stringify(encoded);
   }
 
   function deserialize(text, ports) {
@@ -91,7 +119,8 @@
         case 'n': return x.v === '-0' ? -0 : Number(x.v);
         case 'b': return BigInt(x.v);
         case 'ref': return objs.get(x.id);
-        case 'port': return ports ? ports[x.i] : undefined;
+        case 'port': out = ports ? ports[x.i] : undefined; break;
+        case 'canvas': out = codec.receiveCanvas(x.size); break;
         case 'a':
           out = new Array(x.l || 0); objs.set(x.id, out);
           x.v.forEach((e, i) => { put(out, i, dec(e)); });
@@ -101,6 +130,7 @@
         case 'w': out = Object(dec(x.v)); break;
         case 'm': out = new Map(); objs.set(x.id, out); for (const [k, v] of x.v) out.set(dec(k), dec(v)); return out;
         case 's': out = new Set(); objs.set(x.id, out); for (const v of x.v) out.add(dec(v)); return out;
+        case 'blob': out = decodeBlob(x.v[0], x.v[1], x.v[2], x.v[3]); break;
         case 'ab': out = new Uint8Array(x.v).buffer; break;
         case 'ta': {
           const C = globalThis[x.k] || Uint8Array;
@@ -137,18 +167,30 @@
     let p = proxies.get(id);
     if (p) return p;
     const location = {
-      get href() { return info(id, 'href', 0); },
+      get href() {
+        if (!sameOrigin(id)) throw new DOMException('Cannot read a cross-origin Location', 'SecurityError');
+        return info(id, 'href', 0);
+      },
       set href(v) { info(id, 'navigate', String(v)); },
       assign(v) { info(id, 'navigate', String(v)); },
       replace(v) { info(id, 'navigate', String(v)); },
-      toString() { return info(id, 'href', 0); },
+      toString() { return this.href; },
     };
+    for (const key of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin']) {
+      const descriptor = { enumerable: true, get() { return new URL(location.href)[key]; } };
+      if (key !== 'origin') descriptor.set = function (value) {
+        const url = new URL(location.href);
+        url[key] = value;
+        location.href = url.href;
+      };
+      Object.defineProperty(location, key, descriptor);
+    }
     const target = {
       postMessage(message, targetOrigin, transfer) {
         const list = transfer || (targetOrigin && typeof targetOrigin === 'object' ? targetOrigin.transfer : null);
-        const ports = Array.isArray(list) ? list.filter((t) => typeof MessagePort === 'function' && t instanceof MessagePort) : [];
-        const data = serialize(message);
-        post(id, JSON.stringify({ t: 'msg', d: data, ports: ports.map((port) => bridgePort(port, id)) }), targetOriginOf(targetOrigin));
+        const origin = targetOriginOf(targetOrigin);
+        const packet = pack(message, list);
+        post(id, JSON.stringify({ t: 'msg', d: packet.d, ports: packet.ports.map(port => bridgePort(port, id)) }), origin);
       },
       focus() {}, blur() {}, close() {},
       get screenX() { return sameOrigin(id) ? foreignValue(id, 'screenX') : 0; },
@@ -214,11 +256,14 @@
         return typeof g.Window === 'function' && sameOrigin(id) ? g.Window.prototype : Object.getPrototypeOf(t);
       },
       has(t, key) {
-        return key in t || ((BUILTINS.has(key) || (typeof key === 'string' && /^[A-Z]/.test(key) && typeof g[key] === 'function')) && sameOrigin(id));
+        if (key in t) return true;
+        return typeof key === 'string' && sameOrigin(id) && !!info(id, 'has', key);
       },
       set(t, key, v) {
         if (key === 'location') { info(id, 'navigate', String(v)); return true; }
-        return true;
+        if (!sameOrigin(id)) throw new DOMException('Cannot write a cross-origin Window property', 'SecurityError');
+        if (typeof key !== 'string') return false;
+        return !!info(id, 'set', key, serialize(v));
       },
     });
     ids.set(p, id);
@@ -253,8 +298,12 @@
   function toForeign(v) {
     if (typeof v === 'function') return [];
     if (typeof Node === 'function' && v instanceof Node) return v;
+    if (typeof g.Range === 'function' && v instanceof g.Range) return v;
     try { return serialize(v); } catch (e) { return undefined; }
   }
+  const setProperty = Reflect.set;
+  function foreignSet(name, value) { return setProperty(g, name, deserialize(value)); }
+  function foreignHas(name) { return name in g; }
   function foreignGet(name) { return toForeign(g[name]); }
   function foreignCall(name, args) {
     const f = g[name];
@@ -326,11 +375,33 @@
 
   // The serializer, for the worker message routing (messaging.js,
   // worker.js; removed from the global after startup).
-  Object.defineProperty(g, '__rhClone', { value: { serialize, deserialize }, configurable: true });
+  function pack(value, transfer) {
+    const list = transferList(transfer);
+    const ports = list.filter(codec.isPort);
+    const index = ports.length ? new Map(ports.map((port, i) => [port, i])) : null;
+    const d = serialize(value, index, list.length ? new Set(list) : null);
+    // Payload getters may throw or detach an entry while serializing the graph.
+    for (const item of list) {
+      if (codec.offscreen.has(item)) codec.checkCanvasTransfer(item);
+      else if (codec.isPort(item) ? codec.portDetached(item) : bufferDetached.call(item)) {
+        throw cloneError('Detached transferable');
+      }
+    }
+    for (const item of list) {
+      if (codec.offscreen.has(item)) codec.detachCanvas(item);
+      else if (!codec.isPort(item)) transferBuffer.call(item);
+    }
+    return { d, ports: ports.length ? ports.map(codec.movePort) : ports };
+  }
+  const codec = { serialize, deserialize, pack, offscreen: new WeakSet(), isPort: () => false };
+  Object.defineProperty(g, '__rhClone', { value: codec, configurable: true });
 
   // structuredClone with the same algorithm as postMessage.
   Object.defineProperty(g, 'structuredClone', {
-    value: function structuredClone(value) { return deserialize(serialize(value)); },
+    value: function structuredClone(value, options = {}) {
+      const packet = pack(value, options == null ? undefined : options.transfer);
+      return deserialize(packet.d, packet.ports);
+    },
     writable: true, configurable: true,
   });
 
@@ -339,10 +410,10 @@
   const bridges = new Map();
   let nextBridge = 0;
   function forward(port, bridge, frame) {
-    port.onmessage = (ev) => post(frame, JSON.stringify({
-      t: 'port', id: bridge, d: serialize(ev.data),
-      ports: Array.from(ev.ports || [], (p) => bridgePort(p, frame)),
-    }), '*');
+    codec.forwardPort(port, packet => {
+      post(frame, JSON.stringify({ t: 'port', id: bridge, d: packet.d,
+        ports: packet.ports.map(p => bridgePort(p, frame)) }), '*');
+    });
   }
   // `port` (ours) goes to frame `frame`: messages arriving on it are sent
   // there; messages from there are posted into it.
@@ -367,16 +438,19 @@
     try { env = JSON.parse(text); } catch (e) { return; }
     if (env && env.t === 'port') {
       const port = bridges.get(env.id);
-      if (port) port.postMessage(deserialize(env.d), incomingPorts(env.ports, source));
+      if (port) {
+        const ports = incomingPorts(env.ports, source);
+        codec.enqueuePeer(port, { d: env.d, ports });
+      }
       return;
     }
-    let value;
-    try { value = deserialize(env.d); } catch (e) { value = null; }
     const ports = incomingPorts(env.ports, source);
+    let value;
+    try { value = deserialize(env.d, ports); } catch (e) { value = null; }
     const ev = new MessageEvent('message', { data: value, origin, source: windowFor(source), ports });
     g.dispatchEvent(ev);
   }
 
-  return { serialize, deserialize, windowFor, deliver, foreignGet, foreignCall, foreignDispatch, eventInit,
+  return { serialize, deserialize, windowFor, deliver, foreignGet, foreignSet, foreignHas, foreignCall, foreignDispatch, eventInit,
     registerWindow(proxy) { ids.set(proxy, -1); } };
 })

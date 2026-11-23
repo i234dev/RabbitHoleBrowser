@@ -38,6 +38,7 @@ impl Length {
             Length::Px(v) => Some(v),
             Length::Percent(p) => Some(base * p / 100.0),
             Length::Calc(px, p) => Some(px + base * p / 100.0),
+            Length::Math(id) if self.is_anchor_query() => math_node(id)?.eval_anchors(base,&|q| q.fallback?.resolve(base)),
             Length::Math(id) => Some(math_eval(id, base)),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         }
@@ -73,6 +74,7 @@ impl Length {
 pub enum MathNode {
     /// px + percent% of the base.
     Leaf(f32, f32),
+    Anchor(crate::props::anchor_length::Query),
     Sum(Vec<MathNode>),
     Scale(Box<MathNode>, f32),
     Min(Vec<MathNode>),
@@ -91,6 +93,7 @@ pub enum MathNode {
 impl MathNode {
     pub fn eval(&self, base: f32) -> f32 {
         match self {
+            MathNode::Anchor(q) => q.fallback.and_then(|l| l.resolve(base)).unwrap_or(0.),
             MathNode::Leaf(px, p) => px + base * p / 100.0,
             MathNode::Sum(v) => v.iter().map(|n| n.eval(base)).sum(),
             MathNode::Scale(n, f) => n.eval(base) * f,
@@ -104,9 +107,35 @@ impl MathNode {
             MathNode::Stretch => base,
         }
     }
+    pub fn has_anchor(&self) -> bool {
+        match self {
+            Self::Anchor(_) => true,
+            Self::Sum(v) | Self::Min(v) | Self::Max(v) => v.iter().any(Self::has_anchor),
+            Self::Scale(n,_) | Self::FitContent(n) => n.has_anchor(),
+            Self::Clamp(a) => a.iter().any(Self::has_anchor),
+            _ => false,
+        }
+    }
+
+    pub fn eval_anchors(&self, base: f32, resolve: &impl Fn(&crate::props::anchor_length::Query) -> Option<f32>) -> Option<f32> {
+        let ev = |n: &MathNode| n.eval_anchors(base,resolve);
+        match self {
+            Self::Anchor(q) => resolve(q),
+            Self::Leaf(px,p) => Some(px+base*p/100.),
+            Self::Scale(n,f) => Some(ev(n)?*f),
+            Self::Sum(v) => v.iter().map(ev).sum(),
+            Self::Min(v) => v.iter().try_fold(f32::INFINITY, |a,n| Some(a.min(ev(n)?))),
+            Self::Max(v) => v.iter().try_fold(f32::NEG_INFINITY, |a,n| Some(a.max(ev(n)?))),
+            Self::Clamp(a) => Some(ev(&a[1])?.min(ev(&a[2])?).max(ev(&a[0])?)),
+            Self::FitContent(n) => ev(n),
+            Self::Stretch => Some(base),
+        }
+    }
+
     /// Does any term depend on the base?
     pub fn has_percent(&self) -> bool {
         match self {
+            MathNode::Anchor(q) => q.fallback.is_some_and(|l| l.has_percent()),
             MathNode::Leaf(_, p) => *p != 0.0,
             MathNode::Sum(v) | MathNode::Min(v) | MathNode::Max(v) => v.iter().any(|n| n.has_percent()),
             MathNode::Scale(n, _) => n.has_percent(),
@@ -126,13 +155,27 @@ impl MathNode {
                 MathNode::Leaf(px, p) if *px == 0.0 => format!("{}%", num(*p)),
                 MathNode::Leaf(px, p) if *px < 0.0 => format!("{}% - {}px", num(*p), num(-px)),
                 MathNode::Leaf(px, p) => format!("{}% + {}px", num(*p), num(*px)),
-                MathNode::Sum(v) => v.iter().map(inner).collect::<Vec<_>>().join(" + "),
-                MathNode::Scale(n, f) => format!("{} * ({})", num(*f), inner(n)),
+                MathNode::Sum(v) => {
+                    // CSS Values serializes numeric leaves before other math
+                    // functions, preserving the order of the latter.
+                    let (mut lengths, functions): (Vec<_>, Vec<_>) =
+                        v.iter().partition(|n| matches!(n, MathNode::Leaf(..)));
+                    lengths.extend(functions);
+                    lengths.into_iter().map(inner).collect::<Vec<_>>().join(" + ")
+                }
+                MathNode::Scale(n, f) => {
+                    let operand = inner(n);
+                    let sum = matches!(**n, MathNode::Sum(_))
+                        || matches!(**n, MathNode::Leaf(px, pct) if px != 0.0 && pct != 0.0);
+                    if sum { format!("{} * ({operand})", num(*f)) }
+                    else { format!("{} * {operand}", num(*f)) }
+                }
                 other => other.to_css(),
             }
         }
         let list = |v: &[MathNode]| v.iter().map(inner).collect::<Vec<_>>().join(", ");
         match self {
+            MathNode::Anchor(q) => q.css(),
             MathNode::Min(v) => format!("min({})", list(v)),
             MathNode::Max(v) => format!("max({})", list(v)),
             MathNode::Clamp(a) => format!("clamp({})", list(&a[..])),
@@ -157,12 +200,19 @@ static MATH_TABLE: std::sync::LazyLock<std::sync::RwLock<MathTable>> = std::sync
 pub fn intern_math(n: MathNode) -> u32 {
     // Sizing keywords carry a tag bit so layout can tell them from plain
     // math lengths without a table lookup.
-    let tag = if matches!(n, MathNode::FitContent(_) | MathNode::Stretch) { SIZING_TAG } else { 0 };
+    let tag = if matches!(n, MathNode::FitContent(_) | MathNode::Stretch) { SIZING_TAG } else if n.has_anchor() { ANCHOR_TAG } else { 0 };
     intern_math_untagged(n) | tag
 }
 
 /// Tag bit of [`Length::Math`] ids of `fit-content()` / `stretch`.
 const SIZING_TAG: u32 = 1 << 31;
+const ANCHOR_TAG: u32 = 1 << 30;
+
+impl Length {
+    pub fn is_anchor_query(self) -> bool {
+        matches!(self, Self::Math(id) if id & ANCHOR_TAG != 0)
+    }
+}
 
 fn intern_math_untagged(n: MathNode) -> u32 {
     let key = format!("{n:?}");
@@ -181,7 +231,7 @@ fn intern_math_untagged(n: MathNode) -> u32 {
 
 /// The interned expression `id`.
 pub fn math_node(id: u32) -> Option<std::sync::Arc<MathNode>> {
-    MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get((id & !SIZING_TAG) as usize).cloned()
+    MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get((id & !(SIZING_TAG | ANCHOR_TAG)) as usize).cloned()
 }
 
 /// The `stretch` sizing keyword as a length.
@@ -605,23 +655,27 @@ pub enum ContentDistribution {
 /// [`ContentDistribution`] fold together (CSS Align 3): `normal`, the
 /// overflow position, `last baseline` and the flavour of start/end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AlignFlags(pub u8);
+pub struct AlignFlags(pub u16);
 
 impl AlignFlags {
     /// `safe` overflow position.
-    pub const SAFE: u8 = 1;
+    pub const SAFE: u16 = 1;
     /// `last baseline`.
-    pub const LAST: u8 = 2;
+    pub const LAST: u16 = 2;
     /// `self-start` / `self-end`: the item's own writing mode.
-    pub const SELF: u8 = 4;
+    pub const SELF: u16 = 4;
     /// `left` / `right`: physical sides.
-    pub const LEFT: u8 = 8;
-    pub const RIGHT: u8 = 16;
+    pub const LEFT: u16 = 8;
+    pub const RIGHT: u16 = 16;
     /// `normal`.
-    pub const NORMAL: u8 = 32;
+    pub const NORMAL: u16 = 32;
     /// `flex-start` / `flex-end`.
-    pub const FLEX: u8 = 64;
-    pub fn has(self, flag: u8) -> bool {
+    pub const FLEX: u16 = 64;
+    pub const UNSAFE: u16 = 128;
+    pub const LEGACY: u16 = 256;
+    pub const BASELINE: u16 = 512;
+    pub const ANCHOR_CENTER: u16 = 1024;
+    pub fn has(self, flag: u16) -> bool {
         self.0 & flag != 0
     }
 }
@@ -819,6 +873,8 @@ pub struct GradientStop {
     /// The unclipped color of a stop written in a CSS Color 4 notation
     /// (`color` is its sRGB clip); `None` for legacy sRGB colors.
     pub wide: Option<crate::Wide>,
+    /// Unclipped color in its original coordinate system for CSSOM.
+    pub components: Option<std::rc::Rc<crate::ComputedColor>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1443,10 +1499,37 @@ pub enum Content {
 /// Parsed `transition` entries (property, duration s, delay s, easing name).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Transition {
+    pub allow_discrete: bool,
     pub property: String,
     pub duration: f32,
     pub delay: f32,
     pub timing: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationComposition {
+    Replace,
+    Add,
+    Accumulate,
+}
+
+impl AnimationComposition {
+    pub fn parse(keyword: &str) -> Option<Self> {
+        match keyword {
+            "replace" => Some(Self::Replace),
+            "add" => Some(Self::Add),
+            "accumulate" => Some(Self::Accumulate),
+            _ => None,
+        }
+    }
+
+    pub fn css(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Add => "add",
+            Self::Accumulate => "accumulate",
+        }
+    }
 }
 
 /// Parsed `animation` shorthand.
@@ -1559,6 +1642,12 @@ pub struct ComputedStyle {
     /// positions distinguish hypothetical block and inline-level boxes.
     pub display_before_blockification: Display,
     pub position: Position,
+    pub position_area: crate::props::anchor::PositionArea,
+    pub anchor_scope: crate::props::anchor::AnchorScope,
+    pub anchor_names: Option<std::rc::Rc<[String]>>,
+    pub position_anchor: Option<std::rc::Rc<str>>,
+    pub position_try_order: crate::props::anchor::TryOrder,
+    pub position_try_fallbacks: Option<std::rc::Rc<[crate::props::anchor::TryOption]>>,
     pub float: Float,
     pub clear: Clear,
     pub flex_direction: FlexDirection,
@@ -1584,6 +1673,8 @@ pub struct ComputedStyle {
 
     pub color: Color,
     pub background_color: Color,
+    pub color_components: Option<std::rc::Rc<crate::ComputedColor>>,
+    pub background_color_components: Option<std::rc::Rc<crate::ComputedColor>>,
     /// Resolved URL string of `background-image: url(...)`, if any.
     pub background_image: Option<String>,
     pub opacity: f32,
@@ -1742,6 +1833,11 @@ pub struct ComputedStyle {
     pub backdrop_filters: Vec<FilterOp>,
     /// `clip-path` (`None` = `none`).
     pub clip_path: Option<std::sync::Arc<ClipPath>>,
+    /// The float exclusion shape, relative to its margin box by default.
+    pub shape_outside: Option<std::sync::Arc<ClipPath>>,
+    pub shape_outside_position_explicit: bool,
+    pub shape_margin: Length,
+    pub motion: Option<Box<crate::props::motion::Motion>>,
     /// Names of the properties declared `!important` for an element with
     /// animations (they do not override them); `None` otherwise.
     pub important: Option<std::rc::Rc<Vec<String>>>,
@@ -1940,6 +2036,7 @@ pub struct ComputedStyle {
     pub author_widget_style: bool,
     pub transitions: Vec<Transition>,
     pub animations: Vec<Animation>,
+    pub animation_composition: Option<std::rc::Rc<[AnimationComposition]>>,
     pub scroll_margin_top: f32,
     /// `contain`/`isolation`/`will-change` imply a stacking context.
     pub creates_stacking_context: bool,
@@ -1962,6 +2059,12 @@ impl ComputedStyle {
             display: Display::Inline,
             display_before_blockification: Display::Inline,
             position: Position::Static,
+            position_area: Default::default(),
+            anchor_scope: Default::default(),
+            anchor_names: None,
+            position_anchor: None,
+            position_try_order: Default::default(),
+            position_try_fallbacks: None,
             float: Float::None,
             clear: Clear::None,
             flex_direction: FlexDirection::Row,
@@ -1981,6 +2084,8 @@ impl ComputedStyle {
             box_sizing: BoxSizing::ContentBox,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
+            color_components: None,
+            background_color_components: None,
             background_image: None,
             opacity: 1.0,
             font_family: Family::Sans,
@@ -2072,6 +2177,10 @@ impl ComputedStyle {
             filters: Vec::new(),
             backdrop_filters: Vec::new(),
             clip_path: None,
+            shape_outside: None,
+            shape_outside_position_explicit: false,
+            shape_margin: Length::Px(0.0),
+            motion: None,
             clip_rect: None,
             border_shape: None,
             corner_shape: [CornerShape::Round; 4],
@@ -2160,6 +2269,7 @@ impl ComputedStyle {
             author_widget_style: false,
             transitions: Vec::new(),
             animations: Vec::new(),
+            animation_composition: None,
             scroll_margin_top: 0.0,
             creates_stacking_context: false,
             border_collapse: false,
@@ -2179,9 +2289,20 @@ impl ComputedStyle {
         self.contain_layout || self.contain_paint || self.contain_size || self.contain_inline_size || self.contain_style || self.container_inline
     }
 
+    pub(crate) fn resolve_color_components(&self, tokens: &[rabbithole_css::Token]) -> Option<std::rc::Rc<crate::ComputedColor>> {
+        if crate::values::is_ident(tokens, "currentcolor") {
+            self.color_components.clone()
+        } else {
+            crate::ComputedColor::parse(tokens)
+        }
+    }
+
     pub fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         ComputedStyle {
+            justify_items: if parent.justify_items_flags.has(AlignFlags::LEGACY) { parent.justify_items } else { ItemAlign::Normal },
+            justify_items_flags: if parent.justify_items_flags.has(AlignFlags::LEGACY) { parent.justify_items_flags } else { AlignFlags(AlignFlags::NORMAL) },
             color: parent.color,
+            color_components: parent.color_components.clone(),
             font_family: parent.font_family,
             font_size: parent.computed_font_size(),
             font_weight: parent.font_weight,
@@ -2277,6 +2398,9 @@ impl ComputedStyle {
     /// inherited part did not change need no restyle for inheritance.
     pub fn inherited_eq(&self, o: &ComputedStyle) -> bool {
         self.color == o.color
+            && self.justify_items_flags.has(AlignFlags::LEGACY) == o.justify_items_flags.has(AlignFlags::LEGACY)
+            && (!self.justify_items_flags.has(AlignFlags::LEGACY) || self.justify_items == o.justify_items && self.justify_items_flags == o.justify_items_flags)
+            && self.color_components == o.color_components
             && self.font_family == o.font_family
             && self.font_monospace_only == o.font_monospace_only
             && self.font_size_keyword == o.font_size_keyword
@@ -2374,8 +2498,25 @@ impl ComputedStyle {
 
     /// A transform other than `none` (`transform` or an individual
     /// transform property).
+    pub fn has_anchor_lengths(&self) -> bool {
+        [self.inset.top,self.inset.right,self.inset.bottom,self.inset.left,
+         self.width,self.min_width,self.max_width,self.height,self.min_height,self.max_height,
+         self.margin.top,self.margin.right,self.margin.bottom,self.margin.left]
+            .into_iter().any(Length::is_anchor_query)
+    }
+
+    pub fn needs_anchor_layout(&self) -> bool {
+        matches!(self.position, Position::Absolute | Position::Fixed) &&
+            (!self.position_area.is_none() || self.position_try_fallbacks.is_some() || self.has_anchor_lengths())
+    }
+
     pub fn has_transform(&self) -> bool {
-        !self.transform.is_empty() || self.transform3d.as_ref().is_some_and(|t| t.translate.is_some() || t.rotate.is_some() || t.scale.is_some())
+        !self.transform.is_empty() || self.has_motion_path() || self.transform3d.as_ref().is_some_and(|t| t.translate.is_some() || t.rotate.is_some() || t.scale.is_some())
+    }
+
+    /// A transformed or filtered ancestor contains even fixed descendants.
+    pub fn establishes_fixed_containing_block(&self) -> bool {
+        self.has_transform() || !self.filters.is_empty() || !self.backdrop_filters.is_empty() || self.perspective().is_some() || self.preserve_3d()
     }
 
     /// The 3D properties, for writing.

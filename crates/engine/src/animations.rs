@@ -11,13 +11,19 @@
 //! `transitionrun/start/end/cancel` and `animationstart/iteration/end/
 //! cancel` events are queued and dispatched from the tick.
 
+mod grid_tracks;
+
+use rabbithole_style::props::motion::{OffsetPosition as MotionPosition, OffsetRotate as MotionRotation};
+
+use grid_tracks::Operation as GridOperation;
+use rabbithole_style::{AnimationComposition as Composite, TrackListItem};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::Color;
 use rabbithole_script::{EventDetail, EventInit};
-use rabbithole_style::{BasicShape, ClipPath, ComputedStyle, ControlPoint, FilterOp, Length, ShapeCommand, ShapeRadius, TransformOp, Visibility};
+use rabbithole_style::{AlignFlags, ContentDistribution, ItemAlign, BasicShape, ClipPath, ComputedStyle, ControlPoint, FilterOp, Length, ShapeCommand, ShapeRadius, TransformOp, Visibility};
 
 use crate::scripting::ScriptOutcome;
 use crate::{Engine, Page};
@@ -61,6 +67,25 @@ enum Prop {
     Filter,
     BackdropFilter,
     ClipPath,
+    ShapeOutside,
+    OffsetDistance,
+    OffsetRotate,
+    OffsetPosition,
+    OffsetAnchor,
+    OffsetPath,
+    ShapeMargin,
+    AlignContent,
+    JustifyContent,
+    AlignSelf,
+    JustifySelf,
+    AlignItems,
+    JustifyItems,
+    AnchorName,
+    PositionAnchor,
+    PositionArea,
+    AnchorScope,
+    GridTemplateColumns,
+    GridTemplateRows,
 }
 
 const ALL: &[Prop] = &[
@@ -100,6 +125,25 @@ const ALL: &[Prop] = &[
     Prop::Filter,
     Prop::BackdropFilter,
     Prop::ClipPath,
+    Prop::ShapeOutside,
+    Prop::OffsetDistance,
+    Prop::OffsetRotate,
+    Prop::OffsetPosition,
+    Prop::OffsetAnchor,
+    Prop::OffsetPath,
+    Prop::ShapeMargin,
+    Prop::AlignContent,
+    Prop::JustifyContent,
+    Prop::AlignSelf,
+    Prop::JustifySelf,
+    Prop::AlignItems,
+    Prop::JustifyItems,
+    Prop::AnchorName,
+    Prop::PositionAnchor,
+    Prop::PositionArea,
+    Prop::AnchorScope,
+    Prop::GridTemplateColumns,
+    Prop::GridTemplateRows,
 ];
 
 impl Prop {
@@ -141,6 +185,25 @@ impl Prop {
             Prop::Filter => "filter",
             Prop::BackdropFilter => "backdrop-filter",
             Prop::ClipPath => "clip-path",
+            Prop::ShapeOutside => "shape-outside",
+            Prop::OffsetDistance => "offset-distance",
+            Prop::OffsetRotate => "offset-rotate",
+            Prop::OffsetPosition => "offset-position",
+            Prop::OffsetAnchor => "offset-anchor",
+            Prop::OffsetPath => "offset-path",
+            Prop::ShapeMargin => "shape-margin",
+            Prop::AlignContent => "align-content",
+            Prop::JustifyContent => "justify-content",
+            Prop::AlignSelf => "align-self",
+            Prop::JustifySelf => "justify-self",
+            Prop::AlignItems => "align-items",
+            Prop::JustifyItems => "justify-items",
+            Prop::AnchorName => "anchor-name",
+            Prop::PositionAnchor => "position-anchor",
+            Prop::PositionArea => "position-area",
+            Prop::AnchorScope => "anchor-scope",
+            Prop::GridTemplateRows => "grid-template-rows",
+            Prop::GridTemplateColumns => "grid-template-columns",
         }
     }
 
@@ -157,6 +220,11 @@ impl Prop {
         }
         use Prop::*;
         match n {
+            "offset" => matches!(self, OffsetPath | OffsetDistance | OffsetPosition | OffsetRotate | OffsetAnchor),
+            "grid" | "grid-template" => matches!(self, GridTemplateRows | GridTemplateColumns),
+            "place-content" => matches!(self, AlignContent | JustifyContent),
+            "place-items" => matches!(self, AlignItems | JustifyItems),
+            "place-self" => matches!(self, AlignSelf | JustifySelf),
             "margin" => matches!(self, MarginTop | MarginRight | MarginBottom | MarginLeft),
             "padding" => matches!(self, PaddingTop | PaddingRight | PaddingBottom | PaddingLeft),
             "border-color" | "border" => matches!(self, BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor),
@@ -174,13 +242,22 @@ impl Prop {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
+    MotionPosition(MotionPosition),
+    MotionRotation(MotionRotation),
+    AnchorName(Option<Rc<[String]>>),
+    PositionAnchor(Option<Rc<str>>),
+    PositionArea(rabbithole_style::props::anchor::PositionArea),
+    AnchorScope(rabbithole_style::props::anchor::AnchorScope),
+    Tracks(Vec<TrackListItem>),
+    Distribution(ContentDistribution, AlignFlags),
+    ItemAlignment(ItemAlign, AlignFlags),
     F(f32),
     C(Color),
     L(Length),
     T(Vec<TransformOp>),
     V(Visibility),
     Fl(Vec<FilterOp>),
-    Cp(Option<std::sync::Arc<ClipPath>>),
+    Cp(Option<std::sync::Arc<ClipPath>>, bool),
 }
 
 fn get(s: &ComputedStyle, p: Prop) -> Val {
@@ -221,16 +298,53 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         BorderRadius => Val::F(s.border_radius),
         Filter => Val::Fl(s.filters.clone()),
         BackdropFilter => Val::Fl(s.backdrop_filters.clone()),
-        ClipPath => Val::Cp(s.clip_path.clone()),
+        ClipPath => Val::Cp(s.clip_path.clone(), false),
+        ShapeOutside => Val::Cp(s.shape_outside.clone(), s.shape_outside_position_explicit),
+        ShapeMargin => Val::L(s.shape_margin),
+        OffsetDistance => Val::L(s.motion().distance),
+        OffsetRotate => Val::MotionRotation(s.motion().rotate),
+        OffsetPosition => Val::MotionPosition(s.motion().position),
+        OffsetAnchor => Val::MotionPosition(s.motion().anchor),
+        OffsetPath => Val::Cp(s.motion().path.clone(), s.motion().explicit_center),
+        AlignContent => Val::Distribution(s.align_content, s.align_content_flags),
+        JustifyContent => Val::Distribution(s.justify_content, s.justify_content_flags),
+        AlignSelf => Val::ItemAlignment(s.align_self, s.align_self_flags),
+        JustifySelf => Val::ItemAlignment(s.justify_self, s.justify_self_flags),
+        AlignItems => Val::ItemAlignment(s.align_items, s.align_items_flags),
+        AnchorName => Val::AnchorName(s.anchor_names.clone()),
+        PositionAnchor => Val::PositionAnchor(s.position_anchor.clone()),
+        PositionArea => Val::PositionArea(s.position_area),
+        AnchorScope => Val::AnchorScope(s.anchor_scope.clone()),
+        GridTemplateRows => Val::Tracks(s.grid_template_rows.clone()),
+        GridTemplateColumns => Val::Tracks(s.grid_template_columns.clone()),
+        JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
     }
 }
 
 fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
     use Prop::*;
     match (p, v) {
+        (AnchorName, Val::AnchorName(value)) => s.anchor_names.clone_from(value),
+        (PositionAnchor, Val::PositionAnchor(value)) => s.position_anchor.clone_from(value),
+        (PositionArea, Val::PositionArea(value)) => s.position_area.clone_from(value),
+        (AnchorScope, Val::AnchorScope(value)) => s.anchor_scope.clone_from(value),
+        (GridTemplateRows, Val::Tracks(tracks)) => s.grid_template_rows.clone_from(tracks),
+        (GridTemplateColumns, Val::Tracks(tracks)) => s.grid_template_columns.clone_from(tracks),
+        (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
+        (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),
+        (AlignSelf, Val::ItemAlignment(value, flags)) => (s.align_self, s.align_self_flags) = (*value, *flags),
+        (JustifySelf, Val::ItemAlignment(value, flags)) => (s.justify_self, s.justify_self_flags) = (*value, *flags),
+        (AlignItems, Val::ItemAlignment(value, flags)) => (s.align_items, s.align_items_flags) = (*value, *flags),
+        (JustifyItems, Val::ItemAlignment(value, flags)) => (s.justify_items, s.justify_items_flags) = (*value, *flags),
         (Opacity, Val::F(f)) => s.opacity = f.clamp(0.0, 1.0),
-        (Color, Val::C(c)) => s.color = *c,
-        (BackgroundColor, Val::C(c)) => s.background_color = *c,
+        (Color, Val::C(c)) => {
+            s.color = *c;
+            s.color_components = None;
+        }
+        (BackgroundColor, Val::C(c)) => {
+            s.background_color = *c;
+            s.background_color_components = None;
+        }
         (BorderTopColor, Val::C(c)) => s.border_color.top = *c,
         (BorderRightColor, Val::C(c)) => s.border_color.right = *c,
         (BorderBottomColor, Val::C(c)) => s.border_color.bottom = *c,
@@ -278,7 +392,25 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
                 s.creates_stacking_context = true;
             }
         }
-        (ClipPath, Val::Cp(c)) => {
+        (OffsetDistance, Val::L(v)) => s.motion_mut().distance = *v,
+        (OffsetPosition, Val::MotionPosition(v)) => s.motion_mut().position = *v,
+        (OffsetAnchor, Val::MotionPosition(v)) => s.motion_mut().anchor = *v,
+        (OffsetRotate, Val::MotionRotation(v)) => s.motion_mut().rotate = *v,
+        (OffsetPath, Val::Cp(path, explicit)) => {
+            let m = s.motion_mut();
+            m.path.clone_from(path);
+            m.explicit_center = *explicit;
+        }
+        (ShapeOutside, Val::Cp(c, explicit)) => {
+            s.shape_outside = c.clone();
+            s.shape_outside_position_explicit = *explicit;
+        }
+        (ShapeMargin, Val::L(l)) => s.shape_margin = match *l {
+            Length::Px(px) => Length::Px(px.max(0.0)),
+            Length::Percent(pct) => Length::Percent(pct.max(0.0)),
+            other => other,
+        },
+        (ClipPath, Val::Cp(c, _)) => {
             s.clip_path = c.clone();
             if c.is_some() {
                 s.creates_stacking_context = true;
@@ -833,12 +965,17 @@ fn lerp_matrix(a: [f32; 6], b: [f32; 6], t: f32) -> [f32; 6] {
 fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
+        (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(t).tracks(x, y).map(Val::Tracks).unwrap_or_else(discrete),
+        (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
+            lerp_pair(&(*x,*y),&(*u,*v),t).map(|(x,y)| Val::MotionPosition(MotionPosition::Coordinates(x,y))).unwrap_or_else(discrete),
+        (Val::MotionRotation(a), Val::MotionRotation(b)) if a.follows_path == b.follows_path =>
+            Val::MotionRotation(MotionRotation { follows_path: a.follows_path, degrees: lerp(a.degrees,b.degrees,t) }),
         (Val::F(x), Val::F(y)) => Val::F(lerp(*x, *y, t)),
         (Val::C(x), Val::C(y)) => {
             let ch = |p: u8, q: u8| lerp(p as f32, q as f32, t).round().clamp(0.0, 255.0) as u8;
             Val::C(Color { r: ch(x.r, y.r), g: ch(x.g, y.g), b: ch(x.b, y.b), a: ch(x.a, y.a) })
         }
-        (Val::L(x), Val::L(y)) => lerp_len(x, y, t).map(Val::L).unwrap_or_else(discrete),
+        (Val::L(x), Val::L(y)) => lerp_lp(x, y, t).map(Val::L).unwrap_or_else(discrete),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, t).map(Val::T).unwrap_or_else(discrete),
         (Val::Fl(x), Val::Fl(y)) => {
             // Filter Effects §8: a missing list is the identity of the other;
@@ -858,8 +995,8 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
             }
             discrete()
         }
-        (Val::Cp(Some(x)), Val::Cp(Some(y))) => match lerp_clip(x, y, t) {
-            Some(c) => Val::Cp(Some(std::sync::Arc::new(c))),
+        (Val::Cp(Some(x), a_at), Val::Cp(Some(y), b_at)) => match lerp_clip(x, y, t) {
+            Some(c) => Val::Cp(Some(std::sync::Arc::new(c)), *a_at || *b_at),
             None => discrete(),
         },
         (Val::V(x), Val::V(y)) => {
@@ -1047,6 +1184,7 @@ impl Transition {
 
 #[derive(Debug, Clone)]
 struct Keyframe {
+    composite: Option<Composite>,
     offset: f32,
     values: Vec<(Prop, Val)>,
 }
@@ -1164,20 +1302,6 @@ struct ScriptKeyframe {
     values: Vec<(Prop, Val)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Composite {
-    Replace,
-    Add,
-}
-
-fn composite_of(s: &str) -> Option<Composite> {
-    match s {
-        "replace" => Some(Composite::Replace),
-        "add" | "accumulate" => Some(Composite::Add),
-        _ => None,
-    }
-}
-
 impl AnimationState {
     /// When the page needs the next animation frame (engine ms).
     pub fn next_due(&self) -> Option<f64> {
@@ -1217,8 +1341,8 @@ fn now_ms(engine: &Engine) -> f64 {
 }
 
 /// The transition entry (duration s, delay s, easing) covering `p`.
-fn transition_for(style: &ComputedStyle, p: Prop) -> Option<(f32, f32, String)> {
-    style.transitions.iter().rev().find(|t| p.covered_by(&t.property)).map(|t| (t.duration, t.delay, t.timing.clone()))
+fn transition_for(style: &ComputedStyle, p: Prop) -> Option<&rabbithole_style::Transition> {
+    style.transitions.iter().rev().find(|t| p.covered_by(&t.property))
 }
 
 impl Engine {
@@ -1330,8 +1454,10 @@ impl Engine {
             if scripted.contains(&p) {
                 continue;
             }
-            let to = get(after, p);
             let running = page.anim.transitions.iter().position(|t| t.node == node && t.prop == p);
+            let spec = transition_for(after, p).filter(|t| t.duration.max(0.0) + t.delay > 0.0);
+            if running.is_none() && spec.is_none() { continue; }
+            let to = get(after, p);
             let from = match running {
                 Some(i) if !page.anim.transitions[i].clock.idle() => page.anim.transitions[i].value_at(now),
                 _ => get(before, p),
@@ -1341,18 +1467,17 @@ impl Engine {
                     continue; // still heading to the same value
                 }
             }
-            let spec = transition_for(after, p).filter(|(d, _, _)| *d > 0.0);
             if let Some(i) = running {
                 // Replaced or no longer transitioned: cancel.
                 let t = page.anim.transitions.remove(i);
                 page.anim.events.push(QueuedEvent { node, ty: "transitioncancel", name: p.name().into(), elapsed: ((t.clock.local(now).unwrap_or(0.0) - t.delay).max(0.0) / 1000.0) as f32, transition: true });
             }
-            let Some((dur, delay, timing)) = spec else { continue };
+            let Some(spec) = spec else { continue };
             if from == to {
                 continue;
             }
-            // Discrete values (auto widths, mismatched transforms) jump.
-            if !interpolable(&from, &to) {
+            // Normally only interpolable pairs start a transition.
+            if !spec.allow_discrete && !interpolable(&from, &to) {
                 continue;
             }
             page.anim.events.push(QueuedEvent { node, ty: "transitionrun", name: p.name().into(), elapsed: 0.0, transition: true });
@@ -1365,10 +1490,10 @@ impl Engine {
                 to,
                 clock: Clock::pending(),
                 generation: page.anim.generation,
-                delay: delay as f64 * 1000.0,
-                duration: dur as f64 * 1000.0,
-                easing: parse_easing(&timing),
-                timing,
+                delay: spec.delay as f64 * 1000.0,
+                duration: spec.duration as f64 * 1000.0,
+                easing: parse_easing(&spec.timing),
+                timing: spec.timing.clone(),
                 started: false,
             });
         }
@@ -1413,7 +1538,10 @@ impl Engine {
                 let declared: Vec<Prop> = ALL.iter().copied().filter(|p| decls.iter().any(|d| p.covered_by(&d.name))).collect();
                 let values: Vec<(Prop, Val)> = declared.into_iter().map(|p| (p, get(&styled, p))).collect();
                 for &o in offsets {
-                    frames.push(Keyframe { offset: o.clamp(0.0, 1.0), values: values.clone() });
+                    let composite = decls.iter().any(|d| !d.important && d.name == "animation-composition")
+                        .then(|| styled.animation_composition.as_deref().and_then(|ops| ops.first().copied()))
+                        .flatten();
+                    frames.push(Keyframe { composite, offset: o.clamp(0.0, 1.0), values: values.clone() });
                 }
             }
             frames.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
@@ -1472,10 +1600,8 @@ impl Engine {
         }
     }
 
-    /// Write base + animated values into `page.styles` for `node`.
-    fn apply_overlay(&self, page: &mut Page, node: NodeId, now: f64) {
-        let Some(base) = page.anim.base.get(&node).cloned() else { return };
-        let mut style = (*base).clone();
+    fn css_animation_style(&self, page: &Page, node: NodeId, base: &ComputedStyle, now: f64) -> ComputedStyle {
+        let mut style = base.clone();
         for t in page.anim.transitions.iter().filter(|t| t.node == node && !t.clock.idle()) {
             set(&mut style, t.prop, &t.value_at(now));
         }
@@ -1483,7 +1609,7 @@ impl Engine {
         let mut anims: Vec<&Animation> = page.anim.animations.iter().filter(|a| a.node == node).collect();
         anims.sort_by_key(|a| a.index);
         for a in anims {
-            for (p, v) in animation_values(a, &base, now) {
+            for (p, v) in animation_values(a, &style, now) {
                 // `!important` declarations override animations.
                 if base.important.as_ref().is_some_and(|names| names.iter().any(|n| p.covered_by(n))) {
                     continue;
@@ -1491,11 +1617,20 @@ impl Engine {
                 set(&mut style, p, &v);
             }
         }
+        style
+    }
+
+    /// Write base + animated values into `page.styles` for `node`.
+    fn apply_overlay(&self, page: &mut Page, node: NodeId, now: f64) {
+        let Some(base) = page.anim.base.get(&node).cloned() else { return };
+        let mut style = self.css_animation_style(page, node, &base, now);
         if page.anim.script_nodes.contains(&node) {
             self.apply_script_effects(page, node, &base, &mut style, None);
         }
         let changed = page.styles.get(node).map(|s| **s != style).unwrap_or(true);
         if changed {
+            page.styles.any_position_area |= style.needs_anchor_layout();
+            page.styles.any_motion_path |= style.has_motion_path();
             if let Some(slot) = page.styles.styles.get_mut(node) {
                 *slot = Some(Rc::new(style));
                 page.incr.style_patched(node);
@@ -1527,7 +1662,7 @@ impl Engine {
                 page.anim.script_frames.insert(e.id, ScriptFrames { version: e.frames_version, base: base_key, frames });
             }
             let Some(sf) = page.anim.script_frames.get(&e.id) else { continue };
-            let effect_composite = composite_of(&e.composite).unwrap_or(Composite::Replace);
+            let effect_composite = Composite::parse(&e.composite).unwrap_or(Composite::Replace);
             for (p, v) in script_effect_values(&sf.frames, progress, effect_composite, style) {
                 if base.important.as_ref().is_some_and(|names| names.iter().any(|n| p.covered_by(n))) {
                     continue;
@@ -1551,7 +1686,7 @@ impl Engine {
                 let decls = rabbithole_css::parse_declaration_list(&text);
                 let styled = rabbithole_style::cascade::apply_over(base, &parent, &decls, root_fs, viewport);
                 let values = ALL.iter().copied().filter(|p| decls.iter().any(|d| p.covered_by(&d.name))).map(|p| (p, get(&styled, p))).collect();
-                ScriptKeyframe { offset: f.offset as f32, easing: parse_easing(&f.easing), composite: composite_of(&f.composite), values }
+                ScriptKeyframe { offset: f.offset as f32, easing: parse_easing(&f.easing), composite: Composite::parse(&f.composite), values }
             })
             .collect()
     }
@@ -1616,15 +1751,7 @@ impl Engine {
         self.sync_script_animations(page);
         let base = page.anim.base.get(&node).cloned().or_else(|| page.styles.get(node).cloned())?;
         let now = now_ms(self);
-        let mut style = (*base).clone();
-        for t in page.anim.transitions.iter().filter(|t| t.node == node && !t.clock.idle()) {
-            set(&mut style, t.prop, &t.value_at(now));
-        }
-        for a in page.anim.animations.iter().filter(|a| a.node == node) {
-            for (p, v) in animation_values(a, &base, now) {
-                set(&mut style, p, &v);
-            }
-        }
+        let mut style = self.css_animation_style(page, node, &base, now);
         self.apply_script_effects(page, node, &base, &mut style, Some(order));
         Some(Rc::new(style))
     }
@@ -1910,6 +2037,7 @@ fn rendered(page: &Page, node: NodeId) -> bool {
 /// `under` composited with `v` (`add` / `accumulate`).
 fn add_values(under: &Val, v: &Val) -> Val {
     match (under, v) {
+        (Val::Tracks(a), Val::Tracks(b)) => GridOperation::Add.tracks(a, b).map(Val::Tracks).unwrap_or_else(|| v.clone()),
         (Val::F(a), Val::F(b)) => Val::F(a + b),
         (Val::L(a), Val::L(b)) => add_lp(*a, *b).map(Val::L).unwrap_or_else(|| v.clone()),
         (Val::T(a), Val::T(b)) => Val::T(a.iter().chain(b.iter()).cloned().collect()),
@@ -1956,7 +2084,7 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
             let Some((_, v)) = f.values.iter().find(|(q, _)| *q == pr) else { continue };
             let v = match f.composite.unwrap_or(composite) {
                 Composite::Replace => v.clone(),
-                Composite::Add => add_values(&underlying, v),
+                Composite::Add | Composite::Accumulate => add_values(&underlying, v),
             };
             ks.push((f.offset, &f.easing, v));
         }
@@ -1999,9 +2127,13 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
 fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::F(_), Val::F(_)) | (Val::C(_), Val::C(_)) | (Val::V(_), Val::V(_)) => true,
-        (Val::L(x), Val::L(y)) => lerp_len(x, y, 0.5).is_some(),
+        (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
+            lerp_pair(&(*x,*y),&(*u,*v),0.5).is_some(),
+        (Val::MotionRotation(a), Val::MotionRotation(b)) => a.follows_path == b.follows_path,
+        (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(0.5).tracks(x, y).is_some(),
+        (Val::L(x), Val::L(y)) => lerp_lp(x, y, 0.5).is_some(),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),
-        (Val::Cp(Some(x)), Val::Cp(Some(y))) => lerp_clip(x, y, 0.5).is_some(),
+        (Val::Cp(Some(x), _), Val::Cp(Some(y), _)) => lerp_clip(x, y, 0.5).is_some(),
         _ => false,
     }
 }
@@ -2057,12 +2189,22 @@ fn animation_values(a: &Animation, base: &ComputedStyle, now: f64) -> Vec<(Prop,
     let mut out = Vec::new();
     for pr in props {
         // Keyframes declaring pr, with implicit 0% / 100% from the base.
-        let mut ks: Vec<(f32, Val)> = a.frames.iter().filter_map(|f| f.values.iter().find(|(q, _)| *q == pr).map(|(_, v)| (f.offset, v.clone()))).collect();
+        let ops = base.animation_composition.as_deref().unwrap_or_default();
+        let default = if ops.is_empty() { Composite::Replace } else { ops[a.index % ops.len()] };
+        let underlying = get(base, pr);
+        let mut ks: Vec<(f32, Val)> = a.frames.iter().filter_map(|f| {
+            let (_, value) = f.values.iter().find(|(q, _)| *q == pr)?;
+            let composed = match f.composite.unwrap_or(default) {
+                Composite::Replace => value.clone(),
+                Composite::Add | Composite::Accumulate => add_values(&underlying, value),
+            };
+            Some((f.offset, composed))
+        }).collect();
         if ks.first().map(|k| k.0 > 0.0).unwrap_or(true) {
-            ks.insert(0, (0.0, get(base, pr)));
+            ks.insert(0, (0.0, underlying.clone()));
         }
         if ks.last().map(|k| k.0 < 1.0).unwrap_or(true) {
-            ks.push((1.0, get(base, pr)));
+            ks.push((1.0, underlying));
         }
         let mut j = 0;
         while j + 1 < ks.len() - 1 && p > ks[j + 1].0 {

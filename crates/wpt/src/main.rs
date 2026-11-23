@@ -6,7 +6,7 @@
 //!            [--out FILE.jsonl] [--filter SUBSTR] [--memory-kb N] [--verbose] [--list]
 //! rh-wpt summary [--baseline FILE] [--depth N]
 //! rh-wpt serve [--root DIR]
-//! rh-wpt child URL TIMEOUT_MS [--verbose]
+//! rh-wpt child URL TIMEOUT_MS [--verbose] [--loopback-ca PEM]
 //! ```
 
 use std::io::Write;
@@ -74,11 +74,21 @@ impl Flags {
 }
 
 fn child(args: &[String]) -> i32 {
-    let f = Flags::parse(args, &[]);
+    let f = Flags::parse(args, &["loopback-ca"]);
     let (Some(url), Some(ms)) = (f.positional.first(), f.positional.get(1)) else {
         eprintln!("usage: rh-wpt child URL TIMEOUT_MS");
         return 2;
     };
+    if f.has("loopback-ca") {
+        eprintln!("--loopback-ca requires a PEM file");
+        return 2;
+    }
+    if let Some(file) = f.value("loopback-ca") {
+        if let Err(e) = std::fs::read(file).and_then(|pem| rabbithole_engine::net::transport::install_loopback_ca(&pem)) {
+            eprintln!("cannot load loopback CA {file}: {e}");
+            return 2;
+        }
+    }
     let ms: u64 = ms.parse().unwrap_or(10_000);
     let code = runner::run_child(url, Duration::from_millis(ms), f.has("verbose"));
     let _ = std::io::stdout().flush();

@@ -8,7 +8,10 @@ use rabbithole_css::{parse_declaration_list, Declaration, Token};
 use rabbithole_js::{JsResult, ObjectId, Realm, Value};
 use rabbithole_style::{ComputedStyle, Display, Length, Position};
 
+mod alignment;
 mod grid;
+mod images;
+mod shapes;
 
 /// Serialize CSS tokens back to text.
 pub(crate) fn tokens_to_css(tokens: &[Token]) -> String {
@@ -85,18 +88,15 @@ pub(crate) fn camel_to_kebab(name: &str) -> String {
         return name.to_string();
     }
     let mut out = String::new();
-    for (i, c) in name.chars().enumerate() {
+    for c in name.chars() {
         if c.is_ascii_uppercase() {
-            if i == 0 && (name.starts_with("webkit") || name.starts_with("Webkit")) {
-                out.push('-');
-            }
             out.push('-');
             out.push(c.to_ascii_lowercase());
         } else {
             out.push(c);
         }
     }
-    if out.starts_with("webkit-") || out.starts_with("moz-") || out.starts_with("ms-") {
+    if out.starts_with("webkit-") {
         out.insert(0, '-');
     }
     out
@@ -123,6 +123,103 @@ struct DeclList {
     items: Vec<(String, String, bool)>,
 }
 
+fn paired_longhands(name: &str) -> Option<[&'static str;2]> {
+    match name {
+        "place-items" => Some(["align-items","justify-items"]),
+        "place-content" => Some(["align-content","justify-content"]),
+        "place-self" => Some(["align-self","justify-self"]),
+        "position-try" => Some(["position-try-order","position-try-fallbacks"]),
+        _ => None,
+    }
+}
+
+fn css_wide(value: &str) -> bool { matches!(value,"inherit" | "initial" | "unset" | "revert" | "revert-layer") }
+
+fn expand_place(name: &str, value: &str) -> Option<[(&'static str,String);2]> {
+    let [align,justify] = paired_longhands(name)?;
+    if css_wide(value) { return Some([(align,value.into()),(justify,value.into())]); }
+    let tokens = rabbithole_css::Tokenizer::tokenize(value);
+    let parts = rabbithole_style::values::components(&tokens);
+    if name == "position-try" {
+        let (order,list) = rabbithole_style::props::anchor::TryOrder::shorthand(&parts)?;
+        return Some([(align,order.css().into()), (justify,rabbithole_style::props::anchor::TryOption::list_css(&list,false))]);
+    }
+    let (a,b) = rabbithole_style::props::flex::specified_alignment_values(name,&parts)?;
+    Some([(align,a),(justify,b?)])
+}
+
+/// Rule declarations use the same shorthand parser as inline declarations.
+pub(crate) fn cssom_expand_place(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let name = arg_str(realm,args,0)?;
+    let value = arg_str(realm,args,1)?;
+    let Some([(a,av),(b,bv)]) = expand_place(&name,&value) else { return Ok(Value::Null) };
+    Ok(realm.new_array_value(vec![Value::str(a),Value::str(&av),Value::str(b),Value::str(&bv)]))
+}
+
+impl DeclList {
+    fn push(&mut self, name: String, value: String, important: bool) {
+        if let Some(longhands) = expand_place(&name,&value) {
+            self.items.extend(longhands.into_iter().map(|(k,v)| (k.into(),v,important)));
+        } else {
+            self.items.push((name,value,important));
+        }
+    }
+
+    fn direct(&self, prop: &str) -> Option<(&str,bool)> {
+        self.items.iter().rev().filter(|(k,_,_)| k==prop)
+            .find(|(_,_,imp)| *imp).or_else(|| self.items.iter().rev().find(|(k,_,_)| k==prop))
+            .map(|(_,v,imp)| (v.as_str(),*imp))
+    }
+
+    fn value(&self, prop: &str) -> (String,bool) {
+        if let Some((v,imp)) = self.direct(prop) { return (v.into(),imp); }
+        if let Some([a,b]) = paired_longhands(prop) {
+            if let (Some((a,pa)),Some((b,pb))) = (self.direct(a),self.direct(b)) {
+                if pa==pb {
+                    if prop == "position-try" && a == "normal" && !css_wide(b) { return (b.into(),pa); }
+                    if a==b { return (a.into(),pa); }
+                    if !css_wide(a) && !css_wide(b) { return (format!("{a} {b}"),pa); }
+                }
+            }
+        }
+        (String::new(),false)
+    }
+
+    fn css_text(&self) -> String {
+        let mut out = String::new();
+        let mut items = self.items.iter().peekable();
+        while let Some((name,value,important)) = items.next() {
+            let mut property = name.as_str();
+            let mut text = value.clone();
+            if let Some((next,other,priority)) = items.peek() {
+                let shorthand = match (property,next.as_str()) {
+                    ("position-try-order","position-try-fallbacks") => Some("position-try"),
+                    ("align-items","justify-items") => Some("place-items"),
+                    ("align-self","justify-self") => Some("place-self"),
+                    ("align-content","justify-content") => Some("place-content"),
+                    _ => None,
+                };
+                if let Some(shorthand) = shorthand.filter(|_| important==priority && (value==other || (!css_wide(value) && !css_wide(other)))) {
+                    property = shorthand;
+                    if shorthand == "position-try" && value == "normal" { text = other.clone(); }
+                    else if value != other { text.push(' '); text.push_str(other); }
+                    items.next();
+                }
+            }
+            if !out.is_empty() { out.push(' '); }
+            out.push_str(property); out.push_str(": "); out.push_str(&text);
+            if *important { out.push_str(" !important"); }
+            out.push(';');
+        }
+        out
+    }
+
+    fn remove(&mut self, prop: &str) {
+        let longhands = paired_longhands(prop);
+        self.items.retain(|(k,_,_)| k != prop && !longhands.is_some_and(|pair| pair.contains(&k.as_str())));
+    }
+}
+
 /// CSS property names are ASCII case-insensitive, except custom
 /// properties (`--fooBar`), which keep their case.
 fn prop_name(s: &str) -> String {
@@ -133,10 +230,184 @@ fn prop_name(s: &str) -> String {
     }
 }
 
+fn single_color_property(name: &str) -> bool {
+    matches!(name, "color" | "background-color" | "border-top-color" | "border-right-color" |
+        "border-bottom-color" | "border-left-color" | "outline-color" | "text-decoration-color" |
+        "caret-color" | "accent-color" | "column-rule-color")
+}
+
+fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
+    use rabbithole_style::values::{components, ident, parse_color_component, ColorValue};
+    let parts = components(tokens);
+    let [c] = parts.as_slice() else { return None };
+    if let Some(k) = ident(c) {
+        if matches!(k.as_str(), "inherit" | "unset" | "initial" | "revert" | "revert-layer")
+            || (k == "auto" && matches!(name, "caret-color" | "accent-color"))
+            || (k == "invert" && name == "outline-color")
+            || parse_color_component(c).is_some() {
+            return Some(k);
+        }
+        return None;
+    }
+    // Keep expressions in the specified value until their variables, units
+    // and origin color can be resolved in the element's computed style.
+    if let [Token::Function(f), rest @ ..] = *c {
+        if f.eq_ignore_ascii_case("color-layers") {
+            let (mode, layers) = rabbithole_style::layer_parts(c)?;
+            let mut items = Vec::new();
+            if let Some(mode) = mode.filter(|s| s != "normal") { items.push(mode); }
+            for layer in layers { items.push(specified_color(name, layer)?); }
+            return Some(format!("color-layers({})", items.join(", ")));
+        }
+        if f.eq_ignore_ascii_case("alpha") {
+            let (origin, component) = rabbithole_style::alpha_parts(c)?;
+            let origin = specified_color(name, origin)?;
+            let valid = match component {
+                [Token::Number(_) | Token::Percentage(_)] => true,
+                [Token::Ident(k)] => k.eq_ignore_ascii_case("alpha") || k.eq_ignore_ascii_case("none"),
+                [Token::Function(k), ..] => {
+                    let math = ["calc","min","max","clamp"].iter().any(|name| k.eq_ignore_ascii_case(name));
+                    let deferred = component.iter().any(|t| matches!(t, Token::Function(f)
+                        if ["var","env","attr","sibling-index","sibling-count"].iter().any(|name| f.eq_ignore_ascii_case(name))));
+                    let replaced: Vec<_> = component.iter().map(|t| match t {
+                        Token::Ident(k) if k.eq_ignore_ascii_case("alpha") => Token::Number(1.0),
+                        t => t.clone(),
+                    }).collect();
+                    deferred || (math && rabbithole_style::values::number(&replaced).is_some())
+                }
+                _ => false,
+            };
+            if !valid { return None; }
+            return Some(format!("alpha(from {origin} / {})", tokens_to_css(component)));
+        }
+        let deferred = rest.iter().any(|t| matches!(t, Token::Function(_))) ||
+            rest.iter().any(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) ||
+            ["var", "env", "attr", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
+        if deferred {
+            let known = ["var", "env", "attr", "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab",
+                "oklch", "color", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
+            return known.then(|| tokens_to_css(c));
+        }
+    }
+    let ColorValue::Color(rgb) = parse_color_component(c)? else { return None };
+    Some(rabbithole_style::ComputedColor::parse(c).map_or_else(|| color_css(rgb), |wide| wide.to_css()))
+}
+
+fn checked_property(name: &str) -> bool {
+    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::motion::property(name) || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+}
+
+fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
+    if let Some(result) = rabbithole_style::props::anchor_length::specified(name,tokens,&tokens_to_css) {
+        return result;
+    }
+    if matches!(name, "shape-outside" | "shape-margin") {
+        if rabbithole_style::cascade::supports_declaration(name,tokens) == Some(false) { return None; }
+        if name == "shape-outside" { return Some(shapes::specified(tokens,"margin-box")); }
+    }
+    if rabbithole_style::props::motion::property(name) {
+        if rabbithole_style::cascade::supports_declaration(name,tokens) != Some(true) { return None; }
+        let parts = rabbithole_style::values::components(tokens);
+        if parts.len() == 1 && matches!(parts[0], [Token::Ident(_)]) { return Some(tokens_to_css(tokens)); }
+        if tokens.iter().any(|t| matches!(t,Token::Function(f) if ["var","env","attr"].iter().any(|n| f.eq_ignore_ascii_case(n)))) {
+            return Some(tokens_to_css(tokens));
+        }
+        match name {
+            "offset-path" => return Some(shapes::specified(tokens,"border-box")),
+            "offset-anchor" | "offset-position" => return Some(shapes::specified_position(&parts)),
+            "offset-rotate" if parts.len() == 2 && matches!(parts[1],[Token::Ident(_)]) => {
+                return Some(format!("{} {}", tokens_to_css(parts[1]),tokens_to_css(parts[0])));
+            }
+            _ => {}
+        }
+    }
+    if single_color_property(name) { return specified_color(name, tokens); }
+    if matches!(name, "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
+        let parts = rabbithole_style::values::components(tokens);
+        if let [value] = parts.as_slice() {
+            if let Some(k) = rabbithole_style::values::ident(value).filter(|k| matches!(k.as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer")) {
+                return Some(k);
+            }
+        }
+        if !tokens.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
+            if name == "anchor-scope" { return rabbithole_style::props::anchor::AnchorScope::parse(&parts).map(|scope| scope.to_css()); }
+            if name == "anchor-name" { return rabbithole_style::props::anchor::names(&parts).map(|names| if names.is_empty() { "none".into() } else { names.join(", ") }); }
+            if name == "position-anchor" {
+                let [c] = parts.as_slice() else { return None };
+                return if rabbithole_style::values::is_ident(c,"auto") { Some("auto".into()) } else { rabbithole_style::props::anchor::dashed_ident(c).map(str::to_owned) };
+            }
+            if name == "position-try" { return rabbithole_style::props::anchor::TryOrder::shorthand(&parts).map(|(order,list)| order.shorthand_css(&list,false)); }
+            if name == "position-try-order" {
+                let [part] = parts.as_slice() else { return None };
+                return rabbithole_style::props::anchor::TryOrder::parse(part).map(|o| o.css().into());
+            }
+            if name == "position-try-fallbacks" { use rabbithole_style::props::anchor::TryOption; return TryOption::parse_list(&parts).map(|v| TryOption::list_css(&v,false)); }
+            if name == "position-area" { return rabbithole_style::props::anchor::PositionArea::parse(&parts).map(|a| a.to_css(false)); }
+            return rabbithole_style::props::flex::specified_alignment(name, &parts);
+        }
+    }
+    Some(tokens_to_css(tokens))
+}
+
+pub(crate) fn cssom_serialize_selector(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let selector = arg_str(realm, args, 0)?;
+    let namespaces = rabbithole_css::Tokenizer::tokenize(&arg_str(realm, args, 1)?);
+    Ok(Value::str(&rabbithole_css::selector::serialize_type_selectors(&selector, &namespaces)))
+}
+
+pub(crate) fn cssom_keyframe_selector(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let text = arg_str(realm, args, 0)?;
+    let tokens = rabbithole_css::Tokenizer::tokenize(&text);
+    let Some(keys) = rabbithole_css::keyframe_selectors(&tokens) else { return Ok(Value::Null) };
+    let keys: Vec<_> = keys.iter().map(|k| {
+        let percentage = format!("{}%", if k.percentage == 0.0 { 0.0 } else { k.percentage });
+        match &k.range { Some(name) => format!("{name} {percentage}"), None => percentage }
+    }).collect();
+    Ok(Value::str(&keys.join(", ")))
+}
+
+pub(crate) fn cssom_valid_selector(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let selector = arg_str(realm, args, 0)?;
+    let nested = realm.to_boolean(&arg(args, 1));
+    let tokens = rabbithole_css::Tokenizer::tokenize(&selector);
+    let declarations = arg_str(realm, args, 2)?;
+    let declarations = rabbithole_css::Tokenizer::tokenize(&declarations);
+    Ok(Value::Bool(rabbithole_css::selector::valid_rule_selector_with_namespaces(&tokens, nested, &declarations)))
+}
+
+pub(crate) fn cssom_try_name(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let tokens = rabbithole_css::Tokenizer::tokenize(&arg_str(realm, args, 0)?);
+    Ok(rabbithole_css::position_try::name(&tokens).map_or(Value::Null,Value::str))
+}
+
+pub(crate) fn cssom_try_descriptors(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(realm.new_array_value(rabbithole_css::position_try::DESCRIPTORS.iter().map(|name| Value::str(name)).collect()))
+}
+
+pub(crate) fn cssom_namespace(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let tokens = rabbithole_css::Tokenizer::tokenize(&arg_str(realm, args, 0)?);
+    Ok(match rabbithole_css::parse_namespace(&tokens) {
+        Some((prefix, uri)) => realm.new_array_value(vec![Value::str(prefix), Value::str(uri)]),
+        None => Value::Null,
+    })
+}
+
+pub(crate) fn cssom_specified_value(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let name = arg_str(realm, args, 0)?;
+    let value = arg_str(realm, args, 1)?;
+    if !checked_property(&name) && !might_use_anchor(&value) { return Ok(Value::str(&value)); }
+    let tokens = rabbithole_css::Tokenizer::tokenize(&value);
+    Ok(specified_value(&name, &tokens).map_or(Value::Null, |s| Value::str(&s)))
+}
+
 fn parse_style(n: NodeRef) -> DeclList {
     let text = get_attribute(n, "style").unwrap_or_default();
     let decls: Vec<Declaration> = parse_declaration_list(&text);
-    DeclList { items: decls.into_iter().map(|d| (d.name, tokens_to_css(&d.value), d.important)).collect() }
+    let mut list = DeclList { items: Vec::with_capacity(decls.len()) };
+    for d in decls {
+        if let Some(value) = specified_value(&d.name, &d.value) { list.push(d.name,value,d.important); }
+    }
+    list
 }
 
 fn write_style(n: NodeRef, list: &DeclList) {
@@ -146,7 +417,7 @@ fn write_style(n: NodeRef, list: &DeclList) {
         }
         return;
     }
-    let text = list.items.iter().map(|(k, v, imp)| format!("{k}: {v}{};", if *imp { " !important" } else { "" })).collect::<Vec<_>>().join(" ");
+    let text = list.css_text();
     set_attribute(n, "style", Some(&text));
 }
 
@@ -186,16 +457,25 @@ fn style_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     }
     let prop = camel_to_kebab(&key);
     let list = parse_style(n);
-    Ok(Value::str(list.items.iter().rev().find(|(k, _, _)| *k == prop).map(|(_, v, _)| v.as_str()).unwrap_or("")))
+    Ok(Value::str(&list.value(&prop).0))
+}
+
+fn might_use_anchor(value: &str) -> bool {
+    value.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"anchor"))
 }
 
 fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
-    let mut list = parse_style(n);
     let value = value.trim();
-    list.items.retain(|(k, _, _)| *k != prop);
+    let serialized;
+    let value = if !value.is_empty() && (checked_property(prop) || might_use_anchor(value)) {
+        let Some(v) = specified_value(prop, &rabbithole_css::Tokenizer::tokenize(value)) else { return };
+        serialized = v;
+        serialized.as_str()
+    } else { value };
+    let mut list = parse_style(n);
+    list.remove(prop);
     if !value.is_empty() {
-        // Expand nothing: keep as given (the cascade handles shorthands).
-        list.items.push((prop.to_string(), value.to_string(), important));
+        list.push(prop.to_string(), value.to_string(), important);
     }
     write_style(n, &list);
 }
@@ -204,7 +484,7 @@ fn style_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     let n = style_target(realm, args)?;
     let Some(key) = key_of(realm, args) else { return Ok(Value::Bool(true)) };
     let v = arg(args, 2);
-    let value = if v.is_nullish() { String::new() } else { realm.to_rust_string(v)? };
+    let value = if v.is_null() { String::new() } else { realm.to_rust_string(v)? };
     if key == "cssText" {
         set_attribute(n, "style", Some(&value));
         return Ok(Value::Bool(true));
@@ -215,8 +495,17 @@ fn style_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 }
 
 fn style_has(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let _ = style_target(realm, args)?;
-    Ok(Value::Bool(true))
+    let target = arg(args, 0);
+    let V::Object(id) = target.v() else { return Ok(Value::Bool(false)); };
+    let key = realm.to_property_key(arg(args, 1))?;
+    if realm.has_property(id, &key)? { return Ok(Value::Bool(true)); }
+    let Some(name) = key_of(realm, args) else { return Ok(Value::Bool(false)); };
+    if matches!(name.as_str(), "cssText" | "length" | "parentRule") { return Ok(Value::Bool(true)); }
+    if let Ok(index) = name.parse::<usize>() {
+        let n = style_target(realm, args)?;
+        return Ok(Value::Bool(index.to_string() == name && index < parse_style(n).items.len()));
+    }
+    Ok(Value::Bool(rabbithole_style::cascade::recognizes_property(&camel_to_kebab(&name))))
 }
 
 fn style_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -227,11 +516,15 @@ fn style_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
 
 fn style_set_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "setProperty")?;
+    if args.len() < 2 { return Err(realm.throw_type_error("setProperty requires a name and a value")); }
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let v = arg(args, 1);
-    let value = if v.is_nullish() { String::new() } else { realm.to_rust_string(v)? };
-    let prio = arg_str_opt(realm, args, 2)?.unwrap_or_default();
-    set_style_prop(n, &prop, &value, prio.eq_ignore_ascii_case("important"));
+    let value = if v.is_null() { String::new() } else { realm.to_rust_string(v)? };
+    let priority = arg(args, 2);
+    let prio = if priority.is_nullish() { String::new() } else { realm.to_rust_string(priority)? };
+    if value.is_empty() || prio.is_empty() || prio.eq_ignore_ascii_case("important") {
+        set_style_prop(n, &prop, &value, !prio.is_empty());
+    }
     Ok(Value::Undefined)
 }
 
@@ -239,21 +532,21 @@ fn style_get_property_value(realm: &mut Realm, this: Value, args: &[Value]) -> J
     let n = this_node(realm, &this, "getPropertyValue")?;
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
-    Ok(Value::str(list.items.iter().rev().find(|(k, _, _)| *k == prop).map(|(_, v, _)| v.as_str()).unwrap_or("")))
+    Ok(Value::str(&list.value(&prop).0))
 }
 
 fn style_get_property_priority(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getPropertyPriority")?;
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
-    Ok(Value::str(if list.items.iter().any(|(k, _, imp)| *k == prop && *imp) { "important" } else { "" }))
+    Ok(Value::str(if list.value(&prop).1 { "important" } else { "" }))
 }
 
 fn style_remove_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "removeProperty")?;
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
-    let old = list.items.iter().rev().find(|(k, _, _)| *k == prop).map(|(_, v, _)| v.clone()).unwrap_or_default();
+    let old = list.value(&prop).0;
     set_style_prop(n, &prop, "", false);
     Ok(Value::str(&old))
 }
@@ -289,10 +582,13 @@ pub(crate) fn style_object(realm: &mut Realm, wrapper: ObjectId, n: NodeRef) -> 
 fn color_css(c: rabbithole_gfx::Color) -> String {
     if c.a == 255 {
         format!("rgb({}, {}, {})", c.r, c.g, c.b)
-    } else if c.a == 0 {
-        "rgba(0, 0, 0, 0)".into()
     } else {
-        format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, (c.a as f32 / 255.0 * 1000.0).round() / 1000.0)
+        // CSS Color 4 serializes a byte alpha with two decimal places if
+        // that value round-trips to the same byte; otherwise use three.
+        let alpha = f32::from(c.a) / 255.0;
+        let short = (alpha * 100.0).round() / 100.0;
+        let a = if (short * 255.0).round() as u8 == c.a { short } else { (alpha * 1000.0).round() / 1000.0 };
+        format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, a)
     }
 }
 
@@ -339,6 +635,14 @@ fn display_css(d: Display) -> &'static str {
     }
 }
 
+fn anchor_style(node: NodeRef, prop: &str, frame: Option<u64>, style: std::rc::Rc<ComputedStyle>) -> std::rc::Rc<ComputedStyle> {
+    if (rabbithole_style::props::anchor_length::property(prop).is_some() && style.has_anchor_lengths())
+        || (style.position_try_fallbacks.is_some() && rabbithole_css::position_try::DESCRIPTORS.contains(&prop)) {
+        return with_env(|env| env.anchor_style(frame,node.node)).unwrap_or(style);
+    }
+    style
+}
+
 /// Computed value of `prop` for a node, as a CSS string.
 pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     if n.doc & crate::host::FRAME_DOC != 0 {
@@ -346,11 +650,13 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         // final-layout query; the other existing frame values use style.
         let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
         let s = with_env(|env| env.frame_computed_style(frame, n.node))?;
+        let s = anchor_style(n,prop,Some(frame),s);
         if let Some(rows) = grid::axis(prop).filter(|_| matches!(s.display, Display::Grid | Display::InlineGrid)) {
             if let Some(tracks) = with_env(|env| env.frame_used_grid_tracks(frame, n.node, rows)) {
                 return Some(grid::used(&tracks));
             }
         }
+        if let Some(value) = resolved_inset(n, &s, prop) { return Some(value); }
         return Some(computed_from_style(&s, prop, Default::default(), Default::default()));
     }
     if n.doc != 0 {
@@ -364,7 +670,8 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     // layout box only when the value actually depends on it, so scripts
     // that interleave style writes and reads don't force full layouts.
     let style = with_env(|env| env.computed_style(n.node));
-    let s: std::rc::Rc<ComputedStyle> = style?;
+    let s = anchor_style(n,prop,None,style?);
+    if let Some(value) = resolved_inset(n, &s, prop) { return Some(value); }
     let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_) | rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_));
     let needs_box = match prop {
         "grid-template-columns" | "grid-template-rows" => true,
@@ -378,10 +685,6 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         "padding-right" => pct(&s.padding.right),
         "padding-bottom" => pct(&s.padding.bottom),
         "padding-left" => pct(&s.padding.left),
-        "top" => pct(&s.inset.top),
-        "left" => pct(&s.inset.left),
-        "right" => pct(&s.inset.right),
-        "bottom" => pct(&s.inset.bottom),
         "min-width" => pct(&s.min_width),
         "max-width" => pct(&s.max_width),
         "min-height" => pct(&s.min_height),
@@ -394,7 +697,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
             env.ensure_layout();
             (env.computed_style(n.node), ())
         });
-        st.unwrap_or(s)
+        st.map_or(s, |style| anchor_style(n,prop,None,style))
     } else {
         s
     };
@@ -411,7 +714,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     let r = if needs_box { with_env(|env| env.node_rect(n.node)).unwrap_or_default() } else { Default::default() };
     let pct_padding = [&s.padding.top, &s.padding.right, &s.padding.bottom, &s.padding.left].into_iter().any(|l| pct(l));
     let cb = if needs_box && prop != "transform" && (!matches!(prop, "width" | "height" | "inline-size" | "block-size") || pct_padding) {
-        containing_block(n.node, &s)
+        containing_block(n, s.position, false)
     } else {
         Default::default()
     };
@@ -423,31 +726,71 @@ pub(crate) fn computed_value_of_style(s: &ComputedStyle, prop: &str) -> String {
     computed_from_style(s, prop, Default::default(), Default::default())
 }
 
+fn layout_rect(n: NodeRef) -> Option<rabbithole_gfx::Rect> {
+    with_env(|env| if n.doc == 0 { env.node_rect(n.node) } else { env.frame_node_rect((n.doc & !FRAME_DOC) as u64, n.node) })
+}
+
+/// CSSOM returns the computed inset for unpositioned elements and elements
+/// without a layout box. Positioned boxes resolve percentages, and relative
+/// and absolutely positioned boxes also expose used values for auto insets.
+fn resolved_inset(n: NodeRef, s: &ComputedStyle, prop: &str) -> Option<String> {
+    let (value, opposite, vertical, start) = match prop {
+        "top" => (&s.inset.top, &s.inset.bottom, true, true),
+        "bottom" => (&s.inset.bottom, &s.inset.top, true, false),
+        "left" => (&s.inset.left, &s.inset.right, false, true),
+        "right" => (&s.inset.right, &s.inset.left, false, false),
+        _ => return None,
+    };
+    if s.position == Position::Static || matches!(s.display, Display::None | Display::Contents)
+        || matches!(value, Length::Px(_)) || (value.is_auto() && s.position == Position::Sticky) {
+        return Some(position_css(value));
+    }
+    let Some(rect) = layout_rect(n) else { return Some(position_css(value)); };
+    let cb = containing_block(n, s.position, true);
+    let base = if vertical { cb.h } else { cb.w };
+    if !value.is_auto() && !value.is_anchor_query() { return Some(length_css(value, base)); }
+    if s.position == Position::Relative {
+        let offset = -opposite.resolve_or_zero(base);
+        return Some(px(if offset == 0.0 { 0.0 } else { offset }));
+    }
+    let (origin, extent, margin_start, margin_end) = if vertical {
+        (rect.y - cb.y, rect.h, s.margin.top, s.margin.bottom)
+    } else {
+        (rect.x - cb.x, rect.w, s.margin.left, s.margin.right)
+    };
+    let offset = if start { origin - margin_start.resolve_or_zero(cb.w) } else { base - origin - extent - margin_end.resolve_or_zero(cb.w) };
+    Some(px(offset))
+}
+
 /// The containing block of `node` (after layout), the base of its
 /// percentage margins, padding, insets and min/max sizes: the padding box
 /// of the nearest positioned ancestor for absolute positioning, the
 /// viewport for fixed, else the parent's content box.
-fn containing_block(node: rabbithole_dom::NodeId, s: &ComputedStyle) -> rabbithole_gfx::Rect {
+fn containing_block(n: NodeRef, position: Position, sticky_inset: bool) -> rabbithole_gfx::Rect {
     let viewport = || {
-        let (w, h) = with_env(|env| env.viewport());
+        let (w, h) = with_env(|env| if n.doc == 0 { env.viewport() } else { env.frame_viewport((n.doc & !FRAME_DOC) as u64).unwrap_or_default() });
         rabbithole_gfx::Rect { x: 0.0, y: 0.0, w, h }
     };
-    if s.position == Position::Fixed {
-        return viewport();
-    }
-    let abs = s.position == Position::Absolute;
-    let mut cur = with_doc(0, |doc| doc.flat_parent(node));
+    let out_of_flow = matches!(position, Position::Fixed | Position::Absolute);
+    let mut cur = with_doc(n.doc, |doc| doc.flat_parent(n.node));
     while let Some(p) = cur {
-        let is_element = with_doc(0, |doc| doc.element(p).is_some());
+        let is_element = with_doc(n.doc, |doc| doc.element(p).is_some());
         if !is_element {
             break;
         }
-        let ps = with_env(|env| env.computed_style(p));
-        if let Some(ps) = ps.filter(|ps| ps.display != Display::Contents && (!abs || ps.position != Position::Static)) {
-            if let Some(pr) = with_env(|env| env.node_rect(p)) {
+        let frame = (n.doc & !FRAME_DOC) as u64;
+        let ps = with_env(|env| if n.doc == 0 { env.computed_style(p) } else { env.frame_computed_style(frame, p) });
+        if let Some(ps) = ps.filter(|ps| ps.display != Display::Contents && match position {
+            Position::Fixed => ps.establishes_fixed_containing_block(),
+            Position::Absolute => ps.position != Position::Static || ps.establishes_fixed_containing_block(),
+            Position::Sticky if sticky_inset => [ps.overflow_x, ps.overflow_y].into_iter()
+                .any(|o| !matches!(o, rabbithole_style::Overflow::Visible | rabbithole_style::Overflow::Clip)),
+            _ => ps.display != Display::Inline,
+        }) {
+            if let Some(pr) = layout_rect(NodeRef { doc: n.doc, node: p }) {
                 let b = &ps.border_width;
                 let (mut x, mut y, mut w, mut h) = (pr.x + b.left, pr.y + b.top, pr.w - b.left - b.right, pr.h - b.top - b.bottom);
-                if !abs {
+                if !out_of_flow {
                     let pw = w;
                     let pad = &ps.padding;
                     let (pl, pt) = (pad.left.resolve_or_zero(pw), pad.top.resolve_or_zero(pw));
@@ -459,7 +802,7 @@ fn containing_block(node: rabbithole_dom::NodeId, s: &ComputedStyle) -> rabbitho
                 return rabbithole_gfx::Rect { x, y, w: w.max(0.0), h: h.max(0.0) };
             }
         }
-        cur = with_doc(0, |doc| doc.flat_parent(p));
+        cur = with_doc(n.doc, |doc| doc.flat_parent(p));
     }
     viewport()
 }
@@ -467,10 +810,34 @@ fn containing_block(node: rabbithole_dom::NodeId, s: &ComputedStyle) -> rabbitho
 /// A computed value from the style (and the border box `r` and the
 /// containing block `cb`, for values that depend on layout).
 fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, cb: rabbithole_gfx::Rect) -> String {
+    if let Some(value) = alignment::computed(s, prop) { return value; }
     match prop {
         "grid-template-columns" => grid::computed(&s.grid_template_columns),
         "grid-template-rows" => grid::computed(&s.grid_template_rows),
         "display" => display_css(s.display).to_string(),
+        "shape-outside" => shapes::computed(s.shape_outside.as_deref(), s.shape_outside_position_explicit, rabbithole_style::ShapeBox::Margin),
+        "shape-margin" => position_css(&s.shape_margin),
+        "offset-path" => shapes::computed(s.motion().path.as_deref(),s.motion().explicit_center,rabbithole_style::ShapeBox::Border),
+        "offset-distance" => position_css(&s.motion().distance),
+        "offset-rotate" => {
+            let v = s.motion().rotate;
+            if v.follows_path && v.degrees == 0.0 { "auto".into() }
+            else { format!("{}{}deg", if v.follows_path { "auto " } else { "" }, fmt_num(v.degrees)) }
+        }
+        "offset-position" | "offset-anchor" => {
+            use rabbithole_style::props::motion::OffsetPosition;
+            match if prop == "offset-position" { s.motion().position } else { s.motion().anchor } {
+                OffsetPosition::Auto => "auto".into(), OffsetPosition::Normal => "normal".into(),
+                OffsetPosition::Coordinates(x,y) => format!("{} {}",position_css(&x),position_css(&y)),
+            }
+        }
+        "position-try" => s.position_try_order.shorthand_css(s.position_try_fallbacks.as_deref().unwrap_or_default(),true),
+        "position-try-order" => s.position_try_order.css().into(),
+        "position-try-fallbacks" => rabbithole_style::props::anchor::TryOption::list_css(s.position_try_fallbacks.as_deref().unwrap_or_default(),true),
+        "position-area" => s.position_area.to_css(true),
+        "anchor-scope" => s.anchor_scope.to_css(),
+        "anchor-name" => s.anchor_names.as_ref().map_or_else(|| "none".into(),|names| names.join(", ")),
+        "position-anchor" => s.position_anchor.as_deref().unwrap_or("auto").into(),
         "position" => match s.position {
             Position::Static => "static",
             Position::Relative => "relative",
@@ -481,8 +848,8 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         .to_string(),
         "visibility" => if s.visibility == rabbithole_style::Visibility::Hidden { "hidden".into() } else { "visible".into() },
         "opacity" => format!("{}", s.opacity),
-        "color" => color_css(s.color),
-        "background-color" => color_css(s.background_color),
+        "color" => s.color_components.as_ref().map_or_else(|| color_css(s.color), |c| c.to_css()),
+        "background-color" => s.background_color_components.as_ref().map_or_else(|| color_css(s.background_color), |c| c.to_css()),
         "border-top-color" => color_css(s.border_color.top),
         "border-right-color" => color_css(s.border_color.right),
         "border-bottom-color" => color_css(s.border_color.bottom),
@@ -529,6 +896,15 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
             rabbithole_style::Overflow::Clip => "clip",
         }
         .to_string(),
+        "list-style-type" => {
+            use rabbithole_style::ListStyleType::*;
+            match s.list_style_type {
+                None => "none", Disc => "disc", Circle => "circle", Square => "square",
+                Decimal => "decimal", DecimalLeadingZero => "decimal-leading-zero",
+                LowerAlpha => "lower-alpha", UpperAlpha => "upper-alpha",
+                LowerRoman => "lower-roman", UpperRoman => "upper-roman",
+            }.into()
+        }
         "text-align" => match s.text_align {
             rabbithole_style::TextAlign::Start => "start",
             rabbithole_style::TextAlign::End => "end",
@@ -668,7 +1044,8 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
             None => "0% 0%".into(),
         },
         "direction" => if s.direction == rabbithole_style::Direction::Rtl { "rtl".into() } else { "ltr".into() },
-        "background-image" => s.background_image.as_ref().map(|u| format!("url(\"{u}\")")).unwrap_or_else(|| "none".into()),
+        "background-image" => images::layers(&s.background_layers),
+        "mask-image" => images::layers(&s.mask_layers),
         "min-width" => length_css(&s.min_width, cb.w),
         "max-width" => if s.max_width.is_auto() { "none".into() } else { length_css(&s.max_width, cb.w) },
         "min-height" => length_css(&s.min_height, cb.h),
@@ -771,9 +1148,11 @@ fn timing_css(s: &ComputedStyle, prop: &str) -> Option<String> {
     let list = |items: Vec<String>, empty: &str| if items.is_empty() { empty.to_string() } else { items.join(", ") };
     Some(match prop {
         "transition-property" => list(s.transitions.iter().map(|t| t.property.clone()).collect(), "all"),
+        "transition-behavior" => list(s.transitions.iter().map(|t| if t.allow_discrete { "allow-discrete".into() } else { "normal".into() }).collect(), "normal"),
         "transition-duration" => list(s.transitions.iter().map(|t| secs(t.duration)).collect(), "0s"),
         "transition-delay" => list(s.transitions.iter().map(|t| secs(t.delay)).collect(), "0s"),
         "transition-timing-function" => list(s.transitions.iter().map(|t| t.timing.clone()).collect(), "ease"),
+        "animation-composition" => list(s.animation_composition.as_deref().unwrap_or_default().iter().map(|op| op.css().to_string()).collect(), "replace"),
         "animation-name" => list(s.animations.iter().map(|a| a.name.clone()).collect(), "none"),
         "animation-duration" => list(s.animations.iter().map(|a| secs(a.duration)).collect(), "0s"),
         "animation-delay" => list(s.animations.iter().map(|a| secs(a.delay)).collect(), "0s"),
@@ -787,6 +1166,17 @@ fn timing_css(s: &ComputedStyle, prop: &str) -> Option<String> {
 }
 
 
+/// A retained computed declaration observes stylesheet edits in the same task.
+fn read_computed_value(realm: &mut Realm, node: NodeRef, property: &str) -> JsResult<Value> {
+    let flush = {
+        let host = state();
+        let host = host.borrow();
+        if host.render.sheets_pending { host.factories.get("flushSheets").cloned() } else { None }
+    };
+    if let Some(flush) = flush { realm.call(flush, Value::Undefined, &[])?; }
+    Ok(Value::str(&computed_value(node, property).unwrap_or_default()))
+}
+
 fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = style_target(realm, args)?;
     let Some(key) = key_of(realm, args) else { return Ok(Value::Undefined) };
@@ -797,7 +1187,15 @@ fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
         _ => {}
     }
     let prop = camel_to_kebab(&key);
-    Ok(Value::str(&computed_value(n, &prop).unwrap_or_default()))
+    read_computed_value(realm, n, &prop)
+}
+
+fn cs_has(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let target = arg(args, 0);
+    let V::Object(id) = target.v() else { return Ok(Value::Bool(false)); };
+    let key = realm.to_property_key(arg(args, 1))?;
+    if realm.has_property(id, &key)? { return Ok(Value::Bool(true)); }
+    Ok(Value::Bool(key_of(realm, args).is_some_and(|k| rabbithole_style::cascade::recognizes_property(&camel_to_kebab(&k)))))
 }
 
 fn cs_set(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -807,7 +1205,7 @@ fn cs_set(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> 
 fn cs_get_property_value(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getPropertyValue")?;
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
-    Ok(Value::str(&computed_value(n, &prop).unwrap_or_default()))
+    read_computed_value(realm, n, &prop)
 }
 
 fn cs_empty(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
@@ -834,7 +1232,7 @@ fn get_computed_style(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
     realm.define_property(target, "length", Value::Number(0.0), 0);
     realm.define_property(target, "cssText", Value::str(""), 0);
     let _ = cs_zero;
-    Ok(make_proxy(realm, target, &[("get", cs_get), ("set", cs_set)]))
+    Ok(make_proxy(realm, target, &[("get", cs_get), ("set", cs_set), ("has", cs_has)]))
 }
 
 // ---------------------------------------------------------------- matchMedia
@@ -861,12 +1259,28 @@ fn match_media(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     Ok(Value::Object(o))
 }
 
-fn css_supports(_realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let text = match args.first().map(Value::v) {
-        Some(V::String(s)) => s.to_rust_string().to_ascii_lowercase(),
-        _ => String::new(),
+/// Legacy HTML editing commands use an absolute CSS color, serialized for
+/// a style declaration or converted to an opaque HTML font color.
+pub(crate) fn editing_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let text = arg_str(realm, args, 0)?;
+    let tokens = rabbithole_css::Tokenizer::tokenize(&text);
+    Ok(match rabbithole_style::values::parse_color(&tokens) {
+        Some(rabbithole_style::values::ColorValue::Color(c)) => Value::str(&color_css(c)),
+        _ => Value::Null,
+    })
+}
+
+fn css_supports(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if args.is_empty() { return Err(realm.throw_type_error("CSS.supports requires an argument")); }
+    let first = arg_str(realm, args, 0)?;
+    rabbithole_style::install_supports_validator();
+    let matches = if args.len() == 1 {
+        rabbithole_css::supports::evaluate_script_condition(&rabbithole_css::Tokenizer::tokenize(&first))
+    } else {
+        let value = arg_str(realm, args, 1)?;
+        rabbithole_css::supports::evaluate_property(&first, &rabbithole_css::Tokenizer::tokenize(&value))
     };
-    Ok(Value::Bool(!(text.contains("container") || text.contains("grid-template-areas: none") || text.contains("backdrop-filter"))))
+    Ok(Value::Bool(matches))
 }
 
 fn css_escape(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {

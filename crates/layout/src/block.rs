@@ -124,6 +124,7 @@ pub(crate) struct Layouter<'a> {
     /// The absolutely positioned boxes being laid out belong to a
     /// transformed containing block, which also contains fixed boxes.
     fixed_cb: bool,
+    anchor_areas: crate::anchor::AnchoredLayout,
     /// The block children being laid out have a `-webkit-center` parent.
     center_blocks: bool,
     /// The containing block of the block children being laid out is
@@ -180,6 +181,13 @@ fn sizing_keyword(l: Length) -> bool {
 fn stretch_height(style: &ComputedStyle, cb_h: f32, pb_v: f32) -> f32 {
     let m = style.margin.top.resolve_or_zero(0.0) + style.margin.bottom.resolve_or_zero(0.0);
     (cb_h - m - pb_v).max(0.0)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PositionedDescendants {
+    Absolute,
+    AbsoluteAndFixed,
+    FixedOnly,
 }
 
 /// Static-position rectangle of an absolutely positioned box (inline
@@ -405,6 +413,7 @@ impl<'a> Layouter<'a> {
             feature_cache: HashMap::new(),
             abs_cb: HashMap::new(),
             fixed_cb: false,
+            anchor_areas: Default::default(),
             center_blocks: false,
             cb_rtl: false,
             clamp: None,
@@ -511,10 +520,35 @@ impl<'a> Layouter<'a> {
 
     /// Lay out the document, taking unchanged boxes from `reuse`.
     pub(crate) fn layout_document_with(&mut self, reuse: Option<&crate::incremental::Reuse>) -> LayoutTree {
+        let initial = self.layout_pass(reuse);
+        if !self.ctx.styles.any_position_area { return initial; }
+        let mut choices = HashMap::new();
+        let mut areas = crate::anchor::placements(self.ctx,&initial,&choices);
+        let mut pending = std::mem::take(&mut areas.fallback_targets);
+        let mut best = HashMap::new();
+        let mut tree = initial;
+        loop {
+            let available = std::mem::take(&mut areas.available_space);
+            if !areas.is_empty() {
+                let mut positioned = Self::new(self.ctx);
+                positioned.anchor_areas = areas;
+                tree = positioned.layout_pass(None);
+                tree.resolved_anchor_styles = positioned.anchor_areas.lengths;
+            } else if !choices.is_empty() || !tree.resolved_anchor_styles.is_empty() {
+                tree = Self::new(self.ctx).layout_pass(None);
+            }
+            if !crate::anchor::advance_fallbacks(self.ctx,&tree,&mut pending,&mut choices,&available,&mut best) { return tree; }
+            areas = crate::anchor::placements(self.ctx,&tree,&choices);
+        }
+    }
+
+    fn layout_pass(&mut self, reuse: Option<&crate::incremental::Reuse>) -> LayoutTree {
         let debug = crate::incremental::debug_timing();
         let t0 = std::time::Instant::now();
         let builder = Builder::new(self.ctx, reuse);
-        let mut root = crate::wm::prepare(builder.build_root(), self.ctx.doc.body());
+        let mut raw_root = builder.build_root();
+        self.anchor_areas.apply_lengths(&mut raw_root);
+        let mut root = crate::wm::prepare(raw_root, self.ctx.doc.body());
         let t_build = t0.elapsed();
         let uses_counters = builder.uses_counters();
         let vp_w = self.ctx.viewport_width.max(1.0);
@@ -535,6 +569,7 @@ impl<'a> Layouter<'a> {
         }
         let root_definite = height_definite(&root, true);
         self.apply_relative(&mut root, vp_w, Some(vp_h), root_definite);
+        if self.ctx.styles.any_motion_path { crate::motion::apply(&root, Rect::new(0.0, 0.0, vp_w, vp_h)); }
         let (max_r, max_b) = bounds(&root);
         doc_h = doc_h.max(max_b);
         if debug {
@@ -547,6 +582,7 @@ impl<'a> Layouter<'a> {
             height: doc_h,
             viewport: (vp_w, vp_h),
             uses_counters,
+            resolved_anchor_styles: Default::default(),
         }
     }
 
@@ -1823,6 +1859,7 @@ impl<'a> Layouter<'a> {
         let dx = fx + m.left - child.rect.x;
         let dy = fy + m.top - child.rect.y;
         child.translate(dx, dy);
+        bfc.set_shape(child, cb.width);
     }
 
     /// Lay out an atomic inline-level box (inline-block / image) at a
@@ -1852,7 +1889,7 @@ impl<'a> Layouter<'a> {
     /// Lay out the absolutely positioned (and, when transformed, fixed)
     /// descendants `b` is the containing block of.
     pub(crate) fn layout_abs_descendants_of(&mut self, b: &mut LayoutBox, cb: Rect) {
-        let saved = std::mem::replace(&mut self.fixed_cb, transform_containing_block(&b.style));
+        let saved = std::mem::replace(&mut self.fixed_cb, b.style.establishes_fixed_containing_block());
         self.layout_abs_descendants(b, cb);
         self.fixed_cb = saved;
     }
@@ -1860,16 +1897,20 @@ impl<'a> Layouter<'a> {
     pub(crate) fn layout_abs_descendants(&mut self, b: &mut LayoutBox, cb: Rect) -> bool {
         // The common case needs no inline geometry or allocation. Preserve
         // this fact on reused subtrees, just as the recursive walk below does.
-        if b.no_abs_below {
+        // A positioned descendant stops the normal absolute-position walk.
+        // Fixed descendants can still belong to this transformed container.
+        let through_positioned = self.fixed_cb && has_contained_fixed(b);
+        if b.no_abs_below && !through_positioned {
             return false;
         }
-        if !has_abs_descendants(b) {
+        if !through_positioned && !has_abs_descendants(b) {
             b.no_abs_below = true;
             return false;
         }
         let inline_cbs = inline_containing_blocks(b);
         let mut ancestors = HashMap::new();
-        let found = self.layout_abs_descendants_with(b, cb, &inline_cbs, &mut ancestors);
+        let mode = if through_positioned { PositionedDescendants::AbsoluteAndFixed } else { PositionedDescendants::Absolute };
+        let found = self.layout_abs_descendants_with(b, cb, &inline_cbs, &mut ancestors, mode);
         b.no_abs_below = !found;
         found
     }
@@ -1887,7 +1928,7 @@ impl<'a> Layouter<'a> {
         ancestor
     }
 
-    fn layout_abs_descendants_with(&mut self, b: &mut LayoutBox, cb: Rect, inline_cbs: &HashMap<rabbithole_dom::NodeId, Rect>, ancestors: &mut HashMap<rabbithole_dom::NodeId, Option<rabbithole_dom::NodeId>>) -> bool {
+    fn layout_abs_descendants_with(&mut self, b: &mut LayoutBox, cb: Rect, inline_cbs: &HashMap<rabbithole_dom::NodeId, Rect>, ancestors: &mut HashMap<rabbithole_dom::NodeId, Option<rabbithole_dom::NodeId>>, mode: PositionedDescendants) -> bool {
         // Into a vertical subtree's logical space.
         let logical_cbs;
         let (cb, inline_cbs) = match b.wm_transform {
@@ -1899,8 +1940,10 @@ impl<'a> Layouter<'a> {
         };
         let mut found = false;
         for i in 0..b.children.len() {
-            if b.children[i].flow == Flow::Absolute {
+            let fixed = b.children[i].style.position == Position::Fixed;
+            if b.children[i].flow == Flow::Absolute && (mode != PositionedDescendants::FixedOnly || fixed) {
                 let area = b.children[i].abs_node().and_then(|n| {
+                    if mode == PositionedDescendants::FixedOnly { return None; }
                     if inline_cbs.is_empty() {
                         return self.abs_cb.get(&n).copied();
                     }
@@ -1929,12 +1972,19 @@ impl<'a> Layouter<'a> {
                 });
                 self.layout_absolute(&mut b.children[i], area.unwrap_or(cb), static_right, static_rect);
                 found = true;
-            } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below && !transform_containing_block(&b.children[i].style) {
-                // Kept boxes remember having none (their subtree is
-                // unchanged), so large static subtrees are walked once.
-                let f = self.layout_abs_descendants_with(&mut b.children[i], cb, inline_cbs, ancestors);
-                b.children[i].no_abs_below = !f;
+            }
+            let child = &mut b.children[i];
+            if child.style.establishes_fixed_containing_block() { continue; }
+            if mode != PositionedDescendants::FixedOnly && child.style.position == Position::Static &&
+                (!child.no_abs_below || mode == PositionedDescendants::AbsoluteAndFixed) {
+                let f = self.layout_abs_descendants_with(child, cb, inline_cbs, ancestors, mode);
+                child.no_abs_below = !f;
                 found |= f;
+            } else if mode == PositionedDescendants::FixedOnly ||
+                (mode == PositionedDescendants::AbsoluteAndFixed && child.style.position != Position::Static) {
+                // Its absolute descendants have already been positioned by
+                // their own containing block. Only fixed boxes escape it.
+                found |= self.layout_abs_descendants_with(child, cb, inline_cbs, ancestors, PositionedDescendants::FixedOnly);
             }
         }
         found
@@ -1965,10 +2015,15 @@ impl<'a> Layouter<'a> {
             static_right = false;
         }
         let style = c.style.clone();
-        let l = style.inset.left.resolve(cb.w);
-        let r = style.inset.right.resolve(cb.w);
-        let t = style.inset.top.resolve(cb.h);
-        let btm = style.inset.bottom.resolve(cb.h);
+        let anchored = if self.anchor_areas.is_empty() { None } else {
+            c.abs_node().and_then(|n| self.anchor_areas.areas.get(&n)).copied()
+        };
+        let cb = anchored.map_or(cb,|a| a.area);
+        let auto = anchored.map(|_| 0.0);
+        let l = style.inset.left.resolve(cb.w).or(auto);
+        let r = style.inset.right.resolve(cb.w).or(auto);
+        let t = style.inset.top.resolve(cb.h).or(auto);
+        let btm = style.inset.bottom.resolve(cb.h).or(auto);
         let ml = style.margin.left.resolve_or_zero(cb.w);
         let mr = style.margin.right.resolve_or_zero(cb.w);
         let mt = style.margin.top.resolve_or_zero(cb.w);
@@ -1981,7 +2036,7 @@ impl<'a> Layouter<'a> {
         // A table's auto width is shrink-to-fit, even between two insets.
         let table = matches!(c.formatting, Formatting::Table | Formatting::TableWrapper);
         let (mut mode, mut avail) = match (l, r, style.width.is_auto()) {
-            (Some(l), Some(r), true) if table => (WidthMode::ShrinkToFit, (cb.w - l - r).max(0.0)),
+            (Some(l), Some(r), true) if table || (anchored.is_some() && style.justify_self != ItemAlign::Stretch) => (WidthMode::ShrinkToFit, (cb.w - l - r).max(0.0)),
             (Some(l), Some(r), true) => (WidthMode::Fixed((cb.w - l - r - ml - mr - pb_h).max(0.0)), cb.w),
             _ => {
                 // With both insets auto the box starts at its static
@@ -2046,7 +2101,9 @@ impl<'a> Layouter<'a> {
             self.forced_content_height = Some(height);
         } else if let (Some(t), Some(bt), true) = (t, btm, style.height.is_auto()) {
             if c.kind != BoxKind::Image && ratio.is_none() {
-                self.forced_content_height = Some((cb.h - t - bt - mt - mb - pb_v).max(0.0));
+                if anchored.is_none() || style.align_self == ItemAlign::Stretch {
+                    self.forced_content_height = Some((cb.h - t - bt - mt - mb - pb_v).max(0.0));
+                }
             }
         }
         let mut bfc = Bfc::new();
@@ -2096,6 +2153,14 @@ impl<'a> Layouter<'a> {
         // `align-self` align the box in its static-position rectangle, or
         // in the inset-modified containing block when both insets are set.
         let (mut x, mut y) = (x, y);
+        if let Some(area) = anchored {
+            if matches!(style.justify_self,ItemAlign::Auto | ItemAlign::Normal) && !style.margin.left.is_auto() && !style.margin.right.is_auto() {
+                x = area.align[0].offset(cb.x+l.unwrap_or(0.),cb.right()-r.unwrap_or(0.),area.center.0,c.rect.w+ml+mr)+ml;
+            }
+            if matches!(style.align_self,ItemAlign::Auto | ItemAlign::Normal) && !style.margin.top.is_auto() && !style.margin.bottom.is_auto() {
+                y = area.align[1].offset(cb.y+t.unwrap_or(0.),cb.bottom()-btm.unwrap_or(0.),area.center.1,c.rect.h+mt+mb)+mt;
+            }
+        }
         if let Some(sr) = static_rect {
             let own_rtl = style.direction == rabbithole_style::Direction::Rtl;
             // `auto` uses the parent's `*-items` for the static position
@@ -2238,28 +2303,27 @@ impl<'a> Layouter<'a> {
 /// `none` establish a containing block for absolute descendants).
 fn contains_absolutes(style: &rabbithole_style::ComputedStyle) -> bool {
     style.position != Position::Static
-        || transform_containing_block(style)
+        || style.establishes_fixed_containing_block()
         || (style.display == rabbithole_style::Display::Inline && (!style.filters.is_empty() || !style.backdrop_filters.is_empty()))
 }
 
 /// Is the box the containing block of its absolutely positioned
 /// descendants (positioned or transformed)?
 pub(crate) fn contains_positioned(style: &rabbithole_style::ComputedStyle) -> bool {
-    style.position != Position::Static || transform_containing_block(style)
+    style.position != Position::Static || style.establishes_fixed_containing_block()
 }
 
-/// A transform, `perspective`, `transform-style: preserve-3d`, `filter` or
-/// `backdrop-filter` makes the box the containing block of its absolutely
-/// positioned and fixed descendants (CSS Transforms 1 §2, CSS Transforms 2
-/// §6, Filter Effects 1 §5).
-fn transform_containing_block(style: &rabbithole_style::ComputedStyle) -> bool {
-    style.has_transform() || !style.filters.is_empty() || !style.backdrop_filters.is_empty() || style.transform3d.as_ref().is_some_and(|t| t.perspective.is_some() || t.preserve_3d)
+fn has_contained_fixed(b: &LayoutBox) -> bool {
+    b.children.iter().any(|child| {
+        child.style.position == Position::Fixed ||
+            (!child.style.establishes_fixed_containing_block() && has_contained_fixed(child))
+    })
 }
 
 fn has_abs_descendants(b: &LayoutBox) -> bool {
     b.children.iter().any(|child| {
         child.flow == Flow::Absolute
-            || (child.style.position == Position::Static && !child.no_abs_below && !transform_containing_block(&child.style) && has_abs_descendants(child))
+            || (child.style.position == Position::Static && !child.no_abs_below && !child.style.establishes_fixed_containing_block() && has_abs_descendants(child))
     })
 }
 

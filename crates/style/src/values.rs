@@ -337,6 +337,7 @@ pub enum LengthValue {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Leaf(Lin),
+    Anchor(crate::props::anchor_length::Query),
     Sum(Vec<Expr>),
     Scale(Box<Expr>, f32),
     Fn(MathFn, Vec<Expr>),
@@ -356,7 +357,7 @@ impl Expr {
                 Some(acc)
             }
             Expr::Scale(e, f) => Some(e.to_lin()?.scale(*f)),
-            Expr::Fn(..) => None,
+            Expr::Fn(..) | Expr::Anchor(_) => None,
         }
     }
     fn is_number(&self) -> Option<f32> {
@@ -369,6 +370,7 @@ impl Expr {
     fn compute(&self, ctx: &LengthContext) -> crate::computed::MathNode {
         use crate::computed::MathNode;
         match self {
+            Expr::Anchor(q) => MathNode::Anchor(q.clone()),
             Expr::Leaf(l) => MathNode::Leaf(l.px_part(ctx), l.percent),
             Expr::Sum(v) => MathNode::Sum(v.iter().map(|e| e.compute(ctx)).collect()),
             Expr::Scale(e, f) => MathNode::Scale(Box::new(e.compute(ctx)), *f),
@@ -380,10 +382,29 @@ impl Expr {
     }
 }
 
+type AnchorParser<'a> = Option<&'a dyn Fn(&[Token]) -> Option<crate::props::anchor_length::Query>>;
+
+fn expr_sum(comps: &[&[Token]]) -> Option<Expr> { sum_with(comps, None) }
+fn expr_fn(c: &[Token], f: &str) -> Option<Expr> { fn_with(c,f,None) }
+
+pub(crate) fn anchor_math(c: &[Token], ctx: &LengthContext,
+    query: &dyn Fn(&[Token]) -> Option<crate::props::anchor_length::Query>) -> Option<crate::MathNode> {
+    fn dimensional(e: &Expr) -> bool {
+        match e {
+            Expr::Leaf(l) => !l.is_number,
+            Expr::Anchor(_) => true,
+            Expr::Sum(parts) | Expr::Fn(_,parts) => parts.iter().all(dimensional),
+            Expr::Scale(e,f) => f.is_finite() && dimensional(e),
+        }
+    }
+    let expression = sum_with(&[c],Some(query))?;
+    dimensional(&expression).then(|| expression.compute(ctx))
+}
+
 /// sum := product (('+' | '-') product)*, keeping math functions.
-fn expr_sum(comps: &[&[Token]]) -> Option<Expr> {
+fn sum_with(comps: &[&[Token]], query: AnchorParser) -> Option<Expr> {
     let mut i = 0;
-    let mut terms = vec![expr_product(comps, &mut i)?];
+    let mut terms = vec![expr_product(comps, &mut i, query)?];
     while i < comps.len() {
         let sign = match comps[i] {
             [Token::Delim('+')] => 1.0,
@@ -391,19 +412,19 @@ fn expr_sum(comps: &[&[Token]]) -> Option<Expr> {
             _ => return None,
         };
         i += 1;
-        let rhs = expr_product(comps, &mut i)?;
+        let rhs = expr_product(comps, &mut i, query)?;
         terms.push(if sign < 0.0 { Expr::Scale(Box::new(rhs), -1.0) } else { rhs });
     }
     Some(if terms.len() == 1 { terms.pop()? } else { Expr::Sum(terms) })
 }
 
-fn expr_product(comps: &[&[Token]], i: &mut usize) -> Option<Expr> {
-    let mut acc = expr_unit(comps, i)?;
+fn expr_product(comps: &[&[Token]], i: &mut usize, query: AnchorParser) -> Option<Expr> {
+    let mut acc = expr_unit(comps, i, query)?;
     while *i < comps.len() {
         match comps[*i] {
             [Token::Delim('*')] => {
                 *i += 1;
-                let rhs = expr_unit(comps, i)?;
+                let rhs = expr_unit(comps, i, query)?;
                 acc = match (acc.is_number(), rhs.is_number()) {
                     (Some(a), Some(b)) => Expr::Leaf(Lin { num: a * b, is_number: true, ..Lin::default() }),
                     (_, Some(b)) => Expr::Scale(Box::new(acc), b),
@@ -413,7 +434,7 @@ fn expr_product(comps: &[&[Token]], i: &mut usize) -> Option<Expr> {
             }
             [Token::Delim('/')] => {
                 *i += 1;
-                let d = expr_unit(comps, i)?.is_number().filter(|d| *d != 0.0)?;
+                let d = expr_unit(comps, i, query)?.is_number().filter(|d| *d != 0.0)?;
                 acc = match acc.is_number() {
                     Some(a) => Expr::Leaf(Lin { num: a / d, is_number: true, ..Lin::default() }),
                     None => Expr::Scale(Box::new(acc), 1.0 / d),
@@ -425,30 +446,31 @@ fn expr_product(comps: &[&[Token]], i: &mut usize) -> Option<Expr> {
     Some(acc)
 }
 
-fn expr_unit(comps: &[&[Token]], i: &mut usize) -> Option<Expr> {
+fn expr_unit(comps: &[&[Token]], i: &mut usize, query: AnchorParser) -> Option<Expr> {
     let c = *comps.get(*i)?;
     *i += 1;
     match c {
         [Token::Number(n)] => Some(Expr::Leaf(Lin { num: *n, is_number: true, ..Lin::default() })),
-        [Token::OpenParen, ..] => expr_sum(&components(strip_function(c))),
-        [Token::Delim('-')] => Some(Expr::Scale(Box::new(expr_unit(comps, i)?), -1.0)),
+        [Token::OpenParen, ..] => sum_with(&components(strip_function(c)), query),
+        [Token::Delim('-')] => Some(Expr::Scale(Box::new(expr_unit(comps, i, query)?), -1.0)),
         [Token::Function(f), ..] => match f.to_ascii_lowercase().as_str() {
-            "calc" | "-webkit-calc" | "-moz-calc" => expr_sum(&components(strip_function(c))),
-            "min" | "max" | "clamp" => expr_fn(c, f),
+            "calc" | "-webkit-calc" | "-moz-calc" => sum_with(&components(strip_function(c)), query),
+            "min" | "max" | "clamp" => fn_with(c, f, query),
+            "anchor" | "anchor-size" => query?(c).map(Expr::Anchor),
             _ => None,
         },
         _ => Some(Expr::Leaf(lin_of(&parse_length(c)?)?)),
     }
 }
 
-fn expr_fn(c: &[Token], f: &str) -> Option<Expr> {
+fn fn_with(c: &[Token], f: &str, query: AnchorParser) -> Option<Expr> {
     let f = match f.to_ascii_lowercase().as_str() {
         "min" => MathFn::Min,
         "max" => MathFn::Max,
         "clamp" => MathFn::Clamp,
         _ => return None,
     };
-    let args = function_args(c).iter().map(|a| expr_sum(a)).collect::<Option<Vec<_>>>()?;
+    let args = function_args(c).iter().map(|a| sum_with(a, query)).collect::<Option<Vec<_>>>()?;
     if args.is_empty() || (f == MathFn::Clamp && args.len() != 3) {
         return None;
     }
@@ -1089,7 +1111,7 @@ pub fn parse_color_component(c: &[Token]) -> Option<ColorValue> {
         [Token::Function(f), rest @ ..] => {
             let lf = f.to_ascii_lowercase();
             // Relative color syntax: `<fn>(from <color> ...)`.
-            if rest.iter().find(|t| !matches!(t, Token::Whitespace)).is_some_and(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) {
+            if lf != "alpha" && rest.iter().find(|t| !matches!(t, Token::Whitespace)).is_some_and(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) {
                 return crate::color_spaces::relative(&lf, c).map(ColorValue::Color);
             }
             match lf.as_str() {
@@ -1118,37 +1140,6 @@ pub fn hex_color(h: &str) -> Option<Color> {
     }
 }
 
-/// Flatten function args: supports both `a, b, c [, alpha]` and
-/// `a b c [/ alpha]` syntaxes. Returns (values, alpha).
-fn color_args(c: &[Token]) -> Option<(Vec<&[Token]>, Option<&[Token]>)> {
-    let inner = strip_function(c);
-    let comps = components(inner);
-    let mut vals = Vec::new();
-    let mut alpha = None;
-    let mut after_slash = false;
-    for comp in comps {
-        match comp {
-            [Token::Comma] => continue,
-            [Token::Delim('/')] => {
-                after_slash = true;
-                continue;
-            }
-            _ => {}
-        }
-        if after_slash {
-            alpha = Some(comp);
-        } else if vals.len() == 3 {
-            alpha = Some(comp);
-        } else {
-            vals.push(comp);
-        }
-    }
-    if vals.len() != 3 {
-        return None;
-    }
-    Some((vals, alpha))
-}
-
 fn channel(c: &[Token]) -> Option<f32> {
     match c {
         [Token::Number(n)] => Some(*n),
@@ -1173,7 +1164,7 @@ fn to_u8(v: f32) -> u8 {
 }
 
 fn parse_rgb(c: &[Token]) -> Option<Color> {
-    let (vals, alpha) = color_args(c)?;
+    let (vals, alpha) = crate::color_spaces::srgb_args(c)?;
     let r = channel(vals[0])?;
     let g = channel(vals[1])?;
     let b = channel(vals[2])?;
@@ -1182,7 +1173,7 @@ fn parse_rgb(c: &[Token]) -> Option<Color> {
 }
 
 fn parse_hsl(c: &[Token]) -> Option<Color> {
-    let (vals, alpha) = color_args(c)?;
+    let (vals, alpha) = crate::color_spaces::srgb_args(c)?;
     // The legacy comma syntax takes percentages only (`hsla(0, 0, 0, 1)`
     // is invalid); bare numbers belong to the modern syntax (CSS Color 4).
     let legacy = components(strip_function(c)).iter().any(|comp| matches!(comp, [Token::Comma]));

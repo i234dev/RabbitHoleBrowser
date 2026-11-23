@@ -10,6 +10,7 @@
 pub mod animations;
 pub mod consent;
 pub mod diff;
+mod editing;
 pub mod forms;
 pub mod frames;
 mod home;
@@ -411,7 +412,7 @@ impl Loader {
             let cascade = |prune: bool| match discovery_sheets(&doc, &sheets, prune) {
                 Some(discovery) => rabbithole_style::style_tree_with(&doc, &discovery, &env, &opts),
                 // Nothing to discover: no element is looked at.
-                None => StyledTree { styles: Vec::new(), before: Vec::new(), after: Vec::new(), marker: Vec::new(), first_letter: Vec::new(), first_line: Vec::new(), any_first_letter: false, any_first_line: false, font_faces: Vec::new(), keyframes: HashMap::new(), root_font_size: 16.0 },
+                None => StyledTree::empty(),
             };
             let styles = cascade(true);
             if verify_discovery() {
@@ -1345,7 +1346,7 @@ impl Engine {
             title: loaded.title,
             status: loaded.status,
             sheets: loaded.sheets,
-            styles: StyledTree { styles: Vec::new(), before: Vec::new(), after: Vec::new(), marker: Vec::new(), first_letter: Vec::new(), first_line: Vec::new(), any_first_letter: false, any_first_line: false, font_faces: Vec::new(), keyframes: HashMap::new(), root_font_size: 16.0 },
+            styles: StyledTree::empty(),
             layout: empty_layout(),
             display_list: DisplayList::default(),
             images: loaded.images.into_iter().collect(),
@@ -1639,6 +1640,7 @@ impl Engine {
         if page.state.focused == node {
             return false;
         }
+        page.doc.focus_editing_host(node);
         page.state.focused = node;
         page.state.focus_visible = node.map(|n| page.focus_should_be_visible(n)).unwrap_or(false);
         if page.has_dynamic_rules {
@@ -2448,8 +2450,8 @@ impl Page {
             return None;
         }
         self.incr.cached_rect(node, || {
-            if let Some(b) = self.layout.box_of(&self.doc, node) {
-                return Some(b.rect);
+            if let Some((_, rect)) = self.layout.box_in_document(&self.doc, node) {
+                return Some(rect);
             }
             {
                 // Inline elements: the union of their line fragments.
@@ -2459,10 +2461,10 @@ impl Page {
                 // a block has no fragments of its own at all.
                 if self.styles.get(node).is_some_and(|s| s.display == rabbithole_style::Display::Inline) {
                     for c in self.doc.flat_child_elements(node) {
-                        if let Some(b) = self.layout.box_of(&self.doc, c).filter(|b| b.flow.is_in_flow() && !b.is_inline_level()) {
+                        if let Some((_, child_rect)) = self.layout.box_in_document(&self.doc, c).filter(|(b, _)| b.flow.is_in_flow() && !b.is_inline_level()) {
                             rect = Some(match rect {
-                                Some(r) => r.union(&b.rect),
-                                None => b.rect,
+                                Some(r) => r.union(&child_rect),
+                                None => child_rect,
                             });
                         }
                     }
@@ -2508,8 +2510,8 @@ impl Page {
                     if !self.doc.element(n).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Svg) {
                         break;
                     }
-                    if let Some(b) = self.layout.box_of(&self.doc, n) {
-                        return Some(b.rect);
+                    if let Some((_, rect)) = self.layout.box_in_document(&self.doc, n) {
+                        return Some(rect);
                     }
                     cur = self.doc.flat_parent(n);
                 }
@@ -2531,26 +2533,34 @@ impl Page {
         {
             let mut rects = self.layout.inline_client_rects(&self.doc, node);
             for c in self.doc.flat_child_elements(node) {
-                if let Some(b) = self.layout.box_of(&self.doc, c).filter(|b| b.flow.is_in_flow() && !b.is_inline_level()) {
-                    rects.push(b.rect);
+                if let Some((_, child_rect)) = self.layout.box_in_document(&self.doc, c).filter(|(b, _)| b.flow.is_in_flow() && !b.is_inline_level()) {
+                    rects.push(child_rect);
                 }
             }
             if !rects.is_empty() {
                 rects.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
-                return rects;
+                return rects.into_iter().map(|r| self.client_fragment_rect(node, r)).collect();
             }
         }
-        self.layout_rect_of(node).into_iter().collect()
+        self.client_rect_of(node).into_iter().collect()
     }
 
     /// [`Page::layout_rect_of`] as painted: mapped through the CSS transforms of
     /// the node and its ancestors (the bounding box of the result).
     pub fn client_rect_of(&self, node: NodeId) -> Option<Rect> {
-        let mut r = self.layout_rect_of(node)?;
+        Some(self.client_fragment_rect(node, self.layout_rect_of(node)?))
+    }
+
+    fn client_fragment_rect(&self, node: NodeId, mut r: Rect) -> Rect {
         let mut cur = Some(node);
         while let Some(n) = cur {
             if let Some(s) = self.styles.get(n).filter(|s| s.has_transform()) {
-                if let Some(b) = self.layout_rect_of(n) {
+                let motion = if s.has_motion_path() {
+                    self.layout.motion_matrix_in_document(&self.doc, n)
+                } else { None };
+                if let Some(m) = motion {
+                    r = rabbithole_gfx::path::transform_rect_bounds(&m, r);
+                } else if let Some(b) = self.layout_rect_of(n) {
                     let m = rabbithole_style::transform_matrix(&s.transform_ops(), b.w, b.h, s.font_size);
                     let ox = b.x + s.transform_origin.0.resolve_or_zero(b.w);
                     let oy = b.y + s.transform_origin.1.resolve_or_zero(b.h);
@@ -2560,7 +2570,7 @@ impl Page {
             }
             cur = self.doc.flat_parent(n);
         }
-        Some(r)
+        r
     }
 
     /// Scroll container under a document point.

@@ -401,18 +401,73 @@ fn params_for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     Ok(Value::Undefined)
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum PairList { Query, Form }
+
+#[derive(Clone, Copy)]
+struct PairCursor {
+    owner: Option<ObjectId>,
+    list: PairList,
+    kind: u8,
+    index: usize,
+}
+
+impl PairList {
+    fn at(self, realm: &Realm, owner: ObjectId, index: usize) -> Option<(Value, Value)> {
+        match self {
+            Self::Query => realm.host_data::<ParamsData>(owner)?.pairs.get(index).map(|(k, v)| (Value::str(k), Value::str(v))),
+            Self::Form => realm.host_data::<FormDataData>(owner)?.fields.get(index).map(|(k, v)| (Value::str(k), v.as_value())),
+        }
+    }
+
+    fn iterator(self, realm: &mut Realm, owner: ObjectId, kind: u8) -> Value {
+        let (name, next): (_, rabbithole_js::NativeFn) = match self {
+            Self::Query => ("URLSearchParams Iterator", params_next),
+            Self::Form => ("FormData Iterator", fd_next),
+        };
+        let cached = state().borrow().protos.get(name).copied();
+        let prototype = cached.unwrap_or_else(|| {
+            let p = realm.new_object_with_proto(Some(realm.intrinsics.iterator_proto));
+            realm.extra_roots.push(Value::Object(p));
+            realm.define_method(p, "next", 0, next);
+            realm.define_property(p, rabbithole_js::realm::SYM_TO_STRING_TAG, Value::str(name), CONFIGURABLE);
+            state().borrow_mut().protos.insert(name, p);
+            p
+        });
+        let it = realm.new_object_with_proto(Some(prototype));
+        realm.set_host_data(it, Box::new(PairCursor { owner: Some(owner), list: self, kind, index: 0 }));
+        realm.define_property(it, state().borrow().pair_iterator_owner, Value::Object(owner), 0);
+        Value::Object(it)
+    }
+
+    fn next(self, realm: &mut Realm, this: Value) -> JsResult<Value> {
+        let Some((id, cursor)) = this.as_object().and_then(|id| Some((id, *realm.host_data::<PairCursor>(id)?))).filter(|(_, c)| c.list == self) else {
+            return Err(realm.throw_type_error("Illegal invocation"));
+        };
+        if let Some(owner) = cursor.owner {
+            if let Some((key, value)) = self.at(realm, owner, cursor.index) {
+                realm.host_data_mut::<PairCursor>(id).unwrap().index += 1;
+                let item = match cursor.kind { 0 => key, 1 => value, _ => realm.new_array_value(vec![key, value]) };
+                return Ok(realm.create_iter_result(item, false));
+            }
+            realm.host_data_mut::<PairCursor>(id).unwrap().owner = None;
+            realm.define_property(id, state().borrow().pair_iterator_owner, Value::Null, 0);
+        }
+        Ok(realm.create_iter_result(Value::Undefined, true))
+    }
+}
+
+fn params_next(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    PairList::Query.next(realm, this)
+}
+
+fn fd_next(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    PairList::Form.next(realm, this)
+}
+
 fn params_iter(realm: &mut Realm, this: Value, kind: u8) -> JsResult<Value> {
     let o = params_of(realm, &this)?;
-    let items: Vec<Value> = params_pairs(realm, o)
-        .into_iter()
-        .map(|(k, v)| match kind {
-            0 => Value::str(&k),
-            1 => Value::str(&v),
-            _ => realm.new_array_value(vec![Value::str(&k), Value::str(&v)]),
-        })
-        .collect();
-    let arr = realm.new_array_value(items);
-    realm.invoke(arr, "values", &[])
+    Ok(PairList::Query.iterator(realm, o, kind))
 }
 
 fn params_entries(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -572,6 +627,18 @@ pub(crate) struct BodyData {
     pub navigation: Option<Request>,
 }
 
+#[derive(Clone)]
+struct FileInfo {
+    name: String,
+    last_modified: i64,
+}
+
+struct BlobData {
+    file: Option<FileInfo>,
+    bytes: Vec<u8>,
+    mime: String,
+}
+
 pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(Vec<u8>, Option<String>)> {
     match v.v() {
         V::Undefined | V::Null => Ok((Vec::new(), None)),
@@ -581,24 +648,28 @@ pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(V
                 return Ok((serialize_query(&p.pairs).into_bytes(), Some("application/x-www-form-urlencoded;charset=UTF-8".into())));
             }
             if let Some(f) = realm.host_data::<FormDataData>(o) {
-                let fields: Vec<(String, String)> = f.fields.clone();
-                let b = Body::multipart(&fields, &[]);
+                use rabbithole_net::fetch::MultipartValue;
+                let b = Body::multipart_entries(f.fields.iter().map(|(name, entry)| {
+                    let part = match entry {
+                        FormValue::Text(text) => MultipartValue::Text(text),
+                        FormValue::File(id) => {
+                            let blob = realm.host_data::<BlobData>(*id).unwrap();
+                            MultipartValue::File { filename: &blob.file.as_ref().unwrap().name, mime: &blob.mime, bytes: &blob.bytes }
+                        }
+                    };
+                    (name.as_str(), part)
+                }));
                 return Ok((b.data, Some(b.content_type)));
+            }
+            if let Some(blob) = realm.host_data::<BlobData>(o) {
+                return Ok((blob.bytes.clone(), (!blob.mime.is_empty()).then(|| blob.mime.clone())));
             }
             if let Some(b) = realm.host_data::<BodyData>(o) {
                 return Ok((b.bytes.clone(), None));
             }
             match &realm.obj(o).kind {
-                rabbithole_js::ObjectKind::ArrayBuffer(buf) => Ok((buf.bytes.borrow().clone(), None)),
-                rabbithole_js::ObjectKind::TypedArray(t) => {
-                    let buf = realm.obj(t.buffer);
-                    if let rabbithole_js::ObjectKind::ArrayBuffer(b) = &buf.kind {
-                        let b = b.bytes.borrow();
-                        let start = t.byte_offset.min(b.len());
-                        let end = (t.byte_offset + rabbithole_js::builtins::typed_array::typed_array_length(realm, t) * t.kind.element_size()).min(b.len());
-                        return Ok((b[start..end].to_vec(), None));
-                    }
-                    Ok((Vec::new(), None))
+                rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_) | rabbithole_js::ObjectKind::DataView(_) => {
+                    Ok((buffer_source_bytes(realm, v, "BodyInit")?, None))
                 }
                 _ => {
                     let s = realm.to_rust_string(v.clone())?;
@@ -682,6 +753,11 @@ fn rejected(realm: &mut Realm, kind: &str, msg: &str) -> JsResult<Value> {
     Ok(Value::Object(p))
 }
 
+/// Encoding Standard UTF-8 decode consumes one leading signature.
+fn decode_utf8(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
+}
+
 fn body_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let bytes = match take_body(realm, &this) {
         Ok(b) => b,
@@ -690,7 +766,7 @@ fn body_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
             return rejected(realm, "TypeError", &msg);
         }
     };
-    let s = String::from_utf8_lossy(&bytes).into_owned();
+    let s = decode_utf8(&bytes);
     resolved(realm, Value::str(&s))
 }
 
@@ -702,7 +778,7 @@ fn body_json(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
             return rejected(realm, "TypeError", &msg);
         }
     };
-    let s = String::from_utf8_lossy(&bytes).into_owned();
+    let s = decode_utf8(&bytes);
     let json = realm.get_str(Value::Object(realm.global()), "JSON")?;
     let parse = realm.get_str(json.clone(), "parse")?;
     match realm.call(parse, json, &[Value::str(&s)]) {
@@ -754,7 +830,10 @@ fn body_blob(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
             return rejected(realm, "TypeError", &msg);
         }
     };
-    let ct = realm.get_str(this.clone(), "headers").ok().and_then(|h| h.as_object()).and_then(|h| realm.host_data::<HeadersData>(h).and_then(|d| d.list.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.clone()))).unwrap_or_default();
+    let headers = realm.get_str(this, "headers")?;
+    let ct = headers.as_object().and_then(|o| realm.host_data::<HeadersData>(o)).map_or_else(String::new, |data| {
+        rabbithole_net::mime::from_content_type_headers(data.list.iter().filter(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, value)| value.as_str()))
+    });
     let blob = make_blob(realm, bytes, &ct);
     resolved(realm, blob)
 }
@@ -1070,8 +1149,8 @@ fn build_request(url: &str, method: &str, headers: &[(String, String)], body: &[
             req = req.with_header(k, v);
         }
     }
-    let referer = with_env(|env| env.document_url());
-    Ok(req.with_referer(referer).with_dest(rabbithole_net::Destination::Empty).with_mode(rabbithole_net::RequestMode::Cors, rabbithole_net::CredentialsMode::SameOrigin))
+    let (referer, policy) = with_env(|env| (env.document_url(), env.referrer_policy()));
+    Ok(req.with_referer(referer).with_referrer_policy(policy).with_dest(rabbithole_net::Destination::Empty).with_mode(rabbithole_net::RequestMode::Cors, rabbithole_net::CredentialsMode::SameOrigin))
 }
 
 /// Start a request on a background thread when the environment can (http
@@ -1266,13 +1345,29 @@ fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
 
 // ------------------------------------------------------------ FormData
 
+#[derive(Clone)]
+enum FormValue {
+    Text(String),
+    File(ObjectId),
+}
+
+impl FormValue {
+    fn as_value(&self) -> Value {
+        match self {
+            Self::Text(text) => Value::str(text),
+            Self::File(id) => Value::Object(*id),
+        }
+    }
+}
+
 pub(crate) struct FormDataData {
-    pub fields: Vec<(String, String)>,
+    fields: Vec<(String, FormValue)>,
 }
 
 pub(crate) fn make_form_data(realm: &mut Realm, fields: Vec<(String, String)>) -> ObjectId {
     let p = proto("FormData");
     let o = realm.new_object_with_proto(Some(p));
+    let fields = fields.into_iter().map(|(k, v)| (k, FormValue::Text(v))).collect();
     realm.set_host_data(o, Box::new(FormDataData { fields }));
     realm.set_class_name(o, "FormData");
     o
@@ -1294,34 +1389,100 @@ fn fd_of(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
     }
 }
 
+// File identities in native data need a traced edge for as long as their
+// entries exist. The private array stays writable when script freezes the form.
+fn fd_file_roots(realm: &mut Realm, o: ObjectId) -> ObjectId {
+    let slot = state().borrow().form_data_files;
+    if let Some(array) = realm.obj(o).props.get(&PropertyKey::Symbol(slot)).and_then(|p| p.value.as_object()) {
+        return array;
+    }
+    let array = realm.new_array(Vec::new());
+    realm.define_property(o, slot, Value::Object(array), 0);
+    array
+}
+
+fn fd_refresh_roots(realm: &mut Realm, o: ObjectId) {
+    let slot = state().borrow().form_data_files;
+    let Some(array) = realm.obj(o).props.get(&PropertyKey::Symbol(slot)).and_then(|p| p.value.as_object()) else { return };
+    let files: Vec<_> = realm.host_data::<FormDataData>(o).unwrap().fields.iter().filter_map(|(_, v)| match v {
+        FormValue::File(id) => Some(Value::Object(*id)),
+        FormValue::Text(_) => None,
+    }).collect();
+    if let rabbithole_js::ObjectKind::Array { elements, length } = &mut realm.obj_mut(array).kind {
+        *length = files.len() as u32;
+        *elements = files;
+    }
+}
+
+fn fd_entry(realm: &mut Realm, args: &[Value]) -> JsResult<(String, FormValue)> {
+    if args.len() < 2 {
+        return Err(realm.throw_type_error("FormData requires a name and value"));
+    }
+    let name = arg_str(realm, args, 0)?;
+    let Some(id) = args[1].as_object().filter(|&id| realm.host_data::<BlobData>(id).is_some()) else {
+        if args.len() > 2 {
+            return Err(realm.throw_type_error("A filename requires a Blob"));
+        }
+        return Ok((name, FormValue::Text(arg_str(realm, args, 1)?)));
+    };
+    let filename = arg_str_opt(realm, args, 2)?;
+    let blob = realm.host_data::<BlobData>(id).unwrap();
+    if filename.is_none() && blob.file.is_some() {
+        return Ok((name, FormValue::File(id)));
+    }
+    let file = FileInfo {
+        name: filename.unwrap_or_else(|| "blob".into()),
+        last_modified: blob.file.as_ref().map_or_else(|| rabbithole_js::builtins::date::now_ms() as i64, |f| f.last_modified),
+    };
+    let data = BlobData { bytes: blob.bytes.clone(), mime: blob.mime.clone(), file: Some(file) };
+    let file = make_blob_object(realm, data, proto("File"));
+    realm.native_root(file.clone());
+    Ok((name, FormValue::File(file.as_object().unwrap())))
+}
+
 fn fd_append(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
-    let k = arg_str(realm, args, 0)?;
-    let v = arg_str(realm, args, 1)?;
-    realm.host_data_mut::<FormDataData>(o).unwrap().fields.push((k, v));
+    let entry = fd_entry(realm, args)?;
+    if let FormValue::File(id) = entry.1 {
+        let roots = fd_file_roots(realm, o);
+        if let rabbithole_js::ObjectKind::Array { elements, length } = &mut realm.obj_mut(roots).kind {
+            elements.push(Value::Object(id));
+            *length = elements.len() as u32;
+        }
+    }
+    realm.host_data_mut::<FormDataData>(o).unwrap().fields.push(entry);
     Ok(Value::Undefined)
 }
 
 fn fd_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
-    let k = arg_str(realm, args, 0)?;
-    let v = arg_str(realm, args, 1)?;
-    let d = realm.host_data_mut::<FormDataData>(o).unwrap();
-    d.fields.retain(|(kk, _)| *kk != k);
-    d.fields.push((k, v));
+    let (key, value) = fd_entry(realm, args)?;
+    if matches!(value, FormValue::File(_)) { fd_file_roots(realm, o); }
+    let fields = &mut realm.host_data_mut::<FormDataData>(o).unwrap().fields;
+    let mut replacement = Some(value);
+    fields.retain_mut(|(name, old)| {
+        if *name != key { return true }
+        if let Some(new) = replacement.take() {
+            *old = new;
+            return true;
+        }
+        false
+    });
+    if let Some(value) = replacement { fields.push((key, value)); }
+    fd_refresh_roots(realm, o);
     Ok(Value::Undefined)
 }
 
 fn fd_get(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
     let k = arg_str(realm, args, 0)?;
-    Ok(realm.host_data::<FormDataData>(o).unwrap().fields.iter().find(|(kk, _)| *kk == k).map(|(_, v)| Value::str(v)).unwrap_or(Value::Null))
+    Ok(realm.host_data::<FormDataData>(o).unwrap().fields.iter().find(|(kk, _)| *kk == k).map(|(_, v)| v.as_value()).unwrap_or(Value::Null))
 }
 
 fn fd_get_all(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
     let k = arg_str(realm, args, 0)?;
-    let vals: Vec<Value> = realm.host_data::<FormDataData>(o).unwrap().fields.iter().filter(|(kk, _)| *kk == k).map(|(_, v)| Value::str(v)).collect();
+    let vals: Vec<Value> = realm.host_data::<FormDataData>(o).unwrap().fields.iter().filter(|(kk, _)| *kk == k).map(|(_, v)| v.as_value()).collect();
     Ok(realm.new_array_value(vals))
 }
 
@@ -1335,25 +1496,13 @@ fn fd_delete(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     let o = fd_of(realm, &this)?;
     let k = arg_str(realm, args, 0)?;
     realm.host_data_mut::<FormDataData>(o).unwrap().fields.retain(|(kk, _)| *kk != k);
+    fd_refresh_roots(realm, o);
     Ok(Value::Undefined)
 }
 
 fn fd_iter(realm: &mut Realm, this: Value, kind: u8) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
-    let items: Vec<Value> = realm
-        .host_data::<FormDataData>(o)
-        .unwrap()
-        .fields
-        .clone()
-        .into_iter()
-        .map(|(k, v)| match kind {
-            0 => Value::str(&k),
-            1 => Value::str(&v),
-            _ => realm.new_array_value(vec![Value::str(&k), Value::str(&v)]),
-        })
-        .collect();
-    let arr = realm.new_array_value(items);
-    realm.invoke(arr, "values", &[])
+    Ok(PairList::Form.iterator(realm, o, kind))
 }
 
 fn fd_entries(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1371,59 +1520,91 @@ fn fd_values(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 fn fd_for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = fd_of(realm, &this)?;
     let f = arg(args, 0);
-    let fields = realm.host_data::<FormDataData>(o).unwrap().fields.clone();
-    for (k, v) in fields {
-        realm.call(f.clone(), arg(args, 1), &[Value::str(&v), Value::str(&k), this.clone()])?;
+    if !realm.is_callable(&f) {
+        return Err(realm.throw_type_error("FormData.forEach requires a callable"));
+    }
+    let mut i = 0;
+    while let Some((key, value)) = PairList::Form.at(realm, o, i) {
+        realm.call(f.clone(), arg(args, 1), &[value, key, this.clone()])?;
+        i += 1;
     }
     Ok(Value::Undefined)
 }
 
 // ---------------------------------------------------------------- Blob
 
+fn normalize_blob_type(ty: &str) -> String {
+    if ty.bytes().all(|b| (0x20..=0x7e).contains(&b)) { ty.to_ascii_lowercase() } else { String::new() }
+}
+
 pub(crate) fn make_blob(realm: &mut Realm, bytes: Vec<u8>, ty: &str) -> Value {
-    let p = proto("Blob");
-    let o = realm.new_object_with_proto(Some(p));
-    let len = bytes.len();
-    realm.set_host_data(o, Box::new(BodyData { bytes, used: false, navigation: None }));
-    realm.set_class_name(o, "Blob");
-    realm.define_property(o, "size", Value::Number(len as f64), ACC);
-    realm.define_property(o, "type", Value::str(ty), ACC);
+    make_blob_object(realm, BlobData { bytes, mime: ty.to_string(), file: None }, proto("Blob"))
+}
+
+fn make_blob_object(realm: &mut Realm, data: BlobData, prototype: ObjectId) -> Value {
+    let class = if data.file.is_some() { "File" } else { "Blob" };
+    let o = realm.new_object_with_proto(Some(prototype));
+    realm.set_host_data(o, Box::new(data));
+    realm.set_class_name(o, class);
     Value::Object(o)
 }
 
+fn blob_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a BlobData> {
+    let Some(id) = this.as_object().filter(|&id| realm.host_data::<BlobData>(id).is_some()) else {
+        return Err(realm.throw_type_error("Illegal invocation"));
+    };
+    Ok(realm.host_data::<BlobData>(id).unwrap())
+}
+
+fn blob_size(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::Number(blob_data(realm, &this)?.bytes.len() as f64))
+}
+
+fn blob_type(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::str(&blob_data(realm, &this)?.mime))
+}
+
 fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    construct_blob(realm, args, false)
+}
+
+fn file_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if args.len() < 2 {
+        return Err(realm.throw_type_error("File requires fileBits and fileName"));
+    }
+    construct_blob(realm, args, true)
+}
+
+fn construct_blob(realm: &mut Realm, args: &[Value], file: bool) -> JsResult<Value> {
+    let class = if file { "File" } else { "Blob" };
+    if realm.new_target().is_undefined() {
+        return Err(realm.throw_type_error(&format!("{class} requires new")));
+    }
     let parts = arg(args, 0);
-    let opts = arg(args, 1);
-    if !(parts.is_undefined() || parts.is_object()) {
+    let opts = arg(args, if file { 2 } else { 1 });
+    if !(parts.is_object() || (!file && parts.is_undefined())) {
         return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value cannot be converted to a sequence."));
     }
-    // Web IDL converts arguments from left to right: coerce the sequence's
-    // string parts before reading any member of the options dictionary.
-    // Keep binary parts as references until processing the constructor's
-    // body (an options getter may still mutate an ArrayBuffer).
+    // Convert each part before advancing the iterator. Binary sources are
+    // copied after conversion of the dictionary, whose getters can alter them.
     let mut converted = Vec::new();
     if parts.is_object() {
-        let sequence = realm.iterate_to_vec(parts)?;
-        for p in &sequence {
-            realm.native_root(p.clone());
-        }
-        for p in sequence {
-            let binary = match p.v() {
-                V::Object(o) => realm.host_data::<BodyData>(o).is_some()
-                    || realm.host_data::<ParamsData>(o).is_some()
-                    || realm.host_data::<FormDataData>(o).is_some()
-                    || matches!(&realm.obj(o).kind, rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_)),
-                _ => false,
-            };
-            let p = if binary || matches!(p.v(), V::String(_) | V::Null | V::Undefined) {
-                p
-            } else {
-                Value::str(&realm.to_rust_string(p)?)
-            };
-            realm.native_root(p.clone());
-            converted.push(p);
-        }
+        let (it, next) = realm.get_iterator(parts)?;
+        realm.native_root(it.clone());
+        realm.native_root(next.clone());
+        realm.for_each_step(it, next, |realm, part, index| {
+            if index >= rabbithole_js::interop::MAX_LIST_LENGTH {
+                return Err(realm.out_of_memory());
+            }
+            let binary = part.as_object().is_some_and(|o| realm.host_data::<BlobData>(o).is_some()
+                || matches!(realm.obj(o).kind, rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_) | rabbithole_js::ObjectKind::DataView(_)));
+            let value = if binary { part } else { Value::str(&realm.to_rust_string(part)?) };
+            realm.native_root(value.clone());
+            converted.push(value);
+            Ok(())
+        })?;
     }
+    let name = if file { Some(arg_str(realm, args, 1)?) } else { None };
     if !(opts.is_undefined() || opts.is_null() || opts.is_object()) {
         return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value is not of type 'BlobPropertyBag'."));
     }
@@ -1434,6 +1615,19 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         Some(other) => return Err(realm.throw_type_error(&format!("Failed to construct 'Blob': The provided value '{other}' is not a valid enum value of type EndingType."))),
     };
     let ty = dict_str(realm, &opts, "type")?.unwrap_or_default();
+    let info = if let Some(name) = name {
+        let modified = dict_value(realm, &opts, "lastModified")?;
+        let last_modified = if modified.is_undefined() {
+            rabbithole_js::builtins::date::now_ms() as i64
+        } else {
+            // Web IDL long long truncates and wraps modulo 2^64.
+            let n = realm.to_number(modified)?.trunc() % 18446744073709551616.0;
+            if n < 0.0 { ((-n) as u64).wrapping_neg() as i64 } else { n as u64 as i64 }
+        };
+        Some(FileInfo { name, last_modified })
+    } else {
+        None
+    };
     let mut bytes = Vec::new();
     for p in converted {
         if native {
@@ -1447,37 +1641,87 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         let (b, _) = body_bytes_from_value(realm, &p)?;
         bytes.extend(b);
     }
-    // The type: lower-cased, or empty when not printable ASCII.
-    let ty = if ty.chars().all(|c| ('\u{20}'..='\u{7e}').contains(&c)) { ty.to_ascii_lowercase() } else { String::new() };
-    Ok(make_blob(realm, bytes, &ty))
+    let prototype = realm.proto_from_new_target(proto(class));
+    Ok(make_blob_object(realm, BlobData { bytes, mime: normalize_blob_type(&ty), file: info }, prototype))
+}
+
+/// Serialize the native payload without consulting any page-defined properties.
+pub(crate) fn serialize_blob(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(blob) = args.first().and_then(Value::as_object).and_then(|o| realm.host_data::<BlobData>(o)) else {
+        return Ok(Value::Null);
+    };
+    let bytes = Value::str(&base64_encode(&blob.bytes));
+    let mime = Value::str(&blob.mime);
+    let (name, modified) = match &blob.file {
+        Some(f) => (Value::str(&f.name), Value::str(&f.last_modified.to_string())),
+        None => (Value::Null, Value::Null),
+    };
+    Ok(realm.new_array_value(vec![bytes, mime, name, modified]))
+}
+
+pub(crate) fn deserialize_blob(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let [encoded, mime, name, modified] = args else { return Err(realm.throw_type_error("Invalid serialized Blob")); };
+    let (V::String(encoded), V::String(mime)) = (encoded.v(), mime.v()) else { return Err(realm.throw_type_error("Invalid serialized Blob")); };
+    let Some(bytes) = rabbithole_net::base64_decode(&encoded.to_rust_string()) else { return Err(realm.throw_type_error("Invalid serialized Blob bytes")); };
+    let file = match (name.v(), modified.v()) {
+        (V::Null, V::Null) => None,
+        (V::String(name), V::String(modified)) => {
+            let last_modified = modified.to_rust_string().parse().map_err(|_| realm.throw_type_error("Invalid serialized File timestamp"))?;
+            Some(FileInfo { name: name.to_rust_string(), last_modified })
+        }
+        _ => return Err(realm.throw_type_error("Invalid serialized File metadata")),
+    };
+    let prototype = proto(if file.is_some() { "File" } else { "Blob" });
+    Ok(make_blob_object(realm, BlobData { bytes, mime: mime.to_rust_string(), file }, prototype))
+}
+
+fn file_name(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    if let Some(info) = &blob_data(realm, &this)?.file {
+        return Ok(Value::str(&info.name));
+    }
+    Err(realm.throw_type_error("Illegal invocation"))
+}
+
+fn file_last_modified(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    if let Some(info) = &blob_data(realm, &this)?.file {
+        return Ok(Value::Number(info.last_modified as f64));
+    }
+    Err(realm.throw_type_error("Illegal invocation"))
 }
 
 fn blob_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let V::Object(o) = this.v() else {
-        return Err(realm.throw_type_error("Illegal invocation"));
-    };
-    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
-    resolved(realm, Value::str(&String::from_utf8_lossy(&bytes)))
+    let text = Value::str(&decode_utf8(&blob_data(realm, &this)?.bytes));
+    resolved(realm, text)
 }
 
 fn blob_array_buffer(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let V::Object(o) = this.v() else {
-        return Err(realm.throw_type_error("Illegal invocation"));
-    };
-    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
+    let bytes = blob_data(realm, &this)?.bytes.clone();
     let ab = make_array_buffer(realm, bytes);
     resolved(realm, ab)
 }
 
+/// Blob.slice takes [Clamp] long long offsets, rounded to nearest-even.
+fn blob_offset(realm: &mut Realm, value: Value, len: usize, default: usize) -> JsResult<usize> {
+    if value.is_undefined() {
+        return Ok(default);
+    }
+    let offset = realm.to_number(value)?.round_ties_even() as i64;
+    Ok(if offset < 0 { len.saturating_sub(usize::try_from(offset.unsigned_abs()).unwrap_or(usize::MAX)) }
+        else { len.min(usize::try_from(offset).unwrap_or(usize::MAX)) })
+}
+
+pub(crate) fn read_blob_buffer_sync(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let bytes = blob_data(realm, &arg(args, 0))?.bytes.clone();
+    Ok(make_array_buffer(realm, bytes))
+}
+
 fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let V::Object(o) = this.v() else {
-        return Err(realm.throw_type_error("Illegal invocation"));
-    };
-    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
-    let start = realm.relative_index(arg(args, 0), bytes.len(), 0)?;
-    let end = realm.relative_index(arg(args, 1), bytes.len(), bytes.len())?;
+    let len = blob_data(realm, &this)?.bytes.len();
+    let start = blob_offset(realm, arg(args, 0), len, 0)?;
+    let end = blob_offset(realm, arg(args, 1), len, len)?;
     let ty = arg_str_opt(realm, args, 2)?.unwrap_or_default();
-    Ok(make_blob(realm, bytes[start.min(end)..end].to_vec(), &ty))
+    let bytes = blob_data(realm, &this)?.bytes[start.min(end)..end].to_vec();
+    Ok(make_blob(realm, bytes, &normalize_blob_type(&ty)))
 }
 
 /// `URL.createObjectURL(blob)`: `blob:<origin>/<uuid>` resolving to the
@@ -1485,10 +1729,9 @@ fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
 fn url_create_object_url(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     let (bytes, ty) = match v.v() {
-        V::Object(o) if realm.host_data::<BodyData>(o).is_some() => {
-            let b = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
-            let t = realm.get_str(v.clone(), "type").ok().and_then(|t| realm.to_rust_string(t).ok()).unwrap_or_default();
-            (b, t)
+        V::Object(o) if realm.host_data::<BlobData>(o).is_some() => {
+            let blob = blob_data(realm, &v)?;
+            (blob.bytes.clone(), blob.mime.clone())
         }
         // MediaSource and other objects: an opaque URL.
         V::Object(_) => (Vec::new(), String::new()),
@@ -1610,6 +1853,9 @@ pub(crate) struct TextDecoderData {
 }
 
 fn text_decoder_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if realm.new_target().is_undefined() {
+        return Err(realm.throw_type_error("TextDecoder requires new"));
+    }
     let label = match args.first().map(|v| v.v()) {
         None | Some(V::Undefined) => "utf-8".to_string(),
         Some(_) => arg_str(realm, args, 0)?,
@@ -1654,7 +1900,7 @@ fn text_decoder_ignore_bom(realm: &mut Realm, this: Value, _: &[Value]) -> JsRes
 }
 
 /// Bytes of an `AllowSharedBufferSource` (copied).
-fn buffer_source_bytes(realm: &mut Realm, v: &Value, what: &str) -> JsResult<Vec<u8>> {
+pub(crate) fn buffer_source_bytes(realm: &mut Realm, v: &Value, what: &str) -> JsResult<Vec<u8>> {
     let V::Object(o) = v.v() else {
         return Err(realm.throw_type_error(&format!("{what}: The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")));
     };
@@ -1840,10 +2086,34 @@ fn xhr_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Object(o))
 }
 
+fn byte_string(realm: &mut Realm, args: &[Value], index: usize) -> JsResult<String> {
+    let Some(value) = args.get(index) else {
+        return Err(realm.throw_type_error("Missing required argument"));
+    };
+    let text = realm.to_rust_string(value.clone())?;
+    if text.chars().any(|c| c > '\u{ff}') {
+        return Err(realm.throw_type_error("Cannot convert value to ByteString"));
+    }
+    Ok(text)
+}
+
+fn forbidden_method(method: &str) -> bool {
+    ["CONNECT", "TRACE", "TRACK"].iter().any(|m| method.eq_ignore_ascii_case(m))
+}
+
 fn xhr_open(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = xhr_of(realm, &this)?;
-    let method = arg_str(realm, args, 0)?.to_ascii_uppercase();
+    if args.len() < 2 { return Err(realm.throw_type_error("open requires a method and URL")); }
+    let method = byte_string(realm, args, 0)?;
     let url = arg_str(realm, args, 1)?;
+    if !rabbithole_net::mime::is_http_token(&method) {
+        return Err(crate::misc::dom_exception(realm, "SyntaxError", "Invalid HTTP method"));
+    }
+    if forbidden_method(&method) {
+        return Err(crate::misc::dom_exception(realm, "SecurityError", "Forbidden HTTP method"));
+    }
+    let upper = method.to_ascii_uppercase();
+    let method = if matches!(upper.as_str(), "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT") { upper } else { method };
     let url = match resolve_url(&url) {
         Some(u) => u.to_string(),
         None => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to execute 'open' on 'XMLHttpRequest': Invalid URL '{url}'"))),
@@ -1865,9 +2135,26 @@ fn xhr_open(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 
 fn xhr_set_request_header(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = xhr_of(realm, &this)?;
-    let k = arg_str(realm, args, 0)?.to_ascii_lowercase();
-    let v = arg_str(realm, args, 1)?;
-    realm.host_data_mut::<XhrData>(o).unwrap().headers.push((k, v));
+    let name = byte_string(realm, args, 0)?.to_ascii_lowercase();
+    let value = byte_string(realm, args, 1)?;
+    let value = value.trim_matches([' ', '\t', '\r', '\n']);
+    let d = realm.host_data_mut::<XhrData>(o).unwrap();
+    if d.ready_state != 1 || d.sent {
+        return Err(crate::misc::dom_exception(realm, "InvalidStateError", "Request headers require an open, unsent request"));
+    }
+    if !rabbithole_net::mime::is_http_token(&name) || value.contains(['\0', '\r', '\n']) {
+        return Err(crate::misc::dom_exception(realm, "SyntaxError", "Invalid HTTP header"));
+    }
+    let method_override = matches!(name.as_str(), "x-http-method" | "x-http-method-override" | "x-method-override");
+    if rabbithole_net::cors::is_forbidden_request_header(&name) || (method_override && value.split(',').any(|m| forbidden_method(m.trim()))) {
+        return Ok(Value::Undefined);
+    }
+    if let Some((_, current)) = d.headers.iter_mut().find(|(key, _)| *key == name) {
+        current.push_str(", ");
+        current.push_str(value);
+    } else {
+        d.headers.push((name, value.to_string()));
+    }
     Ok(Value::Undefined)
 }
 
@@ -2122,11 +2409,15 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_symbol_method(fd, rabbithole_js::realm::SYM_ITERATOR, "[Symbol.iterator]", 0, fd_entries);
     // Blob / File
     let blob = define_class(realm, "Blob", None, blob_ctor);
+    realm.define_accessor(blob, "size", Some(blob_size), None, ACC);
+    realm.define_accessor(blob, "type", Some(blob_type), None, ACC);
     realm.define_method(blob, "text", 0, blob_text);
     realm.define_method(blob, "arrayBuffer", 0, blob_array_buffer);
     realm.define_method(blob, "slice", 2, blob_slice);
     realm.define_method(blob, "stream", 0, blob_text);
-    define_class(realm, "File", Some("Blob"), blob_ctor);
+    let file = define_class(realm, "File", Some("Blob"), file_ctor);
+    realm.define_accessor(file, "name", Some(file_name), None, ACC);
+    realm.define_accessor(file, "lastModified", Some(file_last_modified), None, ACC);
     define_class(realm, "FileReader", Some("EventTarget"), file_reader_ctor);
     // TextEncoder / TextDecoder
     let te = define_class(realm, "TextEncoder", None, text_encoder_ctor);
