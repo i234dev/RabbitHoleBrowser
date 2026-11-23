@@ -10,6 +10,7 @@ use rabbithole_js::{JsResult, ObjectId, Realm, Value};
 struct Key {
     private: PrivateKey,
     extractable: bool,
+    signing: bool,
 }
 
 fn curve(realm: &mut Realm, args: &[Value]) -> JsResult<&'static Algorithm> {
@@ -36,8 +37,9 @@ fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
         }.map_err(|_| dom_exception(realm, "DataError", "Invalid ECDH private key"))?
     };
     let extractable = realm.to_boolean(&arg(args, 3));
+    let signing = realm.to_boolean(&arg(args, 4));
     let id = realm.new_object();
-    realm.set_host_data(id, Box::new(Key { private, extractable }));
+    realm.set_host_data(id, Box::new(Key { private, extractable, signing }));
     Ok(Value::Object(id))
 }
 
@@ -75,16 +77,38 @@ fn validate(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 fn derive(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let bytes = buffer_source_bytes(realm, &arg(args, 1), "ECDH public key")?;
     let id = handle(realm, args)?;
-    let private = &realm.host_data::<Key>(id).unwrap().private;
+    let key = realm.host_data::<Key>(id).unwrap();
+    if key.signing { return Err(dom_exception(realm, "InvalidAccessError", "Expected an agreement key")); }
+    let private = &key.private;
     let peer = UnparsedPublicKey::new(private.algorithm(), bytes);
     let result = agreement::agree(private, peer, (), |secret| Ok(secret.to_vec()))
         .map_err(|_| dom_exception(realm, "OperationError", "ECDH agreement failed"))?;
     Ok(make_array_buffer(realm, result))
 }
 
+fn sign(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let digest = buffer_source_bytes(realm, &arg(args, 1), "ECDSA digest")?;
+    let id = handle(realm, args)?;
+    let key = realm.host_data::<Key>(id).unwrap();
+    if !key.signing { return Err(dom_exception(realm, "InvalidAccessError", "Expected a signing key")); }
+    let result = key.private.as_der().ok().and_then(|der: Pkcs8V1Der<'_>| super::ecdsa::sign(der.as_ref(), &digest))
+        .ok_or_else(|| dom_exception(realm, "OperationError", "ECDSA signing failed"))?;
+    Ok(make_array_buffer(realm, result))
+}
+
+fn verify(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let public = buffer_source_bytes(realm, &arg(args, 0), "ECDSA public key")?;
+    let digest = buffer_source_bytes(realm, &arg(args, 1), "ECDSA digest")?;
+    let signature = buffer_source_bytes(realm, &arg(args, 2), "ECDSA signature")?;
+    super::ecdsa::verify(&public, &digest, &signature).map(Value::Bool)
+        .ok_or_else(|| dom_exception(realm, "OperationError", "ECDSA verification failed"))
+}
+
 pub(super) fn install(realm: &mut Realm, internals: ObjectId) {
-    realm.define_method(internals, "ecdhKey", 4, create);
+    realm.define_method(internals, "ecdhKey", 5, create);
     realm.define_method(internals, "ecdhExport", 2, export);
     realm.define_method(internals, "ecdhValidate", 2, validate);
+    realm.define_method(internals, "ecdsaSign", 2, sign);
+    realm.define_method(internals, "ecdsaVerify", 3, verify);
     realm.define_method(internals, "ecdhDerive", 2, derive);
 }

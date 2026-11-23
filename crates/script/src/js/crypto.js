@@ -179,12 +179,12 @@
   }
 
   const normAlg = a => typeof a === 'object' && a !== null ? a : { name: `${a}` };
-  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ED448', 'X448'];
+  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ED448', 'X448'];
   function algName(a) {
     const id = normAlg(a);
     if (id.name === undefined) throw new TypeError('An algorithm name is required');
     const n = String(id.name).toUpperCase();
-    const map = { ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
+    const map = { ECDSA: 'ECDSA', ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
     throw err('NotSupportedError', 'Algorithm: Unrecognized name');
@@ -280,6 +280,11 @@
     if (!ecCurves[name]) throw err('NotSupportedError','Unsupported named curve');
     return name;
   }
+  function ecDigest(alg, message) {
+    const hash = normAlg(alg).hash;
+    if (hash === undefined) throw new TypeError('ECDSA requires a hash algorithm');
+    return N.cryptoDigest(hashName(hash), message);
+  }
   function ecPart(value, size) {
     if (typeof value !== 'string' || value.length !== Math.ceil(size * 4 / 3) ||
         !/^[A-Za-z0-9_-]+$/.test(value)) throw ecError();
@@ -329,14 +334,16 @@
     }
     return Uint8Array.from(field(0x30,[...field(0x30,ecAlgIdentifier(curve)),...field(3,[0,...bytes])])).buffer;
   }
-  function importEcdh(format, data, alg, extractable, usages) {
+  function importEc(name, format, data, alg, extractable, usages) {
     const curve = ecCurve(alg), size = ecCurves[curve].size;
     const priv = format === 'pkcs8' || (format === 'jwk' && data?.d !== undefined);
-    usageCheck(usages, priv ? ['deriveBits','deriveKey'] : []);
+    const signing = name === 'ECDSA';
+    usageCheck(usages, priv ? (signing ? ['sign'] : ['deriveBits','deriveKey']) : (signing ? ['verify'] : []));
     if (priv && !usages.length) throw err('SyntaxError','A private key requires a usage');
     let point, handle;
     if (format === 'jwk') {
-      if (data?.kty !== 'EC' || data.crv !== curve || (usages.length && data.use !== undefined && data.use !== 'enc') ||
+      if (data?.kty !== 'EC' || data.crv !== curve || (usages.length && data.use !== undefined && data.use !== (signing ? 'sig' : 'enc')) ||
+          (signing && data.alg !== undefined && data.alg !== ({'P-256':'ES256','P-384':'ES384','P-521':'ES512'})[curve]) ||
           (data.ext === false && extractable)) throw ecError();
       if (data.key_ops !== undefined) {
         const ops = Array.from(data.key_ops);
@@ -344,21 +351,21 @@
       }
       point = Uint8Array.of(4,...ecPart(data.x,size),...ecPart(data.y,size));
       if (priv) {
-        handle = N.ecdhKey(curve,'scalar',ecPart(data.d,size),!!extractable);
+        handle = N.ecdhKey(curve,'scalar',ecPart(data.d,size),!!extractable,signing);
         const actual = new Uint8Array(N.ecdhExport(handle,'public'));
         if (!actual.every((b,i)=>b === point[i])) throw ecError();
       }
     } else if (format === 'pkcs8') {
-      handle = N.ecdhKey(curve,'pkcs8',parseEcDer(bytesOf(data),curve,true),!!extractable);
+      handle = N.ecdhKey(curve,'pkcs8',parseEcDer(bytesOf(data),curve,true),!!extractable,signing);
     } else if (format === 'spki') {
       point = parseEcDer(bytesOf(data),curve,false);
     } else if (format === 'raw' || format === 'raw-public') {
       point = bytesOf(data);
-    } else throw err('NotSupportedError','Unsupported ECDH import format');
+    } else throw err('NotSupportedError','Unsupported EC import format');
     if (!priv) N.ecdhValidate(curve,point);
-    return newKey(priv ? 'private' : 'public',extractable,{name:'ECDH',namedCurve:curve},usages,priv ? handle : point.slice());
+    return newKey(priv ? 'private' : 'public',extractable,{name,namedCurve:curve},usages,priv ? handle : point.slice());
   }
-  function exportEcdh(format, k) {
+  function exportEc(format, k) {
     const curve = k.algorithm.namedCurve, priv = k.type === 'private';
     if (format === 'pkcs8' && priv) return N.ecdhExport(k.raw,format);
     const point = priv ? new Uint8Array(N.ecdhExport(k.raw,'public')) : k.raw;
@@ -370,12 +377,12 @@
       if (priv) jwk.d = b64u(new Uint8Array(N.ecdhExport(k.raw,'scalar')));
       return jwk;
     }
-    throw err('InvalidAccessError','The ECDH key type cannot be exported in this format');
+    throw err('InvalidAccessError','The EC key type cannot be exported in this format');
   }
 
   function importSecret(format, keyData, alg, extractable, usages) {
     const name = algName(alg);
-    if (name === 'ECDH') return importEcdh(format,keyData,alg,extractable,Array.from(usages));
+    if (name === 'ECDH' || name === 'ECDSA') return importEc(name,format,keyData,alg,extractable,Array.from(usages));
     if (okp[name]) return importOctetKey(name, format, keyData, extractable, Array.from(usages));
     let raw;
     if (format === 'raw' || format === 'raw-secret') raw = bytesOf(keyData);
@@ -465,14 +472,17 @@
     generateKey(alg, extractable, usages) {
       return run(() => {
         const name = algName(alg);
-        if (name === 'ECDH') {
-          const namedCurve = ecCurve(alg), requested = Array.from(usages);
-          usageCheck(requested, ['deriveBits','deriveKey']);
-          if (!requested.length) throw err('SyntaxError','A private key requires a usage');
-          const handle = N.ecdhKey(namedCurve,'generate',null,!!extractable);
+        if (name === 'ECDH' || name === 'ECDSA') {
+          const namedCurve = ecCurve(alg), requested = Array.from(usages), signing = name === 'ECDSA';
+          const privateOps = signing ? ['sign'] : ['deriveBits','deriveKey'];
+          const publicOps = signing ? ['verify'] : [];
+          usageCheck(requested, [...privateOps,...publicOps]);
+          const privateUsages = requested.filter(u => privateOps.includes(u));
+          if (!privateUsages.length) throw err('SyntaxError','A private key requires a usage');
+          const handle = N.ecdhKey(namedCurve,'generate',null,!!extractable,signing);
           return {
-            publicKey: newKey('public',true,{name,namedCurve},[],new Uint8Array(N.ecdhExport(handle,'public'))),
-            privateKey: newKey('private',extractable,{name,namedCurve},requested,handle),
+            publicKey: newKey('public',true,{name,namedCurve},requested.filter(u => publicOps.includes(u)),new Uint8Array(N.ecdhExport(handle,'public'))),
+            privateKey: newKey('private',extractable,{name,namedCurve},privateUsages,handle),
           };
         }
         if (okp[name]) {
@@ -498,7 +508,7 @@
       return run(() => {
         if (!hasKey(key)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
         if (!keyInfo(key).extractable) throw err('InvalidAccessError', 'key is not extractable');
-        if (keyInfo(key).algorithm.name === 'ECDH') return exportEcdh(format,keyInfo(key));
+        if (['ECDH','ECDSA'].includes(keyInfo(key).algorithm.name)) return exportEc(format,keyInfo(key));
         if (okp[keyInfo(key).algorithm.name]) return exportOctetKey(format, keyInfo(key));
         const raw = keyInfo(key).raw;
         if (format === 'raw' || format === 'raw-secret') return raw.slice().buffer;
@@ -514,12 +524,14 @@
       const name = algName(alg);
       checkKey(key, name, 'sign');
       const k = keyInfo(key), msg = bytesOf(data);
+      if (name === 'ECDSA') return N.ecdsaSign(k.raw, ecDigest(alg,msg));
       return name === 'Ed25519' ? N.ed25519Sign(k.raw, msg) : hmac(k.algorithm.hash.name, k.raw, msg).buffer;
     }); }
     verify(alg, key, signature, data) { return run(() => {
       const name = algName(alg);
       checkKey(key, name, 'verify');
       const k = keyInfo(key), msg = bytesOf(data), sig = bytesOf(signature);
+      if (name === 'ECDSA') return N.ecdsaVerify(encodeEcSpki(k.algorithm.namedCurve,k.raw), ecDigest(alg,msg), sig);
       return name === 'Ed25519' ? N.ed25519Verify(k.raw, msg, sig) : N.cryptoHmac(k.algorithm.hash.name, k.raw, msg, sig);
     }); }
     encrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), false, 'encrypt').buffer); }

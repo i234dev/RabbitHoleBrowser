@@ -847,8 +847,8 @@ fn web_crypto_digest_hmac_aes_pbkdf2() {
           const pk = await s.importKey('raw', enc.encode('password'), 'PBKDF2', false, ['deriveBits']);
           const bits = await s.deriveBits({ name: 'PBKDF2', salt: enc.encode('salt'), iterations: 2, hash: 'SHA-1' }, pk, 160);
           console.log('pbkdf2', hex(bits));
-          const bad = await s.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']).catch((e) => e.name);
-          console.log('ec', bad, crypto instanceof Crypto, crypto.subtle instanceof SubtleCrypto, gk instanceof CryptoKey);
+          const pair = await s.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+          console.log('ec', pair.privateKey.type, pair.publicKey.type, crypto instanceof Crypto, crypto.subtle instanceof SubtleCrypto, gk instanceof CryptoKey);
         })().catch((e) => console.log('ERR ' + e + ' ' + e.stack));
         "#,
     );
@@ -862,7 +862,7 @@ fn web_crypto_digest_hmac_aes_pbkdf2() {
             "aes 69c4e0d86a7b0430d8cdb78070b4c55a true",
             "gcm secret 22 A256GCM",
             "pbkdf2 ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957",
-            "ec NotSupportedError true true true",
+            "ec private public true true true",
         ]
     );
 }
@@ -2427,4 +2427,36 @@ fn ecdh_checks_points_and_reuses_generated_and_imported_private_keys() {
       })().catch(e=>console.log(e.name,e.message));
     "#);
     assert_eq!(out, ["true 6b10 InvalidAccessError", "DataError DataError", "P-256 32 true", "P-384 48 true", "P-521 66 true"]);
+}
+
+#[test]
+fn ecdsa_verifies_a_published_signature_and_supports_independent_hash_selection() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const s = crypto.subtle, name = 'ECDSA', msg = new TextEncoder().encode('sample');
+        const bytes = hex => Uint8Array.from(hex.match(/../g), v => parseInt(v,16));
+        // RFC 6979 A.2.5, NIST P-256, SHA-256, message "sample".
+        const point = bytes('0460FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB67903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299');
+        const sig = bytes('EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8');
+        const key = await s.importKey('raw',point,{name,namedCurve:'P-256'},true,['verify']);
+        console.log(await s.verify({name,hash:'SHA-256'},key,sig,msg),
+          await s.verify({name,hash:'SHA-384'},key,sig,msg),
+          await s.verify({name,hash:'SHA-256'},key,sig.slice(1),msg));
+        for (const namedCurve of ['P-256','P-384','P-521']) {
+          const alg = {name,namedCurve}, pair = await s.generateKey(alg,true,['sign','verify']);
+          const privateKey = await s.importKey('pkcs8',await s.exportKey('pkcs8',pair.privateKey),alg,false,['sign']);
+          const publicKey = await s.importKey('spki',await s.exportKey('spki',pair.publicKey),alg,true,['verify']);
+          const result = [];
+          for (const hash of ['SHA-1','SHA-256','SHA-384','SHA-512']) {
+            const sig = await s.sign({name,hash},privateKey,msg);
+            result.push(sig.byteLength + '/' + await s.verify({name,hash},publicKey,sig,msg));
+          }
+          console.log(namedCurve,result.join(','),await s.exportKey('jwk',privateKey).catch(e=>e.name));
+        }
+      })().catch(e=>console.log(e.name,e.message));
+    "#);
+    assert_eq!(out, ["true false false",
+        "P-256 64/true,64/true,64/true,64/true InvalidAccessError",
+        "P-384 96/true,96/true,96/true,96/true InvalidAccessError",
+        "P-521 132/true,132/true,132/true,132/true InvalidAccessError"]);
 }

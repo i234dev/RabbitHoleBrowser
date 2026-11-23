@@ -2260,6 +2260,7 @@ version = "0.1.44"
 dependencies = [
  "aes 0.8.4",
  "aws-lc-rs",
+ "aws-lc-sys",
  "flate2",
  "ghash",
  "rabbithole-css",

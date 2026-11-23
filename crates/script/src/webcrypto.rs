@@ -1,6 +1,7 @@
 //! Native hash and HMAC operations shared by WebCrypto key derivation and
 //! signatures. A PBKDF2 operation can yield between batches of PRF calls.
 mod ecdh;
+mod ecdsa;
 mod gcm;
 mod x25519;
 

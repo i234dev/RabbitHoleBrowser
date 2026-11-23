@@ -30,4 +30,5 @@ ghash = "0.5.1"
 subtle = "2.6"
 rabbithole-rtc = { path = "../rtc" }
 x25519-dalek = { version = "3", features = ["static_secrets"] }
+aws-lc-sys = { version = "0.47", default-features = false }
 aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
