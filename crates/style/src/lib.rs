@@ -19,7 +19,7 @@ mod vars;
 mod color_spaces;
 
 pub use computed::*;
-pub use color_spaces::{color_to_wide, interpolate as interpolate_color, interpolate_wide, wide_to_color, ComputedColor, ColorInterp, HueMethod, InterpSpace, Wide};
+pub use color_spaces::{alpha_parts, layer_parts, color_to_wide, interpolate as interpolate_color, interpolate_wide, wide_to_color, ComputedColor, ColorInterp, HueMethod, InterpSpace, Wide};
 pub use restyle::{RestyleOutcome, StyleChange, StyleEngine};
 pub use rabbithole_css::{Declaration, MatchState, MediaEnv, PseudoElement, Stylesheet};
 

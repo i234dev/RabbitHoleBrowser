@@ -257,9 +257,93 @@ pub fn system_color(name: &str) -> Option<Color> {
 /// clipped to the sRGB gamut) and alpha.
 pub type Wide = [f32; 4];
 
+/// Separate the optional blend mode and the ordered layers. Each layer must
+/// itself be one color component; callers parse it at the appropriate stage.
+pub fn layer_parts(tokens: &[Token]) -> Option<(Option<String>, Vec<&[Token]>)> {
+    let mut layers = Vec::new();
+    let mut mode = None;
+    for (i, group) in split_top_commas(strip(tokens)).into_iter().enumerate() {
+        let parts = components(group);
+        let [color] = parts.as_slice() else { return None };
+        if i == 0 {
+            if let Some(name) = crate::values::ident(color) {
+                if rabbithole_gfx::canvas_ext::blend_mode_index(&name).is_some_and(|m| m < 16) {
+                    mode = Some(name);
+                    continue;
+                }
+            }
+        }
+        layers.push(*color);
+    }
+    (!layers.is_empty()).then_some((mode, layers))
+}
+
+fn layer_color(tokens: &[Token]) -> Option<Color> {
+    let (mode, layers) = layer_parts(tokens)?;
+    let mode = mode.and_then(|s| rabbithole_gfx::canvas_ext::blend_mode_index(&s)).unwrap_or(0);
+    let mut backdrop = Color::TRANSPARENT;
+    for layer in layers.iter().rev() {
+        let source = crate::values::resolve_current(crate::values::parse_color_component(layer)?)?;
+        let b = f64::from(backdrop.a) / 255.0;
+        let s = f64::from(source.a) / 255.0;
+        let a = s + b * (1.0 - s);
+        if a == 0.0 { continue; }
+        let blend = Color::from_u32(rabbithole_gfx::canvas_ext::blend_pixel(mode, backdrop.to_u32(), source.to_u32()));
+        let channel = |cs: u8, cb: u8, mixed: u8| {
+            ((s * (1.0 - b) * f64::from(cs) + s * b * f64::from(mixed) +
+                (1.0 - s) * b * f64::from(cb)) / a).round() as u8
+        };
+        backdrop = Color::rgba(channel(source.r, backdrop.r, blend.r), channel(source.g, backdrop.g, blend.g),
+            channel(source.b, backdrop.b, blend.b), (a * 255.0).round() as u8);
+    }
+    Some(backdrop)
+}
+
+pub fn alpha_parts(tokens: &[Token]) -> Option<(&[Token], &[Token])> {
+    let (c, a) = args(tokens)?;
+    let [from, origin] = c.as_slice() else { return None; };
+    crate::values::is_ident(from, "from").then_some((*origin, a?))
+}
+
+fn replace_alpha(tokens: &[Token]) -> Option<(Color, ComputedColor)> {
+    let (origin, expr) = alpha_parts(tokens)?;
+    let (paint, mut css) = if matches!(origin.first(), Some(Token::Function(f)) if f.eq_ignore_ascii_case("alpha")) {
+        replace_alpha(origin)?
+    } else {
+        let paint = crate::values::resolve_current(crate::values::parse_color_component(origin)?)?;
+        let css = ComputedColor::parse(origin).map_or_else(|| {
+            let origin_alpha = if let Some(Token::Function(f)) = origin.first() {
+                let parsed = match f.to_ascii_lowercase().as_str() {
+                    "rgb" | "rgba" | "hsl" | "hsla" => srgb_args(origin),
+                    "hwb" => args(origin),
+                    _ => None,
+                };
+                parsed.and_then(|(_, a)| alpha(a)).map(|a| a as f32)
+            } else { None };
+            ComputedColor { space: "srgb", channels: [paint.r, paint.g, paint.b].map(|v| Some(f32::from(v) / 255.0)),
+                alpha: Some(origin_alpha.unwrap_or(f32::from(paint.a) / 255.0)) }
+        }, |c| (*c).clone());
+        (paint, css)
+    };
+    css.alpha = match expr {
+        t if crate::values::is_ident(t, "alpha") => css.alpha,
+        t if crate::values::is_ident(t, "none") => None,
+        t => {
+            let replaced: Vec<_> = t.iter().map(|token| match token {
+                Token::Ident(k) if k.eq_ignore_ascii_case("alpha") => Token::Number(css.alpha.unwrap_or(0.0)),
+                t => t.clone(),
+            }).collect();
+            Some(alpha(Some(&replaced))? as f32)
+        }
+    };
+    Some((paint.with_alpha((255.0 * css.alpha.unwrap_or(0.0)).round() as u8), css))
+}
+
 /// A color of one of the newer notations, or `None` when `c` is not one
 /// (or is invalid).
 pub fn parse_function(f: &str, c: &[Token]) -> Option<ColorValue> {
+    if f == "color-layers" { return layer_color(c).map(ColorValue::Color); }
+    if f == "alpha" { return replace_alpha(c).map(|(color, _)| ColorValue::Color(color)); }
     if f == "light-dark" {
         // The light scheme is the one we render.
         let parts = split_top_commas(strip(c));
@@ -326,6 +410,7 @@ impl ComputedColor {
     pub fn parse(c: &[Token]) -> Option<std::rc::Rc<Self>> {
         let [Token::Function(f), rest @ ..] = c else { return None };
         let f = f.to_ascii_lowercase();
+        if f == "alpha" { return replace_alpha(c).map(|(_, color)| std::rc::Rc::new(color)); }
         let relative = rest.iter().find(|t| !matches!(t, Token::Whitespace))
             .is_some_and(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from")));
         let resolved;

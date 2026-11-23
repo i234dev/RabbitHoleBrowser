@@ -1089,7 +1089,7 @@ pub fn parse_color_component(c: &[Token]) -> Option<ColorValue> {
         [Token::Function(f), rest @ ..] => {
             let lf = f.to_ascii_lowercase();
             // Relative color syntax: `<fn>(from <color> ...)`.
-            if rest.iter().find(|t| !matches!(t, Token::Whitespace)).is_some_and(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) {
+            if lf != "alpha" && rest.iter().find(|t| !matches!(t, Token::Whitespace)).is_some_and(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) {
                 return crate::color_spaces::relative(&lf, c).map(ColorValue::Color);
             }
             match lf.as_str() {

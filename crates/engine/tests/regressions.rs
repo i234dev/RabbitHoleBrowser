@@ -694,3 +694,17 @@ fn peer_connections_deliver_over_an_authenticated_data_channel() {
         std::thread::sleep(Duration::from_millis(4));
     }
 }
+
+#[test]
+fn css_color_layers_composite_in_paint_order_and_alpha_preserves_the_origin_space() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<div id=box style='background-color:color-layers(multiply, yellow, cyan)'></div>");
+    let result=eval(&e,&mut page,r#"(()=>{
+        const bg=getComputedStyle(box).backgroundColor;
+        box.style.color='alpha(from color(display-p3 1 0.2 0 / 0.5) / calc(alpha * 0.25))';
+        const color=getComputedStyle(box).color;
+        box.style.backgroundColor='color-layers(normal, red, blue)';
+        return [bg,color,box.style.backgroundColor,getComputedStyle(box).backgroundColor].join('|');
+    })()"#);
+    assert_eq!(result,"rgb(0, 255, 0)|color(display-p3 1 0.2 0 / 0.125)|color-layers(red, blue)|rgb(255, 0, 0)");
+}

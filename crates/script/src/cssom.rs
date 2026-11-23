@@ -152,6 +152,34 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
     // Keep expressions in the specified value until their variables, units
     // and origin color can be resolved in the element's computed style.
     if let [Token::Function(f), rest @ ..] = *c {
+        if f.eq_ignore_ascii_case("color-layers") {
+            let (mode, layers) = rabbithole_style::layer_parts(c)?;
+            let mut items = Vec::new();
+            if let Some(mode) = mode.filter(|s| s != "normal") { items.push(mode); }
+            for layer in layers { items.push(specified_color(name, layer)?); }
+            return Some(format!("color-layers({})", items.join(", ")));
+        }
+        if f.eq_ignore_ascii_case("alpha") {
+            let (origin, component) = rabbithole_style::alpha_parts(c)?;
+            let origin = specified_color(name, origin)?;
+            let valid = match component {
+                [Token::Number(_) | Token::Percentage(_)] => true,
+                [Token::Ident(k)] => k.eq_ignore_ascii_case("alpha") || k.eq_ignore_ascii_case("none"),
+                [Token::Function(k), ..] => {
+                    let math = ["calc","min","max","clamp"].iter().any(|name| k.eq_ignore_ascii_case(name));
+                    let deferred = component.iter().any(|t| matches!(t, Token::Function(f)
+                        if ["var","env","attr","sibling-index","sibling-count"].iter().any(|name| f.eq_ignore_ascii_case(name))));
+                    let replaced: Vec<_> = component.iter().map(|t| match t {
+                        Token::Ident(k) if k.eq_ignore_ascii_case("alpha") => Token::Number(1.0),
+                        t => t.clone(),
+                    }).collect();
+                    deferred || (math && rabbithole_style::values::number(&replaced).is_some())
+                }
+                _ => false,
+            };
+            if !valid { return None; }
+            return Some(format!("alpha(from {origin} / {})", tokens_to_css(component)));
+        }
         let deferred = rest.iter().any(|t| matches!(t, Token::Function(_))) ||
             rest.iter().any(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) ||
             ["var", "env", "attr", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
