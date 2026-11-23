@@ -526,7 +526,9 @@ impl<'a> Layouter<'a> {
         if areas.is_empty() { return initial; }
         let mut positioned = Self::new(self.ctx);
         positioned.anchor_areas = areas;
-        positioned.layout_pass(None)
+        let mut tree = positioned.layout_pass(None);
+        tree.resolved_anchor_styles = positioned.anchor_areas.lengths;
+        tree
     }
 
     fn layout_pass(&mut self, reuse: Option<&crate::incremental::Reuse>) -> LayoutTree {
@@ -568,6 +570,7 @@ impl<'a> Layouter<'a> {
             height: doc_h,
             viewport: (vp_w, vp_h),
             uses_counters,
+            resolved_anchor_styles: Default::default(),
         }
     }
 

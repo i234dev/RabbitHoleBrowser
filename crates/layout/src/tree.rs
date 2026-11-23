@@ -924,6 +924,8 @@ impl LayoutBox {
 
 #[derive(Debug)]
 pub struct LayoutTree {
+    /// Anchor query results in physical CSS axes, before writing-mode normalization.
+    pub resolved_anchor_styles: std::collections::HashMap<NodeId,Rc<ComputedStyle>>,
     pub root: LayoutBox,
     /// Total document width/height (max of viewport and content).
     pub width: f32,
@@ -950,6 +952,7 @@ impl LayoutTree {
             height: 0.0,
             viewport: (0.0, 0.0),
             uses_counters: true,
+            resolved_anchor_styles: Default::default(),
         }
     }
 

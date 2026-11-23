@@ -1246,6 +1246,14 @@ fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
 }
 
 #[test]
+fn anchor_lookup_observes_containing_blocks_and_out_of_flow_order() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<style>section{position:relative}aside{position:absolute}i{display:block;width:35px;anchor-name:--x}.target{position:absolute;width:anchor-size(--x width, 7px);height:5px}</style><section><div class=target id=early></div><aside><i></i></aside><div class=target id=late></div></section><section><i style='width:90px'></i></section>");
+    let result=eval(&e,&mut page,"[early.offsetWidth,late.offsetWidth].join(',')");
+    assert_eq!(result,"7,35");
+}
+
+#[test]
 fn anchor_functions_resolve_distinct_boxes_and_nested_fallbacks() {
     let mut e = engine(true);
     let mut page=load(&mut e,"<style>body{margin:0}section{position:relative;width:300px;height:240px}.a{width:40px;height:20px;margin-left:30px;anchor-name:--a}.b{width:80px;height:32px;margin-left:120px;anchor-name:--b}#tip{position:absolute;left:anchor(right --a);top:anchor(bottom --b);width:anchor-size(--b width);height:anchor-size(--missing height, anchor-size(--a height))}</style><section><div class=a id=a></div><div class=b id=b></div><div id=tip></div></section>");

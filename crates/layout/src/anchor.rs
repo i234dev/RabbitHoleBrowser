@@ -58,25 +58,50 @@ impl Placement {
     }
 }
 
-fn container(ctx: &LayoutContext, tree: &LayoutTree, node: NodeId, style: &ComputedStyle) -> (Rect,(rabbithole_style::WritingMode,rabbithole_style::Direction)) {
+/// Follow the containing-block chain, including in-flow block containers
+/// along which anchor positions propagate to an outside query.
+fn containing_node(ctx: &LayoutContext, node: NodeId, style: &ComputedStyle) -> Option<NodeId> {
+    if ctx.doc.top_layer.contains(&node) { return None; }
     let mut parent = ctx.doc.flat_parent(node);
     while let Some(id) = parent {
         if let Some(s) = ctx.styles.get(id) {
-            let positioned = style.position == Position::Absolute && s.position != Position::Static;
-            if (positioned || s.establishes_fixed_containing_block()) && !ctx.doc.top_layer.contains(&node) {
-                if let Some((_,border)) = tree.box_in_document(ctx.doc,id) {
-                    let bounds = Rect::new(border.x+s.border_width.left,border.y+s.border_width.top,
-                        (border.w-s.border_width.left-s.border_width.right).max(0.),
-                        (border.h-s.border_width.top-s.border_width.bottom).max(0.));
-                    return (bounds,(s.writing_mode,s.direction));
-                }
-            }
+            use rabbithole_style::Display;
+            let establishes = match style.position {
+                Position::Absolute => s.position != Position::Static || s.establishes_fixed_containing_block(),
+                Position::Fixed => s.establishes_fixed_containing_block(),
+                _ => s.display.is_block_level() || s.display.is_atomic_inline() || s.display == Display::TableCell,
+            };
+            if establishes && !matches!(s.display,Display::None | Display::Contents) { return Some(id); }
         }
         parent = ctx.doc.flat_parent(id);
     }
+    None
+}
+
+fn container(ctx: &LayoutContext, tree: &LayoutTree, parent: Option<NodeId>) -> (Rect,Writing) {
+    if let Some((s, border)) = parent.and_then(|id| Some((ctx.styles.get(id)?,tree.box_in_document(ctx.doc,id)?.1))) {
+        let bounds = Rect::new(border.x+s.border_width.left,border.y+s.border_width.top,
+            (border.w-s.border_width.left-s.border_width.right).max(0.),
+            (border.h-s.border_width.top-s.border_width.bottom).max(0.));
+        return (bounds,(s.writing_mode,s.direction));
+    }
     let root = ctx.doc.child_elements(Document::ROOT).next().and_then(|id| ctx.styles.get(id));
     (Rect::new(0.,0.,ctx.viewport_width,ctx.viewport_height),root.map_or(
-        (rabbithole_style::WritingMode::HorizontalTb,rabbithole_style::Direction::Ltr), |s| (s.writing_mode,s.direction)))
+        (WritingMode::HorizontalTb,Direction::Ltr), |s| (s.writing_mode,s.direction)))
+}
+
+fn acceptable(ctx: &LayoutContext, mut anchor: NodeId, cb: Option<NodeId>, order: usize,
+              orders: &HashMap<NodeId,usize>) -> bool {
+    loop {
+        let Some(style) = ctx.styles.get(anchor) else { return false; };
+        let parent = containing_node(ctx,anchor,style);
+        if parent == cb {
+            return !matches!(style.position,Position::Absolute | Position::Fixed) ||
+                orders.get(&anchor).is_some_and(|i| *i < order);
+        }
+        let Some(next) = parent else { return false; };
+        anchor = next;
+    }
 }
 
 fn name_scope(ctx: &LayoutContext, mut node: NodeId, name: &str) -> Option<NodeId> {
@@ -93,7 +118,7 @@ fn name_scope(ctx: &LayoutContext, mut node: NodeId, name: &str) -> Option<NodeI
 #[derive(Default)]
 pub(crate) struct AnchoredLayout {
     pub areas: HashMap<NodeId, Placement>,
-    lengths: HashMap<NodeId, std::rc::Rc<ComputedStyle>>,
+    pub lengths: HashMap<NodeId, std::rc::Rc<ComputedStyle>>,
 }
 
 impl AnchoredLayout {
@@ -192,13 +217,15 @@ impl QueryBox {
 }
 
 pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> AnchoredLayout {
-    let mut named: HashMap<(NodeId,Option<NodeId>,&str),Vec<(usize,NodeId)>> = HashMap::new();
+    let mut named: HashMap<(NodeId,Option<NodeId>,&str),Vec<NodeId>> = HashMap::new();
     let mut targets = Vec::new();
+    let mut orders = HashMap::new();
     for (order,id) in ctx.doc.shadow_including_descendants(Document::ROOT).into_iter().enumerate() {
         let Some(s) = ctx.styles.get(id) else { continue };
+        if matches!(s.position, Position::Absolute | Position::Fixed) { orders.insert(id,order); }
         if let Some(names) = &s.anchor_names {
             let scope = ctx.doc.tree_root(id);
-            for name in names.iter() { named.entry((scope,name_scope(ctx,id,name),name.as_str())).or_default().push((order,id)); }
+            for name in names.iter() { named.entry((scope,name_scope(ctx,id,name),name.as_str())).or_default().push(id); }
         }
         if s.needs_anchor_layout() {
             targets.push((order,id,s));
@@ -206,24 +233,21 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> AnchoredLayo
     }
     let mut result = AnchoredLayout::default();
     for (order,id,s) in targets {
+        let cb_node = containing_node(ctx,id,s);
         let bounds = |a| {
             if ctx.doc.is_shadow_including_inclusive_ancestor(id,a) { return None; }
             tree.box_in_document(ctx.doc,a).map(|(_,r)| r).or_else(|| tree.inline_rect(ctx.doc,a))
         };
         let lookup = |name: Option<&str>| if let Some(name) = name.or(s.position_anchor.as_deref()) {
             named.get(&(ctx.doc.tree_root(id), name_scope(ctx,id,name), name)).and_then(|candidates| {
-                candidates.iter().rev().find_map(|&(other_order,a)| {
-                    let anchor_style = ctx.styles.get(a)?;
-                    if other_order >= order && matches!(anchor_style.position, Position::Absolute | Position::Fixed) {
-                        return None;
-                    }
-                    bounds(a)
+                candidates.iter().rev().find_map(|&a| {
+                    acceptable(ctx,a,cb_node,order,&orders).then(|| bounds(a)).flatten()
                 })
             })
         } else {
             ctx.doc.popover_invoker(id).and_then(bounds)
         };
-        let (cb,writing) = container(ctx,tree,id,s);
+        let (cb,writing) = container(ctx,tree,cb_node);
         if s.has_anchor_lengths() {
             let geometry = QueryBox { cb, writing, own:(s.writing_mode,s.direction) };
             result.lengths.insert(id,std::rc::Rc::new(geometry.resolve(s,&lookup)));

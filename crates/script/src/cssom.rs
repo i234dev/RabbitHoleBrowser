@@ -574,6 +574,13 @@ fn display_css(d: Display) -> &'static str {
     }
 }
 
+fn anchor_style(node: NodeRef, prop: &str, frame: Option<u64>, style: std::rc::Rc<ComputedStyle>) -> std::rc::Rc<ComputedStyle> {
+    if rabbithole_style::props::anchor_length::property(prop).is_some() && style.has_anchor_lengths() {
+        return with_env(|env| env.anchor_style(frame,node.node)).unwrap_or(style);
+    }
+    style
+}
+
 /// Computed value of `prop` for a node, as a CSS string.
 pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     if n.doc & crate::host::FRAME_DOC != 0 {
@@ -581,6 +588,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         // final-layout query; the other existing frame values use style.
         let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
         let s = with_env(|env| env.frame_computed_style(frame, n.node))?;
+        let s = anchor_style(n,prop,Some(frame),s);
         if let Some(rows) = grid::axis(prop).filter(|_| matches!(s.display, Display::Grid | Display::InlineGrid)) {
             if let Some(tracks) = with_env(|env| env.frame_used_grid_tracks(frame, n.node, rows)) {
                 return Some(grid::used(&tracks));
@@ -600,7 +608,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     // layout box only when the value actually depends on it, so scripts
     // that interleave style writes and reads don't force full layouts.
     let style = with_env(|env| env.computed_style(n.node));
-    let s: std::rc::Rc<ComputedStyle> = style?;
+    let s = anchor_style(n,prop,None,style?);
     if let Some(value) = resolved_inset(n, &s, prop) { return Some(value); }
     let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_) | rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_));
     let needs_box = match prop {

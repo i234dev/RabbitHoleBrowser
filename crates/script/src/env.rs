@@ -62,6 +62,7 @@ pub trait HostEnv {
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>>;
     /// Final Grid axis metadata after bringing this document's layout up to
     /// date. None for no box, a stacking axis or an unsupported completion.
+    fn anchor_style(&mut self, _frame: Option<u64>, _node: NodeId) -> Option<Rc<ComputedStyle>> { None }
     fn used_grid_tracks(&mut self, _node: NodeId, _rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> { None }
     /// Scroll state of an element's box (after layout): (scroll offset,
     /// scroll size). `None` = no box / not supported.

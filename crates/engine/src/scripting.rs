@@ -200,6 +200,27 @@ pub struct EngineEnv<'a> {
     pub page: &'a mut Page,
 }
 
+impl EngineEnv<'_> {
+    fn with_frame_layout<T>(&mut self, frame: Option<u64>, read: impl FnOnce(&Page) -> Option<T>) -> Option<T> {
+        let Some(id) = frame.filter(|&id| id != self.page.frame_id) else {
+            self.ensure_layout();
+            return read(self.page);
+        };
+        self.ensure_layout();
+        self.engine.update_frame_viewport(self.page, id);
+        let origin = crate::frames::page_origin(self.page);
+        if let Some(anc) = crate::frames::ancestor_page(id) {
+            if crate::frames::page_origin(anc) != origin { return None; }
+            self.engine.flush_layout(anc);
+            return read(anc);
+        }
+        let child = crate::frames::find_frame_page_mut(self.page, id)?;
+        if crate::frames::page_origin(child) != origin { return None; }
+        self.engine.flush_layout(child);
+        read(child)
+    }
+}
+
 impl HostEnv for EngineEnv<'_> {
     fn service_worker_client(&self) -> Option<rabbithole_script::ServiceWorkerClient> { self.page.script.service_worker_client.clone() }
     fn service_worker_registry(&self) -> Option<rabbithole_script::ServiceWorkerRegistry> {
@@ -342,6 +363,9 @@ impl HostEnv for EngineEnv<'_> {
     fn computed_custom_property(&mut self, node: NodeId, name: &str) -> Option<Vec<rabbithole_css::Token>> {
         self.engine.flush_style(self.page);
         self.page.incr.style_engine()?.custom_property(node, name)
+    }
+    fn anchor_style(&mut self, frame: Option<u64>, node: NodeId) -> Option<Rc<ComputedStyle>> {
+        self.with_frame_layout(frame,|page| page.layout.resolved_anchor_styles.get(&node).cloned())
     }
     fn used_grid_tracks(&mut self, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
         self.ensure_layout();
@@ -646,19 +670,7 @@ impl HostEnv for EngineEnv<'_> {
         child.layout_rect_of(node)
     }
     fn frame_used_grid_tracks(&mut self, id: u64, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
-        if id == self.page.frame_id { return self.used_grid_tracks(node, rows); }
-        self.ensure_layout();
-        self.engine.update_frame_viewport(self.page, id);
-        let origin = crate::frames::page_origin(self.page);
-        if let Some(anc) = crate::frames::ancestor_page(id) {
-            if crate::frames::page_origin(anc) != origin { return None; }
-            self.engine.flush_layout(anc);
-            return anc.layout.used_grid_tracks(&anc.doc, node, rows);
-        }
-        let child = crate::frames::find_frame_page_mut(self.page, id)?;
-        if crate::frames::page_origin(child) != origin { return None; }
-        self.engine.flush_layout(child);
-        child.layout.used_grid_tracks(&child.doc, node, rows)
+        self.with_frame_layout(Some(id), |page| page.layout.used_grid_tracks(&page.doc,node,rows))
     }
     fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
         if let Some(c) = self.page.frames.get(node) {
