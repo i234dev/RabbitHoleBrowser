@@ -252,7 +252,14 @@
 
   class CSSStyleRule extends CSSRule {
     get selectorText() { return this[S].selector; }
-    set selectorText(v) { this[S].selector = String(v).trim(); touch(this); }
+    set selectorText(v) {
+      const selector = `${v}`.trim();
+      let parent = this[S].parentRule;
+      while (parent && !(parent instanceof CSSStyleRule)) parent = parent[S].parentRule;
+      if (!N.cssomValidSelector(selector, !!parent)) return;
+      this[S].selector = selector;
+      touch(this);
+    }
     get style() { return this[S].style; }
     set style(v) { this[S].style.cssText = v; }
     get styleMap() { return null; }

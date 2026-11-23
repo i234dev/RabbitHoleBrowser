@@ -707,7 +707,7 @@ impl<'a> SelectorParser<'a> {
                     "not" | "is" | "where" | "matches" | "-webkit-any" | "-moz-any" => {
                         let mut sub = self.subparser(inner);
                         // Forgiving selector list: drop invalid parts.
-                        let mut list = sub.parse_list_forgiving();
+                        let mut list = if lname == "not" { sub.parse_list()? } else { sub.parse_list_forgiving() };
                         if lname != "not" { list.retain(|s| s.pseudo_element.is_none()); }
                         match lname.as_str() {
                             "not" => Pseudo::Not(list),
@@ -853,6 +853,23 @@ impl<'a> SelectorParser<'a> {
         }
         list
     }
+}
+
+/// Validate a selector list in CSSOM's style-rule context. Forgiving
+/// functional pseudo-classes can contain unsupported alternatives.
+pub fn valid_rule_selector(tokens: &[Token], nested: bool) -> bool {
+    fn valid(sel: &Selector) -> bool {
+        sel.compounds.iter().all(|c| c.pseudos.iter().all(|p| match p {
+            Pseudo::Never => false,
+            Pseudo::Not(list) | Pseudo::Host(list) | Pseudo::HostContext(list) |
+            Pseudo::Slotted(list) | Pseudo::NthChildOf(_, _, list) | Pseudo::NthLastChildOf(_, _, list) =>
+                list.iter().all(valid),
+            Pseudo::Has(list) => list.iter().all(|(_, s)| valid(s)),
+            _ => true,
+        }))
+    }
+    let mut parser = if nested { SelectorParser::nested(tokens, Arc::new(Vec::new())) } else { SelectorParser::new(tokens) };
+    parser.parse_list().is_some_and(|list| list.iter().all(valid))
 }
 
 /// Parse `an+b` micro-syntax from tokens.

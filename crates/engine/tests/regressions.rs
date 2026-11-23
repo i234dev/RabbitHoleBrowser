@@ -811,3 +811,17 @@ fn selectors_distinguish_empty_and_wildcard_namespaces() {
     })()"#);
     assert_eq!(result, "false|true|true|true|false|true");
 }
+
+#[test]
+fn css_style_rule_selector_changes_are_atomic() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=sheet>.selected { color: red }</style><article class=selected id=item>x</article>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const rule = document.querySelector('#sheet').sheet.cssRules[0];
+        rule.selectorText = 'article, .broken:unknown-pseudo';
+        const original = [rule.selectorText, getComputedStyle(item).color];
+        rule.selectorText = 'section, :is(.other, :unknown-pseudo)';
+        return [...original, rule.selectorText, getComputedStyle(item).color].join('|');
+    })()"#);
+    assert_eq!(result, ".selected|rgb(255, 0, 0)|section, :is(.other, :unknown-pseudo)|rgb(0, 0, 0)");
+}
