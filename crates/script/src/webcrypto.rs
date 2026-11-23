@@ -3,6 +3,8 @@
 mod ecdh;
 mod ecdsa;
 mod gcm;
+mod owned;
+mod rsa;
 mod x25519;
 
 use crate::fetch::{buffer_source_bytes, make_array_buffer};
@@ -205,6 +207,7 @@ fn chacha20_poly1305(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Va
 
 pub(crate) fn install(realm: &mut Realm, internals: ObjectId) {
     ecdh::install(realm, internals);
+    rsa::install(realm, internals);
     x25519::install(realm, internals);
     realm.define_method(internals, "chachaPoly1305", 5, chacha20_poly1305);
     realm.define_method(internals, "aesGcm", 6, aes_gcm);

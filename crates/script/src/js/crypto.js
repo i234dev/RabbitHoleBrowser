@@ -180,6 +180,7 @@
   function newKey(type, extractable, algorithm, usages, raw) {
     const k = Object.create(CryptoKey.prototype);
     const publicAlgorithm = { ...algorithm };
+    if (algorithm.publicExponent) publicAlgorithm.publicExponent = algorithm.publicExponent.slice();
     if (algorithm.hash) publicAlgorithm.hash = { ...algorithm.hash };
     recordKey(k, { type, extractable: !!extractable, algorithm, publicAlgorithm,
       usages: Object.freeze(Array.from(new Set(usages))), raw });
@@ -187,13 +188,13 @@
   }
 
   const normAlg = a => typeof a === 'object' && a !== null ? a : { name: `${a}` };
-  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ED448', 'X448'];
+  const UNSUPPORTED = ['ED448', 'X448'];
   function algName(a) {
     const id = normAlg(a);
     const name = id.name;
     if (name === undefined) throw new TypeError('An algorithm name is required');
     const n = String(name).toUpperCase();
-    const map = { 'CHACHA20-POLY1305': 'ChaCha20-Poly1305', ECDSA: 'ECDSA', ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
+    const map = { 'RSASSA-PKCS1-V1_5':'RSASSA-PKCS1-v1_5', 'RSA-PSS':'RSA-PSS', 'RSA-OAEP':'RSA-OAEP', 'CHACHA20-POLY1305': 'ChaCha20-Poly1305', ECDSA: 'ECDSA', ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
     throw err('NotSupportedError', 'Algorithm: Unrecognized name');
@@ -389,8 +390,147 @@
     throw err('InvalidAccessError','The EC key type cannot be exported in this format');
   }
 
+  const rsaAlgorithms = new Set(['RSASSA-PKCS1-v1_5','RSA-PSS','RSA-OAEP']);
+  const rsaNumbers = ['n','e','d','p','q','dp','dq','qi'];
+  const rsaIdentifier = [6,9,42,134,72,134,247,13,1,1,1,5,0];
+  const rsaError = () => err('DataError','Invalid RSA key encoding');
+  function rsaUsages(name, priv) {
+    if (name === 'RSA-OAEP') return priv ? ['decrypt','unwrapKey'] : ['encrypt','wrapKey'];
+    return priv ? ['sign'] : ['verify'];
+  }
+  function rsaJwa(name, hash) {
+    const size = hash.slice(4);
+    if (name === 'RSA-OAEP') return hash === 'SHA-1' ? name : name+'-'+size;
+    return (name === 'RSA-PSS' ? 'PS' : 'RS')+size;
+  }
+  function derField(tag, data) {
+    const length = [];
+    for (let n=data.length; n; n=Math.floor(n/256)) length.unshift(n & 255);
+    return Uint8Array.from([tag,...(data.length < 128 ? [data.length] : [128|length.length,...length]),...data]);
+  }
+  function rsaIntegers(der, priv) {
+    const seq = ecDerField(der,0,48);
+    if (seq.end !== der.length) throw rsaError();
+    let pos = 0;
+    if (priv) {
+      const version=ecDerField(seq.data,pos,2);
+      if (version.data.length !== 1 || version.data[0] !== 0) throw rsaError();
+      pos=version.end;
+    }
+    const parts = [];
+    for (let i=0; i<(priv ? 8 : 2); ++i) {
+      const integer=ecDerField(seq.data,pos,2), bytes=integer.data;
+      if (!bytes.length || bytes[0]>=128 || (bytes[0]===0 && (bytes.length===1 || bytes[1]<128))) throw rsaError();
+      parts.push(bytes[0]===0 ? bytes.subarray(1) : bytes);
+      pos=integer.end;
+    }
+    if (pos !== seq.data.length) throw rsaError();
+    return parts;
+  }
+  function rsaJwkDer(jwk, priv) {
+    const bytes = priv ? [2,1,0] : [];
+    for (const key of rsaNumbers.slice(0,priv ? 8 : 2)) {
+      const text=jwk[key];
+      if (typeof text!=='string' || !/^[A-Za-z0-9_-]+$/.test(text)) throw rsaError();
+      const v=unb64u(text);
+      if (!v.length || !v[0] || b64u(v)!==text) throw rsaError();
+      bytes.push(...derField(2, v[0]>=128 ? [0,...v] : v));
+    }
+    return derField(48,bytes);
+  }
+  function rsaContainer(key, priv) {
+    const alg=derField(48,rsaIdentifier);
+    return derField(48,priv ? [2,1,0,...alg,...derField(4,key)] : [...alg,...derField(3,[0,...key])]).buffer;
+  }
+  function unpackRsa(der, priv) {
+    const outer=ecDerField(der,0,48);
+    if (outer.end !== der.length) throw rsaError();
+    let pos=0;
+    if (priv) {
+      const version=ecDerField(outer.data,pos,2);
+      if (version.data.length!==1 || version.data[0]!==0) throw rsaError();
+      pos=version.end;
+    }
+    const alg=ecDerField(outer.data,pos,48);
+    if (![11,13].includes(alg.data.length) || !alg.data.every((b,i)=>b===rsaIdentifier[i])) throw rsaError();
+    const field=ecDerField(outer.data,alg.end,priv ? 4 : 3);
+    if (!priv && field.data[0]!==0) throw rsaError();
+    if (field.end !== outer.data.length && (!priv || ecDerField(outer.data,field.end,160).end !== outer.data.length)) throw rsaError();
+    return priv ? field.data : field.data.subarray(1);
+  }
+  function rsaKey(name, hash, handle, extractable, usages, priv) {
+    const parts=rsaIntegers(new Uint8Array(N.rsaExport(handle,false)),false);
+    const modulusLength=8*(parts[0].length-1)+32-Math.clz32(parts[0][0]);
+    return newKey(priv ? 'private' : 'public',extractable,
+      {name,hash:{name:hash},modulusLength,publicExponent:parts[1].slice()},usages,handle);
+  }
+  function importRsa(name, format, data, alg, extractable, usages) {
+    const h=normAlg(alg).hash;
+    if (h===undefined) throw new TypeError('RSA requires a hash algorithm');
+    const hash=hashName(h);
+    if (!['spki','pkcs8','jwk'].includes(format)) throw err('NotSupportedError','Unsupported RSA key format');
+    const priv=format==='pkcs8' || (format==='jwk' && data?.d !== undefined);
+    usageCheck(usages,rsaUsages(name,priv));
+    let encoded;
+    if (format==='jwk') {
+      if (data?.kty!=='RSA' || (data.alg!==undefined && data.alg!==rsaJwa(name,hash)) ||
+          (usages.length && data.use!==undefined && data.use!==(name==='RSA-OAEP' ? 'enc' : 'sig')) ||
+          (data.ext===false && extractable) || data.oth!==undefined) throw rsaError();
+      if (data.key_ops!==undefined) {
+        const ops=Array.from(data.key_ops);
+        if (new Set(ops).size!==ops.length || usages.some(u=>!ops.includes(u))) throw rsaError();
+      }
+      encoded=rsaJwkDer(data,priv);
+    } else encoded=unpackRsa(bytesOf(data),priv);
+    const handle=N.rsaImport(encoded,priv,!!extractable);
+    if (priv && !usages.length) throw err('SyntaxError','A private key requires a usage');
+    return rsaKey(name,hash,handle,extractable,usages,priv);
+  }
+  function exportRsa(format,k) {
+    const priv=k.type==='private';
+    if (!['spki','pkcs8','jwk'].includes(format)) throw err('NotSupportedError','Unsupported RSA key format');
+    if (format!=='jwk' && (format==='pkcs8')!==priv) throw err('InvalidAccessError','Wrong RSA key type for this format');
+    const der=new Uint8Array(N.rsaExport(k.raw,priv));
+    if (format!=='jwk') return rsaContainer(der,priv);
+    const parts=rsaIntegers(der,priv), a=k.algorithm;
+    const jwk={kty:'RSA',alg:rsaJwa(a.name,a.hash.name),key_ops:k.usages.slice(),ext:true};
+    parts.forEach((v,i)=>{jwk[rsaNumbers[i]]=b64u(v);});
+    return jwk;
+  }
+  function generateRsa(name,alg,extractable,usages) {
+    const a=normAlg(alg), hashValue=a.hash;
+    if (hashValue===undefined) throw new TypeError('RSA requires a hash algorithm');
+    const hash=hashName(hashValue), bits=unsigned(a.modulusLength,0xffffffff), e=a.publicExponent;
+    const exponent=N.rsaExponent(e);
+    const priv=rsaUsages(name,true), pub=rsaUsages(name,false);
+    usageCheck(usages,[...pub,...priv]);
+    const privateUsages=usages.filter(u=>priv.includes(u)), publicUsages=usages.filter(u=>pub.includes(u));
+    if (!privateUsages.length) throw err('SyntaxError','A private key requires a usage');
+    const job=N.rsaGenerate(bits,exponent,!!extractable);
+    return new Promise((resolve,reject) => {
+      function poll() {
+        try {
+          const handle=N.rsaGenerated(job);
+          if (!handle) { defer(poll,1); return; }
+          const publicHandle=N.rsaImport(N.rsaExport(handle,false),false,true);
+          resolve({publicKey:rsaKey(name,hash,publicHandle,true,publicUsages,false),
+            privateKey:rsaKey(name,hash,handle,extractable,privateUsages,true)});
+        } catch (e) { reject(e); }
+      }
+      defer(poll,1);
+    });
+  }
+  function rsaSignature(k,op,alg,msg,sig) {
+    const hash=k.algorithm.hash.name;
+    const salt=k.algorithm.name==='RSA-PSS' ? unsigned(normAlg(alg).saltLength,0xffffffff) : null;
+    const digest=N.cryptoDigest(hash,bytesOf(msg));
+    return N.rsaOperate(k.raw,op,hash,salt,digest,
+      op==='sign' ? new Uint8Array(0) : bytesOf(sig));
+  }
+
   function importSecret(format, keyData, alg, extractable, usages) {
     const name = algName(alg);
+    if (rsaAlgorithms.has(name)) return importRsa(name,format,keyData,alg,extractable,Array.from(usages));
     if (name === 'ECDH' || name === 'ECDSA') return importEc(name,format,keyData,alg,extractable,Array.from(usages));
     if (okp[name]) return importOctetKey(name, format, keyData, extractable, Array.from(usages));
     if (name === 'ChaCha20-Poly1305') {
@@ -503,6 +643,7 @@
     generateKey(alg, extractable, usages) {
       return run(() => {
         const name = algName(alg);
+        if (rsaAlgorithms.has(name)) return generateRsa(name,alg,extractable,Array.from(usages));
         if (name === 'ECDH' || name === 'ECDSA') {
           const namedCurve = ecCurve(alg), requested = Array.from(usages), signing = name === 'ECDSA';
           const privateOps = signing ? ['sign'] : ['deriveBits','deriveKey'];
@@ -539,6 +680,7 @@
       return run(() => {
         if (!hasKey(key)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
         if (!keyInfo(key).extractable) throw err('InvalidAccessError', 'key is not extractable');
+        if (rsaAlgorithms.has(keyInfo(key).algorithm.name)) return exportRsa(format,keyInfo(key));
         if (['ECDH','ECDSA'].includes(keyInfo(key).algorithm.name)) return exportEc(format,keyInfo(key));
         if (okp[keyInfo(key).algorithm.name]) return exportOctetKey(format, keyInfo(key));
         if (keyInfo(key).algorithm.name === 'ChaCha20-Poly1305') {
@@ -560,6 +702,7 @@
     sign(alg, key, data) { return run(() => {
       const name = algName(alg);
       checkKey(key, name, 'sign');
+      if (rsaAlgorithms.has(name)) return rsaSignature(keyInfo(key),'sign',alg,data);
       const k = keyInfo(key), msg = bytesOf(data);
       if (name === 'ECDSA') return N.ecdsaSign(k.raw, ecDigest(alg,msg));
       return name === 'Ed25519' ? N.ed25519Sign(k.raw, msg) : hmac(k.algorithm.hash.name, k.raw, msg).buffer;
@@ -567,6 +710,7 @@
     verify(alg, key, signature, data) { return run(() => {
       const name = algName(alg);
       checkKey(key, name, 'verify');
+      if (rsaAlgorithms.has(name)) return rsaSignature(keyInfo(key),'verify',alg,data,signature);
       const k = keyInfo(key), msg = bytesOf(data), sig = bytesOf(signature);
       if (name === 'ECDSA') return N.ecdsaVerify(encodeEcSpki(k.algorithm.namedCurve,k.raw), ecDigest(alg,msg), sig);
       return name === 'Ed25519' ? N.ed25519Verify(k.raw, msg, sig) : N.cryptoHmac(k.algorithm.hash.name, k.raw, msg, sig);
@@ -603,6 +747,11 @@
     checkKey(key, name, usage);
     const a = normAlg(alg);
     switch (name) {
+      case 'RSA-OAEP': {
+        const label=a.label, k=keyInfo(key);
+        const extra=label===undefined ? new Uint8Array(0) : bytesOf(label);
+        return new Uint8Array(N.rsaOperate(k.raw,decrypt ? 'decrypt' : 'encrypt',k.algorithm.hash.name,null,bytesOf(data),extra));
+      }
       case 'ChaCha20-Poly1305': {
         const aad = a.additionalData === undefined ? new Uint8Array(0) : bytesOf(a.additionalData);
         return new Uint8Array(N.chachaPoly1305(keyInfo(key).raw, bytesOf(a.iv), bytesOf(data), aad, decrypt));

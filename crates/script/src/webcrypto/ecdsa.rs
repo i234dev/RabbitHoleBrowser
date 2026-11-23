@@ -3,23 +3,7 @@
 use aws_lc_sys as lc;
 use std::{mem::MaybeUninit, ptr::NonNull};
 
-struct Owned<T> {
-    ptr: NonNull<T>,
-    free: unsafe extern "C" fn(*mut T),
-}
-impl<T> Owned<T> {
-    fn new(ptr: *mut T, free: unsafe extern "C" fn(*mut T)) -> Option<Self> {
-        Some(Self { ptr: NonNull::new(ptr)?, free })
-    }
-    fn get(&self) -> *mut T { self.ptr.as_ptr() }
-    fn transfer(self) { std::mem::forget(self); }
-}
-impl<T> Drop for Owned<T> {
-    fn drop(&mut self) {
-        // Every constructor supplies the matching destructor for this owned reference.
-        unsafe { (self.free)(self.get()) }
-    }
-}
+use super::owned::Owned;
 
 fn key(der: &[u8], private: bool) -> Option<Owned<lc::EC_KEY>> {
     // CBS borrows der throughout both parse calls. get1 acquires an independent reference.

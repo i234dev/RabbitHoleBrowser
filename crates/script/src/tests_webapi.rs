@@ -2582,3 +2582,42 @@ fn aes_ctr_wraps_only_the_counter_bits_and_rejects_counter_reuse() {
     "#);
     assert_eq!(output, ["true","OperationError"]);
 }
+
+#[test]
+fn web_crypto_rsa_binds_hash_padding_and_labels_to_native_key_operations() {
+    let (mut env, mut host) = setup("<body>");
+    run(&mut env, &mut host, r#"
+      (async () => {
+        const s=crypto.subtle, data=Uint8Array.of(1,2,3), label=Uint8Array.of(4,5);
+        const alg={name:'RSA-OAEP',hash:'SHA-256',modulusLength:1024,publicExponent:Uint8Array.of(1,0,1)};
+        const pair=await s.generateKey(alg,true,['encrypt','decrypt']);
+        const spki=await s.exportKey('spki',pair.publicKey), pkcs8=await s.exportKey('pkcs8',pair.privateKey);
+        const privateJwk=await s.exportKey('jwk',pair.privateKey);
+        const privateKey=await s.importKey('jwk',privateJwk,alg,false,['decrypt']);
+        const opts={name:alg.name,label};
+        const ciphertext=await s.encrypt(opts,pair.publicKey,data);
+        console.log(privateJwk.alg,new Uint8Array(await s.decrypt(opts,privateKey,ciphertext)).join(','),
+          await s.decrypt({name:alg.name},privateKey,ciphertext).catch(e=>e.name),
+          await s.exportKey('pkcs8',privateKey).catch(e=>e.name));
+        for (const name of ['RSA-PSS','RSASSA-PKCS1-v1_5']) {
+          const params={name,hash:'SHA-384'}, sigOpts={name,saltLength:0};
+          const pub=await s.importKey('spki',spki,params,true,['verify']);
+          const key=await s.importKey('pkcs8',pkcs8,params,false,['sign']);
+          const sig=await s.sign(sigOpts,key,data);
+          console.log(name,pub.algorithm.modulusLength,pub.algorithm.publicExponent.join(','),
+              await s.verify(sigOpts,pub,sig,data),await s.verify(sigOpts,pub,sig,label));
+          if (name==='RSA-PSS') console.log(await s.verify({name,saltLength:32},pub,sig,data));
+        }
+      })().catch(e=>console.log(e.name,e.message)).finally(()=>console.log('done'));
+    "#);
+    let start = std::time::Instant::now();
+    while !env.logs.iter().any(|(_, msg)| msg == "done") {
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "RSA promise did not settle");
+        host.run_timers(&mut env, 1100.0 + start.elapsed().as_secs_f64() * 1000.0);
+        host.run_jobs(&mut env);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let lines: Vec<_> = env.logs.iter().filter(|(level,_)| level=="log").map(|(_,line)| line.as_str()).collect();
+    assert_eq!(lines, ["RSA-OAEP-256 1,2,3 OperationError InvalidAccessError",
+        "RSA-PSS 1024 1,0,1 true false", "false", "RSASSA-PKCS1-v1_5 1024 1,0,1 true false", "done"]);
+}
