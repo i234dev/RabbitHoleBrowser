@@ -229,8 +229,14 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
     use Prop::*;
     match (p, v) {
         (Opacity, Val::F(f)) => s.opacity = f.clamp(0.0, 1.0),
-        (Color, Val::C(c)) => s.color = *c,
-        (BackgroundColor, Val::C(c)) => s.background_color = *c,
+        (Color, Val::C(c)) => {
+            s.color = *c;
+            s.color_components = None;
+        }
+        (BackgroundColor, Val::C(c)) => {
+            s.background_color = *c;
+            s.background_color_components = None;
+        }
         (BorderTopColor, Val::C(c)) => s.border_color.top = *c,
         (BorderRightColor, Val::C(c)) => s.border_color.right = *c,
         (BorderBottomColor, Val::C(c)) => s.border_color.bottom = *c,

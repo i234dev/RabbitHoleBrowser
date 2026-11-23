@@ -622,3 +622,20 @@ fn keyboard_target_ranges_snapshot_the_edit_and_clear_after_dispatch() {
     e.key_input(&mut page,"a","KeyA",true,Modifiers::default());
     assert_eq!(eval(&e,&mut page,"[ed.textContent,seen.length].join('|')"), "xy|0");
 }
+
+#[test]
+fn computed_colors_preserve_coordinates_through_inheritance_and_shorthands() {
+    let mut engine = engine(true);
+    let mut page = load(&mut engine, "<section style='color:color(display-p3 120% 0 40% / 50%)'><i style='background:currentcolor'></i></section>");
+    let result = eval(&engine, &mut page, r#"
+        const el = document.querySelector('i');
+        const colors = [getComputedStyle(el).color, getComputedStyle(el).backgroundColor];
+        el.style.background = 'none';
+        el.style.color = 'oklch(120% -2 1turn / none)';
+        colors.push(getComputedStyle(el).color, getComputedStyle(el).backgroundColor);
+        el.style.color = 'rgb(from rgb(51 102 153 / 0.8) r g b)';
+        colors.push(getComputedStyle(el).color);
+        colors.join('|')
+    "#);
+    assert_eq!(result, "color(display-p3 1.2 0 0.4 / 0.5)|color(display-p3 1.2 0 0.4 / 0.5)|oklch(1 0 0 / none)|rgba(0, 0, 0, 0)|color(srgb 0.2 0.4 0.6 / 0.8)");
+}

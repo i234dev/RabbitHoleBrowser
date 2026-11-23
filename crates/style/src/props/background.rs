@@ -553,7 +553,7 @@ fn is_position_kw(c: &[Token]) -> bool {
 
 /// Parse one layer of the `background` shorthand. Returns the layer and the
 /// color found in it (if any).
-fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(BackgroundLayer, Option<Color>)> {
+fn parse_layer<'a>(layer: &[&'a [Token]], current: Color, ctx: &ApplyCtx) -> Option<(BackgroundLayer, Option<(Color, &'a [Token])>)> {
     let mut out = BackgroundLayer::default();
     let mut col = None;
     let mut boxes: Vec<BoxArea> = Vec::new();
@@ -576,7 +576,7 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
             if col.is_some() {
                 return None;
             }
-            col = Some(cc);
+            col = Some((cc, c));
             i += 1;
             continue;
         }
@@ -743,11 +743,13 @@ fn apply_mask(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &A
         style.mask_layers = out;
     } else {
         let saved_color = style.background_color;
+        let saved_components = style.background_color_components.take();
         let saved_image = style.background_image.take();
         std::mem::swap(&mut style.background_layers, &mut style.mask_layers);
         apply(bg_name, &kept, style, ctx);
         std::mem::swap(&mut style.background_layers, &mut style.mask_layers);
         style.background_color = saved_color;
+        style.background_color_components = saved_components;
         style.background_image = saved_image;
     }
     if matches!(bg_name, "background" | "background-image") {
@@ -1065,13 +1067,15 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             // `background: red` still resets the layers).
             out.retain(|l| !matches!(l.image, BackgroundImage::None));
             style.background_layers = out;
-            style.background_color = final_color.unwrap_or(Color::TRANSPARENT);
+            style.background_color = final_color.map_or(Color::TRANSPARENT, |(c, _)| c);
+            style.background_color_components = final_color.and_then(|(_, t)| style.resolve_color_components(t));
             sync_compat(style);
         }
         "background-color" => {
             if comps.len() == 1 {
                 if let Some(c) = color(comps[0], current) {
                     style.background_color = c;
+                    style.background_color_components = style.resolve_color_components(comps[0]);
                 }
             }
         }

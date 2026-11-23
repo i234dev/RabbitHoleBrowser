@@ -1584,6 +1584,8 @@ pub struct ComputedStyle {
 
     pub color: Color,
     pub background_color: Color,
+    pub color_components: Option<std::rc::Rc<crate::ComputedColor>>,
+    pub background_color_components: Option<std::rc::Rc<crate::ComputedColor>>,
     /// Resolved URL string of `background-image: url(...)`, if any.
     pub background_image: Option<String>,
     pub opacity: f32,
@@ -1981,6 +1983,8 @@ impl ComputedStyle {
             box_sizing: BoxSizing::ContentBox,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
+            color_components: None,
+            background_color_components: None,
             background_image: None,
             opacity: 1.0,
             font_family: Family::Sans,
@@ -2179,9 +2183,18 @@ impl ComputedStyle {
         self.contain_layout || self.contain_paint || self.contain_size || self.contain_inline_size || self.contain_style || self.container_inline
     }
 
+    pub(crate) fn resolve_color_components(&self, tokens: &[rabbithole_css::Token]) -> Option<std::rc::Rc<crate::ComputedColor>> {
+        if crate::values::is_ident(tokens, "currentcolor") {
+            self.color_components.clone()
+        } else {
+            crate::ComputedColor::parse(tokens)
+        }
+    }
+
     pub fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         ComputedStyle {
             color: parent.color,
+            color_components: parent.color_components.clone(),
             font_family: parent.font_family,
             font_size: parent.computed_font_size(),
             font_weight: parent.font_weight,
@@ -2277,6 +2290,7 @@ impl ComputedStyle {
     /// inherited part did not change need no restyle for inheritance.
     pub fn inherited_eq(&self, o: &ComputedStyle) -> bool {
         self.color == o.color
+            && self.color_components == o.color_components
             && self.font_family == o.font_family
             && self.font_monospace_only == o.font_monospace_only
             && self.font_size_keyword == o.font_size_keyword

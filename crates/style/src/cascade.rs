@@ -2298,13 +2298,20 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "bottom" => to.inset.bottom = from.inset.bottom,
         "left" => to.inset.left = from.inset.left,
         "inset" => to.inset = from.inset,
-        "color" => to.color = from.color,
+        "color" => {
+            to.color = from.color;
+            to.color_components = from.color_components.clone();
+        }
         "background" => {
             to.background_color = from.background_color;
+            to.background_color_components = from.background_color_components.clone();
             to.background_image = from.background_image.clone();
             to.background_layers = from.background_layers.clone();
         }
-        "background-color" => to.background_color = from.background_color,
+        "background-color" => {
+            to.background_color = from.background_color;
+            to.background_color_components = from.background_color_components.clone();
+        }
         "opacity" => to.opacity = from.opacity,
         "font" => {
             to.font_family = from.font_family;
@@ -3710,8 +3717,14 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         "color" => {
             if comps.len() == 1 {
                 match values::parse_color_component(c0) {
-                    Some(ColorValue::Color(c)) => style.color = c,
-                    Some(ColorValue::CurrentColor) => style.color = parent.color,
+                    Some(ColorValue::Color(c)) => {
+                        style.color = c;
+                        style.color_components = crate::ComputedColor::parse(c0);
+                    }
+                    Some(ColorValue::CurrentColor) => {
+                        style.color = parent.color;
+                        style.color_components = parent.color_components.clone();
+                    }
                     None => {}
                 }
             }
@@ -3720,6 +3733,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             if comps.len() == 1 {
                 if let Some(c) = color_of(c0, style) {
                     style.background_color = c;
+                    style.background_color_components = style.resolve_color_components(c0);
                 }
             }
         }

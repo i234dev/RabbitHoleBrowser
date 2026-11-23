@@ -1,7 +1,7 @@
 //! CSS Color 4/5 beyond sRGB notations: `hwb()`, `lab()`, `lch()`,
 //! `oklab()`, `oklch()`, `color()` (sRGB, linear sRGB, Display P3, A98,
 //! ProPhoto, Rec.2020, XYZ), `color-mix()`, `light-dark()` and the system
-//! colors. Computed values are gamut-clipped 8-bit sRGB; gradients keep
+//! colors. Painting uses gamut-clipped 8-bit sRGB; gradients keep
 //! the unclipped linear-light sRGB of the newer notations ([`Wide`]) so
 //! interpolation sees the real color and clipping happens per sample.
 
@@ -48,6 +48,7 @@ fn num(c: &[Token], pct_ref: f64) -> Option<f64> {
         [Token::Number(n)] => Some(*n as f64),
         [Token::Percentage(p)] => Some(*p as f64 / 100.0 * pct_ref),
         [Token::Ident(s)] if s.eq_ignore_ascii_case("none") => Some(0.0),
+        [Token::Function(_), ..] => crate::values::number(c).map(f64::from),
         _ => None,
     }
 }
@@ -274,6 +275,127 @@ pub fn parse_wide(c: &[Token]) -> Option<Wide> {
     Some([lin[0] as f32, lin[1] as f32, lin[2] as f32, a as f32])
 }
 
+/// Components retained for CSSOM when painting an 8-bit sRGB color loses
+/// the original coordinate system, precision or missing components.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputedColor {
+    space: &'static str,
+    channels: [Option<f32>; 3],
+    alpha: Option<f32>,
+}
+
+impl ComputedColor {
+    pub fn to_css(&self) -> String {
+        let polar_srgb = matches!(self.space, "hsl" | "hwb");
+        let mut out = match self.space {
+            "hsl" | "hwb" | "lab" | "lch" | "oklab" | "oklch" => format!("{}(", self.space),
+            name => format!("color({name} "),
+        };
+        for (i, channel) in self.channels.iter().enumerate() {
+            if i != 0 {
+                out.push(' ');
+            }
+            match channel {
+                Some(v) => {
+                    out.push_str(&v.to_string());
+                    if polar_srgb && i != 0 {
+                        out.push('%');
+                    }
+                }
+                None => out.push_str("none"),
+            }
+        }
+        if self.alpha != Some(1.0) {
+            out.push_str(" / ");
+            out.push_str(&self.alpha.map_or_else(|| "none".into(), |v| v.to_string()));
+        }
+        out.push(')');
+        out
+    }
+
+    pub(crate) fn parse(c: &[Token]) -> Option<std::rc::Rc<Self>> {
+        let [Token::Function(f), rest @ ..] = c else { return None };
+        let f = f.to_ascii_lowercase();
+        let relative = rest.iter().find(|t| !matches!(t, Token::Whitespace))
+            .is_some_and(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from")));
+        let resolved;
+        let c = if relative {
+            resolved = relative_components(&f, c)?;
+            resolved.as_slice()
+        } else {
+            c
+        };
+        let (mut vals, a) = args(c)?;
+        let missing = |v: &[Token]| crate::values::is_ident(v, "none");
+        let has_missing = vals.iter().any(|v| missing(v)) || a.is_some_and(missing);
+        let space = match f.as_str() {
+            "rgb" | "rgba" if relative || has_missing => "srgb",
+            "hsl" | "hsla" if relative || has_missing => "hsl",
+            "hwb" if relative || has_missing => "hwb",
+            "lab" => "lab",
+            "lch" => "lch",
+            "oklab" => "oklab",
+            "oklch" => "oklch",
+            "color" if vals.len() == 4 => match crate::values::ident(vals.remove(0))?.as_str() {
+                "xyz" | "xyz-d65" => "xyz-d65",
+                "xyz-d50" => "xyz-d50",
+                "srgb" => "srgb",
+                "srgb-linear" => "srgb-linear",
+                "display-p3" => "display-p3",
+                "display-p3-linear" => "display-p3-linear",
+                "a98-rgb" => "a98-rgb",
+                "prophoto-rgb" => "prophoto-rgb",
+                "rec2020" => "rec2020",
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let [x, y, z] = vals.as_slice() else { return None };
+        let lab = matches!(space, "lab" | "oklab" | "lch" | "oklch");
+        let cylindrical = matches!(space, "lch" | "oklch");
+        let polar_srgb = matches!(space, "hsl" | "hwb");
+        let lightness_max = if space.starts_with("ok") { 1.0 } else { 100.0 };
+        let mut channels = [None; 3];
+        for (i, t) in [*x, *y, *z].into_iter().enumerate() {
+            if missing(t) {
+                continue;
+            }
+            let n = if (polar_srgb && i == 0) || (cylindrical && i == 2) {
+                hue(t)?.rem_euclid(360.0)
+            } else if polar_srgb {
+                num(t, 100.0)?.clamp(0.0, 100.0)
+            } else if lab && i == 0 {
+                num(t, lightness_max)?.clamp(0.0, lightness_max)
+            } else if lab {
+                let scale = if space.starts_with("ok") { 0.4 } else if cylindrical { 150.0 } else { 125.0 };
+                let n = num(t, scale)?;
+                if cylindrical { n.max(0.0) } else { n }
+            } else if matches!(f.as_str(), "rgb" | "rgba") {
+                let v = num(t, 255.0)? / 255.0;
+                if relative { v } else { v.clamp(0.0, 1.0) }
+            } else {
+                num(t, 1.0)?
+            };
+            channels[i] = Some(if n == 0.0 || n.is_nan() { 0.0 } else { n as f32 });
+        }
+        let alpha = if a.is_some_and(missing) { None } else { Some(alpha(a)? as f32) };
+        let mut color = Self { space, channels, alpha };
+        if relative && polar_srgb && !has_missing {
+            let [h, s, l] = color.channels.map(|v| f64::from(v.unwrap()));
+            let rgb = if space == "hsl" {
+                hsl_to_rgb(h, s / 100.0, l / 100.0)
+            } else if s + l >= 100.0 {
+                [s / (s + l); 3]
+            } else {
+                hsl_to_rgb(h, 1.0, 0.5).map(|v| v * (1.0 - (s + l) / 100.0) + s / 100.0)
+            };
+            color.space = "srgb";
+            color.channels = rgb.map(|v| Some(v as f32));
+        }
+        Some(std::rc::Rc::new(color))
+    }
+}
+
 /// Colors outside the sRGB gamut are clipped per channel, as engines do,
 /// except at the ends of the lightness range, where gamut mapping (CSS
 /// Color 4 §13.2) gives white and black whatever the chroma. Lightness
@@ -373,6 +495,11 @@ fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
 /// `calc()` included. `None` for an unsupported origin (`currentcolor`)
 /// or space.
 pub fn relative(f: &str, c: &[Token]) -> Option<Color> {
+    let out = relative_components(f, c)?;
+    crate::values::resolve_current(crate::values::parse_color_component(&out)?)
+}
+
+fn relative_components(f: &str, c: &[Token]) -> Option<Vec<Token>> {
     let inner = strip(c);
     let comps: Vec<&[Token]> = components(inner).into_iter().filter(|c| !matches!(c, [Token::Whitespace])).collect();
     let [from, origin, rest @ ..] = comps.as_slice() else { return None };
@@ -451,11 +578,12 @@ pub fn relative(f: &str, c: &[Token]) -> Option<Color> {
         }
         out.push(Token::Whitespace);
     }
-    out.push(Token::CloseParen);
-    match crate::values::parse_color_component(&out)? {
-        ColorValue::Color(col) => Some(col),
-        ColorValue::CurrentColor => None,
+    if !rest.iter().any(|t| matches!(*t, [Token::Delim('/')])) {
+        out.push(Token::Delim('/'));
+        out.push(Token::Number(alpha as f32));
     }
+    out.push(Token::CloseParen);
+    Some(out)
 }
 
 /// Split function arguments at top-level commas.
