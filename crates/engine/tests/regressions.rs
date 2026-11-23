@@ -795,3 +795,19 @@ fn paragraph_deletion_moves_one_line_and_preserves_its_whitespace() {
     })()"#);
     assert_eq!(result, "lefttwo  spaces|pre-wrap|next|true|4");
 }
+
+#[test]
+fn selectors_distinguish_empty_and_wildcard_namespaces() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=host></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const a = document.createElement('entry'), b = document.createElementNS(null,'entry');
+        a.setAttributeNS('urn:fixture','a:level','one');
+        a.setAttributeNS('urn:second','b:level','two');
+        b.setAttribute('level','plain');
+        host.append(a,b);
+        return [a.matches('|entry'), b.matches('|entry'), a.matches('*|entry'),
+            a.matches('[*|level="two"]'), a.matches('[|level]'), b.matches('[|level]')].join('|');
+    })()"#);
+    assert_eq!(result, "false|true|true|true|false|true");
+}

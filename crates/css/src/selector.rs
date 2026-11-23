@@ -21,6 +21,7 @@ pub enum AttrOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttrSelector {
+    pub any_namespace: bool,
     pub name: String,
     pub op: AttrOp,
     pub value: String,
@@ -116,6 +117,7 @@ enum PseudoParse {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Compound {
+    pub no_namespace: bool,
     pub tag: Option<String>,
     pub id: Option<String>,
     pub classes: Vec<String>,
@@ -460,6 +462,8 @@ impl<'a> SelectorParser<'a> {
         }
         // Namespace prefix `*|` or `svg|` – accept and ignore
         if self.peek() == Some(&Token::Delim('|')) {
+            c.no_namespace = !any;
+            any = true;
             self.pos += 1;
             match self.bump() {
                 Some(Token::Ident(name)) => c.tag = Some(name.to_ascii_lowercase()),
@@ -517,6 +521,9 @@ impl<'a> SelectorParser<'a> {
 
     fn parse_attr(&mut self) -> Option<AttrSelector> {
         self.skip_ws();
+        let any_namespace = self.toks.get(self.pos..self.pos + 2) == Some(&[Token::Delim('*'), Token::Delim('|')]);
+        if any_namespace { self.pos += 2; }
+        else if self.peek() == Some(&Token::Delim('|')) { self.pos += 1; }
         let name = match self.bump() {
             Some(Token::Ident(n)) => n.to_ascii_lowercase(),
             _ => return None,
@@ -526,6 +533,7 @@ impl<'a> SelectorParser<'a> {
             Some(Token::CloseBracket) => {
                 self.pos += 1;
                 return Some(AttrSelector {
+                    any_namespace,
                     name,
                     op: AttrOp::Exists,
                     value: String::new(),
@@ -562,6 +570,7 @@ impl<'a> SelectorParser<'a> {
         let mut ci = false;
         if let Some(Token::Ident(flag)) = self.peek() {
             ci = flag.eq_ignore_ascii_case("i");
+            if !ci && !flag.eq_ignore_ascii_case("s") { return None; }
             self.pos += 1;
             self.skip_ws();
         }
@@ -569,6 +578,7 @@ impl<'a> SelectorParser<'a> {
             return None;
         }
         Some(AttrSelector {
+            any_namespace,
             name,
             op,
             value,
@@ -1171,6 +1181,7 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
         Some(e) => e,
         None => return false,
     };
+    if c.no_namespace && el.ns != rabbithole_dom::Namespace::None { return false; }
     if let Some(t) = &c.tag {
         // Selectors are lower-cased; SVG / XML elements keep their case
         // (`linearGradient`, `Foo`), so compare without ASCII case.
@@ -1195,16 +1206,18 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
         }
     }
     for a in &c.attrs {
-        let v = match el.attr(&a.name) {
-            Some(v) => v,
-            None => return false,
-        };
-        let ok = if a.op == AttrOp::Exists {
-            true
-        } else if a.case_insensitive {
+        let matches_value = |v: &str| a.op == AttrOp::Exists || if a.case_insensitive {
             attr_op_matches(&a.op, &v.to_ascii_lowercase(), &a.value.to_ascii_lowercase())
         } else {
             attr_op_matches(&a.op, v, &a.value)
+        };
+        let ok = if a.any_namespace {
+            el.attrs.iter().any(|(name, value)| {
+                let local = if doc.attr_namespace(node, name).is_some() { name.rsplit(':').next().unwrap_or(name) } else { name };
+                local == a.name && matches_value(value)
+            })
+        } else {
+            el.attr(&a.name).is_some_and(|v| matches_value(v) && doc.attr_namespace(node, &a.name).is_none())
         };
         if !ok {
             return false;
