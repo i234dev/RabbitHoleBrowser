@@ -4078,7 +4078,7 @@ fn probe_apply(base: &ComputedStyle, name: &str, value: &[Token]) -> ComputedSty
 /// Whether a standard property is recognized by the cascade, independent
 /// of its value or of the styles currently applied to an element.
 pub fn recognizes_property(name: &str) -> bool {
-    if name.starts_with("--") { return false; }
+    if name.starts_with("--") || !rabbithole_css::supports::property_enabled(name) { return false; }
     if name == "all" { return true; }
     thread_local! {
         static KNOWN: std::cell::RefCell<std::collections::HashSet<String>> = Default::default();

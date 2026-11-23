@@ -19,6 +19,12 @@ const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "shape-outside", "offset-path", "offset-distance", "offset", "zoom", "corner-shape", "dynamic-range-limit", "overlay", "container-name-x",
 ];
 
+/// Properties disabled in this implementation use the same feature
+/// detection result in CSSOM and conditional stylesheets.
+pub fn property_enabled(name: &str) -> bool {
+    !UNSUPPORTED_PROPERTIES.contains(&name)
+}
+
 /// Values we do not implement for otherwise supported properties.
 const UNSUPPORTED_VALUES: &[(&str, &str)] = &[
     ("grid-template-columns", "subgrid"),
@@ -219,7 +225,7 @@ fn declaration(toks: &[&Token]) -> bool {
     if value.is_empty() {
         return false;
     }
-    if UNSUPPORTED_PROPERTIES.contains(&name.as_str()) {
+    if !property_enabled(&name) {
         return false;
     }
     let values: Vec<String> = toks[2..]
@@ -238,7 +244,7 @@ fn declaration(toks: &[&Token]) -> bool {
         return false;
     }
     // Vendor-prefixed properties of other engines.
-    if name.starts_with("-moz-") || name.starts_with("-ms-") || name.starts_with("-o-") {
+    if VALIDATOR.get().is_none() && (name.starts_with("-moz-") || name.starts_with("-ms-") || name.starts_with("-o-")) {
         return false;
     }
     match VALIDATOR.get() {

@@ -2288,3 +2288,15 @@ fn web_crypto_operations_use_the_keys_original_algorithm_and_usages() {
     "#);
     assert_eq!(out, ["32 true InvalidAccessError", "InvalidAccessError"]);
 }
+
+#[test]
+fn css_vendor_aliases_and_descriptors_agree_with_feature_queries() {
+    let out = result_of("<body>", r#"
+        const s = document.body.style;
+        s.WebkitTransform = 'scale(2)';
+        window.result=[s.webkitTransform,s.getPropertyValue('-webkit-transform'),
+            'WebkitTransform' in s, 'mozAnimation' in s, CSS.supports('unicode-range','inherit'),
+            CSS.supports('-moz-animation','inherit') === ('MozAnimation' in s)].join('|');
+    "#);
+    assert_eq!(out, "'scale(2)|scale(2)|true|false|false|true'");
+}

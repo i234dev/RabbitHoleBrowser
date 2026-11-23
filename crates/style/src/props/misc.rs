@@ -578,7 +578,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         | "-webkit-margin-before" | "-webkit-margin-after" | "-webkit-margin-start" | "-webkit-margin-end"
         | "-webkit-padding-start" | "-webkit-padding-end" | "-webkit-border-image" | "border-image" | "border-image-source"
         | "border-image-slice" | "border-image-width" | "border-image-outset" | "border-image-repeat" | "cursor-x"
-        | "nav-index" | "ime-mode" | "src" | "unicode-range" | "font-display" | "behavior" | "filter-x" | "-ms-filter"
+        | "nav-index" | "ime-mode" | "behavior" | "filter-x" | "-ms-filter"
         | "-ms-interpolation-mode" | "-ms-overflow-style" | "-ms-high-contrast-adjust" | "-moz-force-broken-image-icon" => {}
         _ => return false,
     }

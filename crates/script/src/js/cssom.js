@@ -100,7 +100,7 @@
     return out;
   }
 
-  const kebab = (p) => p === 'cssFloat' ? 'float' : p.startsWith('--') ? p : p.replace(/^(webkit|moz|ms)(?=[A-Z])/, '-$1').replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+  const kebab = (p) => p === 'cssFloat' ? 'float' : p.startsWith('--') ? p : p.replace(/^(webkit)(?=[A-Z])/, '-$1').replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
 
   // ------------------------------------------------ CSSStyleDeclaration
 

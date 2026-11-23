@@ -85,18 +85,15 @@ pub(crate) fn camel_to_kebab(name: &str) -> String {
         return name.to_string();
     }
     let mut out = String::new();
-    for (i, c) in name.chars().enumerate() {
+    for c in name.chars() {
         if c.is_ascii_uppercase() {
-            if i == 0 && (name.starts_with("webkit") || name.starts_with("Webkit")) {
-                out.push('-');
-            }
             out.push('-');
             out.push(c.to_ascii_lowercase());
         } else {
             out.push(c);
         }
     }
-    if out.starts_with("webkit-") || out.starts_with("moz-") || out.starts_with("ms-") {
+    if out.starts_with("webkit-") {
         out.insert(0, '-');
     }
     out
