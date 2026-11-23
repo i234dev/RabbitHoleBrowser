@@ -1246,6 +1246,26 @@ fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
 }
 
 #[test]
+fn anchor_functions_resolve_distinct_boxes_and_nested_fallbacks() {
+    let mut e = engine(true);
+    let mut page=load(&mut e,"<style>body{margin:0}section{position:relative;width:300px;height:240px}.a{width:40px;height:20px;margin-left:30px;anchor-name:--a}.b{width:80px;height:32px;margin-left:120px;anchor-name:--b}#tip{position:absolute;left:anchor(right --a);top:anchor(bottom --b);width:anchor-size(--b width);height:anchor-size(--missing height, anchor-size(--a height))}</style><section><div class=a id=a></div><div class=b id=b></div><div id=tip></div></section>");
+    let result=eval(&e,&mut page,r#"(() => {
+        const sample=()=>{const r=tip.getBoundingClientRect();return [r.x,r.y,r.width,r.height].join(',')};
+        const first=sample();
+        tip.style.left='anchor(top --a, 9px)';
+        const specified=tip.style.left, second=sample();
+        tip.style.left='anchor(right --b)';
+        b.style.width='90px';
+        const third=sample(), left=getComputedStyle(tip).left;
+        tip.style.left='calc((anchor(--a right) + anchor(--b left)) / 2)';
+        tip.style.maxWidth='max(anchor-size(--a width), 15px)';
+        tip.style.left='anchor(bogus right)';
+        return [first,specified,second,third,left,sample()].join('|');
+    })()"#);
+    assert_eq!(result,"70,52,80,20|anchor(--a top, 9px)|9,52,80,20|210,52,90,20|210px|95,52,40,20");
+}
+
+#[test]
 fn local_anchor_names_follow_the_nearest_matching_inclusive_scope() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<style>body{margin:0}.anchor{anchor-name:--box;width:20px;height:20px}.target{position:absolute;position-anchor:--box;position-area:bottom right;width:10px;height:10px}section{anchor-scope:--box}#a{margin-left:30px}#b{margin-left:120px}</style><div id=a class=anchor></div><section id=scope><div id=b class=anchor></div><div id=inside class=target></div></section><div id=outside class=target></div>");

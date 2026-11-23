@@ -2804,10 +2804,6 @@ fn fit_content_fn(c: &[Token], ctx: &LengthContext, width: bool) -> Option<Lengt
     Some(Length::Math(intern_math(MathNode::FitContent(Box::new(node)))))
 }
 
-fn resolve_len(c: &[Token], ctx: &LengthContext) -> Option<Length> {
-    values::parse_length(c).map(|l| l.resolve(ctx))
-}
-
 /// Resolve a length that may not be `auto` or negative-sensitive.
 fn resolve_len_no_auto(c: &[Token], ctx: &LengthContext) -> Option<Length> {
     let l = values::parse_length(c)?;
@@ -3551,7 +3547,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
                 fit_content_fn(c0, ctx, name.ends_with("width")).unwrap_or(Length::FitContent)
             } else {
-                match resolve_len(c0, ctx) {
+                match props::anchor_length::length(c0, false, ctx) {
                     // Negative sizes are invalid.
                     Some(Length::Px(v)) | Some(Length::Percent(v)) if v < 0.0 => return,
                     Some(l) => l,
@@ -3583,7 +3579,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             } else if props::fn_name(c0).as_deref() == Some("fit-content") {
                 fit_content_fn(c0, ctx, name == "max-width").unwrap_or(Length::FitContent)
             } else {
-                match resolve_len_no_auto(c0, ctx) {
+                match props::anchor_length::length(c0, false, ctx).filter(|l| !l.is_auto()) {
                     Some(Length::Px(v)) | Some(Length::Percent(v)) if v < 0.0 => return,
                     Some(l) => l,
                     None => return,
@@ -3596,13 +3592,13 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "margin" => {
-            if let Some(e) = parse_edges(&comps, |c| resolve_len(c, ctx)) {
+            if let Some(e) = parse_edges(&comps, |c| props::anchor_length::length(c, false, ctx)) {
                 style.margin = e;
             }
         }
         "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
             if comps.len() == 1 {
-                if let Some(l) = resolve_len(c0, ctx) {
+                if let Some(l) = props::anchor_length::length(c0, false, ctx) {
                     match name {
                         "margin-top" => style.margin.top = l,
                         "margin-right" => style.margin.right = l,
@@ -3613,7 +3609,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "margin-inline" | "margin-block" => {
-            if let Some(v) = two_values(&comps, |c| resolve_len(c, ctx)) {
+            if let Some(v) = two_values(&comps, |c| props::anchor_length::length(c, false, ctx)) {
                 if name == "margin-inline" {
                     style.margin.left = v.0;
                     style.margin.right = v.1;
@@ -3728,7 +3724,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         }
         "top" | "right" | "bottom" | "left" => {
             if comps.len() == 1 {
-                if let Some(l) = resolve_len(c0, ctx) {
+                if let Some(l) = props::anchor_length::length(c0, true, ctx) {
                     match name {
                         "top" => style.inset.top = l,
                         "right" => style.inset.right = l,
@@ -3739,7 +3735,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "inset" => {
-            if let Some(e) = parse_edges(&comps, |c| resolve_len(c, ctx)) {
+            if let Some(e) = parse_edges(&comps, |c| props::anchor_length::length(c, true, ctx)) {
                 style.inset = e;
             }
         }
@@ -4148,6 +4144,9 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     }
     if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
         return Some(recognizes_property(name));
+    }
+    if let Some(result) = props::anchor_length::specified(name,value,&|_| String::new()) {
+        return Some(result.is_some());
     }
     if name == "anchor-scope" { return Some(props::anchor::AnchorScope::parse(&values::components(value)).is_some()); }
     if name == "anchor-name" { return Some(props::anchor::names(&values::components(value)).is_some()); }

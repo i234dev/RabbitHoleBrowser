@@ -124,7 +124,7 @@ pub(crate) struct Layouter<'a> {
     /// The absolutely positioned boxes being laid out belong to a
     /// transformed containing block, which also contains fixed boxes.
     fixed_cb: bool,
-    anchor_areas: HashMap<rabbithole_dom::NodeId,crate::anchor::Placement>,
+    anchor_areas: crate::anchor::AnchoredLayout,
     /// The block children being laid out have a `-webkit-center` parent.
     center_blocks: bool,
     /// The containing block of the block children being laid out is
@@ -413,7 +413,7 @@ impl<'a> Layouter<'a> {
             feature_cache: HashMap::new(),
             abs_cb: HashMap::new(),
             fixed_cb: false,
-            anchor_areas: HashMap::new(),
+            anchor_areas: Default::default(),
             center_blocks: false,
             cb_rtl: false,
             clamp: None,
@@ -533,7 +533,9 @@ impl<'a> Layouter<'a> {
         let debug = crate::incremental::debug_timing();
         let t0 = std::time::Instant::now();
         let builder = Builder::new(self.ctx, reuse);
-        let mut root = crate::wm::prepare(builder.build_root(), self.ctx.doc.body());
+        let mut raw_root = builder.build_root();
+        self.anchor_areas.apply_lengths(&mut raw_root);
+        let mut root = crate::wm::prepare(raw_root, self.ctx.doc.body());
         let t_build = t0.elapsed();
         let uses_counters = builder.uses_counters();
         let vp_w = self.ctx.viewport_width.max(1.0);
@@ -1998,7 +2000,7 @@ impl<'a> Layouter<'a> {
         }
         let style = c.style.clone();
         let anchored = if self.anchor_areas.is_empty() { None } else {
-            c.abs_node().and_then(|n| self.anchor_areas.get(&n)).copied()
+            c.abs_node().and_then(|n| self.anchor_areas.areas.get(&n)).copied()
         };
         let cb = anchored.map_or(cb,|a| a.area);
         let auto = anchored.map(|_| 0.0);

@@ -1289,7 +1289,7 @@ impl StyleEngine {
                 // (Layout looks these up only once any element has one.)
                 tree.any_first_letter |= tree.first_letter[node].is_some();
                 tree.any_first_line |= tree.first_line[node].is_some();
-                tree.any_position_area |= !style.position_area.is_none() && matches!(style.position, crate::Position::Absolute | crate::Position::Fixed);
+                tree.any_position_area |= style.needs_anchor_layout();
                 let changed = !old.as_ref().map(|o| Rc::ptr_eq(o, &style)).unwrap_or(false);
                 if !all && (changed || pseudo_changed) {
                     changes.push(StyleChange { node, old: old.clone(), new: Some(style.clone()), pseudo_changed });

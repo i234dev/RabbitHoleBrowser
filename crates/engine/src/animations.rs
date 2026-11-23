@@ -1574,7 +1574,7 @@ impl Engine {
         }
         let changed = page.styles.get(node).map(|s| **s != style).unwrap_or(true);
         if changed {
-            page.styles.any_position_area |= !style.position_area.is_none() && matches!(style.position, rabbithole_style::Position::Absolute | rabbithole_style::Position::Fixed);
+            page.styles.any_position_area |= style.needs_anchor_layout();
             if let Some(slot) = page.styles.styles.get_mut(node) {
                 *slot = Some(Rc::new(style));
                 page.incr.style_patched(node);

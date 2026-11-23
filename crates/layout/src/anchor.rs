@@ -5,6 +5,7 @@ use rabbithole_dom::{Document, NodeId};
 use rabbithole_gfx::{Rect, Matrix};
 use rabbithole_style::{ComputedStyle, Position, props::anchor::Region};
 use std::collections::HashMap;
+use rabbithole_style::{Length, WritingMode, Direction, math_node, props::anchor_length::Dimension};
 
 #[derive(Clone,Copy)]
 pub(crate) enum Alignment { Start, End, Center, Anchor }
@@ -89,7 +90,108 @@ fn name_scope(ctx: &LayoutContext, mut node: NodeId, name: &str) -> Option<NodeI
     }
 }
 
-pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> HashMap<NodeId,Placement> {
+#[derive(Default)]
+pub(crate) struct AnchoredLayout {
+    pub areas: HashMap<NodeId, Placement>,
+    lengths: HashMap<NodeId, std::rc::Rc<ComputedStyle>>,
+}
+
+impl AnchoredLayout {
+    pub fn is_empty(&self) -> bool { self.areas.is_empty() && self.lengths.is_empty() }
+
+    /// Apply physical values before the writing-mode layout converts them
+    /// into the local logical coordinate system.
+    pub fn apply_lengths(&self, node: &mut crate::tree::LayoutBox) {
+        if self.lengths.is_empty() { return; }
+        if let Some(style) = node.node.and_then(|id| self.lengths.get(&id)) {
+            if node.style.has_anchor_lengths() { node.style = style.clone(); }
+        }
+        for child in &mut node.children { self.apply_lengths(child); }
+    }
+}
+
+type Writing = (WritingMode,Direction);
+
+fn reversed(horizontal: bool, (mode,dir): Writing) -> bool {
+    if horizontal == mode.is_vertical() {
+        mode == WritingMode::VerticalRl
+    } else {
+        (dir == Direction::Rtl) != (mode == WritingMode::SidewaysLr)
+    }
+}
+
+struct QueryBox {
+    cb: Rect,
+    writing: Writing,
+    own: Writing,
+}
+
+impl QueryBox {
+    fn pixels(&self, dim: &Dimension, anchor: Rect, horizontal: bool, end: bool) -> Option<f32> {
+        let axis = |rect: Rect| if horizontal { (rect.x,rect.w) } else { (rect.y,rect.h) };
+        let (start,len) = axis(anchor);
+        let ratio = match *dim {
+            Dimension::Size(name) => {
+                let width = match name {
+                    Some("width") => true,
+                    Some("height") => false,
+                    Some("block") => self.writing.0.is_vertical(),
+                    Some("inline") => !self.writing.0.is_vertical(),
+                    Some("self-block") => self.own.0.is_vertical(),
+                    Some("self-inline") => !self.own.0.is_vertical(),
+                    _ => horizontal,
+                };
+                return Some(if width {anchor.w} else {anchor.h});
+            }
+            Dimension::Percentage(p) => if reversed(horizontal,self.writing) { 1.-p/100. } else { p/100. },
+            Dimension::Side("center") => 0.5,
+            Dimension::Side(side) => {
+                let far = match side {
+                    "left" | "right" if horizontal => side == "right",
+                    "top" | "bottom" if !horizontal => side == "bottom",
+                    "inside" => end,
+                    "outside" => !end,
+                    "start" | "end" => reversed(horizontal,self.writing) != (side == "end"),
+                    "self-start" | "self-end" => reversed(horizontal,self.own) != (side == "self-end"),
+                    _ => return None,
+                };
+                if far { 1. } else { 0. }
+            }
+        };
+        let (origin,extent) = axis(self.cb);
+        let offset = start + len*ratio - origin;
+        Some(if end { extent-offset } else { offset })
+    }
+
+    fn length(&self, length: Length, horizontal: bool, end: bool, base: f32,
+              lookup: &impl Fn(Option<&str>) -> Option<Rect>) -> Length {
+        if !length.is_anchor_query() { return length; }
+        let Length::Math(id) = length else { return length };
+        let Some(node) = math_node(id) else { return Length::Auto; };
+        node.eval_anchors(base, &|q| {
+            lookup(q.name.as_deref()).and_then(|a| self.pixels(&q.dimension,a,horizontal,end))
+                .or_else(|| self.length(q.fallback?,horizontal,end,base,lookup).resolve(base))
+        }).map_or(Length::Auto,Length::Px)
+    }
+
+    fn resolve(&self, style: &ComputedStyle, lookup: &impl Fn(Option<&str>) -> Option<Rect>) -> ComputedStyle {
+        let mut s = style.clone();
+        for (value,horizontal,end,margin) in [
+            (&mut s.inset.left,true,false,false),(&mut s.inset.right,true,true,false),
+            (&mut s.inset.top,false,false,false),(&mut s.inset.bottom,false,true,false),
+            (&mut s.margin.left,true,false,true),(&mut s.margin.right,true,true,true),
+            (&mut s.margin.top,false,false,true),(&mut s.margin.bottom,false,true,true),
+            (&mut s.width,true,false,false),(&mut s.min_width,true,false,false),(&mut s.max_width,true,false,false),
+            (&mut s.height,false,false,false),(&mut s.min_height,false,false,false),(&mut s.max_height,false,false,false),
+        ] {
+            let width_base = if margin { !self.writing.0.is_vertical() } else { horizontal };
+            *value = self.length(*value,horizontal,end,if width_base {self.cb.w} else {self.cb.h},lookup);
+        }
+        s
+    }
+}
+
+pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> AnchoredLayout {
     let mut named: HashMap<(NodeId,Option<NodeId>,&str),Vec<(usize,NodeId)>> = HashMap::new();
     let mut targets = Vec::new();
     for (order,id) in ctx.doc.shadow_including_descendants(Document::ROOT).into_iter().enumerate() {
@@ -98,17 +200,17 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> HashMap<Node
             let scope = ctx.doc.tree_root(id);
             for name in names.iter() { named.entry((scope,name_scope(ctx,id,name),name.as_str())).or_default().push((order,id)); }
         }
-        if matches!(s.position,Position::Fixed | Position::Absolute) && !s.position_area.is_none() {
+        if s.needs_anchor_layout() {
             targets.push((order,id,s));
         }
     }
-    let mut result = HashMap::new();
+    let mut result = AnchoredLayout::default();
     for (order,id,s) in targets {
         let bounds = |a| {
             if ctx.doc.is_shadow_including_inclusive_ancestor(id,a) { return None; }
             tree.box_in_document(ctx.doc,a).map(|(_,r)| r).or_else(|| tree.inline_rect(ctx.doc,a))
         };
-        let anchor = if let Some(name) = s.position_anchor.as_deref() {
+        let lookup = |name: Option<&str>| if let Some(name) = name.or(s.position_anchor.as_deref()) {
             named.get(&(ctx.doc.tree_root(id), name_scope(ctx,id,name), name)).and_then(|candidates| {
                 candidates.iter().rev().find_map(|&(other_order,a)| {
                     let anchor_style = ctx.styles.get(a)?;
@@ -121,13 +223,18 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> HashMap<Node
         } else {
             ctx.doc.popover_invoker(id).and_then(bounds)
         };
-        let Some(anchor) = anchor else { continue };
-        let Some((_,coordinates)) = tree.box_and_coordinates(ctx.doc,id) else { continue };
         let (cb,writing) = container(ctx,tree,id,s);
+        if s.has_anchor_lengths() {
+            let geometry = QueryBox { cb, writing, own:(s.writing_mode,s.direction) };
+            result.lengths.insert(id,std::rc::Rc::new(geometry.resolve(s,&lookup)));
+        }
+        if s.position_area.is_none() { continue; }
+        let Some(anchor) = lookup(None) else { continue };
+        let Some((_,coordinates)) = tree.box_and_coordinates(ctx.doc,id) else { continue };
         let Some([x,y]) = s.position_area.physical(writing,(s.writing_mode,s.direction)) else { continue };
         let (left,right,ax) = interval(x,cb.x,cb.right(),anchor.x,anchor.right());
         let (top,bottom,ay) = interval(y,cb.y,cb.bottom(),anchor.y,anchor.bottom());
-        result.insert(id,Placement { area: Rect::new(left,top,right-left,bottom-top),
+        result.areas.insert(id,Placement { area: Rect::new(left,top,right-left,bottom-top),
             center:(anchor.x+anchor.w/2.,anchor.y+anchor.h/2.),align:[ax,ay] }.in_box_space(coordinates));
     }
     result

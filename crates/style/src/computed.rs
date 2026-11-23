@@ -38,6 +38,7 @@ impl Length {
             Length::Px(v) => Some(v),
             Length::Percent(p) => Some(base * p / 100.0),
             Length::Calc(px, p) => Some(px + base * p / 100.0),
+            Length::Math(id) if self.is_anchor_query() => math_node(id)?.eval_anchors(base,&|q| q.fallback?.resolve(base)),
             Length::Math(id) => Some(math_eval(id, base)),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         }
@@ -73,6 +74,7 @@ impl Length {
 pub enum MathNode {
     /// px + percent% of the base.
     Leaf(f32, f32),
+    Anchor(crate::props::anchor_length::Query),
     Sum(Vec<MathNode>),
     Scale(Box<MathNode>, f32),
     Min(Vec<MathNode>),
@@ -91,6 +93,7 @@ pub enum MathNode {
 impl MathNode {
     pub fn eval(&self, base: f32) -> f32 {
         match self {
+            MathNode::Anchor(q) => q.fallback.and_then(|l| l.resolve(base)).unwrap_or(0.),
             MathNode::Leaf(px, p) => px + base * p / 100.0,
             MathNode::Sum(v) => v.iter().map(|n| n.eval(base)).sum(),
             MathNode::Scale(n, f) => n.eval(base) * f,
@@ -104,9 +107,35 @@ impl MathNode {
             MathNode::Stretch => base,
         }
     }
+    pub fn has_anchor(&self) -> bool {
+        match self {
+            Self::Anchor(_) => true,
+            Self::Sum(v) | Self::Min(v) | Self::Max(v) => v.iter().any(Self::has_anchor),
+            Self::Scale(n,_) | Self::FitContent(n) => n.has_anchor(),
+            Self::Clamp(a) => a.iter().any(Self::has_anchor),
+            _ => false,
+        }
+    }
+
+    pub fn eval_anchors(&self, base: f32, resolve: &impl Fn(&crate::props::anchor_length::Query) -> Option<f32>) -> Option<f32> {
+        let ev = |n: &MathNode| n.eval_anchors(base,resolve);
+        match self {
+            Self::Anchor(q) => resolve(q),
+            Self::Leaf(px,p) => Some(px+base*p/100.),
+            Self::Scale(n,f) => Some(ev(n)?*f),
+            Self::Sum(v) => v.iter().map(ev).sum(),
+            Self::Min(v) => v.iter().try_fold(f32::INFINITY, |a,n| Some(a.min(ev(n)?))),
+            Self::Max(v) => v.iter().try_fold(f32::NEG_INFINITY, |a,n| Some(a.max(ev(n)?))),
+            Self::Clamp(a) => Some(ev(&a[1])?.min(ev(&a[2])?).max(ev(&a[0])?)),
+            Self::FitContent(n) => ev(n),
+            Self::Stretch => Some(base),
+        }
+    }
+
     /// Does any term depend on the base?
     pub fn has_percent(&self) -> bool {
         match self {
+            MathNode::Anchor(q) => q.fallback.is_some_and(|l| l.has_percent()),
             MathNode::Leaf(_, p) => *p != 0.0,
             MathNode::Sum(v) | MathNode::Min(v) | MathNode::Max(v) => v.iter().any(|n| n.has_percent()),
             MathNode::Scale(n, _) => n.has_percent(),
@@ -133,6 +162,7 @@ impl MathNode {
         }
         let list = |v: &[MathNode]| v.iter().map(inner).collect::<Vec<_>>().join(", ");
         match self {
+            MathNode::Anchor(q) => q.css(),
             MathNode::Min(v) => format!("min({})", list(v)),
             MathNode::Max(v) => format!("max({})", list(v)),
             MathNode::Clamp(a) => format!("clamp({})", list(&a[..])),
@@ -157,12 +187,19 @@ static MATH_TABLE: std::sync::LazyLock<std::sync::RwLock<MathTable>> = std::sync
 pub fn intern_math(n: MathNode) -> u32 {
     // Sizing keywords carry a tag bit so layout can tell them from plain
     // math lengths without a table lookup.
-    let tag = if matches!(n, MathNode::FitContent(_) | MathNode::Stretch) { SIZING_TAG } else { 0 };
+    let tag = if matches!(n, MathNode::FitContent(_) | MathNode::Stretch) { SIZING_TAG } else if n.has_anchor() { ANCHOR_TAG } else { 0 };
     intern_math_untagged(n) | tag
 }
 
 /// Tag bit of [`Length::Math`] ids of `fit-content()` / `stretch`.
 const SIZING_TAG: u32 = 1 << 31;
+const ANCHOR_TAG: u32 = 1 << 30;
+
+impl Length {
+    pub fn is_anchor_query(self) -> bool {
+        matches!(self, Self::Math(id) if id & ANCHOR_TAG != 0)
+    }
+}
 
 fn intern_math_untagged(n: MathNode) -> u32 {
     let key = format!("{n:?}");
@@ -181,7 +218,7 @@ fn intern_math_untagged(n: MathNode) -> u32 {
 
 /// The interned expression `id`.
 pub fn math_node(id: u32) -> Option<std::sync::Arc<MathNode>> {
-    MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get((id & !SIZING_TAG) as usize).cloned()
+    MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get((id & !(SIZING_TAG | ANCHOR_TAG)) as usize).cloned()
 }
 
 /// The `stretch` sizing keyword as a length.
@@ -2435,6 +2472,18 @@ impl ComputedStyle {
 
     /// A transform other than `none` (`transform` or an individual
     /// transform property).
+    pub fn has_anchor_lengths(&self) -> bool {
+        [self.inset.top,self.inset.right,self.inset.bottom,self.inset.left,
+         self.width,self.min_width,self.max_width,self.height,self.min_height,self.max_height,
+         self.margin.top,self.margin.right,self.margin.bottom,self.margin.left]
+            .into_iter().any(Length::is_anchor_query)
+    }
+
+    pub fn needs_anchor_layout(&self) -> bool {
+        matches!(self.position, Position::Absolute | Position::Fixed) &&
+            (!self.position_area.is_none() || self.has_anchor_lengths())
+    }
+
     pub fn has_transform(&self) -> bool {
         !self.transform.is_empty() || self.transform3d.as_ref().is_some_and(|t| t.translate.is_some() || t.rotate.is_some() || t.scale.is_some())
     }

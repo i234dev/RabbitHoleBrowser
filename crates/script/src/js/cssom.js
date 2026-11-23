@@ -143,7 +143,7 @@
       const m = /!\s*important\s*$/i.exec(value);
       if (m) { important = true; value = value.slice(0, m.index).trim(); }
       if (!name.startsWith('--')) name = name.toLowerCase();
-      if (checkedProperties.has(name)) {
+      if (checkedProperties.has(name) || /anchor(?:-size)?\(/i.test(value)) {
         value = N.cssomSpecifiedValue(name, value);
         if (value === null) return;
       }
@@ -175,7 +175,7 @@
     const get = (p) => declarationValue(st.decls,p)[1];
     const set = (p, v, imp) => {
       v = v === null ? '' : `${v}`.trim();
-      if (v && checkedProperties.has(p)) {
+      if (v && (checkedProperties.has(p) || /anchor(?:-size)?\(/i.test(v))) {
         v = N.cssomSpecifiedValue(p, v);
         if (v === null) return;
       }

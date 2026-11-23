@@ -289,6 +289,9 @@ fn checked_property(name: &str) -> bool {
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
+    if let Some(result) = rabbithole_style::props::anchor_length::specified(name,tokens,&tokens_to_css) {
+        return result;
+    }
     if single_color_property(name) { return specified_color(name, tokens); }
     if matches!(name, "position-area" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
         let parts = rabbithole_style::values::components(tokens);
@@ -331,7 +334,7 @@ pub(crate) fn cssom_namespace(realm: &mut Realm, _: Value, args: &[Value]) -> Js
 pub(crate) fn cssom_specified_value(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let name = arg_str(realm, args, 0)?;
     let value = arg_str(realm, args, 1)?;
-    if !checked_property(&name) { return Ok(Value::str(&value)); }
+    if !checked_property(&name) && !might_use_anchor(&value) { return Ok(Value::str(&value)); }
     let tokens = rabbithole_css::Tokenizer::tokenize(&value);
     Ok(specified_value(&name, &tokens).map_or(Value::Null, |s| Value::str(&s)))
 }
@@ -396,10 +399,14 @@ fn style_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     Ok(Value::str(&list.value(&prop).0))
 }
 
+fn might_use_anchor(value: &str) -> bool {
+    value.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"anchor"))
+}
+
 fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
     let value = value.trim();
     let serialized;
-    let value = if checked_property(prop) && !value.is_empty() {
+    let value = if !value.is_empty() && (checked_property(prop) || might_use_anchor(value)) {
         let Some(v) = specified_value(prop, &rabbithole_css::Tokenizer::tokenize(value)) else { return };
         serialized = v;
         serialized.as_str()
@@ -671,7 +678,7 @@ fn resolved_inset(n: NodeRef, s: &ComputedStyle, prop: &str) -> Option<String> {
     let Some(rect) = layout_rect(n) else { return Some(position_css(value)); };
     let cb = containing_block(n, s.position, true);
     let base = if vertical { cb.h } else { cb.w };
-    if !value.is_auto() { return Some(length_css(value, base)); }
+    if !value.is_auto() && !value.is_anchor_query() { return Some(length_css(value, base)); }
     if s.position == Position::Relative {
         let offset = -opposite.resolve_or_zero(base);
         return Some(px(if offset == 0.0 { 0.0 } else { offset }));
