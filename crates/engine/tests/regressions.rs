@@ -856,3 +856,18 @@ fn inline_and_rule_declarations_convert_null_and_undefined_per_cssom() {
     })()"#);
     assert_eq!(result, "red/undefined/|red/undefined/");
 }
+
+#[test]
+fn selector_queries_follow_focus_and_preserve_scope_on_indexed_subjects() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=group><input id=field></section><a id=link href='#local'>x</a>");
+    let result = eval(&e, &mut page, r#"(() => {
+        field.focus();
+        const focused = [field.matches(':focus-visible'), field.closest('section:focus-within') === group,
+            document.querySelector('#field:focus') === field, group.querySelector(':scope > :focus') === field,
+            link.matches(':link'), link.matches(':visited')];
+        field.blur();
+        return [...focused, document.querySelectorAll(':focus').length].join('|');
+    })()"#);
+    assert_eq!(result, "true|true|true|true|true|false|0");
+}

@@ -132,6 +132,11 @@ pub trait HostEnv {
     fn random_bytes(&mut self, buf: &mut [u8]);
     /// `window.open` / `target=_blank`.
     fn open_window(&mut self, url: Url);
+    /// Interaction state visible to DOM selector queries in an active document.
+    fn selector_state(&mut self, _frame: Option<u64>) -> rabbithole_css::MatchState {
+        rabbithole_css::MatchState::default()
+    }
+
     fn focus_node(&mut self, node: Option<NodeId>);
     /// Submit a form (build the request and navigate); `submitter` is the
     /// button used, if any.

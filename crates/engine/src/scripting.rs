@@ -716,6 +716,24 @@ impl HostEnv for EngineEnv<'_> {
     fn take_initial_frame_load(&mut self, node: NodeId) -> bool {
         self.page.frames.children.iter_mut().find(|c| c.node == node).and_then(|c| c.page.as_mut()).map(|p| std::mem::take(&mut p.script.frame_initial_load_pending)).unwrap_or(false)
     }
+    fn selector_state(&mut self, frame: Option<u64>) -> rabbithole_css::MatchState {
+        let state = if let Some(id) = frame {
+            let origin = crate::frames::page_origin(self.page);
+            let target = crate::frames::ancestor_page(id).or_else(|| crate::frames::find_frame_page_mut(self.page, id));
+            let Some(target) = target.filter(|p| crate::frames::page_origin(p) == origin) else {
+                return Default::default();
+            };
+            &target.state
+        } else {
+            &self.page.state
+        };
+        // History is private. Script selector APIs always see links as unvisited.
+        rabbithole_css::MatchState {
+            focused: state.focused, focus_visible: state.focus_visible, active: state.active,
+            hovered: state.hovered, target_id: state.target_id.clone(), ..Default::default()
+        }
+    }
+
     fn focus_node(&mut self, node: Option<NodeId>) {
         self.page.doc.focus_editing_host(node);
         self.page.state.focused = node;
