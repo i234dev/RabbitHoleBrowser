@@ -585,11 +585,29 @@
       pc.dispatchEvent(new RTCPeerConnectionIceEvent('icecandidate'));
     },0);
   }
+  function updateNegotiationNeeded(pc) {
+    const p = peers.get(pc);
+    if (p.negotiationQueued || p.signalingState !== 'stable') return;
+    p.negotiationQueued = true;
+    schedule(() => {
+      p.negotiationQueued = false;
+      if (p.signalingState !== 'stable' || p.pendingOperations) return;
+      const hasData = desc => desc && /^m=application [1-9]\d* [^ ]*SCTP\b/im.test(desc.sdp);
+      const needed = p.byHandle.size > 0 &&
+        !(hasData(p.currentLocalDescription) && hasData(p.currentRemoteDescription));
+      const notify = needed && !p.negotiationNeeded;
+      p.negotiationNeeded = needed;
+      if (notify) pc.dispatchEvent(new Event('negotiationneeded'));
+    },0);
+  }
   function enqueue(pc, action) {
     const p = peers.get(pc);
     if (!p) return Promise.reject(new TypeError('Invalid receiver'));
+    ++p.pendingOperations;
     const result = p.operations.then(()=>{state(pc);return action(p);});
-    p.operations = result.catch(()=>{});
+    p.operations = result.catch(()=>{}).then(()=>{
+      if (--p.pendingOperations === 0 && p.byHandle.size) updateNegotiationNeeded(pc);
+    });
     return result;
   }
   class RTCPeerConnection extends EventTarget {
@@ -601,7 +619,7 @@
         emptySdp:'v=0\r\no=- '+((BigInt(id[0])<<31n)|BigInt(id[1]>>>1))+' 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n',
         signalingState:'stable',iceConnectionState:'new',connectionState:'new',iceGatheringState:'new',
         pendingLocalDescription:null,pendingRemoteDescription:null,currentLocalDescription:null,currentRemoteDescription:null,
-        gatheringStarted:false,negotiationQueued:false,answer:null,lastOffer:null});
+        gatheringStarted:false,pendingOperations:0,negotiationNeeded:false,negotiationQueued:false,answer:null,lastOffer:null});
     }
     static async generateCertificate(algorithm) {
       if (!arguments.length) throw new TypeError('A key generation algorithm is required');
@@ -656,10 +674,7 @@
       const handle=N.rtcChannel(backend(p),label,protocol,ordered,negotiated?id:null,maxPacketLifeTime,maxRetransmits);
       const ch=new RTCDataChannel(channelToken,{pc:this,handle,label,protocol,ordered,negotiated,id:negotiated?id:null,maxPacketLifeTime,maxRetransmits});
       p.byHandle.set(handle,ch);
-      if (p.byHandle.size===1 && !p.currentLocalDescription && !p.negotiationQueued) {
-        p.negotiationQueued=true;
-        schedule(()=>{p.negotiationQueued=false;if(p.signalingState==='stable' && !p.currentLocalDescription)this.dispatchEvent(new Event('negotiationneeded'));},0);
-      }
+      updateNegotiationNeeded(this);
       return ch;
     }
     createOffer() {
@@ -679,7 +694,7 @@
       return enqueue(this,p=>{
         const t=type===undefined ? (p.pendingRemoteDescription?'answer':'offer') : enumeration(type,['offer','answer','pranswer','rollback']);
         if(t==='offer' && ['stable','have-local-offer'].includes(p.signalingState)) {
-          const generated=p.lastOffer || (p.native ? N.rtcOffer(p.native) : p.emptySdp);
+          const generated=(sdp && p.lastOffer) || (p.native ? N.rtcOffer(p.native) : p.emptySdp);
           if(sdp && sdp!==generated) throw failure('InvalidModificationError','Local SDP must match the generated offer');
           p.lastOffer=generated;
           p.pendingLocalDescription=new RTCSessionDescription({type:t,sdp:generated});
@@ -694,6 +709,7 @@
           p.pendingLocalDescription=p.pendingRemoteDescription=null;
           p.gatheringStarted=true;
           applyTransportDescription(p,p.currentLocalDescription,true);
+          p.negotiationNeeded=false;
           change(this,'signalingState','stable','signalingstatechange');
           gather(this,p.currentLocalDescription); pump(this);
         } else throw failure('InvalidStateError','Description is invalid in the current signaling state');
@@ -714,6 +730,7 @@
           p.currentLocalDescription=p.pendingLocalDescription; p.currentRemoteDescription=desc;
           applyTransportDescription(p,desc,false);
           p.pendingLocalDescription=p.pendingRemoteDescription=null;
+          p.negotiationNeeded=false;
           change(this,'signalingState','stable','signalingstatechange'); pump(this);
         } else throw failure('InvalidStateError','Description is invalid in the current signaling state');
       });

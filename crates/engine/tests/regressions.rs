@@ -1228,6 +1228,48 @@ fn indent_and_outdent_preserve_paragraphs_formatting_and_selection() {
 }
 
 #[test]
+fn data_channels_added_during_an_empty_offer_trigger_one_followup_negotiation() {
+    use std::time::{Duration, Instant};
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<p>RTC negotiation</p>");
+    eval(&e, &mut page, r#"
+      var negotiationResult = '';
+      (async () => {
+        const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+        let calls = 0;
+        await a.setLocalDescription();
+        a.onnegotiationneeded = async () => {
+          try {
+            ++calls;
+            await a.setLocalDescription();
+            if (!a.localDescription.sdp.includes('m=application')) throw Error('missing SCTP');
+            await b.setRemoteDescription(a.localDescription);
+            await b.setLocalDescription();
+            await a.setRemoteDescription(b.localDescription);
+          } catch (e) { negotiationResult = String(e); }
+        };
+        const first = a.createDataChannel('one');
+        a.createDataChannel('two');
+        first.onopen = () => {
+          a.createDataChannel('three');
+          setTimeout(() => { negotiationResult = calls + '|' + a.signalingState; a.close(); b.close(); }, 10);
+        };
+        await b.setRemoteDescription(a.localDescription);
+        await b.setLocalDescription();
+        await a.setRemoteDescription(b.localDescription);
+      })().catch(e => negotiationResult = String(e));
+    "#);
+    let until = Instant::now() + Duration::from_secs(8);
+    loop {
+        e.tick(&mut page);
+        let result = eval(&e, &mut page, "negotiationResult");
+        if !result.is_empty() { assert_eq!(result, "1|stable"); break; }
+        assert!(Instant::now() < until, "data channel negotiation did not finish");
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+#[test]
 fn closing_a_data_channel_delivers_queued_blob_and_text_in_order() {
     use std::time::{Duration, Instant};
     let mut e = engine(true);
