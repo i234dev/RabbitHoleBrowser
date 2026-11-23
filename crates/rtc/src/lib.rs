@@ -360,6 +360,7 @@ impl Peer {
                     {
                         match socket.send_to(&t.contents, t.destination) {
                             Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                            Err(e) if unreachable_peer(&e) => {}
                             res => {
                                 res?;
                             }
@@ -385,7 +386,7 @@ impl Peer {
                                 }
                                 break;
                             }
-                            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                            Err(e) if e.kind() == ErrorKind::WouldBlock || unreachable_peer(&e) => {}
                             Err(e) => return Err(e),
                         }
                     }
@@ -403,6 +404,13 @@ impl Peer {
         }
         Ok(events)
     }
+}
+
+/// Windows reports an ICMP port-unreachable reply to an earlier datagram as
+/// an error on the next UDP call (WSAECONNRESET). A peer that has gone away
+/// is detected by ICE, DTLS and SCTP, not by the socket.
+fn unreachable_peer(e: &io::Error) -> bool {
+    matches!(e.kind(), ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused)
 }
 
 #[cfg(test)]
