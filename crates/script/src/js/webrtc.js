@@ -345,7 +345,11 @@
     };
     const usernameFragment = field('ice-ufrag'), password = field('ice-pwd');
     const key = local ? 'localParameters' : 'remoteParameters', list = local ? 'local' : 'remote';
-    if (ice[key]?.usernameFragment !== usernameFragment) ice[list] = [];
+    if (ice[key]?.usernameFragment !== usernameFragment) {
+      ice[list] = [];
+      if (!local) ice.remoteComplete = false;
+    }
+    if (!local && /^a=end-of-candidates\r?$/m.test(section)) ice.remoteComplete = true;
     ice[key] = usernameFragment && password ? {usernameFragment,password} : null;
     if (ice.role === 'unknown') ice.role = (desc.type === 'offer') === local ? 'controlling' : 'controlled';
     if (!local) {
@@ -457,6 +461,7 @@
       for (const [kind,id,a,b,c,ordered,life,retries] of events) {
         if (p.signalingState === 'closed') break;
         if (kind === 'pair' && ice) {
+          p.pairNominated = true;
           const info = iceTransports.get(ice);
           const local = info.local.find(v => v.address === id && v.port === a);
           const remote = info.remote.find(v => v.address === b && v.port === c);
@@ -473,9 +478,13 @@
         }
         if (kind === 'connected') { setTransportState(dtls,'connected'); change(pc,'connectionState','connected','connectionstatechange'); continue; }
         if (kind === 'ice') {
-          setTransportState(ice,id);
+          p.nativeIceState = id;
+          if (id !== 'connected' && id !== 'completed') {
+            p.pairNominated = false;
+            setTransportState(ice,id);
+            change(pc,'iceConnectionState',id,'iceconnectionstatechange');
+          }
           if (id === 'checking' && dtls?.state === 'new') setTransportState(dtls,'connecting');
-          change(pc,'iceConnectionState',id,'iceconnectionstatechange');
           if (id === 'checking' && p.connectionState === 'new') change(pc,'connectionState','connecting','connectionstatechange');
           continue;
         }
@@ -499,6 +508,17 @@
           const data = a ? (ch.binaryType === 'blob' ? new Blob([b]) : b) : decoder.decode(b);
           ch.dispatchEvent(new MessageEvent('message',{data}));
         } else if (ch && kind === 'close') finishChannel(ch);
+      }
+      if (p.signalingState !== 'closed' && ice && p.pairNominated &&
+          (p.nativeIceState === 'connected' || p.nativeIceState === 'completed')) {
+        // A nominated pair is usable before both agents finish gathering.
+        // Publish its selection before notifying connection-state listeners.
+        const connected = ice.state === 'connected' || ice.state === 'completed';
+        const complete = connected && p.nativeIceState === 'completed' &&
+          p.iceGatheringState === 'complete' && iceTransports.get(ice).remoteComplete;
+        const state = complete ? 'completed' : 'connected';
+        setTransportState(ice,state);
+        if (p.signalingState !== 'closed') change(pc,'iceConnectionState',state,'iceconnectionstatechange');
       }
       pump(pc);
     }, 4);
@@ -650,7 +670,20 @@
     addIceCandidate(init = {}) {
       return enqueue(this,p=>{
         if(!this.remoteDescription) throw failure('InvalidStateError','A remote description is required');
-        if(init==null || !init.candidate) return;
+        if (init == null || !init.candidate) {
+          const ice = p.sctp?.transport.iceTransport;
+          if (ice) {
+            const info = iceTransports.get(ice);
+            const media = this.remoteDescription.sdp.split(/^m=/m).slice(1);
+            const index = media.findIndex(part => part.startsWith('application '));
+            const mid = index < 0 ? null : /^a=mid:([^\r\n]+)/m.exec(media[index])?.[1];
+            if ((init?.sdpMid == null || String(init.sdpMid) === mid) &&
+                (init?.sdpMLineIndex == null || Number(init.sdpMLineIndex) === index) &&
+                (init?.usernameFragment == null || String(init.usernameFragment) === info.remoteParameters?.usernameFragment))
+              info.remoteComplete = true;
+          }
+          return;
+        }
         const c=new RTCIceCandidate(init);
         if(c.sdpMid===null && c.sdpMLineIndex===null) throw new TypeError('A media identifier is required');
         const mids=[...this.remoteDescription.sdp.matchAll(/^a=mid:([^\r\n]+)/gm)].map(m=>m[1]);

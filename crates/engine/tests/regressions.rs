@@ -922,6 +922,11 @@ fn data_channel_transports_report_negotiated_limits_and_the_selected_ice_pair() 
         var result = '', step = 'offer';
         var sender = new RTCPeerConnection(), receiver = new RTCPeerConnection();
         (async () => {
+            const states = [];
+            receiver.oniceconnectionstatechange = () => {
+                if (receiver.iceConnectionState === 'connected')
+                    states.push(!!receiver.sctp.transport.iceTransport.getSelectedCandidatePair());
+            };
             const channel = sender.createDataChannel('transport');
             const message = new Promise(resolve => channel.onmessage = event => resolve(event.data));
             receiver.ondatachannel = ({channel}) => {
@@ -945,6 +950,9 @@ fn data_channel_transports_report_negotiated_limits_and_the_selected_ice_pair() 
             const sctp = receiver.sctp, dtls = sctp.transport, ice = dtls.iceTransport;
             step = 'pair';
             while (!ice.getSelectedCandidatePair()) await new Promise(resolve => setTimeout(resolve, 10));
+            await receiver.addIceCandidate(null);
+            while (ice.state !== 'completed') await new Promise(resolve => setTimeout(resolve, 5));
+            if (states.join() !== 'true') throw Error('ICE selection was unavailable on connection');
             const pair = ice.getSelectedCandidatePair();
             const properties = [data, sctp instanceof RTCSctpTransport, dtls instanceof RTCDtlsTransport,
                 ice instanceof RTCIceTransport, sctp.state, dtls.state, ice.role, sctp.maxMessageSize,
