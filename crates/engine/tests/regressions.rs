@@ -708,3 +708,20 @@ fn css_color_layers_composite_in_paint_order_and_alpha_preserves_the_origin_spac
     })()"#);
     assert_eq!(result,"rgb(0, 255, 0)|color(display-p3 1 0.2 0 / 0.125)|color-layers(red, blue)|rgb(255, 0, 0)");
 }
+
+#[test]
+fn editing_aligns_only_selected_paragraphs_and_preserves_the_selection() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<section contenteditable id=ed>plain<p>second</p><p>third</p></section>");
+    let out=eval(&e,&mut page,r#"(()=>{
+        const sel=getSelection(), a=ed.firstChild, b=ed.children[0].firstChild;
+        sel.setBaseAndExtent(b,3,a,2);
+        document.execCommand('justifyCenter');
+        const aligned=[document.queryCommandValue('justifyCenter'),document.queryCommandState('justifyCenter'),
+            getComputedStyle(ed.lastChild).textAlign,sel.anchorNode===b,sel.focusNode===a];
+        sel.collapse(b,2);
+        document.execCommand('formatBlock',false,'<h2>');
+        return [...aligned,document.queryCommandValue('formatBlock'),sel.anchorNode===b,sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(out,"center|true|start|true|true|h2|true|2");
+}

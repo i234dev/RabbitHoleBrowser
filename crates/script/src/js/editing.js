@@ -239,11 +239,128 @@
     }
   }
 
+  const alignments = new Map([
+    ['justifyleft','left'], ['justifyright','right'], ['justifycenter','center'], ['justifyfull','justify']
+  ]);
+  const blockTags = new Set(['address','dd','div','dt','h1','h2','h3','h4','h5','h6','p','pre']);
+  const blockCommand = cmd => alignments.has(cmd) || cmd === 'formatblock';
+  function isBlock(node) {
+    return node?.nodeType === 1 && !['inline','contents','inline-block','inline-flex','inline-grid','none'].includes(getComputedStyle(node).display);
+  }
+  function alignOf(el) {
+    const s=getComputedStyle(el), a=s.textAlign;
+    if (a === 'start' || a === 'end') return (a === 'start') === (s.direction !== 'rtl') ? 'left' : 'right';
+    return a;
+  }
+  // Identify the entire visual paragraph containing a selected leaf. When
+  // inline children share an editing host or a table cell, limit the run
+  // to adjacent inline content, stopping at block or line-break boundaries.
+  function paragraph(host, node) {
+    let top = node;
+    while (top !== host && top.parentNode !== host && !isBlock(top)) top = top.parentNode;
+    if (top !== host && isBlock(top) && !['li','td','th'].includes(top.localName))
+      return {container:top.parentNode, nodes:[top], block:top};
+    const container = top === host || isBlock(top) ? top : top.parentNode;
+    if (node===container) node=container.firstChild;
+    if (!node) return {container,nodes:[],block:null};
+    while (node.parentNode!==container) node=node.parentNode;
+    let first=node, last=node;
+    while (first.previousSibling && !isBlock(first.previousSibling) && first.previousSibling.localName!=='br') first=first.previousSibling;
+    while (last.nextSibling && !isBlock(last.nextSibling) && last.localName!=='br') last=last.nextSibling;
+    const nodes=[];
+    for (let n=first;n;n=n.nextSibling) { nodes.push(n); if (n===last) break; }
+    return {container,nodes,block:null};
+  }
+  function paragraphs(t) {
+    let nodes = t.range.collapsed ? [] : selectedText(t).map(run=>run.node);
+    if (!nodes.length) {
+      const point=t.range.startContainer;
+      nodes=[point.nodeType===3 ? point : point.childNodes[t.range.startOffset] || point.lastChild || point];
+    }
+    const seen=new Set(), result=[];
+    for (const node of nodes) {
+      if (editingHost(node)!==t.host) continue;
+      const run=paragraph(t.host,node), key=run.nodes[0] || run.container;
+      if (!seen.has(key)) { seen.add(key); result.push(run); }
+    }
+    return result;
+  }
+  function blockValue(run, cmd) {
+    if (cmd==='formatblock') return blockTags.has(run.block?.localName) ? run.block.localName : '';
+    return alignOf(run.block || run.container);
+  }
+  function blockQuery(t,cmd,kind) {
+    if (!t?.range) return kind==='value' ? '' : false;
+    const values=paragraphs(t).map(run=>blockValue(run,cmd));
+    if (kind==='value') return values[0] || '';
+    if (kind==='mixed') return values.some(v=>v!==values[0]);
+    return alignments.has(cmd) && values.length>0 && values.every(v=>v===alignments.get(cmd));
+  }
+  function bookmark(node, offset) {
+    return {node,offset,next:node.childNodes[offset],prev:node.childNodes[offset-1]};
+  }
+  function restorePoint(p, replacements) {
+    const adjacent=p.next || p.prev;
+    if (adjacent?.parentNode && adjacent.parentNode!==p.node && adjacent.isConnected) {
+      const index=Array.prototype.indexOf.call(adjacent.parentNode.childNodes,adjacent);
+      return [adjacent.parentNode,index+(p.next?0:1)];
+    }
+    const n=replacements.get(p.node)||p.node;
+    return [n, Math.min(p.offset,n.nodeType===3?n.length:n.childNodes.length)];
+  }
+  function applyBlock(t,cmd,value) {
+    const align=alignments.get(cmd);
+    let tag=value.toLowerCase();
+    if (cmd==='formatblock') {
+      if (tag.startsWith('<') && tag.endsWith('>')) tag=tag.slice(1,-1);
+      if (!blockTags.has(tag)) return false;
+    }
+    const {sel,host}=t, doc=host.ownerDocument;
+    const anchor=bookmark(sel.anchorNode,sel.anchorOffset), focus=bookmark(sel.focusNode,sel.focusOffset);
+    const replacements=new Map();
+    let prev=null, changed=false;
+    for (const run of paragraphs(t)) {
+      if (blockValue(run,cmd)===(align || tag)) { prev=null; continue; }
+      const {block,container,nodes}=run;
+      changed=true;
+      if (align && block?.localName==='div') {
+        block.removeAttribute('align');
+        block.style.textAlign=align;
+        prev=block;
+      } else if (!align && block && blockTags.has(block.localName)) {
+        const el=doc.createElement(tag);
+        for (const a of Array.from(block.attributes)) el.setAttribute(a.name,a.value);
+        container.insertBefore(el,block);
+        while (block.firstChild) el.appendChild(block.firstChild);
+        replacements.set(block,el); block.remove(); prev=null;
+      } else {
+        const first=nodes[0];
+        let wrapper;
+        if (align && prev && first?.previousSibling===prev && prev.parentNode===container) wrapper=prev;
+        else {
+          wrapper=doc.createElement(align?'div':tag);
+          if (align) wrapper.style.textAlign=align;
+          container.insertBefore(wrapper,first||null);
+        }
+        if (align && block) { block.removeAttribute('align'); block.style.removeProperty('text-align'); }
+        for (const node of nodes) wrapper.appendChild(node);
+        if (!nodes.length) wrapper.appendChild(doc.createElement('br'));
+        prev=wrapper;
+      }
+    }
+    if (changed) {
+      sel.setBaseAndExtent(...restorePoint(anchor,replacements),...restorePoint(focus,replacements));
+      const types={left:'formatJustifyLeft',right:'formatJustifyRight',center:'formatJustifyCenter',justify:'formatJustifyFull'};
+      input(host,types[align] || '');
+    }
+    return true;
+  }
+
   const preferences = new Set(['stylewithcss', 'usecss', 'defaultparagraphseparator']);
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
   const richCommands = new Set(['inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
   function supported(cmd) {
-    return valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
+    return blockCommand(cmd) || valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
   }
   function editingHost(node) {
     let el = node?.nodeType === 1 ? node : node?.parentElement;
@@ -268,7 +385,7 @@
     if (preferences.has(cmd) || cmd === 'selectall') return true;
     if (!t) return false;
     if (textCommands.has(cmd)) return true;
-    return !t.control && (richCommands.has(cmd) || formats.has(cmd) || valueFormats.has(cmd)) &&
+    return !t.control && (richCommands.has(cmd) || formats.has(cmd) || valueFormats.has(cmd) || blockCommand(cmd)) &&
       (t.host.contentEditable !== 'plaintext-only' || cmd === 'insertlinebreak' || cmd === 'insertparagraph');
   }
 
@@ -366,6 +483,7 @@
       else if (doc.body) doc.getSelection()?.selectAllChildren(t?.host || doc.body);
       return true;
     }
+    if (blockCommand(cmd)) return applyBlock(t,cmd,value);
     if (valueFormats.has(cmd)) {
       const normalized = normalizeFormat(cmd, value);
       if (normalized === null) return false;
@@ -451,15 +569,18 @@
     queryCommandState(name) {
       const state = context(this);
       const cmd = command(name, arguments.length);
+      if (blockCommand(cmd)) return blockQuery(target(this),cmd,'state');
       return formats.has(cmd) ? formatState(state, target(this), cmd, false) : cmd === 'stylewithcss' && state.css;
     },
     queryCommandIndeterm(name) {
       const state = context(this), cmd = command(name, arguments.length);
+      if (blockCommand(cmd)) return blockQuery(target(this),cmd,'mixed');
       return valueFormats.has(cmd) ? selectedValue(state, target(this), cmd, true) : formats.has(cmd) && formatState(state, target(this), cmd, true);
     },
     queryCommandValue(name) {
       const state = context(this);
       const cmd = command(name, arguments.length);
+      if (blockCommand(cmd)) return blockQuery(target(this),cmd,'value');
       return valueFormats.has(cmd) ? selectedValue(state, target(this), cmd, false) : cmd === 'defaultparagraphseparator' ? state.separator : '';
     },
   };
