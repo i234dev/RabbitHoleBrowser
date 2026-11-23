@@ -142,25 +142,30 @@
     return document.importNode(t.content, true);
   }
   const E = g.Element, CD = g.CharacterData, SR = g.ShadowRoot, DF = g.DocumentFragment;
-  for (const [C, insert] of [[E, true], [SR, true]]) {
+  function insertMethod(pos, safe, declarative = false) {
+    return function(html, opts = undefined) {
+      if (!arguments.length) throw new TypeError('HTML markup is required');
+      parseHTMLInto(this, pos, safe, html, opts, declarative);
+    };
+  }
+  for (const C of [E, SR]) {
     // setHTML / setHTMLUnsafe: the children replaced by the markup parsed
     // with declarative shadow roots allowed.
-    method(C, 'setHTMLUnsafe', function (html, opts) { parseHTMLInto(this, 'html', false, html, opts, true); });
-    method(C, 'setHTML', function (html, opts) { parseHTMLInto(this, 'html', true, html, opts, true); });
-    method(C, 'getHTML', function (opts) {
+    method(C, 'setHTMLUnsafe', insertMethod('html', false, true));
+    method(C, 'setHTML', insertMethod('html', true, true));
+    method(C, 'getHTML', function (opts = undefined) {
       if (!opts || !opts.serializableShadowRoots) return this.innerHTML;
       return this.innerHTML;
     });
     for (const [name, pos] of [['appendHTML', 'append'], ['prependHTML', 'prepend']]) {
-      method(C, name + 'Unsafe', function (html, opts) { parseHTMLInto(this, pos, false, html, opts); });
-      method(C, name, function (html, opts) { parseHTMLInto(this, pos, true, html, opts); });
+      method(C, name + 'Unsafe', insertMethod(pos, false));
+      method(C, name, insertMethod(pos, true));
     }
-    void insert;
   }
   for (const C of [E, CD]) {
     for (const [name, pos] of [['beforeHTML', 'before'], ['afterHTML', 'after'], ['replaceWithHTML', 'replaceWith']]) {
-      method(C, name + 'Unsafe', function (html, opts) { parseHTMLInto(this, pos, false, html, opts); });
-      method(C, name, function (html, opts) { parseHTMLInto(this, pos, true, html, opts); });
+      method(C, name + 'Unsafe', insertMethod(pos, false));
+      method(C, name, insertMethod(pos, true));
     }
   }
   // {append,prepend,before,after,replaceWith}HTML{,Unsafe}(html, options):

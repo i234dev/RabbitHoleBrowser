@@ -2360,3 +2360,15 @@ fn web_crypto_gcm_authenticates_truncated_tags_and_variable_ivs() {
     "#);
     assert_eq!(out, ["61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c742373806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f45983612d2e79e3b0785 true", "OperationError"]);
 }
+
+#[test]
+fn html_insertion_methods_require_markup_and_exclude_optional_arguments_from_length() {
+    let out=result_of("<section></section>",r#"
+        const root=document.querySelector('section').attachShadow({mode:'open'});
+        root.setHTMLUnsafe('text');
+        let error;
+        try {root.setHTMLUnsafe();} catch(e) {error=e.name;}
+        window.result=[root.setHTMLUnsafe.length,error,root.textContent].join('|');
+    "#);
+    assert_eq!(out,"'1|TypeError|text'");
+}
