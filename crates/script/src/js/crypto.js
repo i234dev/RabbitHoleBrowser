@@ -258,14 +258,15 @@
     const name = algName(alg);
     const a = normAlg(alg);
     if (key[S].algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key.');
-    if (length == null || !Number.isInteger(length) || length <= 0 || length > 0xffffffff || length % 8)
-      throw err('OperationError', 'The length must be positive and a multiple of 8.');
+    if (length == null || !Number.isInteger(length) || length < 0 || length > 0xffffffff || length % 8)
+      throw err('OperationError', 'The length must be a multiple of 8.');
     const n = length / 8;
     const hash = hashName(a.hash);
     if (name === 'PBKDF2') {
       const salt = bytesOf(a.salt), iterations = Math.trunc(+a.iterations);
       if (!Number.isFinite(iterations) || iterations < 0 || iterations > 0xffffffff) throw new TypeError('Invalid iteration count');
       if (!iterations) throw err('OperationError', 'PBKDF2 iterations must be greater than 0.');
+      if (!n) return new ArrayBuffer(0);
       const op = N.pbkdfStart(hash, key[S].raw, salt, iterations, n);
       const output = N.pbkdfStep(op);
       if (output) return output;
@@ -280,6 +281,7 @@
       });
     }
     const salt = bytesOf(a.salt), info = bytesOf(a.info);
+    if (!n) return new ArrayBuffer(0);
     const hl = HASHES[hash][1];
     if (n > 255 * hl) throw err('OperationError', 'HKDF output exceeds 255 blocks.');
     const prk = hmac(hash, salt.length ? salt : new Uint8Array(hl), key[S].raw);

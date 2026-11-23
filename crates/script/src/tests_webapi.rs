@@ -2180,10 +2180,10 @@ fn web_crypto_derivation_resumes_across_blocks() {
           const output = await s.deriveBits(params,k,448);
           console.log(Array.from(new Uint8Array(output), n=>n.toString(16).padStart(2,'0')).join(''));
           console.log(await s.deriveBits({...params,iterations:-1},k,128).catch(e=>e.name));
-          console.log(await s.deriveBits(params,k,0).catch(e=>e.name));
+          console.log((await s.deriveBits(params,k,0)).byteLength);
         })();
     "#);
-    assert_eq!(out, ["fecfc52d97412573ed2650d10759e86dc7e0c198b2b7331df1e32516fb75d443aa8cbaadbc23a0e835aa0cf5c038e4ef26af9146a9a603cc", "TypeError", "OperationError"]);
+    assert_eq!(out, ["fecfc52d97412573ed2650d10759e86dc7e0c198b2b7331df1e32516fb75d443aa8cbaadbc23a0e835aa0cf5c038e4ef26af9146a9a603cc", "TypeError", "0"]);
 }
 
 #[test]
