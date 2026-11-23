@@ -1014,3 +1014,19 @@ fn stylesheet_namespaces_limit_type_and_attribute_selectors_in_nested_rules() {
     })()"#);
     assert_eq!(result, "0.2|0.6|H|http://www.w3.org/1999/xhtml|.absent|S|g.item[a|flag]|0.8");
 }
+
+#[test]
+fn removing_rich_formatting_preserves_links_unselected_text_and_selection_direction() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div contenteditable id=ed><b>abc</b><a href='#n'><i>de</i></a><span contenteditable=false>locked</span></div>");
+    let result = eval(&e, &mut page, r#"(() => {
+        ed.focus();
+        const sel = getSelection();
+        sel.setBaseAndExtent(ed.querySelector('i').firstChild,1,ed.querySelector('b').firstChild,1);
+        const events = [];
+        ed.oninput = event => events.push(event.inputType);
+        const ok = document.execCommand('removeFormat');
+        return [ok,ed.innerHTML,sel.toString(),sel.direction,events.join(',')].join('|');
+    })()"#);
+    assert_eq!(result, "true|<b>a</b>bc<a href=\"#n\">d<i>e</i></a><span contenteditable=\"false\">locked</span>|bcd|backward|formatRemove");
+}

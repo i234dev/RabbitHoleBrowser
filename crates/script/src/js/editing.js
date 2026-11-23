@@ -204,6 +204,70 @@
       el = parent;
     }
   }
+  const removableInline = new Set(['abbr','acronym','b','bdi','bdo','big','blink','cite',
+    'code','dfn','em','font','i','ins','kbd','mark','nobr','q','s','samp','small','span',
+    'strike','strong','sub','sup','tt','u','var']);
+  function removable(element, host) {
+    return element && element !== host && removableInline.has(element.localName) &&
+      element.namespaceURI === 'http://www.w3.org/1999/xhtml' && element.isContentEditable;
+  }
+  function unwrap(element) {
+    const parent = element.parentNode;
+    while (element.firstChild) parent.insertBefore(element.firstChild, element);
+    element.remove();
+  }
+  function removeFormatting(state, t) {
+    const {host, range, sel} = t;
+    state.typing = null;
+    if (range.collapsed) return true;
+    const runs = selectedText(t), backwards = sel.direction === 'backward';
+    const root = range.commonAncestorContainer, whole = [], stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (node.nodeType !== 1 || !node.isContentEditable || !range.intersectsNode(node)) continue;
+      if (removable(node,host) && range.comparePoint(node,0) === 0 && range.comparePoint(node,node.childNodes.length) === 0)
+        whole.push(node);
+      for (let child = node.lastElementChild; child; child = child.previousElementSibling) stack.push(child);
+    }
+    for (const el of whole) unwrap(el);
+    let changed = whole.length !== 0;
+    for (const run of runs) {
+      let node = run.node;
+      if (!removable(node.parentElement,host) && !node.parentElement.closest('[style]')) continue;
+      if (run.to < node.length) node.splitText(run.to);
+      if (run.from) node = node.splitText(run.from);
+      run.to -= run.from;
+      run.from = 0;
+      run.node = node;
+      while (removable(node.parentElement,host)) {
+        const el = node.parentElement;
+        splitAncestors(node,el);
+        unwrap(el);
+        changed = true;
+      }
+      // Semantic links and other retained elements can still carry inline
+      // formatting. Keep their unrelated attributes and layout declarations.
+      for (let el = node.parentElement; el && el !== host && !isBlock(el); el = el.parentElement) {
+        if (!el.hasAttribute('style')) continue;
+        for (const prop of ['vertical-align','font-weight','font-family','font-size','color',
+          'background-color','font-style','text-decoration','text-decoration-line']) {
+          if (el.style.getPropertyValue(prop)) {
+            splitAncestors(node,el);
+            el.style.removeProperty(prop);
+            changed = true;
+          }
+        }
+        if (!el.style.cssText) el.removeAttribute('style');
+      }
+    }
+    if (changed && runs.length) {
+      const first = runs[0], last = runs[runs.length-1];
+      if (backwards) sel.setBaseAndExtent(last.node,last.to,first.node,first.from);
+      else sel.setBaseAndExtent(first.node,first.from,last.node,last.to);
+    }
+    if (changed) input(host,'formatRemove');
+    return true;
+  }
   function wrapFormat(node, cmd, enable, css) {
     const [tag, prop, on, off] = formats.get(cmd);
     const wrapper = node.ownerDocument.createElement(css || !enable ? 'span' : tag);
@@ -359,7 +423,7 @@
 
   const preferences = new Set(['stylewithcss', 'usecss', 'defaultparagraphseparator']);
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
-  const richCommands = new Set(['inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
+  const richCommands = new Set(['removeformat', 'inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
   function supported(cmd) {
     return blockCommand(cmd) || valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
   }
@@ -669,6 +733,7 @@
       else if (doc.body) doc.getSelection()?.selectAllChildren(t?.host || doc.body);
       return true;
     }
+    if (cmd === 'removeformat') return removeFormatting(state,t);
     if (blockCommand(cmd)) return applyBlock(t,cmd,value);
     if (valueFormats.has(cmd)) {
       const normalized = normalizeFormat(cmd, value);
