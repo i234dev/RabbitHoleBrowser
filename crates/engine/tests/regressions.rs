@@ -1083,3 +1083,18 @@ fn physical_cssom_geometry_survives_nested_orthogonal_writing_modes() {
     })()"#);
     assert_eq!(result,"200|100|206|106|26|14|20px|25px");
 }
+
+#[test]
+fn retained_computed_declaration_observes_rule_mutations_within_a_script() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=sheet>.inactive{opacity:.2}</style><span id=target></span>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const css=getComputedStyle(target), rule=sheet.sheet.cssRules[0];
+        const before=css.opacity;
+        rule.selectorText='#target';
+        const matched=css.opacity;
+        rule.style.setProperty('opacity','0.7');
+        return [before,matched,css.getPropertyValue('opacity')].join('|');
+    })()"#);
+    assert_eq!(result,"1|0.2|0.7");
+}

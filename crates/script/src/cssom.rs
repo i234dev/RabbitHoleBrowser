@@ -959,6 +959,17 @@ fn timing_css(s: &ComputedStyle, prop: &str) -> Option<String> {
 }
 
 
+/// A retained computed declaration observes stylesheet edits in the same task.
+fn read_computed_value(realm: &mut Realm, node: NodeRef, property: &str) -> JsResult<Value> {
+    let flush = {
+        let host = state();
+        let host = host.borrow();
+        if host.render.sheets_pending { host.factories.get("flushSheets").cloned() } else { None }
+    };
+    if let Some(flush) = flush { realm.call(flush, Value::Undefined, &[])?; }
+    Ok(Value::str(&computed_value(node, property).unwrap_or_default()))
+}
+
 fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = style_target(realm, args)?;
     let Some(key) = key_of(realm, args) else { return Ok(Value::Undefined) };
@@ -969,7 +980,7 @@ fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
         _ => {}
     }
     let prop = camel_to_kebab(&key);
-    Ok(Value::str(&computed_value(n, &prop).unwrap_or_default()))
+    read_computed_value(realm, n, &prop)
 }
 
 fn cs_has(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
@@ -987,7 +998,7 @@ fn cs_set(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> 
 fn cs_get_property_value(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getPropertyValue")?;
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
-    Ok(Value::str(&computed_value(n, &prop).unwrap_or_default()))
+    read_computed_value(realm, n, &prop)
 }
 
 fn cs_empty(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {

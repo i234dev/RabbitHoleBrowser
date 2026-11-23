@@ -612,6 +612,8 @@
   let flushQueued = false;
   function flushSheets() {
     flushQueued = false;
+    if (!pendingSheets.size) return;
+    N.setSheetsPending(false);
     const list = Array.from(pendingSheets);
     pendingSheets.clear();
     const targets = new Set();
@@ -627,8 +629,9 @@
   }
   function sheetChanged(sheet) {
     pendingSheets.add(sheet);
-    if (!flushQueued) { flushQueued = true; queueMicrotask(flushSheets); }
+    if (!flushQueued) { flushQueued = true; N.setSheetsPending(true); queueMicrotask(flushSheets); }
   }
+  N.setFactory('flushSheets',flushSheets);
   const gcs = g.getComputedStyle;
   if (gcs) hidden(g, 'getComputedStyle', function getComputedStyle(el, pseudo) { if (pendingSheets.size) flushSheets(); return gcs.call(this, el, pseudo); });
   // Geometry queries see pending CSSOM changes too.

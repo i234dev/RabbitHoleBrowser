@@ -11,6 +11,7 @@ use rabbithole_js::{JsResult, Realm, Value};
 /// State of the "update the rendering" hook (Intersection/Resize observers).
 #[derive(Default)]
 pub struct RenderState {
+    pub sheets_pending: bool,
     pub hook: Option<Value>,
     pub active: bool,
     pub dirty: bool,
@@ -137,6 +138,11 @@ fn set_adopted_styles(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
     if n.doc == 0 && changed {
         mark_dirty();
     }
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn set_sheets_pending(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    state().borrow_mut().render.sheets_pending = realm.to_boolean(&arg(args, 0));
     Ok(Value::Undefined)
 }
 
@@ -490,6 +496,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "cssomValidSelector", 3, crate::cssom::cssom_valid_selector);
     realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
+    realm.define_method(o, "setSheetsPending", 1, set_sheets_pending);
     realm.define_method(o, "setSheetText", 2, set_sheet_text);
     realm.define_method(o, "fetchText", 1, fetch_text);
     realm.define_method(o, "isShadowRoot", 1, is_shadow_root);
