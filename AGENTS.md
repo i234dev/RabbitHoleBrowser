@@ -4,8 +4,8 @@
   addresses. Do not add co-author, contributor or assistant attribution trailers.
 - Every new delivery published to `main` increments the workspace patch version.
   Patch numbers are integers: `0.1.9` is followed by `0.1.10`. When the project
-  owner opens a new minor series, prepare with `--next-series`: the delivery
-  starts that series at patch 1 (`0.1.44` is followed by `0.2.1`).
+  owner opens a new minor series, prepare with `--next-series`: the minor number
+  increases and the patch keeps counting deliveries (`0.1.44` is followed by `0.2.45`).
 - Fetch the previous published revision, then use
   `python3 scripts/release-version.py prepare`. Repeating preparation before
   publication must keep the same version. See [the release procedure](docs/releasing.md).

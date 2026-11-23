@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Prepare or check one patch release against an up-to-date published Git ref.
 
-With --next-series the delivery opens the next minor series at patch 1
-(0.1.44 -> 0.2.1). Patch numbering then continues within that series.
+With --next-series the delivery opens the next minor series. The patch number
+is a delivery counter that never resets (0.1.44 -> 0.2.45 -> 0.2.46).
 
 Uses only Python's standard library and Cargo metadata; never builds, fetches,
 commits, pushes, or upgrades dependencies. Requires Python 3.11 or newer.
@@ -107,7 +107,7 @@ def release(repo, published_ref, action, cargo, next_series=False):
     published = tomllib.loads(command(repo, ["git", "show", commit + ":Cargo.toml"]))["workspace"]["package"]["version"]
     major, minor, patch = version(published)
     version(current)
-    target = f"{major}.{minor + 1}.1" if next_series else f"{major}.{minor}.{patch + 1}"
+    target = f"{major}.{minor + 1 if next_series else minor}.{patch + 1}"
     if current not in (published, target):
         raise ReleaseError(f"Version {current} must match published {published} or prepared {target}")
     if action == "check" and current != target:
@@ -155,7 +155,7 @@ def main():
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--published-ref", default="origin/main", help="already-fetched reference of the previous delivery")
     parser.add_argument("--cargo", default=os.environ.get("CARGO", "cargo"))
-    parser.add_argument("--next-series", action="store_true", help="open the next minor series at patch 1 instead of incrementing the patch")
+    parser.add_argument("--next-series", action="store_true", help="open the next minor series; the patch counter keeps increasing")
     args = parser.parse_args()
     try:
         result = release(args.repo.resolve(), args.published_ref, args.action, args.cargo, args.next_series)
