@@ -19,27 +19,37 @@ fn strip(c: &[Token]) -> &[Token] {
     }
 }
 
-/// `channels / alpha` (space-separated; commas tolerated).
+/// The modern space-separated channel list permits one optional slash-alpha.
 fn args(c: &[Token]) -> Option<(Vec<&[Token]>, Option<&[Token]>)> {
-    let mut vals = Vec::new();
-    let mut alpha = None;
-    let mut slash = false;
-    for comp in components(strip(c)) {
-        match comp {
-            [Token::Comma] => continue,
-            [Token::Delim('/')] => {
-                slash = true;
-                continue;
-            }
-            _ => {}
-        }
-        if slash {
-            alpha = Some(comp);
-        } else {
-            vals.push(comp);
-        }
+    let mut parts = components(strip(c));
+    let alpha = if let Some(i) = parts.iter().position(|p| matches!(*p, [Token::Delim('/')])) {
+        if i + 2 != parts.len() { return None; }
+        let a = parts.pop()?;
+        parts.pop();
+        Some(a)
+    } else { None };
+    if parts.iter().any(|p| matches!(*p, [Token::Comma])) { return None; }
+    Some((parts, alpha))
+}
+
+/// RGB and HSL also support three comma-separated channels and optional alpha.
+/// Legacy syntax excludes missing channels and mixed numeric/percentage RGB.
+pub(crate) fn srgb_args(c: &[Token]) -> Option<(Vec<&[Token]>, Option<&[Token]>)> {
+    let p = components(strip(c));
+    if !p.iter().any(|v| matches!(*v, [Token::Comma])) {
+        let (v, a) = args(c)?;
+        return (v.len() == 3).then_some((v, a));
     }
-    Some((vals, alpha))
+    if !matches!(p.len(), 5 | 7) || p.iter().enumerate().any(|(i, v)|
+        (i % 2 == 1) != matches!(*v, [Token::Comma]) || crate::values::is_ident(v, "none")) {
+        return None;
+    }
+    let v = vec![p[0], p[2], p[4]];
+    if matches!(c.first(), Some(Token::Function(f)) if f.eq_ignore_ascii_case("rgb") || f.eq_ignore_ascii_case("rgba")) {
+        let percentages = v.iter().any(|v| matches!(*v, [Token::Percentage(_)]));
+        if percentages && v.iter().any(|v| matches!(*v, [Token::Number(_)])) { return None; }
+    }
+    Some((v, p.get(6).copied()))
 }
 
 /// A number, a percentage (scaled so 100% = `pct_ref`) or `none` (0).
@@ -313,7 +323,7 @@ impl ComputedColor {
         out
     }
 
-    pub(crate) fn parse(c: &[Token]) -> Option<std::rc::Rc<Self>> {
+    pub fn parse(c: &[Token]) -> Option<std::rc::Rc<Self>> {
         let [Token::Function(f), rest @ ..] = c else { return None };
         let f = f.to_ascii_lowercase();
         let relative = rest.iter().find(|t| !matches!(t, Token::Whitespace))
@@ -412,6 +422,7 @@ fn lightness_ends(lin: Rgb, l: f64, max: f64) -> Rgb {
 }
 
 fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
+    if f == "color-mix" { return color_mix(c); }
     let (vals, a) = args(c)?;
     Some(match f {
         "hwb" => {
@@ -468,7 +479,6 @@ fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
             let v = [num(vals[1], 1.0)?, num(vals[2], 1.0)?, num(vals[3], 1.0)?];
             (predefined(&space, v)?, alpha(a)?)
         }
-        "color-mix" => color_mix(c)?,
         "contrast-color" => {
             // White or black, whichever contrasts more (WCAG 2.1; white on
             // ties), CSS Color 5 §7.

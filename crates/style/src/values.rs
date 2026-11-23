@@ -1118,37 +1118,6 @@ pub fn hex_color(h: &str) -> Option<Color> {
     }
 }
 
-/// Flatten function args: supports both `a, b, c [, alpha]` and
-/// `a b c [/ alpha]` syntaxes. Returns (values, alpha).
-fn color_args(c: &[Token]) -> Option<(Vec<&[Token]>, Option<&[Token]>)> {
-    let inner = strip_function(c);
-    let comps = components(inner);
-    let mut vals = Vec::new();
-    let mut alpha = None;
-    let mut after_slash = false;
-    for comp in comps {
-        match comp {
-            [Token::Comma] => continue,
-            [Token::Delim('/')] => {
-                after_slash = true;
-                continue;
-            }
-            _ => {}
-        }
-        if after_slash {
-            alpha = Some(comp);
-        } else if vals.len() == 3 {
-            alpha = Some(comp);
-        } else {
-            vals.push(comp);
-        }
-    }
-    if vals.len() != 3 {
-        return None;
-    }
-    Some((vals, alpha))
-}
-
 fn channel(c: &[Token]) -> Option<f32> {
     match c {
         [Token::Number(n)] => Some(*n),
@@ -1173,7 +1142,7 @@ fn to_u8(v: f32) -> u8 {
 }
 
 fn parse_rgb(c: &[Token]) -> Option<Color> {
-    let (vals, alpha) = color_args(c)?;
+    let (vals, alpha) = crate::color_spaces::srgb_args(c)?;
     let r = channel(vals[0])?;
     let g = channel(vals[1])?;
     let b = channel(vals[2])?;
@@ -1182,7 +1151,7 @@ fn parse_rgb(c: &[Token]) -> Option<Color> {
 }
 
 fn parse_hsl(c: &[Token]) -> Option<Color> {
-    let (vals, alpha) = color_args(c)?;
+    let (vals, alpha) = crate::color_spaces::srgb_args(c)?;
     // The legacy comma syntax takes percentages only (`hsla(0, 0, 0, 1)`
     // is invalid); bare numbers belong to the modern syntax (CSS Color 4).
     let legacy = components(strip_function(c)).iter().any(|comp| matches!(comp, [Token::Comma]));

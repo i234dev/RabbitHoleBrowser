@@ -70,6 +70,9 @@
   }
 
   // Parse "a: b; c: d !important" into [[name, value, important]].
+  const colorProperties = new Set(['color', 'background-color', 'border-top-color', 'border-right-color',
+    'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
+    'accent-color', 'column-rule-color']);
   function parseDecls(text) {
     const out = [];
     let i = 0, start = 0, depth = 0;
@@ -86,6 +89,10 @@
       const m = /!\s*important\s*$/i.exec(value);
       if (m) { important = true; value = value.slice(0, m.index).trim(); }
       if (!name.startsWith('--')) name = name.toLowerCase();
+      if (colorProperties.has(name)) {
+        value = N.cssomColor(name, value);
+        if (value === null) return;
+      }
       out.push([name, value, important]);
     };
     while (i < n) {
@@ -114,6 +121,10 @@
     const get = (p) => { for (let i = st.decls.length - 1; i >= 0; i--) if (st.decls[i][0] === p) return st.decls[i][1]; return ''; };
     const set = (p, v, imp) => {
       v = v == null ? '' : String(v).trim();
+      if (v && colorProperties.has(p)) {
+        v = N.cssomColor(p, v);
+        if (v === null) return;
+      }
       st.decls = st.decls.filter((d) => d[0] !== p);
       if (v !== '') st.decls.push([p, v, !!imp]);
       changed();
@@ -126,7 +137,12 @@
     const methods = {
       getPropertyValue: (p) => get(String(p).startsWith('--') ? String(p) : String(p).toLowerCase()),
       getPropertyPriority: (p) => (st.decls.find((d) => d[0] === String(p).toLowerCase() && d[2]) ? 'important' : ''),
-      setProperty: (p, v, prio) => set(String(p).startsWith('--') ? String(p) : String(p).toLowerCase(), v, String(prio || '').toLowerCase() === 'important'),
+      setProperty(p, v, prio = '') {
+        p = String(p);
+        const priority = String(prio).toLowerCase();
+        if (v == null || String(v) === '' || !priority || priority === 'important')
+          set(p.startsWith('--') ? p : p.toLowerCase(), v, priority === 'important');
+      },
       removeProperty: (p) => { p = String(p).toLowerCase(); const old = get(p); st.decls = st.decls.filter((d) => d[0] !== p); changed(); return old; },
       item: (i) => (st.decls[i] ? st.decls[i][0] : ''),
       toString: () => '[object CSSStyleDeclaration]',

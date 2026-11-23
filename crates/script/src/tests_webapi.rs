@@ -2323,3 +2323,21 @@ fn web_crypto_ed25519_matches_rfc8032_and_round_trips_key_pairs() {
     "#);
     assert_eq!(out, ["e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b true", "InvalidAccessError", "true 48"]);
 }
+
+#[test]
+fn cssom_color_declarations_validate_before_replacing_values() {
+    let out = result_of("<style>p { color: pink }</style><p style='color: #1234'></p>", r#"
+      const el = document.querySelector('p');
+      const seen = [el.style.color];
+      for (const style of [el.style, document.styleSheets[0].cssRules[0].style]) {
+        style.setProperty('color', 'color(display-p3 20% 0 2)', 'important');
+        style.color = 'rgb(4, 5 6)';
+        style.setProperty('color', 'red', 'invalid');
+        seen.push(style.color, style.getPropertyPriority('color'));
+        style.color = 'rgba(3, 2, 1, 0)';
+        seen.push(style.color);
+      }
+      window.result = seen.join('|');
+    "#);
+    assert_eq!(out, "'rgba(17, 34, 51, 0.267)|color(display-p3 0.2 0 2)|important|rgba(3, 2, 1, 0)|color(display-p3 0.2 0 2)|important|rgba(3, 2, 1, 0)'");
+}

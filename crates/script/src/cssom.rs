@@ -130,10 +130,56 @@ fn prop_name(s: &str) -> String {
     }
 }
 
+fn single_color_property(name: &str) -> bool {
+    matches!(name, "color" | "background-color" | "border-top-color" | "border-right-color" |
+        "border-bottom-color" | "border-left-color" | "outline-color" | "text-decoration-color" |
+        "caret-color" | "accent-color" | "column-rule-color")
+}
+
+fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
+    use rabbithole_style::values::{components, ident, parse_color_component, ColorValue};
+    let parts = components(tokens);
+    let [c] = parts.as_slice() else { return None };
+    if let Some(k) = ident(c) {
+        if matches!(k.as_str(), "inherit" | "unset" | "initial" | "revert" | "revert-layer")
+            || (k == "auto" && matches!(name, "caret-color" | "accent-color"))
+            || (k == "invert" && name == "outline-color")
+            || parse_color_component(c).is_some() {
+            return Some(k);
+        }
+        return None;
+    }
+    // Keep expressions in the specified value until their variables, units
+    // and origin color can be resolved in the element's computed style.
+    if let [Token::Function(f), rest @ ..] = *c {
+        let deferred = rest.iter().any(|t| matches!(t, Token::Function(_))) ||
+            rest.iter().any(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) ||
+            ["var", "env", "attr", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
+        if deferred {
+            let known = ["var", "env", "attr", "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab",
+                "oklch", "color", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
+            return known.then(|| tokens_to_css(c));
+        }
+    }
+    let ColorValue::Color(rgb) = parse_color_component(c)? else { return None };
+    Some(rabbithole_style::ComputedColor::parse(c).map_or_else(|| color_css(rgb), |wide| wide.to_css()))
+}
+
+pub(crate) fn cssom_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let name = arg_str(realm, args, 0)?;
+    let value = arg_str(realm, args, 1)?;
+    if !single_color_property(&name) { return Ok(Value::str(&value)); }
+    let tokens = rabbithole_css::Tokenizer::tokenize(&value);
+    Ok(specified_color(&name, &tokens).map_or(Value::Null, |s| Value::str(&s)))
+}
+
 fn parse_style(n: NodeRef) -> DeclList {
     let text = get_attribute(n, "style").unwrap_or_default();
     let decls: Vec<Declaration> = parse_declaration_list(&text);
-    DeclList { items: decls.into_iter().map(|d| (d.name, tokens_to_css(&d.value), d.important)).collect() }
+    DeclList { items: decls.into_iter().filter_map(|d| {
+        let value = if single_color_property(&d.name) { specified_color(&d.name, &d.value)? } else { tokens_to_css(&d.value) };
+        Some((d.name, value, d.important))
+    }).collect() }
 }
 
 fn write_style(n: NodeRef, list: &DeclList) {
@@ -187,8 +233,14 @@ fn style_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 }
 
 fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
-    let mut list = parse_style(n);
     let value = value.trim();
+    let serialized;
+    let value = if single_color_property(prop) && !value.is_empty() {
+        let Some(v) = specified_color(prop, &rabbithole_css::Tokenizer::tokenize(value)) else { return };
+        serialized = v;
+        serialized.as_str()
+    } else { value };
+    let mut list = parse_style(n);
     list.items.retain(|(k, _, _)| *k != prop);
     if !value.is_empty() {
         // Expand nothing: keep as given (the cascade handles shorthands).
@@ -237,7 +289,9 @@ fn style_set_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let v = arg(args, 1);
     let value = if v.is_nullish() { String::new() } else { realm.to_rust_string(v)? };
     let prio = arg_str_opt(realm, args, 2)?.unwrap_or_default();
-    set_style_prop(n, &prop, &value, prio.eq_ignore_ascii_case("important"));
+    if value.is_empty() || prio.is_empty() || prio.eq_ignore_ascii_case("important") {
+        set_style_prop(n, &prop, &value, !prio.is_empty());
+    }
     Ok(Value::Undefined)
 }
 
@@ -295,8 +349,6 @@ pub(crate) fn style_object(realm: &mut Realm, wrapper: ObjectId, n: NodeRef) -> 
 fn color_css(c: rabbithole_gfx::Color) -> String {
     if c.a == 255 {
         format!("rgb({}, {}, {})", c.r, c.g, c.b)
-    } else if c.a == 0 {
-        "rgba(0, 0, 0, 0)".into()
     } else {
         // CSS Color 4 serializes a byte alpha with two decimal places if
         // that value round-trips to the same byte; otherwise use three.
