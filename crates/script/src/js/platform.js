@@ -670,8 +670,6 @@
   method(g.Document, 'clear', function () {});
   method(g.Document, 'captureEvents', function () {});
   method(g.Document, 'releaseEvents', function () {});
-  method(g.Document, 'queryCommandIndeterm', function () { return false; });
-  method(g.Document, 'queryCommandValue', function () { return ''; });
   method(g.Document, 'hasStorageAccess', function () { return Promise.resolve(true); });
   method(g.Document, 'requestStorageAccess', function () { return Promise.resolve(); });
   method(g.Document, 'startViewTransition', function (cb) {

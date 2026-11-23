@@ -279,6 +279,8 @@ pub struct Document {
     /// An HTML document (`false` for XML documents made by
     /// `createDocument`): decides `tagName` upper-casing.
     pub is_html: bool,
+    /// Whether the document is an HTML editing host.
+    pub design_mode: bool,
     /// Live range boundary points, updated by tree and text mutations
     /// (DOM §5.5 "live ranges"). Slots are freed with `remove_live_point`.
     pub live_points: Vec<Option<BoundaryPoint>>,
@@ -392,6 +394,7 @@ impl Document {
             script_started: std::collections::HashSet::new(),
             quirks_mode: QuirksMode::NoQuirks,
             is_html: true,
+            design_mode: false,
             live_points: Vec::new(),
             live_iterators: Vec::new(),
             selection: None,

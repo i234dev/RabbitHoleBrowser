@@ -1496,7 +1496,7 @@ fn e_scroll_by(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     Ok(Value::Undefined)
 }
 
-fn e_focus(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+pub(crate) fn e_focus(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "focus")?;
     if forward_to_frame(n, "focus") {
         return Ok(Value::Undefined);
@@ -1629,6 +1629,7 @@ fn e_is_content_editable(realm: &mut Realm, this: Value, _: &[Value]) -> JsResul
             if let Some((on, _)) = content_editable_state(doc.attr(c, "contenteditable")) {
                 return on;
             }
+            if c == Document::ROOT { return doc.design_mode; }
             cur = doc.parent(c);
         }
         false

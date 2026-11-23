@@ -98,6 +98,7 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:html.js", include_str!("js/html.js")),
     ("rabbithole:observers.js", include_str!("js/observers.js")),
     ("rabbithole:platform.js", include_str!("js/platform.js")),
+    ("rabbithole:editing.js", include_str!("js/editing.js")),
     ("rabbithole:idb.js", include_str!("js/idb.js")),
     ("rabbithole:crypto.js", include_str!("js/crypto.js")),
     ("rabbithole:canvas.js", include_str!("js/canvas.js")),

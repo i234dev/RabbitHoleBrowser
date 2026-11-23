@@ -528,12 +528,30 @@ fn d_has_focus(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value>
     Ok(Value::Bool(true))
 }
 
-fn d_exec_command(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(false))
+fn d_design_mode(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    Ok(Value::str(if with_doc(d, |doc| doc.design_mode) { "on" } else { "off" }))
 }
 
-fn d_query_command_supported(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(false))
+fn d_design_mode_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    let raw = arg_str(realm, args, 0)?;
+    let on = raw.eq_ignore_ascii_case("on");
+    if !on && !raw.eq_ignore_ascii_case("off") { return Ok(Value::Undefined); }
+    let focus = with_doc(d, |doc| {
+        if doc.design_mode == on { return None; }
+        doc.design_mode = on;
+        if !on { return None; }
+        let node = doc.child_elements(Document::ROOT).next()?;
+        let point = rabbithole_dom::BoundaryPoint { node, offset: 0 };
+        doc.set_selection(point, point);
+        Some(node)
+    });
+    if let Some(node) = focus {
+        let element = wrap_opt(realm, d, Some(node));
+        crate::element::e_focus(realm, element, &[])?;
+    }
+    Ok(Value::Undefined)
 }
 
 fn d_element_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -865,7 +883,8 @@ pub(crate) fn install(realm: &mut Realm) {
         acc(realm, name, d_character_set, None);
     }
     acc(realm, "contentType", d_content_type, None);
-    for (name, val) in [("visibilityState", "visible"), ("designMode", "off"), ("dir", "")] {
+    acc(realm, "designMode", d_design_mode, Some(d_design_mode_set));
+    for (name, val) in [("visibilityState", "visible"), ("dir", "")] {
         let data: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(val.to_string());
         let g = realm.new_native_function_full(&format!("get {name}"), 0, d_constant_str, Some(data), vec![], false);
         realm.define_accessor_values(d, name, Some(Value::Object(g)), None, ACC);
@@ -891,10 +910,6 @@ pub(crate) fn install(realm: &mut Realm) {
     m(realm, "importNode", 2, d_import_node);
     m(realm, "adoptNode", 1, d_adopt_node);
     m(realm, "hasFocus", 0, d_has_focus);
-    m(realm, "execCommand", 3, d_exec_command);
-    m(realm, "queryCommandSupported", 1, d_query_command_supported);
-    m(realm, "queryCommandEnabled", 1, d_query_command_supported);
-    m(realm, "queryCommandState", 1, d_query_command_supported);
     m(realm, "elementFromPoint", 2, d_element_from_point);
     m(realm, "elementsFromPoint", 2, d_elements_from_point);
     m(realm, "caretRangeFromPoint", 2, d_null);

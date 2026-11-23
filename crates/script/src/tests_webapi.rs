@@ -2149,3 +2149,23 @@ fn rtc_signaling_values_keep_local_metadata_out_of_signaling() {
     "#);
     assert_eq!(result, "'rtcp|1|5000|active|tls|true|true|true|true'");
 }
+
+#[test]
+fn editing_commands_use_the_document_selection_and_host() {
+    let result = result_of("<body><div id=editor contenteditable>first</div><p id=locked>other</p>", r#"
+        const d = document, e = d.getElementById('editor'), t = e.firstChild, sel = d.getSelection();
+        const calls = [];
+        e.addEventListener('input', ev => calls.push(ev.inputType));
+        sel.setBaseAndExtent(t, 1, t, 4);
+        const inserted = d.execCommand('insertText', false, 'oo');
+        d.execCommand('insertHTML', false, '<b>!</b>');
+        sel.collapse(d.getElementById('locked').firstChild, 0);
+        const disabled = !d.execCommand('delete');
+        d.execCommand('defaultParagraphSeparator', false, 'p');
+        d.designMode = 'ON';
+        const editable = d.getElementById('locked').isContentEditable;
+        d.designMode = 'off';
+        window.result = [inserted,e.innerHTML,disabled,editable,d.queryCommandValue('defaultParagraphSeparator'),calls[0]].join('|');
+    "#);
+    assert_eq!(result, "'true|foo<b>!</b>t|true|true|p|insertText'");
+}
