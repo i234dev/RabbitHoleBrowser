@@ -216,6 +216,8 @@
     while (element.firstChild) parent.insertBefore(element.firstChild, element);
     element.remove();
   }
+  const formatProperties = ['vertical-align','font-weight','font-family','font-size','color',
+    'background-color','font-style','text-decoration','text-decoration-line'];
   function removeFormatting(state, t) {
     const {host, range, sel} = t;
     state.typing = null;
@@ -233,31 +235,28 @@
     let changed = whole.length !== 0;
     for (const run of runs) {
       let node = run.node;
-      if (!removable(node.parentElement,host) && !node.parentElement.closest('[style]')) continue;
+      const ancestors = [];
+      for (let el = node.parentElement; el && el !== host && !isBlock(el); el = el.parentElement) {
+        if (removable(el,host)) ancestors.push({el,unwrap:true});
+        else if (el.hasAttribute('style')) {
+          const properties = formatProperties.filter(prop => el.style.getPropertyValue(prop));
+          if (properties.length) ancestors.push({el,properties});
+        }
+      }
+      if (!ancestors.length) continue;
       if (run.to < node.length) node.splitText(run.to);
       if (run.from) node = node.splitText(run.from);
       run.to -= run.from;
       run.from = 0;
       run.node = node;
-      while (removable(node.parentElement,host)) {
-        const el = node.parentElement;
-        splitAncestors(node,el);
-        unwrap(el);
-        changed = true;
-      }
-      // Semantic links and other retained elements can still carry inline
-      // formatting. Keep their unrelated attributes and layout declarations.
-      for (let el = node.parentElement; el && el !== host && !isBlock(el); el = el.parentElement) {
-        if (!el.hasAttribute('style')) continue;
-        for (const prop of ['vertical-align','font-weight','font-family','font-size','color',
-          'background-color','font-style','text-decoration','text-decoration-line']) {
-          if (el.style.getPropertyValue(prop)) {
-            splitAncestors(node,el);
-            el.style.removeProperty(prop);
-            changed = true;
-          }
+      for (const item of ancestors) {
+        splitAncestors(node,item.el);
+        if (item.unwrap) unwrap(item.el);
+        else {
+          for (const prop of item.properties) item.el.style.removeProperty(prop);
+          if (!item.el.style.cssText) item.el.removeAttribute('style');
         }
-        if (!el.style.cssText) el.removeAttribute('style');
+        changed = true;
       }
     }
     if (changed && runs.length) {
@@ -308,7 +307,8 @@
     ['justifyleft','left'], ['justifyright','right'], ['justifycenter','center'], ['justifyfull','justify']
   ]);
   const blockTags = new Set(['address','dd','div','dt','h1','h2','h3','h4','h5','h6','p','pre']);
-  const blockCommand = cmd => alignments.has(cmd) || cmd === 'formatblock';
+  const listCommands = new Map([['insertorderedlist','ol'],['insertunorderedlist','ul']]);
+  const blockCommand = cmd => alignments.has(cmd) || cmd === 'formatblock' || listCommands.has(cmd);
   function isBlock(node) {
     return node?.nodeType === 1 && !['inline','contents','inline-block','inline-flex','inline-grid','none'].includes(getComputedStyle(node).display);
   }
@@ -320,10 +320,10 @@
   // Identify the entire visual paragraph containing a selected leaf. When
   // inline children share an editing host or a table cell, limit the run
   // to adjacent inline content, stopping at block or line-break boundaries.
-  function paragraph(host, node) {
+  function paragraph(host, node, byLine) {
     let top = node;
     while (top !== host && top.parentNode !== host && !isBlock(top)) top = top.parentNode;
-    if (top !== host && isBlock(top) && !['li','td','th'].includes(top.localName))
+    if (!byLine && top !== host && isBlock(top) && !['li','td','th'].includes(top.localName))
       return {container:top.parentNode, nodes:[top], block:top};
     const container = top === host || isBlock(top) ? top : top.parentNode;
     if (node===container) node=container.firstChild;
@@ -336,7 +336,7 @@
     for (let n=first;n;n=n.nextSibling) { nodes.push(n); if (n===last) break; }
     return {container,nodes,block:null};
   }
-  function paragraphs(t) {
+  function paragraphs(t, byLine = false) {
     let nodes = t.range.collapsed ? [] : selectedText(t).map(run=>run.node);
     if (!nodes.length) {
       const point=t.range.startContainer;
@@ -345,7 +345,7 @@
     const seen=new Set(), result=[];
     for (const node of nodes) {
       if (editingHost(node)!==t.host) continue;
-      const run=paragraph(t.host,node), key=run.nodes[0] || run.container;
+      const run=paragraph(t.host,node,byLine), key=run.nodes[0] || run.container;
       if (!seen.has(key)) { seen.add(key); result.push(run); }
     }
     return result;
@@ -356,6 +356,12 @@
   }
   function blockQuery(t,cmd,kind) {
     if (!t?.range) return kind==='value' ? '' : false;
+    if (listCommands.has(cmd)) {
+      if (kind === 'value') return '';
+      const items = listParagraphs(t), tag = listCommands.get(cmd);
+      const count = items.filter(run => run.item?.parentElement?.localName === tag).length;
+      return kind === 'mixed' ? count > 0 && count < items.length : count > 0 && count === items.length;
+    }
     const values=paragraphs(t).map(run=>blockValue(run,cmd));
     if (kind==='value') return values[0] || '';
     if (kind==='mixed') return values.some(v=>v!==values[0]);
@@ -372,6 +378,90 @@
     }
     const n=replacements.get(p.node)||p.node;
     return [n, Math.min(p.offset,n.nodeType===3?n.length:n.childNodes.length)];
+  }
+  function listParagraphs(t) {
+    const result = [], seen = new Set();
+    for (const run of paragraphs(t,true)) {
+      const item = run.container.closest('li');
+      if (item && item !== t.host && t.host.contains(item) && ['ol','ul'].includes(item.parentElement?.localName)) {
+        if (!seen.has(item)) { seen.add(item); result.push({...run,item}); }
+      } else result.push(run);
+    }
+    return result;
+  }
+  function splitBeforeChild(parent, child) {
+    if (!child.previousSibling) return;
+    const before = parent.cloneNode(false);
+    before.removeAttribute('id');
+    parent.parentNode.insertBefore(before,parent);
+    while (parent.firstChild !== child) before.appendChild(parent.firstChild);
+  }
+  function mergeAdjacentLists(list) {
+    // Author-supplied starts, reversed numbering and styling delimit distinct lists.
+    if (list.attributes.length) return;
+    const left = list.previousSibling, right = list.nextSibling;
+    if (left?.localName === list.localName && !left.attributes.length && left.isContentEditable) {
+      while (left.lastChild) list.insertBefore(left.lastChild,list.firstChild);
+      left.remove();
+    }
+    if (right?.localName === list.localName && !right.attributes.length && right.isContentEditable) {
+      while (right.firstChild) list.appendChild(right.firstChild);
+      right.remove();
+    }
+  }
+  function applyList(t,tag,separator) {
+    const runs = listParagraphs(t), {host,sel} = t, doc = host.ownerDocument;
+    if (!runs.length) return true;
+    const remove = runs.every(run => run.item?.parentElement.localName === tag);
+    const a = bookmark(sel.anchorNode,sel.anchorOffset), b = bookmark(sel.focusNode,sel.focusOffset);
+    const replacements = new Map(), lists = [];
+    for (const run of runs) {
+      let item = run.item, list;
+      if (item) {
+        const old = item.parentElement;
+        if (!remove && old.localName === tag) { lists.push(old); continue; }
+        splitBeforeChild(old,item);
+        if (remove) {
+          const block = doc.createElement(separator);
+          old.parentNode.insertBefore(block,old);
+          for (const attr of Array.from(item.attributes)) block.setAttribute(attr.name,attr.value);
+          while (item.firstChild) block.appendChild(item.firstChild);
+          replacements.set(item,block);
+          item.remove();
+        } else {
+          list = doc.createElement(tag);
+          old.parentNode.insertBefore(list,old);
+          list.appendChild(item);
+          lists.push(list);
+        }
+        if (!old.firstChild) old.remove();
+        continue;
+      }
+      const container = run.nodes[0]?.parentNode || run.container;
+      const first = run.nodes[0], last = run.nodes[run.nodes.length - 1];
+      const replaceBlock = container !== host && (container.localName === 'p' || container.localName === 'div');
+      list = doc.createElement(tag);
+      item = doc.createElement('li');
+      list.appendChild(item);
+      if (replaceBlock) {
+        if (first) splitBeforeChild(container,first);
+        container.parentNode.insertBefore(list,container);
+        for (const attr of Array.from(container.attributes)) {
+          if (attr.name !== 'id' || !last?.nextSibling) item.setAttribute(attr.name,attr.value);
+        }
+      } else container.insertBefore(list,first || null);
+      const precedingBreak = list.previousSibling;
+      if (precedingBreak?.localName === 'br' && precedingBreak.isContentEditable) precedingBreak.remove();
+      for (const node of run.nodes) item.appendChild(node);
+      if (item.childNodes.length > 1 && item.lastChild.localName === 'br') item.lastChild.remove();
+      if (!item.firstChild) item.appendChild(caretBreak(doc));
+      if (replaceBlock && !container.firstChild) { replacements.set(container,item); container.remove(); }
+      lists.push(list);
+    }
+    for (const list of lists) if (list.parentNode) mergeAdjacentLists(list);
+    sel.setBaseAndExtent(...restorePoint(a,replacements),...restorePoint(b,replacements));
+    input(host,tag === 'ol' ? 'insertOrderedList' : 'insertUnorderedList');
+    return true;
   }
   function applyBlock(t,cmd,value) {
     const align=alignments.get(cmd);
@@ -734,6 +824,7 @@
       return true;
     }
     if (cmd === 'removeformat') return removeFormatting(state,t);
+    if (listCommands.has(cmd)) return applyList(t,listCommands.get(cmd),state.separator);
     if (blockCommand(cmd)) return applyBlock(t,cmd,value);
     if (valueFormats.has(cmd)) {
       const normalized = normalizeFormat(cmd, value);

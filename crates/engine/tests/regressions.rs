@@ -1037,4 +1037,35 @@ fn removing_rich_formatting_preserves_links_unselected_text_and_selection_direct
         return [ok,ed.innerHTML,sel.toString(),sel.direction,events.join(',')].join('|');
     })()"#);
     assert_eq!(result, "true|<b>a</b>bc<a href=\"#n\">d<i>e</i></a><span contenteditable=\"false\">locked</span>|bcd|backward|formatRemove");
+    let nested = eval(&e, &mut page, r##"(() => {
+        ed.innerHTML = '<b><a href="#n">abc</a></b>';
+        const sel = getSelection(), text = ed.querySelector('a').firstChild;
+        sel.setBaseAndExtent(text,1,text,2);
+        document.execCommand('removeFormat');
+        const middle = sel.anchorNode, html = ed.innerHTML;
+        ed.style.color = 'red';
+        document.execCommand('removeFormat');
+        return [html, sel.anchorNode === middle, sel.toString()].join('|');
+    })()"##);
+    assert_eq!(nested, r##"<b><a href="#n">a</a></b><a href="#n">b</a><b><a href="#n">c</a></b>|true|b"##);
+
+}
+
+#[test]
+fn rich_list_commands_group_paragraphs_and_split_only_selected_items() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=ed contenteditable><p>one</p><p>two</p><p>three</p></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const sel=getSelection(), first=ed.firstChild.firstChild, middle=ed.children[1].firstChild;
+        ed.focus();
+        sel.setBaseAndExtent(middle,2,first,1);
+        document.execCommand('insertOrderedList');
+        const initial = [ed.innerHTML,sel.direction,sel.anchorNode===middle,document.queryCommandState('insertorderedlist')];
+        sel.collapse(middle,1);
+        document.execCommand('insertUnorderedList');
+        const converted = ed.innerHTML;
+        document.execCommand('insertUnorderedList');
+        return [...initial,converted,ed.innerHTML,sel.anchorNode===middle,sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result,"<ol><li>one</li><li>two</li></ol><p>three</p>|backward|true|true|<ol><li>one</li></ol><ul><li>two</li></ul><p>three</p>|<ol><li>one</li></ol><div>two</div><p>three</p>|true|1");
 }
