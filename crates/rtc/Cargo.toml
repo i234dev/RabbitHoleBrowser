@@ -7,5 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[dependencies]
-str0m = { version = "0.26", default-features = false, features = ["rust-crypto"] }
+# Use one provider for the DTLS certificate, handshake and SRTP primitives.
+[target.'cfg(not(windows))'.dependencies]
+str0m = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+
+[target.'cfg(windows)'.dependencies]
+str0m = { version = "0.26", default-features = false, features = ["wincrypto"] }
