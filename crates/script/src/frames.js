@@ -41,12 +41,8 @@
     const entries = Array.from(sequence);
     if (new Set(entries).size !== entries.length) throw cloneError('Duplicate transferable');
     for (const entry of entries) {
-      if (codec.isPort(entry)) {
-        if (codec.portDetached(entry)) throw cloneError('Detached MessagePort');
-      } else {
-        try { bufferLength.call(entry); } catch (_) { throw cloneError('Non-transferable object'); }
-        if (bufferDetached.call(entry)) throw cloneError('Detached ArrayBuffer');
-      }
+      if (codec.isPort(entry)) continue;
+      try { bufferLength.call(entry); } catch (_) { throw cloneError('Non-transferable object'); }
     }
     return entries;
   }
@@ -366,6 +362,12 @@
     const ports = list.filter(codec.isPort);
     const index = ports.length ? new Map(ports.map((port, i) => [port, i])) : null;
     const d = serialize(value, index);
+    // Payload getters may throw or detach an entry while serializing the graph.
+    for (const item of list) {
+      if (codec.isPort(item) ? codec.portDetached(item) : bufferDetached.call(item)) {
+        throw cloneError('Detached transferable');
+      }
+    }
     for (const item of list) if (!codec.isPort(item)) transferBuffer.call(item);
     return { d, ports: ports.length ? ports.map(codec.movePort) : ports };
   }

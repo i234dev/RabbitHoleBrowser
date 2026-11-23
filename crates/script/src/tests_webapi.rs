@@ -2073,3 +2073,20 @@ fn transfer_lists_validate_all_entries_before_moving_buffers_and_ports() {
     "#);
     assert_eq!(out, ["DataCloneError 1", "DataCloneError 1", "0 42 true true", "DataCloneError"]);
 }
+
+#[test]
+fn transfer_checks_observe_detachment_after_payload_getters() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        for (const item of [new ArrayBuffer(4), new MessageChannel().port1]) {
+            const other = new ArrayBuffer(2);
+            try {
+                structuredClone({ get x() { structuredClone(null, {transfer: [item]}); } }, {transfer: [other, item]});
+            } catch (e) { console.log(e.name, other.byteLength); }
+            const marker = {};
+            try { structuredClone({ get x() { throw marker; } }, {transfer: [item]}); }
+            catch (e) { console.log(e === marker); }
+        }
+    "#);
+    assert_eq!(out, ["DataCloneError 2", "true", "DataCloneError 2", "true"]);
+}
