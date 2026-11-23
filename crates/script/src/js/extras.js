@@ -16,20 +16,22 @@
   const {getAttribute, setAttribute, removeAttribute} = Element.prototype;
   function enumAttr(C, prop, attr, values, missing = '', invalid = missing, empty = invalid) {
     if (!C) return;
-    Object.defineProperty(C.prototype, prop, {
-      configurable: true, enumerable: true,
-      get() {
+    const accessors = {
+      get [prop]() {
+        if (!C.prototype.isPrototypeOf(this)) throw new TypeError("Illegal invocation");
         const raw = getAttribute.call(this, attr);
         if (raw === null) return missing;
         if (raw === '') return empty;
         const keyword = raw.replace(/[A-Z]/g, ch => ch.toLowerCase());
         return values.includes(keyword) ? keyword : invalid;
       },
-      set(v) {
+      set [prop](v) {
+        if (!C.prototype.isPrototypeOf(this)) throw new TypeError("Illegal invocation");
         if (missing === null && v == null) removeAttribute.call(this, attr);
         else setAttribute.call(this, attr, v);
       },
-    });
+    };
+    Object.defineProperty(C.prototype, prop, Object.getOwnPropertyDescriptor(accessors, prop));
   }
   const strAttr = (C, prop, attr) => acc(C, prop, function () { return this.getAttribute(attr) || ''; }, function (v) { this.setAttribute(attr, v); });
 
@@ -44,7 +46,7 @@
   for (const C of [g.HTMLImageElement,g.HTMLIFrameElement])
     enumAttr(C, 'loading', 'loading', ['eager','lazy'], 'eager');
   enumAttr(g.HTMLImageElement, 'decoding', 'decoding', ['async','sync','auto'], 'auto');
-  enumAttr(g.HTMLLinkElement, 'as', 'as', ['audio','document','embed','fetch','font','image','json','manifest','object','script','style','track','video','worker']);
+  enumAttr(g.HTMLLinkElement, 'as', 'as', ['audio','document','embed','fetch','font','image','json','manifest','object','report','script','sharedworker','style','track','video','worker','xslt']);
   enumAttr(g.HTMLMediaElement, 'preload', 'preload', ['none','metadata','auto'], 'metadata', 'metadata', 'auto');
   strAttr(g.HTMLAreaElement, 'hreflang', 'hreflang');
   strAttr(g.HTMLAreaElement, 'type', 'type');

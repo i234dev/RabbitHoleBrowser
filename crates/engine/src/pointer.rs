@@ -158,7 +158,7 @@ pub fn is_focusable(doc: &Document, n: NodeId) -> bool {
         "a" | "area" if el.attr("href").is_some() => true,
         "button" | "select" | "textarea" | "iframe" | "summary" => true,
         "input" => !el.attr("type").map(|t| t.eq_ignore_ascii_case("hidden")).unwrap_or(false),
-        _ => el.attr("tabindex").and_then(|t| t.trim().parse::<i32>().ok()).is_some() || el.attr("contenteditable").map(|v| !v.eq_ignore_ascii_case("false")).unwrap_or(false),
+        _ => doc.explicit_tab_index(n).is_some() || el.attr("contenteditable").map(|v| !v.eq_ignore_ascii_case("false")).unwrap_or(false),
     }
 }
 
@@ -172,7 +172,7 @@ impl Page {
             if !is_focusable(doc, n) || self.styles.get(n)?.visibility != Visibility::Visible {
                 return None;
             }
-            let index = doc.attr(n, "tabindex").and_then(|t| t.trim().parse::<i32>().ok()).unwrap_or(0);
+            let index = doc.explicit_tab_index(n).unwrap_or(0);
             if index < 0 || self.styles.get(n)?.display == Display::Contents {
                 return None;
             }

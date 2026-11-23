@@ -1402,6 +1402,28 @@ impl Document {
         }
     }
 
+    /// HTML integer parsing consumes the initial signed decimal digits.
+    pub fn explicit_tab_index(&self, id: NodeId) -> Option<i32> {
+        let text = self.attr(id, "tabindex")?.trim_start_matches([' ', '\t', '\r', '\n', '\x0c']);
+        let sign = usize::from(text.starts_with(['+', '-']));
+        let digits = text[sign..].bytes().take_while(u8::is_ascii_digit).count();
+        text[..sign + digits].parse().ok()
+    }
+
+    pub fn tab_index(&self, id: NodeId) -> i32 {
+        if let Some(index) = self.explicit_tab_index(id) { return index; }
+        let Some(el) = self.element(id) else { return -1 };
+        if el.ns == Namespace::Svg && el.tag == "a" { return 0; }
+        if el.ns != Namespace::Html { return -1; }
+        let zero = match el.tag.as_str() {
+            "a" | "area" | "button" | "frame" | "iframe" | "input" | "object" | "select" | "textarea" => true,
+            "summary" => self.parent(id).filter(|&p| self.is_element(p, "details"))
+                .and_then(|p| self.child_elements(p).find(|&c| self.is_element(c, "summary"))) == Some(id),
+            _ => false,
+        };
+        if zero { 0 } else { -1 }
+    }
+
     pub fn tag(&self, id: NodeId) -> Option<&str> {
         self.element(id).map(|e| e.tag.as_str())
     }

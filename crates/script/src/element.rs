@@ -1577,17 +1577,13 @@ fn e_hidden_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
 
 fn e_tab_index_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "tabIndex")?;
-    if let Some(v) = get_attribute(n, "tabindex").and_then(|s| s.trim().parse::<f64>().ok()) {
-        return Ok(Value::Number(v));
-    }
-    let tag = tag_of(n).unwrap_or_default();
-    Ok(Value::Number(if matches!(tag.as_str(), "a" | "input" | "button" | "select" | "textarea" | "iframe") { 0.0 } else { -1.0 }))
+    Ok(Value::Number(with_doc(n.doc, |doc| doc.tab_index(n.node)) as f64))
 }
 
 fn e_tab_index_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "tabIndex")?;
-    let v = realm.to_number(arg(args, 0))?;
-    set_attribute(n, "tabindex", Some(&format!("{}", v as i64)));
+    let v = realm.to_int32(arg(args, 0))?;
+    set_attribute(n, "tabindex", Some(&v.to_string()));
     Ok(Value::Undefined)
 }
 
@@ -2949,6 +2945,7 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "HTMLAudioElement", Some("HTMLMediaElement"), crate::host::html_element_ctor);
     // --- SVGElement
     let svg = define_class(realm, "SVGElement", Some("Element"), illegal_ctor);
+    realm.define_accessor(svg, "tabIndex", Some(e_tab_index_get), Some(e_tab_index_set), ACC);
     realm.define_accessor(svg, "ownerSVGElement", Some(svg_owner), None, ACC);
     realm.define_accessor(svg, "style", Some(e_style), Some(e_style_set), ACC);
     realm.define_accessor(svg, "dataset", Some(e_dataset), None, ACC);

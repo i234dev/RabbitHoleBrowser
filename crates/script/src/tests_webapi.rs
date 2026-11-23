@@ -2248,3 +2248,17 @@ fn shadow_hosts_follow_dom_local_name_rules() {
     "#);
     assert_eq!(out, "'true'");
 }
+
+#[test]
+fn html_reflection_preserves_accessor_names_and_integer_semantics() {
+    let out = result_of("<body><details><summary></summary><summary></summary></details><link>", r#"
+        const link = document.querySelector('link'), p = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, 'as');
+        link.as = 'SHAREDWORKER';
+        link.setAttribute('tabindex','  -0.6'); const positiveZero = Object.is(link.tabIndex, 0);
+        link.setAttribute('tabindex','+15%'); const prefix = link.tabIndex;
+        link.tabIndex = 4294967299;
+        const summaries = Array.from(document.querySelectorAll('summary'), s => s.tabIndex);
+        window.result = [link.as,p.get.name,p.set.name,positiveZero,prefix,link.getAttribute('tabindex'),...summaries].join('|');
+    "#);
+    assert_eq!(out, "'sharedworker|get as|set as|true|15|3|0|-1'");
+}
