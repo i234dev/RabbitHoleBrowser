@@ -1036,6 +1036,25 @@ fn stylesheet_namespaces_limit_type_and_attribute_selectors_in_nested_rules() {
 }
 
 #[test]
+fn link_editing_preserves_existing_attributes_and_customizes_typed_text() {
+    let mut e = engine(true);
+    let mut page=load(&mut e,"<main contenteditable id=ed><p><a href='/old' title='title'>old</a> plain</p><p>next</p></main>");
+    let result=eval(&e,&mut page,r#"(() => {
+        const sel=getSelection(), old=ed.querySelector('a'), text=ed.lastChild.firstChild;
+        sel.setBaseAndExtent(text,2,old.firstChild,1);
+        const made=document.execCommand('createLink',false,'/new');
+        const linked=[...ed.querySelectorAll('a')].map(a=>a.getAttribute('href')).join(',');
+        const backwards=sel.direction;
+        document.execCommand('unlink');
+        sel.collapse(text,0);
+        document.execCommand('createLink',false,'/typed');
+        document.execCommand('insertText',false,'x');
+        return [made,linked,backwards,old.title,ed.querySelector('a[href]').textContent,ed.querySelector('a[href]').getAttribute('href')].join('|');
+    })()"#);
+    assert_eq!(result,"true|/new,/new,/new|backward|title|x|/typed");
+}
+
+#[test]
 fn removing_rich_formatting_preserves_links_unselected_text_and_selection_direction() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<div contenteditable id=ed><b>abc</b><a href='#n'><i>de</i></a><span contenteditable=false>locked</span></div>");

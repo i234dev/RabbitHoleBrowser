@@ -303,6 +303,89 @@
     }
   }
 
+  function putLink(node, href) {
+    const parent = node.parentElement, current = parent?.closest('a');
+    if (current) {
+      current.setAttribute('href',href);
+      return current;
+    }
+    const prev = node.previousSibling;
+    const link = prev?.localName === 'a' && prev.attributes.length === 1 && prev.getAttribute('href') === href
+      ? prev : node.ownerDocument.createElement('a');
+    if (!link.parentNode) {
+      link.setAttribute('href',href);
+      node.parentNode.insertBefore(link,node);
+    }
+    link.appendChild(node);
+    return link;
+  }
+
+  function editLink(t, state, href) {
+    const {range,host,sel} = t, remove = href === null;
+    if (href === '') return false;
+    const backward = sel.direction === 'backward', links = new Set(), units = [];
+    const ends = [bookmark(sel.anchorNode,sel.anchorOffset),bookmark(sel.focusNode,sel.focusOffset)];
+    const replacements = new Map();
+    const addLink = el => {
+      const link = el?.closest('a[href]');
+      if (link && editingHost(link) === host && link !== host) links.add(link);
+    };
+    if (range.collapsed) {
+      const pending = typingStyle(state,range) || new Map();
+      if (!remove) pending.set('createlink',href);
+      else { pending.delete('createlink'); addLink(range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement); }
+      state.typing = {node:range.startContainer,offset:range.startOffset,formats:pending};
+    } else {
+      state.typing = null;
+      const stack = [range.commonAncestorContainer];
+      while (stack.length) {
+        const n = stack.pop();
+        if (!range.intersectsNode(n) || editingHost(n) !== host) continue;
+        if (n.nodeType === 3) {
+          const from = n === range.startContainer ? range.startOffset : 0;
+          const to = n === range.endContainer ? range.endOffset : n.length;
+          if (to > from) { units.push({node:n,from,to}); addLink(n.parentElement); }
+        } else if (n.nodeType === 1) {
+          if (n.matches('a[href]')) addLink(n);
+          if (['br','img'].includes(n.localName)) { units.push({node:n}); addLink(n); }
+          else for (let c=n.lastChild;c;c=c.previousSibling) stack.push(c);
+        }
+      }
+    }
+    for (const link of links) {
+      if (!remove) { link.setAttribute('href',href); continue; }
+      link.removeAttribute('href');
+      if (!link.attributes.length) {
+        replacements.set(link,link.parentNode);
+        unwrap(link);
+      }
+    }
+    if (remove) {
+      if (links.size) {
+        sel.setBaseAndExtent(...restorePoint(ends[0],replacements),...restorePoint(ends[1],replacements));
+        input(host,'');
+      }
+      return true;
+    }
+    for (const u of units) {
+      if (u.node.parentElement?.closest('a[href]')) continue;
+      if (u.node.nodeType === 3) {
+        if (u.to < u.node.length) u.node.splitText(u.to);
+        if (u.from) u.node = u.node.splitText(u.from);
+        u.to -= u.from; u.from = 0;
+      }
+      putLink(u.node,href);
+    }
+    if (units.length) {
+      const point = (u,end) => u.node.nodeType === 3 ? [u.node,end?u.to:u.from] :
+        [u.node.parentNode,Array.prototype.indexOf.call(u.node.parentNode.childNodes,u.node) + Number(end)];
+      const a=point(units[0],false), b=point(units[units.length-1],true);
+      if (backward) sel.setBaseAndExtent(...b,...a); else sel.setBaseAndExtent(...a,...b);
+      input(host,'insertLink',href);
+    }
+    return true;
+  }
+
   const alignments = new Map([
     ['justifyleft','left'], ['justifyright','right'], ['justifycenter','center'], ['justifyfull','justify']
   ]);
@@ -616,7 +699,7 @@
 
   const preferences = new Set(['stylewithcss', 'usecss', 'defaultparagraphseparator']);
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
-  const richCommands = new Set(['indent', 'outdent', 'removeformat', 'inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
+  const richCommands = new Set(['createlink', 'unlink', 'indent', 'outdent', 'removeformat', 'inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
   function supported(cmd) {
     return blockCommand(cmd) || valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
   }
@@ -949,6 +1032,7 @@
       else if (doc.body) doc.getSelection()?.selectAllChildren(t?.host || doc.body);
       return true;
     }
+    if (cmd === 'createlink' || cmd === 'unlink') return editLink(t,state,cmd === 'unlink' ? null : value);
     if (cmd === 'removeformat') return removeFormatting(state,t);
     if (listCommands.has(cmd)) return applyList(t,listCommands.get(cmd),state.separator);
     if (cmd === 'indent' || cmd === 'outdent') return applyIndent(t,cmd === 'indent',state.separator);
@@ -989,6 +1073,7 @@
           const node = doc.createTextNode(lines[i]);
           sel.getRangeAt(0).insertNode(node);
           for (const [name, enabled] of toggles) {
+            if (name === 'createlink') { putLink(node,enabled); continue; }
             if (valueFormats.has(name)) { wrapValue(node, name, enabled, state.css); continue; }
             if (!enabled) clearFormat(node, host, name);
             if (activeFormat(node.parentElement, name) !== enabled) wrapFormat(node, name, enabled, state.css);
