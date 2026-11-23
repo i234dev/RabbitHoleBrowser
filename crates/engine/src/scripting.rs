@@ -438,6 +438,19 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn submit_form(&mut self, form: NodeId, submitter: Option<NodeId>) {
         if let Some(req) = self.page.submit_request(form, submitter, &|_| Vec::new()) {
+            let doc = &self.page.doc;
+            let target = submitter.and_then(|node| doc.attr(node, "formtarget")).or_else(|| doc.attr(form, "target"));
+            if let Some(name) = target.filter(|name| !name.is_empty() && !name.starts_with('_')) {
+                let child = doc.descendants(Document::ROOT).find(|&node| {
+                    matches!(doc.tag(node), Some("iframe" | "frame")) && doc.attr(node, "name") == Some(name)
+                });
+                if let Some(node) = child {
+                    if self.ensure_frame(node).is_some() {
+                        self.engine.load_frame_request(self.page, node, req);
+                    }
+                    return;
+                }
+            }
             self.page.script.pending_navigation = Some(PendingNavigation { request: req, replace: false });
         }
     }

@@ -1165,7 +1165,7 @@ impl Engine {
         Some(crate::pointer::PointerUp { target: Some(node), clicked: None, action, outcome: out })
     }
 
-    fn load_frame_request(&self, page: &mut Page, node: NodeId, req: Request) {
+    pub(crate) fn load_frame_request(&self, page: &mut Page, node: NodeId, req: Request) {
         let Some(c) = page.frame_mut(node) else { return };
         let vp = Viewport { width: c.size.0.max(1.0), height: c.size.1.max(1.0) };
         let mut loader = self.loader.clone();
