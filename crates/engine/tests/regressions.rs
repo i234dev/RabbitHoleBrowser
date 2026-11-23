@@ -1227,6 +1227,35 @@ fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
 }
 
 #[test]
+fn local_anchor_names_follow_the_nearest_matching_inclusive_scope() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>body{margin:0}.anchor{anchor-name:--box;width:20px;height:20px}.target{position:absolute;position-anchor:--box;position-area:bottom right;width:10px;height:10px}section{anchor-scope:--box}#a{margin-left:30px}#b{margin-left:120px}</style><div id=a class=anchor></div><section id=scope><div id=b class=anchor></div><div id=inside class=target></div></section><div id=outside class=target></div>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const left = node => node.getBoundingClientRect().x;
+        const before = [getComputedStyle(scope).anchorScope,left(inside),left(outside)];
+        scope.style.anchorScope='--other';
+        return [...before,left(inside),left(outside)].join('|');
+    })()"#);
+    assert_eq!(result,"--box|140|50|140|140");
+}
+
+#[test]
+fn reopening_a_popover_uses_its_current_invoker_as_the_implicit_anchor() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>button{position:absolute;top:20px;width:40px;height:30px}#first{left:30px}#next{left:120px}#panel{position:fixed;position-area:bottom left;inset:auto;margin:0;width:10px;height:10px;padding:0;border:0}</style><button id=first></button><div id=panel popover></div><button id=next></button>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const sample = source => {
+            panel.showPopover({source});
+            const rect = panel.getBoundingClientRect();
+            panel.hidePopover();
+            return [rect.x,rect.y].join(',');
+        };
+        return [sample(first),sample(next)].join('|');
+    })()"#);
+    assert_eq!(result,"20,50|110,50");
+}
+
+#[test]
 fn named_anchor_areas_reposition_and_resize_the_target_after_style_changes() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<style>*{box-sizing:border-box}body{margin:0}section{position:relative;width:300px;height:200px}#a{position:absolute;left:40px;top:60px;width:50px;height:30px;anchor-name:--card, --other}#t{position:absolute;position-anchor:--card;position-area:bottom left;width:20px;height:10px}#b{position:absolute;left:150px;top:20px;width:10px;height:10px;anchor-name:--second}</style><section><div id=a></div><div id=b></div><div id=t></div></section>");

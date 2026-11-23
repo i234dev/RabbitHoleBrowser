@@ -2225,6 +2225,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "position" => to.position = from.position,
         "position-area" => to.position_area = from.position_area,
         "position-anchor" => to.position_anchor = from.position_anchor.clone(),
+        "anchor-scope" => to.anchor_scope = from.anchor_scope.clone(),
         "anchor-name" => to.anchor_names = from.anchor_names.clone(),
         "float" => to.float = from.float,
         "clear" => to.clear = from.clear,
@@ -3453,6 +3454,9 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.run_in = comps.iter().any(|c| values::is_ident(c, "run-in"));
             }
         }
+        "anchor-scope" => {
+            if let Some(scope) = props::anchor::AnchorScope::parse(&comps) { style.anchor_scope = scope; }
+        }
         "anchor-name" => {
             if let Some(names) = props::anchor::names(&comps) { style.anchor_names = (!names.is_empty()).then(|| names.into()); }
         }
@@ -4145,6 +4149,7 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
         return Some(recognizes_property(name));
     }
+    if name == "anchor-scope" { return Some(props::anchor::AnchorScope::parse(&values::components(value)).is_some()); }
     if name == "anchor-name" { return Some(props::anchor::names(&values::components(value)).is_some()); }
     if name == "position-anchor" { return Some(matches!(values::components(value).as_slice(), [c] if values::is_ident(c,"auto") || props::anchor::dashed_ident(c).is_some())); }
     if name == "position-area" { return Some(props::anchor::PositionArea::parse(&values::components(value)).is_some()); }

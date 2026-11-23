@@ -78,28 +78,50 @@ fn container(ctx: &LayoutContext, tree: &LayoutTree, node: NodeId, style: &Compu
         (rabbithole_style::WritingMode::HorizontalTb,rabbithole_style::Direction::Ltr), |s| (s.writing_mode,s.direction)))
 }
 
+fn name_scope(ctx: &LayoutContext, mut node: NodeId, name: &str) -> Option<NodeId> {
+    let root = ctx.doc.tree_root(node);
+    loop {
+        if ctx.styles.get(node).is_some_and(|style| style.anchor_scope.includes(name))
+            && ctx.doc.tree_root(node) == root {
+            return Some(node);
+        }
+        node = ctx.doc.flat_parent(node)?;
+    }
+}
+
 pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> HashMap<NodeId,Placement> {
-    let mut named: HashMap<(NodeId,&str),Vec<(usize,NodeId)>> = HashMap::new();
+    let mut named: HashMap<(NodeId,Option<NodeId>,&str),Vec<(usize,NodeId)>> = HashMap::new();
     let mut targets = Vec::new();
     for (order,id) in ctx.doc.shadow_including_descendants(Document::ROOT).into_iter().enumerate() {
         let Some(s) = ctx.styles.get(id) else { continue };
         if let Some(names) = &s.anchor_names {
             let scope = ctx.doc.tree_root(id);
-            for name in names.iter() { named.entry((scope,name.as_str())).or_default().push((order,id)); }
+            for name in names.iter() { named.entry((scope,name_scope(ctx,id,name),name.as_str())).or_default().push((order,id)); }
         }
         if matches!(s.position,Position::Fixed | Position::Absolute) && !s.position_area.is_none() {
-            if let Some(name) = s.position_anchor.as_deref() { targets.push((order,id,s,name)); }
+            targets.push((order,id,s));
         }
     }
     let mut result = HashMap::new();
-    for (order,id,s,name) in targets {
-        let Some(candidates) = named.get(&(ctx.doc.tree_root(id),name)) else { continue; };
-        let Some(anchor) = candidates.iter().rev().find_map(|&(other_order,a)| {
+    for (order,id,s) in targets {
+        let bounds = |a| {
             if ctx.doc.is_shadow_including_inclusive_ancestor(id,a) { return None; }
-            let anchor_style = ctx.styles.get(a)?;
-            if other_order >= order && matches!(anchor_style.position, Position::Absolute | Position::Fixed) { return None; }
             tree.box_in_document(ctx.doc,a).map(|(_,r)| r).or_else(|| tree.inline_rect(ctx.doc,a))
-        }) else { continue };
+        };
+        let anchor = if let Some(name) = s.position_anchor.as_deref() {
+            named.get(&(ctx.doc.tree_root(id), name_scope(ctx,id,name), name)).and_then(|candidates| {
+                candidates.iter().rev().find_map(|&(other_order,a)| {
+                    let anchor_style = ctx.styles.get(a)?;
+                    if other_order >= order && matches!(anchor_style.position, Position::Absolute | Position::Fixed) {
+                        return None;
+                    }
+                    bounds(a)
+                })
+            })
+        } else {
+            ctx.doc.popover_invoker(id).and_then(bounds)
+        };
+        let Some(anchor) = anchor else { continue };
         let Some((_,coordinates)) = tree.box_and_coordinates(ctx.doc,id) else { continue };
         let (cb,writing) = container(ctx,tree,id,s);
         let Some([x,y]) = s.position_area.physical(writing,(s.writing_mode,s.direction)) else { continue };

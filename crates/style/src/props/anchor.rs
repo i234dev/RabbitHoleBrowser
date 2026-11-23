@@ -178,3 +178,37 @@ pub fn names(parts: &[&[Token]]) -> Option<Vec<String>> {
 pub fn dashed_ident(tokens: &[Token]) -> Option<&str> {
     match tokens { [Token::Ident(s)] if s.starts_with("--") && s.len()>2 => Some(s), _=>None }
 }
+
+/// Names made local to the inclusive flat-tree subtree of an element.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AnchorScope {
+    #[default]
+    None,
+    All,
+    Names(std::rc::Rc<[String]>),
+}
+
+impl AnchorScope {
+    pub fn parse(parts: &[&[Token]]) -> Option<Self> {
+        if matches!(parts, [v] if crate::values::is_ident(v, "all")) {
+            return Some(Self::All);
+        }
+        names(parts).map(|names| if names.is_empty() { Self::None } else { Self::Names(names.into()) })
+    }
+
+    pub fn includes(&self, name: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Names(names) => names.iter().any(|item| item == name),
+        }
+    }
+
+    pub fn to_css(&self) -> String {
+        match self {
+            Self::None => "none".into(),
+            Self::All => "all".into(),
+            Self::Names(names) => names.join(", "),
+        }
+    }
+}

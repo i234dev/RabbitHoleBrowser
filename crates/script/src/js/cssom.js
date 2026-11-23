@@ -73,7 +73,7 @@
   const checkedProperties = new Set(['color', 'background-color', 'border-top-color', 'border-right-color',
     'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
     'accent-color', 'column-rule-color', 'align-self', 'align-items', 'align-content', 'justify-self', 'justify-items',
-    'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-anchor', 'anchor-name']);
+    'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-anchor', 'anchor-name', 'anchor-scope']);
   const placeLonghands = new Map([
     ['place-items',['align-items','justify-items']], ['place-self',['align-self','justify-self']],
     ['place-content',['align-content','justify-content']]

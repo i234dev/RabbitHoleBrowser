@@ -285,12 +285,12 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
 }
 
 fn checked_property(name: &str) -> bool {
-    matches!(name, "position-area" | "position-anchor" | "anchor-name") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    matches!(name, "position-area" | "position-anchor" | "anchor-name" | "anchor-scope") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
     if single_color_property(name) { return specified_color(name, tokens); }
-    if matches!(name, "position-area" | "position-anchor" | "anchor-name") || rabbithole_style::props::flex::alignment_property(name) {
+    if matches!(name, "position-area" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
         let parts = rabbithole_style::values::components(tokens);
         if let [value] = parts.as_slice() {
             if let Some(k) = rabbithole_style::values::ident(value).filter(|k| matches!(k.as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer")) {
@@ -298,6 +298,7 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
             }
         }
         if !tokens.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
+            if name == "anchor-scope" { return rabbithole_style::props::anchor::AnchorScope::parse(&parts).map(|scope| scope.to_css()); }
             if name == "anchor-name" { return rabbithole_style::props::anchor::names(&parts).map(|names| if names.is_empty() { "none".into() } else { names.join(", ") }); }
             if name == "position-anchor" {
                 let [c] = parts.as_slice() else { return None };
@@ -738,6 +739,7 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "grid-template-rows" => grid::computed(&s.grid_template_rows),
         "display" => display_css(s.display).to_string(),
         "position-area" => s.position_area.to_css(true),
+        "anchor-scope" => s.anchor_scope.to_css(),
         "anchor-name" => s.anchor_names.as_ref().map_or_else(|| "none".into(),|names| names.join(", ")),
         "position-anchor" => s.position_anchor.as_deref().unwrap_or("auto").into(),
         "position" => match s.position {

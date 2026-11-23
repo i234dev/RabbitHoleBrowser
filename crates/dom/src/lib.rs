@@ -632,6 +632,11 @@ impl Document {
         self.open_popovers.contains_key(&node)
     }
 
+    /// The element that invoked an open popover is its implicit anchor.
+    pub fn popover_invoker(&self, node: NodeId) -> Option<NodeId> {
+        self.open_popovers.get(&node).copied().flatten()
+    }
+
     pub fn light_dismiss_popovers(&self) -> impl DoubleEndedIterator<Item = NodeId> + '_ {
         self.top_layer.iter().copied().filter(|&n| self.popover_open(n) &&
             self.attr(n, "popover").is_some_and(|v| Self::popover_mode(v) != "manual"))
