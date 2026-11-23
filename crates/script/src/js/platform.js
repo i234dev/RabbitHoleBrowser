@@ -714,11 +714,10 @@
   // peer realm, ('worker', id) or ('client', id), which relays the other end.
   const swClone = g.__rhClone, swBridges = new Map();
   let swBridgeNext = 0, swBridgePrefix = null;
-  const swPortIndex = ports => new Map(Array.from(ports || []).map((p, i) => [p, i]));
   const swPost = (kind, id, msg) => N.swPostMessage(kind, id, JSON.stringify(msg));
   function swBridge(port, b, kind, id) {
     swBridges.set(b, port);
-    port.onmessage = ev => swPost(kind, id, { t: 'port', b, d: swClone.serialize(ev.data, swPortIndex(ev.ports)), ports: swOutgoing(kind, id, ev.ports) });
+    port.onmessage = ev => swSend(kind, id, ev.data, ev.ports, b);
   }
   function swOutgoing(kind, id, ports) {
     if (swBridgePrefix === null) { const s = swSnapshot(); swBridgePrefix = s.worker !== null ? `w${s.worker}` : `c${s.client}`; }
@@ -728,13 +727,9 @@
     return (bridges || []).map(b => { const ch = new g.MessageChannel(); swBridge(ch.port2, b, kind, id); return ch.port1; });
   }
   // Serialize before any side effect: DataCloneError leaves ports untouched.
-  function swSend(kind, id, message, transfer) {
-    const items = swClone.transferList(transfer);
-    const ports = items.filter(t => t instanceof g.MessagePort);
-    const d = swClone.serialize(message, swPortIndex(ports));
-    // Transferred buffers are detached in the sending realm.
-    for (const buffer of items) if (buffer instanceof ArrayBuffer && typeof buffer.transfer === 'function') buffer.transfer();
-    return swPost(kind, id, { t: 'msg', d, ports: swOutgoing(kind, id, ports) });
+  function swSend(kind, id, message, transfer, b) {
+    const packet = swClone.pack(message, transfer);
+    return swPost(kind, id, { t: b === undefined ? 'msg' : 'port', b, d: packet.d, ports: swOutgoing(kind, id, packet.ports) });
   }
   function swPortMessage(m, kind, id) {
     const p = swBridges.get(m.b);

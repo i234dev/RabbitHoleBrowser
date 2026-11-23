@@ -91,8 +91,8 @@
         const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
         return { t: 'ta', id, k: tag, v: Array.from(bytes) };
       }
-      if (ports && codec.isPort(v)) {
-        if (!ports.has(v)) throw cloneError(tag);
+      if (codec.isPort(v)) {
+        if (!ports || !ports.has(v)) throw cloneError(tag);
         return { t: 'port', id, i: ports.get(v) };
       }
       if (typeof Node === 'function' && v instanceof Node) throw cloneError(tag);
@@ -181,9 +181,9 @@
     const target = {
       postMessage(message, targetOrigin, transfer) {
         const list = transfer || (targetOrigin && typeof targetOrigin === 'object' ? targetOrigin.transfer : null);
-        const ports = transferList(list).filter(codec.isPort);
-        const data = serialize(message);
-        post(id, JSON.stringify({ t: 'msg', d: data, ports: ports.map((port) => bridgePort(port, id)) }), targetOriginOf(targetOrigin));
+        const origin = targetOriginOf(targetOrigin);
+        const packet = pack(message, list);
+        post(id, JSON.stringify({ t: 'msg', d: packet.d, ports: packet.ports.map(port => bridgePort(port, id)) }), origin);
       },
       focus() {}, blur() {}, close() {},
       get screenX() { return sameOrigin(id) ? foreignValue(id, 'screenX') : 0; },
@@ -361,17 +361,22 @@
 
   // The serializer, for the worker message routing (messaging.js,
   // worker.js; removed from the global after startup).
-  const codec = { serialize, deserialize, transferList, isPort: () => false };
+  function pack(value, transfer) {
+    const list = transferList(transfer);
+    const ports = list.filter(codec.isPort);
+    const index = ports.length ? new Map(ports.map((port, i) => [port, i])) : null;
+    const d = serialize(value, index);
+    for (const item of list) if (!codec.isPort(item)) transferBuffer.call(item);
+    return { d, ports: ports.length ? ports.map(codec.movePort) : ports };
+  }
+  const codec = { serialize, deserialize, pack, isPort: () => false };
   Object.defineProperty(g, '__rhClone', { value: codec, configurable: true });
 
   // structuredClone with the same algorithm as postMessage.
   Object.defineProperty(g, 'structuredClone', {
     value: function structuredClone(value, options = {}) {
-      const list = transferList(options == null ? undefined : options.transfer);
-      const ports = list.filter(codec.isPort);
-      const text = serialize(value, new Map(ports.map((p, i) => [p, i])));
-      for (const item of list) if (!codec.isPort(item)) transferBuffer.call(item);
-      return deserialize(text, ports.length ? ports.map(codec.movePort) : []);
+      const packet = pack(value, options == null ? undefined : options.transfer);
+      return deserialize(packet.d, packet.ports);
     },
     writable: true, configurable: true,
   });
@@ -381,10 +386,11 @@
   const bridges = new Map();
   let nextBridge = 0;
   function forward(port, bridge, frame) {
-    port.onmessage = (ev) => post(frame, JSON.stringify({
-      t: 'port', id: bridge, d: serialize(ev.data),
-      ports: Array.from(ev.ports || [], (p) => bridgePort(p, frame)),
-    }), '*');
+    port.onmessage = (ev) => {
+      const packet = pack(ev.data, ev.ports);
+      post(frame, JSON.stringify({ t: 'port', id: bridge, d: packet.d,
+        ports: packet.ports.map(p => bridgePort(p, frame)) }), '*');
+    };
   }
   // `port` (ours) goes to frame `frame`: messages arriving on it are sent
   // there; messages from there are posted into it.
@@ -409,12 +415,15 @@
     try { env = JSON.parse(text); } catch (e) { return; }
     if (env && env.t === 'port') {
       const port = bridges.get(env.id);
-      if (port) port.postMessage(deserialize(env.d), incomingPorts(env.ports, source));
+      if (port) {
+        const ports = incomingPorts(env.ports, source);
+        port.postMessage(deserialize(env.d, ports), ports);
+      }
       return;
     }
-    let value;
-    try { value = deserialize(env.d); } catch (e) { value = null; }
     const ports = incomingPorts(env.ports, source);
+    let value;
+    try { value = deserialize(env.d, ports); } catch (e) { value = null; }
     const ev = new MessageEvent('message', { data: value, origin, source: windowFor(source), ports });
     g.dispatchEvent(ev);
   }

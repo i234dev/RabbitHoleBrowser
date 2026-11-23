@@ -22,11 +22,8 @@
   const origin = () => g.location.origin;
 
   function cloneWithPorts(data, transfer) {
-    const list = C.transferList(transfer);
-    const ports = list.filter(C.isPort);
-    // Clone the payload and its port list together to retain shared identities.
-    const result = g.structuredClone([data, ports], { transfer: list });
-    return { data: result[0], ports: result[1] };
+    const packet = C.pack(data, transfer);
+    return { data: C.deserialize(packet.d, packet.ports), ports: packet.ports };
   }
 
   // --------------------------------------------------------------- ports
@@ -148,20 +145,16 @@
   const send = (id, msg) => N.workerSend(id, JSON.stringify(msg));
   function bridgeTo(id, port, b) {
     workerBridges.set(b, port);
-    port.onmessage = (ev) => send(id, { t: 'port', b, d: C.serialize(ev.data), ports: outgoingWorkerPorts(id, ev.ports) });
+    port.onmessage = ev => send(id, { t: 'port', b, ...workerPacket(id, ev.data, ev.ports) });
   }
-  function transferredPorts(transfer) {
-    const list = C.transferList(transfer);
-    const ports = list.filter((t) => t instanceof MessagePort);
-    for (const p of ports) if (p[S].detached) throw domError('Port at index 0 is already neutered.', 'DataCloneError');
-    return ports;
-  }
-  function outgoingWorkerPorts(id, transfer) {
-    return transferredPorts(transfer).map((p) => {
+  function workerPacket(id, message, transfer) {
+    const packet = C.pack(message, transfer);
+    const ports = packet.ports.map(port => {
       const b = 'o' + nextWorkerBridge++;
-      bridgeTo(id, p, b);
+      bridgeTo(id, port, b);
       return b;
     });
+    return { d: packet.d, ports };
   }
   function incomingWorkerPorts(id, bridges) {
     return (bridges || []).map((b) => {
@@ -176,7 +169,10 @@
     try { m = JSON.parse(text); } catch (e) { return; }
     if (m.t === 'port') {
       const p = workerBridges.get(m.b);
-      if (p) p.postMessage(C.deserialize(m.d), incomingWorkerPorts(id, m.ports));
+      if (p) {
+        const ports = incomingWorkerPorts(id, m.ports);
+        p.postMessage(C.deserialize(m.d, ports), ports);
+      }
       return;
     }
     const w = workerObjects.get(id);
@@ -188,8 +184,8 @@
     }
     if (m.t === 'msg') {
       let data;
-      try { data = C.deserialize(m.d); } catch (e) { w.dispatchEvent(new g.MessageEvent('messageerror', {})); return; }
       const ports = incomingWorkerPorts(id, m.ports);
+      try { data = C.deserialize(m.d, ports); } catch (e) { w.dispatchEvent(new g.MessageEvent('messageerror', {})); return; }
       w.dispatchEvent(new g.MessageEvent('message', { data, ports }));
     }
   });
@@ -206,9 +202,7 @@
     postMessage(message, transfer) {
       const st = this[S];
       if (st.terminated) return;
-      const d = C.serialize(message);
-      const ports = outgoingWorkerPorts(st.id, transfer);
-      send(st.id, { t: 'msg', d, ports });
+      send(st.id, { t: 'msg', ...workerPacket(st.id, message, transfer) });
     }
     terminate() {
       const st = this[S];

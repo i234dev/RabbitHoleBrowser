@@ -1324,6 +1324,37 @@ fn imported_strict_worker_scripts_share_global_bindings() {
 }
 
 #[test]
+fn transferred_worker_ports_retain_identity_and_entanglement() {
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    env.fetches.insert("https://example.test/dir/relay.js".into(), (200, "text/javascript".into(), r#"
+        onmessage = e => {
+            const port = e.data.port;
+            if (port !== e.ports[0] || port !== e.data.again) return;
+            postMessage({ port, bytes: e.data.bytes }, [port, e.data.bytes]);
+        };
+    "#.into()));
+    run(&mut env, &mut host, r#"
+        const worker = new Worker('relay.js');
+        const channel = new MessageChannel();
+        const bytes = Uint8Array.of(73).buffer;
+        channel.port1.onmessage = e => console.log('reply', e.data);
+        worker.onmessage = e => {
+            console.log('received', e.data.port === e.ports[0], new Uint8Array(e.data.bytes)[0]);
+            e.data.port.postMessage('round trip');
+        };
+        worker.postMessage({ port: channel.port2, again: channel.port2, bytes }, [channel.port2, bytes]);
+        try { worker.postMessage(null, [channel.port2]); }
+        catch (e) { console.log('sent', e.name, bytes.byteLength); }
+    "#);
+    for step in 1..=15 {
+        host.run_timers(&mut env, 1000.0 + 10.0 * step as f64);
+        host.run_jobs(&mut env);
+    }
+    let logs: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, msg)| msg.as_str()).collect();
+    assert_eq!(logs, ["sent DataCloneError 0", "received true 73", "reply round trip"]);
+}
+
+#[test]
 fn worker_cloning_creates_own_properties_without_calling_inherited_setters() {
     let (mut env, mut host) = setup("<html><body></body></html>");
     env.fetches.insert("https://example.test/dir/clone-worker.js".into(), (200, "text/javascript".into(), r#"

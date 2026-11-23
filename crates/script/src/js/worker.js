@@ -50,18 +50,16 @@
   // A local MessagePort bridged to the owner's realm under id `b`.
   function bridge(port, b) {
     bridges.set(b, port);
-    port.onmessage = (ev) => post({ t: 'port', b, d: C.serialize(ev.data), ports: outgoingPorts(ev.ports) });
+    port.onmessage = ev => post({ t: 'port', b, ...workerPacket(ev.data, ev.ports) });
   }
-  function portsOf(transfer) {
-    const list = C.transferList(transfer);
-    return list.filter((t) => typeof g.MessagePort === 'function' && t instanceof g.MessagePort);
-  }
-  function outgoingPorts(transfer) {
-    return portsOf(transfer).map((p) => {
+  function workerPacket(message, transfer) {
+    const packet = C.pack(message, transfer);
+    const ports = packet.ports.map(port => {
       const b = 'w' + info.id + '.' + nextBridge++;
-      bridge(p, b);
+      bridge(port, b);
       return b;
     });
+    return { d: packet.d, ports };
   }
   function incomingPorts(ids) {
     return (ids || []).map((b) => {
@@ -73,9 +71,7 @@
 
   const scope = {
     postMessage(message, transfer) {
-      const d = C.serialize(message);
-      const ports = outgoingPorts(transfer);
-      post({ t: 'msg', d, ports });
+      post({ t: 'msg', ...workerPacket(message, transfer) });
     },
     close() { N.workerClose(); },
     importScripts(...urls) {
@@ -96,7 +92,10 @@
     try { m = JSON.parse(text); } catch (e) { return; }
     if (m.t === 'port') {
       const p = bridges.get(m.b);
-      if (p) p.postMessage(C.deserialize(m.d), incomingPorts(m.ports));
+      if (p) {
+        const ports = incomingPorts(m.ports);
+        p.postMessage(C.deserialize(m.d, ports), ports);
+      }
       return;
     }
     if (m.t === 'connect') {
@@ -107,8 +106,9 @@
     }
     if (m.t === 'msg') {
       let data;
-      try { data = C.deserialize(m.d); } catch (e) { g.dispatchEvent(new g.MessageEvent('messageerror', {})); return; }
-      g.dispatchEvent(new g.MessageEvent('message', { data, ports: incomingPorts(m.ports) }));
+      const ports = incomingPorts(m.ports);
+      try { data = C.deserialize(m.d, ports); } catch (e) { g.dispatchEvent(new g.MessageEvent('messageerror', {})); return; }
+      g.dispatchEvent(new g.MessageEvent('message', { data, ports }));
     }
   });
 })();
