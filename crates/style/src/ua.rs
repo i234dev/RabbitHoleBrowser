@@ -152,6 +152,8 @@ button:disabled, input[type=submit i]:disabled, input[type=button i]:disabled, i
 }
 input[type=checkbox i]:disabled, input[type=radio i]:disabled, input[type=range i]:disabled, input[type=file i]:disabled { background-color: transparent; }
 :focus-visible { outline: 2px solid #101010; outline-offset: 1px; }
+/* An editable viewport uses its caret as the default focus indicator. */
+:root:read-write:focus-visible { outline: none; }
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; }
 label { cursor: default; }
 optgroup, option { display: block; }

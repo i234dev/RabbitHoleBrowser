@@ -1444,17 +1444,7 @@ fn is_read_write(doc: &Document, node: NodeId) -> bool {
             let mutable = is_text_input(&t) || matches!(t.as_str(), "date" | "month" | "week" | "time" | "datetime-local");
             mutable && el.attr("readonly").is_none() && !is_disabled_control(doc, node)
         }
-        _ => {
-            // Editing hosts and their descendants.
-            let mut cur = Some(node);
-            while let Some(n) = cur {
-                if let Some(v) = doc.attr(n, "contenteditable") {
-                    return !v.trim().eq_ignore_ascii_case("false");
-                }
-                cur = doc.parent(n);
-            }
-            false
-        }
+        _ => doc.editing_host(node).is_some(),
     }
 }
 

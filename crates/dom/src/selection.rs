@@ -70,6 +70,19 @@ pub struct CustomHighlight {
 }
 
 impl Document {
+    /// Changing document editability can change selectors anywhere in the tree.
+    pub fn set_design_mode(&mut self, enabled: bool) -> bool {
+        if self.design_mode == enabled {
+            return false;
+        }
+        self.design_mode = enabled;
+        self.epoch += 1;
+        if self.tracking {
+            self.log.overflow = true;
+        }
+        true
+    }
+
     /// Outermost editable element within the nearest editing boundary.
     pub fn editing_host(&self, node: NodeId) -> Option<NodeId> {
         let mut host = None;

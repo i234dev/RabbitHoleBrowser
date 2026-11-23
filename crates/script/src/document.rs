@@ -543,9 +543,11 @@ fn d_design_mode_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
     let raw = arg_str(realm, args, 0)?;
     let on = raw.eq_ignore_ascii_case("on");
     if !on && !raw.eq_ignore_ascii_case("off") { return Ok(Value::Undefined); }
+    if !with_doc(d, |doc| doc.set_design_mode(on)) {
+        return Ok(Value::Undefined);
+    }
+    if d == 0 { mark_dirty(); }
     let focus = with_doc(d, |doc| {
-        if doc.design_mode == on { return None; }
-        doc.design_mode = on;
         if !on { return None; }
         let node = doc.child_elements(Document::ROOT).next()?;
         let point = rabbithole_dom::BoundaryPoint { node, offset: 0 };

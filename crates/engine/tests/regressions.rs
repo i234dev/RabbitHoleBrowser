@@ -871,3 +871,25 @@ fn selector_queries_follow_focus_and_preserve_scope_on_indexed_subjects() {
     })()"#);
     assert_eq!(result, "true|true|true|true|true|false|0");
 }
+
+#[test]
+fn editable_viewport_restyles_and_keeps_author_focus_indicators() {
+    use rabbithole_style::BorderStyle;
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>article:read-write {color:green}</style><article id=bodytext>x</article><p contenteditable=false id=locked>y</p>");
+    let root = page.doc.html_element().unwrap();
+    let state = eval(&e, &mut page, r#"(() => {
+        document.designMode = 'on';
+        return [document.activeElement === document.documentElement,
+            document.documentElement.matches(':focus-visible'),
+            getComputedStyle(bodytext).color, locked.matches(':read-write')].join('|');
+    })()"#);
+    assert_eq!(state, "true|true|rgb(0, 128, 0)|false");
+    e.flush_style(&mut page);
+    assert_eq!(page.styles.get(root).unwrap().outline_style, BorderStyle::None);
+    eval(&e, &mut page, "document.documentElement.style.outline='3px dashed red'");
+    e.flush_style(&mut page);
+    assert_eq!(page.styles.get(root).unwrap().outline_style, BorderStyle::Dashed);
+    let color = eval(&e, &mut page, "document.designMode='off'; getComputedStyle(bodytext).color");
+    assert_eq!(color, "rgb(0, 0, 0)");
+}
