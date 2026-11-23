@@ -1847,6 +1847,7 @@ impl<'a> Layouter<'a> {
         let dx = fx + m.left - child.rect.x;
         let dy = fy + m.top - child.rect.y;
         child.translate(dx, dy);
+        bfc.set_shape(child, cb.width);
     }
 
     /// Lay out an atomic inline-level box (inline-block / image) at a

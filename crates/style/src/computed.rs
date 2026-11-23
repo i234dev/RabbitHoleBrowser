@@ -1831,6 +1831,10 @@ pub struct ComputedStyle {
     pub backdrop_filters: Vec<FilterOp>,
     /// `clip-path` (`None` = `none`).
     pub clip_path: Option<std::sync::Arc<ClipPath>>,
+    /// The float exclusion shape, relative to its margin box by default.
+    pub shape_outside: Option<std::sync::Arc<ClipPath>>,
+    pub shape_outside_position_explicit: bool,
+    pub shape_margin: Length,
     /// Names of the properties declared `!important` for an element with
     /// animations (they do not override them); `None` otherwise.
     pub important: Option<std::rc::Rc<Vec<String>>>,
@@ -2168,6 +2172,9 @@ impl ComputedStyle {
             filters: Vec::new(),
             backdrop_filters: Vec::new(),
             clip_path: None,
+            shape_outside: None,
+            shape_outside_position_explicit: false,
+            shape_margin: Length::Px(0.0),
             clip_rect: None,
             border_shape: None,
             corner_shape: [CornerShape::Round; 4],

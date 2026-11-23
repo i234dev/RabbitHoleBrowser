@@ -11,6 +11,7 @@ use rabbithole_style::{ComputedStyle, Display, Length, Position};
 mod alignment;
 mod grid;
 mod images;
+mod shapes;
 
 /// Serialize CSS tokens back to text.
 pub(crate) fn tokens_to_css(tokens: &[Token]) -> String {
@@ -285,12 +286,16 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
 }
 
 fn checked_property(name: &str) -> bool {
-    matches!(name, "position-area" | "position-anchor" | "anchor-name" | "anchor-scope") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-anchor" | "anchor-name" | "anchor-scope") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
     if let Some(result) = rabbithole_style::props::anchor_length::specified(name,tokens,&tokens_to_css) {
         return result;
+    }
+    if matches!(name, "shape-outside" | "shape-margin") {
+        if rabbithole_style::cascade::supports_declaration(name,tokens) == Some(false) { return None; }
+        if name == "shape-outside" { return Some(shapes::specified(tokens)); }
     }
     if single_color_property(name) { return specified_color(name, tokens); }
     if matches!(name, "position-area" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
@@ -753,6 +758,8 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "grid-template-columns" => grid::computed(&s.grid_template_columns),
         "grid-template-rows" => grid::computed(&s.grid_template_rows),
         "display" => display_css(s.display).to_string(),
+        "shape-outside" => shapes::computed(s.shape_outside.as_deref(), s.shape_outside_position_explicit),
+        "shape-margin" => position_css(&s.shape_margin),
         "position-area" => s.position_area.to_css(true),
         "anchor-scope" => s.anchor_scope.to_css(),
         "anchor-name" => s.anchor_names.as_ref().map_or_else(|| "none".into(),|names| names.join(", ")),

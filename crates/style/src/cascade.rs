@@ -2493,6 +2493,11 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.creates_stacking_context = from.creates_stacking_context;
         }
         "clip" => to.clip_rect = from.clip_rect,
+        "shape-outside" => {
+            to.shape_outside = from.shape_outside.clone();
+            to.shape_outside_position_explicit = from.shape_outside_position_explicit;
+        }
+        "shape-margin" => to.shape_margin = from.shape_margin,
         "border-shape" => to.border_shape = from.border_shape.clone(),
         "corner-shape" | "corner-top-left-shape" | "corner-top-right-shape" | "corner-bottom-right-shape" | "corner-bottom-left-shape" => {
             to.corner_shape = from.corner_shape
@@ -4090,6 +4095,7 @@ thread_local! {
 /// value: a valid value of one of these properties changes either the
 /// initial style or this one.
 const SUPPORTS_PROBE: &[(&str, &str)] = &[
+    ("shape-outside", "border-box"), ("shape-margin", "2px"),
     ("display", "table-cell"), ("position", "relative"), ("float", "left"), ("clear", "both"), ("visibility", "hidden"),
     ("margin", "7px 8px 9px 10px"), ("padding", "7px 8px 9px 10px"), ("top", "7px"), ("right", "7px"), ("bottom", "7px"), ("left", "7px"),
     ("width", "7px"), ("height", "7px"), ("min-width", "7px"), ("min-height", "7px"), ("max-width", "7px"), ("max-height", "7px"),
@@ -4102,6 +4108,7 @@ const SUPPORTS_PROBE: &[(&str, &str)] = &[
 
 /// Properties every value of which `SUPPORTS_PROBE` detects.
 const SUPPORTS_CHECKED: &[&str] = &[
+    "shape-outside", "shape-margin",
     "display", "position", "float", "clear", "visibility", "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", "padding",
     "padding-top", "padding-right", "padding-bottom", "padding-left", "top", "right", "bottom", "left", "width", "height", "min-width",
     "min-height", "max-width", "max-height", "color", "background-color", "opacity", "z-index", "box-sizing", "text-align", "white-space",

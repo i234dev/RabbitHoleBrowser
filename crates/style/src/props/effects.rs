@@ -677,7 +677,29 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.transform3d_mut().transform_box = b;
             }
         }
-        "box-reflect" | "-webkit-box-reflect" | "shape-outside" | "shape-margin" => {}
+        "shape-outside" => {
+            if let Some(value) = super::clip_path::parse_shape_value(comps, ctx, ShapeBox::Margin) {
+                let valid_box = |which: &ShapeBox| matches!(which, ShapeBox::Margin | ShapeBox::Border | ShapeBox::Padding | ShapeBox::Content);
+                if match &value {
+                    None => true,
+                    Some(ClipPath::Shape(_, which) | ClipPath::Box(which)) => valid_box(which),
+                    Some(ClipPath::Url(_)) => false,
+                } {
+                    style.shape_outside_position_explicit = comps.iter().any(|component| component.iter().any(|t| matches!(t, Token::Ident(name) if name.eq_ignore_ascii_case("at"))));
+                    style.shape_outside = value.map(std::sync::Arc::new);
+                }
+            }
+        }
+        "shape-margin" => {
+            if let [value] = comps {
+                if let Some(length) = super::len_no_auto(value, ctx) {
+                    if !matches!(length, Length::Px(v) | Length::Percent(v) if v < 0.0) {
+                        style.shape_margin = length;
+                    }
+                }
+            }
+        }
+        "box-reflect" | "-webkit-box-reflect" => {}
         _ => return false,
     }
     true

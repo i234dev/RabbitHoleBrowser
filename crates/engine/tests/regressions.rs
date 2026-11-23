@@ -1054,6 +1054,25 @@ fn script_formatting_switches_baseline_semantics_on_only_the_selected_text() {
 }
 
 #[test]
+fn float_exclusion_shapes_wrap_lines_without_moving_the_float() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>*{margin:0}main{width:300px;line-height:20px}#f{float:left;width:100px;height:100px;shape-outside:inset(0 70px 0 0);shape-margin:5px}i{display:inline-block;width:8px;height:10px}</style><main><div id=f></div><i id=mark></i><br><i></i></main>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const left=()=>mark.getBoundingClientRect().left-f.getBoundingClientRect().left;
+        const inset=left(), value=getComputedStyle(f).shapeOutside;
+        f.style.shapeOutside='polygon(0px 0px, 60px 0px, 60px 80px, 0px 80px)';
+        const polygon=left();
+        const animation=f.animate([{shapeMargin:'0px'},{shapeMargin:'20px'}],1000);
+        animation.pause(); animation.currentTime=500;
+        const animated=left();
+        animation.cancel();
+        f.style.shapeOutside='none';
+        return [inset,polygon,animated,left(),f.getBoundingClientRect().width,value].join('|');
+    })()"#);
+    assert_eq!(result, "35|65|70|100|100|inset(0px 70px 0px 0px)");
+}
+
+#[test]
 fn link_editing_preserves_existing_attributes_and_customizes_typed_text() {
     let mut e = engine(true);
     let mut page=load(&mut e,"<main contenteditable id=ed><p><a href='/old' title='title'>old</a> plain</p><p>next</p></main>");

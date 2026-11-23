@@ -65,6 +65,8 @@ enum Prop {
     Filter,
     BackdropFilter,
     ClipPath,
+    ShapeOutside,
+    ShapeMargin,
     AlignContent,
     JustifyContent,
     AlignSelf,
@@ -116,6 +118,8 @@ const ALL: &[Prop] = &[
     Prop::Filter,
     Prop::BackdropFilter,
     Prop::ClipPath,
+    Prop::ShapeOutside,
+    Prop::ShapeMargin,
     Prop::AlignContent,
     Prop::JustifyContent,
     Prop::AlignSelf,
@@ -169,6 +173,8 @@ impl Prop {
             Prop::Filter => "filter",
             Prop::BackdropFilter => "backdrop-filter",
             Prop::ClipPath => "clip-path",
+            Prop::ShapeOutside => "shape-outside",
+            Prop::ShapeMargin => "shape-margin",
             Prop::AlignContent => "align-content",
             Prop::JustifyContent => "justify-content",
             Prop::AlignSelf => "align-self",
@@ -231,7 +237,7 @@ enum Val {
     T(Vec<TransformOp>),
     V(Visibility),
     Fl(Vec<FilterOp>),
-    Cp(Option<std::sync::Arc<ClipPath>>),
+    Cp(Option<std::sync::Arc<ClipPath>>, bool),
 }
 
 fn get(s: &ComputedStyle, p: Prop) -> Val {
@@ -272,7 +278,9 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         BorderRadius => Val::F(s.border_radius),
         Filter => Val::Fl(s.filters.clone()),
         BackdropFilter => Val::Fl(s.backdrop_filters.clone()),
-        ClipPath => Val::Cp(s.clip_path.clone()),
+        ClipPath => Val::Cp(s.clip_path.clone(), false),
+        ShapeOutside => Val::Cp(s.shape_outside.clone(), s.shape_outside_position_explicit),
+        ShapeMargin => Val::L(s.shape_margin),
         AlignContent => Val::Distribution(s.align_content, s.align_content_flags),
         JustifyContent => Val::Distribution(s.justify_content, s.justify_content_flags),
         AlignSelf => Val::ItemAlignment(s.align_self, s.align_self_flags),
@@ -359,7 +367,12 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
                 s.creates_stacking_context = true;
             }
         }
-        (ClipPath, Val::Cp(c)) => {
+        (ShapeOutside, Val::Cp(c, explicit)) => {
+            s.shape_outside = c.clone();
+            s.shape_outside_position_explicit = *explicit;
+        }
+        (ShapeMargin, Val::L(l)) => s.shape_margin = *l,
+        (ClipPath, Val::Cp(c, _)) => {
             s.clip_path = c.clone();
             if c.is_some() {
                 s.creates_stacking_context = true;
@@ -940,8 +953,8 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
             }
             discrete()
         }
-        (Val::Cp(Some(x)), Val::Cp(Some(y))) => match lerp_clip(x, y, t) {
-            Some(c) => Val::Cp(Some(std::sync::Arc::new(c))),
+        (Val::Cp(Some(x), a_at), Val::Cp(Some(y), b_at)) => match lerp_clip(x, y, t) {
+            Some(c) => Val::Cp(Some(std::sync::Arc::new(c)), *a_at || *b_at),
             None => discrete(),
         },
         (Val::V(x), Val::V(y)) => {
@@ -2074,7 +2087,7 @@ fn interpolable(a: &Val, b: &Val) -> bool {
         (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(0.5).tracks(x, y).is_some(),
         (Val::L(x), Val::L(y)) => lerp_len(x, y, 0.5).is_some(),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),
-        (Val::Cp(Some(x)), Val::Cp(Some(y))) => lerp_clip(x, y, 0.5).is_some(),
+        (Val::Cp(Some(x), _), Val::Cp(Some(y), _)) => lerp_clip(x, y, 0.5).is_some(),
         _ => false,
     }
 }

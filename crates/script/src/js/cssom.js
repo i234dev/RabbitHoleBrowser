@@ -70,7 +70,7 @@
   }
 
   // Parse "a: b; c: d !important" into [[name, value, important]].
-  const checkedProperties = new Set(['color', 'background-color', 'border-top-color', 'border-right-color',
+  const checkedProperties = new Set(['shape-outside', 'shape-margin', 'color', 'background-color', 'border-top-color', 'border-right-color',
     'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
     'accent-color', 'column-rule-color', 'align-self', 'align-items', 'align-content', 'justify-self', 'justify-items',
     'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-anchor', 'anchor-name', 'anchor-scope']);
