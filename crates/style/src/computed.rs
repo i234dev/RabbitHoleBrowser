@@ -1454,6 +1454,32 @@ pub struct Transition {
     pub timing: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationComposition {
+    Replace,
+    Add,
+    Accumulate,
+}
+
+impl AnimationComposition {
+    pub fn parse(keyword: &str) -> Option<Self> {
+        match keyword {
+            "replace" => Some(Self::Replace),
+            "add" => Some(Self::Add),
+            "accumulate" => Some(Self::Accumulate),
+            _ => None,
+        }
+    }
+
+    pub fn css(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Add => "add",
+            Self::Accumulate => "accumulate",
+        }
+    }
+}
+
 /// Parsed `animation` shorthand.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Animation {
@@ -1947,6 +1973,7 @@ pub struct ComputedStyle {
     pub author_widget_style: bool,
     pub transitions: Vec<Transition>,
     pub animations: Vec<Animation>,
+    pub animation_composition: Option<std::rc::Rc<[AnimationComposition]>>,
     pub scroll_margin_top: f32,
     /// `contain`/`isolation`/`will-change` imply a stacking context.
     pub creates_stacking_context: bool,
@@ -2169,6 +2196,7 @@ impl ComputedStyle {
             author_widget_style: false,
             transitions: Vec::new(),
             animations: Vec::new(),
+            animation_composition: None,
             scroll_margin_top: 0.0,
             creates_stacking_context: false,
             border_collapse: false,

@@ -282,3 +282,18 @@ fn auto_repeated_grid_lists_switch_as_a_whole() {
         </script>"#);
     assert_eq!(logs(&mut page), ["10px repeat(auto-fill, 20px)", "40px repeat(auto-fill, 60px)"]);
 }
+
+#[test]
+fn css_keyframe_composition_uses_the_underlying_value_at_each_endpoint() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<!doctype html><style>
+        @keyframes wider {from {width:10px} to {width:30px; animation-composition:replace}}
+        @keyframes extra {from {width:2px} to {width:6px}}
+        #box {width:50px; animation: wider 1s linear both, extra 1s linear both; animation-composition:add}
+        </style><div id=box></div><script>
+        const effects = box.getAnimations();
+        for (const a of effects) { a.pause(); a.currentTime = 500; }
+        console.log(getComputedStyle(box).animationComposition, box.offsetWidth);
+        </script>"#);
+    assert_eq!(logs(&mut page), ["add 49"]);
+}

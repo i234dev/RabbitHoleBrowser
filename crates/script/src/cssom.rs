@@ -945,6 +945,7 @@ fn timing_css(s: &ComputedStyle, prop: &str) -> Option<String> {
         "transition-duration" => list(s.transitions.iter().map(|t| secs(t.duration)).collect(), "0s"),
         "transition-delay" => list(s.transitions.iter().map(|t| secs(t.delay)).collect(), "0s"),
         "transition-timing-function" => list(s.transitions.iter().map(|t| t.timing.clone()).collect(), "ease"),
+        "animation-composition" => list(s.animation_composition.as_deref().unwrap_or_default().iter().map(|op| op.css().to_string()).collect(), "replace"),
         "animation-name" => list(s.animations.iter().map(|a| a.name.clone()).collect(), "none"),
         "animation-duration" => list(s.animations.iter().map(|a| secs(a.duration)).collect(), "0s"),
         "animation-delay" => list(s.animations.iter().map(|a| secs(a.delay)).collect(), "0s"),

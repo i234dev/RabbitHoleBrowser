@@ -2700,6 +2700,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "transition" | "transition-property" | "transition-duration" | "transition-delay" | "transition-timing-function" => {
             to.transitions = from.transitions.clone()
         }
+        "animation-composition" => to.animation_composition.clone_from(&from.animation_composition),
         "animation" | "animation-name" | "animation-duration" | "animation-delay" | "animation-timing-function"
         | "animation-iteration-count" | "animation-direction" | "animation-fill-mode" => to.animations = from.animations.clone(),
         "border-collapse" => to.border_collapse = from.border_collapse,

@@ -14,7 +14,7 @@
 mod grid_tracks;
 
 use grid_tracks::Operation as GridOperation;
-use rabbithole_style::TrackListItem;
+use rabbithole_style::{AnimationComposition as Composite, TrackListItem};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -1105,6 +1105,7 @@ impl Transition {
 
 #[derive(Debug, Clone)]
 struct Keyframe {
+    composite: Option<Composite>,
     offset: f32,
     values: Vec<(Prop, Val)>,
 }
@@ -1220,20 +1221,6 @@ struct ScriptKeyframe {
     /// None = the effect's composite operation.
     composite: Option<Composite>,
     values: Vec<(Prop, Val)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Composite {
-    Replace,
-    Add,
-}
-
-fn composite_of(s: &str) -> Option<Composite> {
-    match s {
-        "replace" => Some(Composite::Replace),
-        "add" | "accumulate" => Some(Composite::Add),
-        _ => None,
-    }
 }
 
 impl AnimationState {
@@ -1472,7 +1459,10 @@ impl Engine {
                 let declared: Vec<Prop> = ALL.iter().copied().filter(|p| decls.iter().any(|d| p.covered_by(&d.name))).collect();
                 let values: Vec<(Prop, Val)> = declared.into_iter().map(|p| (p, get(&styled, p))).collect();
                 for &o in offsets {
-                    frames.push(Keyframe { offset: o.clamp(0.0, 1.0), values: values.clone() });
+                    let composite = decls.iter().any(|d| !d.important && d.name == "animation-composition")
+                        .then(|| styled.animation_composition.as_deref().and_then(|ops| ops.first().copied()))
+                        .flatten();
+                    frames.push(Keyframe { composite, offset: o.clamp(0.0, 1.0), values: values.clone() });
                 }
             }
             frames.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
@@ -1531,10 +1521,8 @@ impl Engine {
         }
     }
 
-    /// Write base + animated values into `page.styles` for `node`.
-    fn apply_overlay(&self, page: &mut Page, node: NodeId, now: f64) {
-        let Some(base) = page.anim.base.get(&node).cloned() else { return };
-        let mut style = (*base).clone();
+    fn css_animation_style(&self, page: &Page, node: NodeId, base: &ComputedStyle, now: f64) -> ComputedStyle {
+        let mut style = base.clone();
         for t in page.anim.transitions.iter().filter(|t| t.node == node && !t.clock.idle()) {
             set(&mut style, t.prop, &t.value_at(now));
         }
@@ -1542,7 +1530,7 @@ impl Engine {
         let mut anims: Vec<&Animation> = page.anim.animations.iter().filter(|a| a.node == node).collect();
         anims.sort_by_key(|a| a.index);
         for a in anims {
-            for (p, v) in animation_values(a, &base, now) {
+            for (p, v) in animation_values(a, &style, now) {
                 // `!important` declarations override animations.
                 if base.important.as_ref().is_some_and(|names| names.iter().any(|n| p.covered_by(n))) {
                     continue;
@@ -1550,6 +1538,13 @@ impl Engine {
                 set(&mut style, p, &v);
             }
         }
+        style
+    }
+
+    /// Write base + animated values into `page.styles` for `node`.
+    fn apply_overlay(&self, page: &mut Page, node: NodeId, now: f64) {
+        let Some(base) = page.anim.base.get(&node).cloned() else { return };
+        let mut style = self.css_animation_style(page, node, &base, now);
         if page.anim.script_nodes.contains(&node) {
             self.apply_script_effects(page, node, &base, &mut style, None);
         }
@@ -1586,7 +1581,7 @@ impl Engine {
                 page.anim.script_frames.insert(e.id, ScriptFrames { version: e.frames_version, base: base_key, frames });
             }
             let Some(sf) = page.anim.script_frames.get(&e.id) else { continue };
-            let effect_composite = composite_of(&e.composite).unwrap_or(Composite::Replace);
+            let effect_composite = Composite::parse(&e.composite).unwrap_or(Composite::Replace);
             for (p, v) in script_effect_values(&sf.frames, progress, effect_composite, style) {
                 if base.important.as_ref().is_some_and(|names| names.iter().any(|n| p.covered_by(n))) {
                     continue;
@@ -1610,7 +1605,7 @@ impl Engine {
                 let decls = rabbithole_css::parse_declaration_list(&text);
                 let styled = rabbithole_style::cascade::apply_over(base, &parent, &decls, root_fs, viewport);
                 let values = ALL.iter().copied().filter(|p| decls.iter().any(|d| p.covered_by(&d.name))).map(|p| (p, get(&styled, p))).collect();
-                ScriptKeyframe { offset: f.offset as f32, easing: parse_easing(&f.easing), composite: composite_of(&f.composite), values }
+                ScriptKeyframe { offset: f.offset as f32, easing: parse_easing(&f.easing), composite: Composite::parse(&f.composite), values }
             })
             .collect()
     }
@@ -1675,15 +1670,7 @@ impl Engine {
         self.sync_script_animations(page);
         let base = page.anim.base.get(&node).cloned().or_else(|| page.styles.get(node).cloned())?;
         let now = now_ms(self);
-        let mut style = (*base).clone();
-        for t in page.anim.transitions.iter().filter(|t| t.node == node && !t.clock.idle()) {
-            set(&mut style, t.prop, &t.value_at(now));
-        }
-        for a in page.anim.animations.iter().filter(|a| a.node == node) {
-            for (p, v) in animation_values(a, &base, now) {
-                set(&mut style, p, &v);
-            }
-        }
+        let mut style = self.css_animation_style(page, node, &base, now);
         self.apply_script_effects(page, node, &base, &mut style, Some(order));
         Some(Rc::new(style))
     }
@@ -2016,7 +2003,7 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
             let Some((_, v)) = f.values.iter().find(|(q, _)| *q == pr) else { continue };
             let v = match f.composite.unwrap_or(composite) {
                 Composite::Replace => v.clone(),
-                Composite::Add => add_values(&underlying, v),
+                Composite::Add | Composite::Accumulate => add_values(&underlying, v),
             };
             ks.push((f.offset, &f.easing, v));
         }
@@ -2118,12 +2105,22 @@ fn animation_values(a: &Animation, base: &ComputedStyle, now: f64) -> Vec<(Prop,
     let mut out = Vec::new();
     for pr in props {
         // Keyframes declaring pr, with implicit 0% / 100% from the base.
-        let mut ks: Vec<(f32, Val)> = a.frames.iter().filter_map(|f| f.values.iter().find(|(q, _)| *q == pr).map(|(_, v)| (f.offset, v.clone()))).collect();
+        let ops = base.animation_composition.as_deref().unwrap_or_default();
+        let default = if ops.is_empty() { Composite::Replace } else { ops[a.index % ops.len()] };
+        let underlying = get(base, pr);
+        let mut ks: Vec<(f32, Val)> = a.frames.iter().filter_map(|f| {
+            let (_, value) = f.values.iter().find(|(q, _)| *q == pr)?;
+            let composed = match f.composite.unwrap_or(default) {
+                Composite::Replace => value.clone(),
+                Composite::Add | Composite::Accumulate => add_values(&underlying, value),
+            };
+            Some((f.offset, composed))
+        }).collect();
         if ks.first().map(|k| k.0 > 0.0).unwrap_or(true) {
-            ks.insert(0, (0.0, get(base, pr)));
+            ks.insert(0, (0.0, underlying.clone()));
         }
         if ks.last().map(|k| k.0 < 1.0).unwrap_or(true) {
-            ks.push((1.0, get(base, pr)));
+            ks.push((1.0, underlying));
         }
         let mut j = 0;
         while j + 1 < ks.len() - 1 && p > ks[j + 1].0 {

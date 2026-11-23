@@ -417,7 +417,12 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 each_animation(style, v, |a, k| a.paused = k == "paused");
             }
         }
-        "animation-composition" | "animation-timeline" => {}
+        "animation-composition" => {
+            if let Some(list) = single_list(comps, |c| AnimationComposition::parse(&values::ident(c)?)) {
+                style.animation_composition = Some(list.into());
+            }
+        }
+        "animation-timeline" => {}
         "scroll-margin-top" | "scroll-margin" => {
             if let Some(v) = super::px(c0, ctx) {
                 style.scroll_margin_top = v;
