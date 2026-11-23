@@ -101,6 +101,18 @@ edition = "2021"
         self.assertEqual(self.helper("check", "--published-ref", previous)["version"], "0.1.10")
         self.assertEqual(self.helper()["version"], "0.1.11")
 
+    def test_next_series_opens_minor_at_patch_one_then_continues(self):
+        previous = self.run_command(["git", "rev-parse", "HEAD"]).stdout.strip()
+        self.assertEqual(self.helper("prepare", "--next-series")["version"], "0.2.1")
+        self.assertIn("## Status (v0.2.1)", (self.repo / "README.md").read_text())
+        self.assertEqual(self.helper("prepare", "--next-series")["changed"], [])
+        self.assertEqual(self.helper("check", "--next-series")["version"], "0.2.1")
+        self.assertIn("must match published 0.1.9 or prepared 0.1.10", self.helper("check", success=False).stderr)
+        self.commit()
+        self.run_command(["git", "update-ref", "refs/remotes/origin/main", "HEAD"])
+        self.assertEqual(self.helper("check", "--next-series", "--published-ref", previous)["version"], "0.2.1")
+        self.assertEqual(self.helper()["version"], "0.2.2")
+
     def test_check_never_prepares_or_changes_files(self):
         before = self.snapshot()
         self.assertIn("run prepare first", self.helper("check", success=False).stderr)

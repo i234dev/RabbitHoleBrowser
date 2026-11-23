@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Prepare or check one patch release against an up-to-date published Git ref.
 
+With --next-series the delivery opens the next minor series at patch 1
+(0.1.44 -> 0.2.1). Patch numbering then continues within that series.
+
 Uses only Python's standard library and Cargo metadata; never builds, fetches,
 commits, pushes, or upgrades dependencies. Requires Python 3.11 or newer.
 """
@@ -93,7 +96,7 @@ def write_atomic(path, content):
             os.unlink(temporary)
 
 
-def release(repo, published_ref, action, cargo):
+def release(repo, published_ref, action, cargo, next_series=False):
     manifest = repo / "Cargo.toml"
     lock = repo / "Cargo.lock"
     original = {p: p.read_bytes() for p in (manifest, lock)}
@@ -104,7 +107,7 @@ def release(repo, published_ref, action, cargo):
     published = tomllib.loads(command(repo, ["git", "show", commit + ":Cargo.toml"]))["workspace"]["package"]["version"]
     major, minor, patch = version(published)
     version(current)
-    target = f"{major}.{minor}.{patch + 1}"
+    target = f"{major}.{minor + 1}.1" if next_series else f"{major}.{minor}.{patch + 1}"
     if current not in (published, target):
         raise ReleaseError(f"Version {current} must match published {published} or prepared {target}")
     if action == "check" and current != target:
@@ -152,9 +155,10 @@ def main():
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--published-ref", default="origin/main", help="already-fetched reference of the previous delivery")
     parser.add_argument("--cargo", default=os.environ.get("CARGO", "cargo"))
+    parser.add_argument("--next-series", action="store_true", help="open the next minor series at patch 1 instead of incrementing the patch")
     args = parser.parse_args()
     try:
-        result = release(args.repo.resolve(), args.published_ref, args.action, args.cargo)
+        result = release(args.repo.resolve(), args.published_ref, args.action, args.cargo, args.next_series)
     except (OSError, KeyError, ReleaseError, ValueError) as error:
         parser.exit(1, f"release-version: {error}\n")
     print(json.dumps(result, indent=2))

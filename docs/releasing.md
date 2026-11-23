@@ -4,6 +4,11 @@ Each new delivery on `main` increments `workspace.package.version` by one patch:
 `0.1.5`, `0.1.6`, …, `0.1.9`, `0.1.10`. A local implementation commit does not
 by itself create a new delivery.
 
+A delivery that the project owner designates as the start of a new minor
+series uses `--next-series` with both `prepare` and `check`. It starts that
+series at patch 1 (`0.1.44` is followed by `0.2.1`); the following deliveries
+increment the patch again (`0.2.2`, …).
+
 Before preparing a delivery, update the reference of the previous published one:
 
 ```sh
