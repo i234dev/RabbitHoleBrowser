@@ -155,8 +155,21 @@ impl MathNode {
                 MathNode::Leaf(px, p) if *px == 0.0 => format!("{}%", num(*p)),
                 MathNode::Leaf(px, p) if *px < 0.0 => format!("{}% - {}px", num(*p), num(-px)),
                 MathNode::Leaf(px, p) => format!("{}% + {}px", num(*p), num(*px)),
-                MathNode::Sum(v) => v.iter().map(inner).collect::<Vec<_>>().join(" + "),
-                MathNode::Scale(n, f) => format!("{} * ({})", num(*f), inner(n)),
+                MathNode::Sum(v) => {
+                    // CSS Values serializes numeric leaves before other math
+                    // functions, preserving the order of the latter.
+                    let (mut lengths, functions): (Vec<_>, Vec<_>) =
+                        v.iter().partition(|n| matches!(n, MathNode::Leaf(..)));
+                    lengths.extend(functions);
+                    lengths.into_iter().map(inner).collect::<Vec<_>>().join(" + ")
+                }
+                MathNode::Scale(n, f) => {
+                    let operand = inner(n);
+                    let sum = matches!(**n, MathNode::Sum(_))
+                        || matches!(**n, MathNode::Leaf(px, pct) if px != 0.0 && pct != 0.0);
+                    if sum { format!("{} * ({operand})", num(*f)) }
+                    else { format!("{} * {operand}", num(*f)) }
+                }
                 other => other.to_css(),
             }
         }

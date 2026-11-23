@@ -1277,6 +1277,20 @@ fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
 }
 
 #[test]
+fn anchor_math_serialization_preserves_grouping_and_sorts_numeric_terms() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<i id=box></i>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const s=box.style;
+        s.left='calc(anchor(--p right) + 3%)';
+        s.top='anchor(--p top, calc(0.5 * anchor(--q bottom)))';
+        s.width='calc(2 * (anchor-size(--p width) + 5px))';
+        return [s.left,s.top,s.width].join('|');
+    })()"#);
+    assert_eq!(result, "calc(3% + anchor(--p right))|anchor(--p top, calc(0.5 * anchor(--q bottom)))|calc(2 * (5px + anchor-size(--p width)))");
+}
+
+#[test]
 fn anchor_lookup_observes_containing_blocks_and_out_of_flow_order() {
     let mut e=engine(true);
     let mut page=load(&mut e,"<style>section{position:relative}aside{position:absolute}i{display:block;width:35px;anchor-name:--x}.target{position:absolute;width:anchor-size(--x width, 7px);height:5px}</style><section><div class=target id=early></div><aside><i></i></aside><div class=target id=late></div></section><section><i style='width:90px'></i></section>");
