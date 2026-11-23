@@ -2341,3 +2341,22 @@ fn cssom_color_declarations_validate_before_replacing_values() {
     "#);
     assert_eq!(out, "'rgba(17, 34, 51, 0.267)|color(display-p3 0.2 0 2)|important|rgba(3, 2, 1, 0)|color(display-p3 0.2 0 2)|important|rgba(3, 2, 1, 0)'");
 }
+
+#[test]
+fn web_crypto_gcm_authenticates_truncated_tags_and_variable_ivs() {
+    let out = logs_of("<body>", r#"
+      (async()=>{
+        const s=crypto.subtle;
+        const bytes=hex=>Uint8Array.from(hex.match(/../g), v=>parseInt(v,16));
+        const hex=b=>Array.from(new Uint8Array(b),v=>v.toString(16).padStart(2,'0')).join('');
+        const key=await s.importKey('raw',bytes('feffe9928665731c6d6a8f9467308308'),'AES-GCM',false,['encrypt','decrypt']);
+        const alg={name:'AES-GCM',iv:bytes('cafebabefacedbad'),additionalData:bytes('feedfacedeadbeeffeedfacedeadbeefabaddad2'),tagLength:64};
+        const msg=bytes('d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39');
+        const enc=new Uint8Array(await s.encrypt(alg,key,msg));
+        console.log(hex(enc),hex(await s.decrypt(alg,key,enc))===hex(msg));
+        enc[enc.length-1]^=1;
+        console.log(await s.decrypt(alg,key,enc).catch(e=>e.name));
+      })();
+    "#);
+    assert_eq!(out, ["61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c742373806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f45983612d2e79e3b0785 true", "OperationError"]);
+}

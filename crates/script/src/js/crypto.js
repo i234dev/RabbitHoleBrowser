@@ -131,50 +131,6 @@
     }
     return out;
   }
-  // GCM: GHASH over GF(2^128).
-  function gmul(x, y) {
-    const z = new Uint8Array(16), v = new Uint8Array(y);
-    for (let i = 0; i < 128; i++) {
-      if ((x[i >> 3] >> (7 - (i & 7))) & 1) for (let j = 0; j < 16; j++) z[j] ^= v[j];
-      const lsb = v[15] & 1;
-      for (let j = 15; j > 0; j--) v[j] = (v[j] >> 1) | ((v[j - 1] & 1) << 7);
-      v[0] >>= 1;
-      if (lsb) v[0] ^= 0xe1;
-    }
-    return z;
-  }
-  function ghash(h, aad, c) {
-    let y = new Uint8Array(16);
-    const blocks = (d) => { for (let i = 0; i < d.length; i += 16) { const b = new Uint8Array(16); b.set(d.slice(i, i + 16)); for (let j = 0; j < 16; j++) y[j] ^= b[j]; y = gmul(y, h); } };
-    blocks(aad); blocks(c);
-    const len = new Uint8Array(16);
-    const put = (off, n) => { let v = n * 8; for (let i = 7; i >= 0; i--) { len[off + i] = v % 256; v = Math.floor(v / 256); } };
-    put(0, aad.length); put(8, c.length);
-    for (let j = 0; j < 16; j++) y[j] ^= len[j];
-    return gmul(y, h);
-  }
-  function gcm(key, iv, data, aad, tagLen, decrypt) {
-    const ks = expandKey(key);
-    const h = encBlock(ks, new Uint8Array(16));
-    let j0;
-    if (iv.length === 12) { j0 = new Uint8Array(16); j0.set(iv); j0[15] = 1; }
-    else j0 = ghash(h, new Uint8Array(0), iv);
-    const inc = (b) => { const c = new Uint8Array(b); for (let k = 15; k >= 12; k--) { c[k] = (c[k] + 1) & 255; if (c[k]) break; } return c; };
-    const tlen = tagLen / 8;
-    if (decrypt) {
-      if (data.length < tlen) throw err('OperationError', 'The provided data is too small.');
-      const ct = data.slice(0, data.length - tlen), tg = data.slice(data.length - tlen);
-      const s = ghash(h, aad, ct), ek = encBlock(ks, j0);
-      for (let i = 0; i < tlen; i++) if ((s[i] ^ ek[i]) !== tg[i]) throw err('OperationError', 'The operation failed for an operation-specific reason');
-      return ctr(key, inc(j0), ct, 32);
-    }
-    const ct = ctr(key, inc(j0), data, 32);
-    const s = ghash(h, aad, ct), ek = encBlock(ks, j0);
-    const out = new Uint8Array(ct.length + tlen);
-    out.set(ct);
-    for (let i = 0; i < tlen; i++) out[ct.length + i] = s[i] ^ ek[i];
-    return out;
-  }
   function aesKw(key, data, unwrap) {
     const ks = expandKey(key);
     const IV = [0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6];
@@ -455,7 +411,12 @@
     switch (name) {
       case 'AES-CBC': return cbc(keyInfo(key).raw, bytesOf(a.iv), data, decrypt);
       case 'AES-CTR': { const c = bytesOf(a.counter); if (c.length !== 16) throw err('OperationError', 'The counter must be 16 bytes.'); return ctr(keyInfo(key).raw, c, data, a.length || 64); }
-      case 'AES-GCM': { const tl = a.tagLength === undefined ? 128 : a.tagLength; if (![32, 64, 96, 104, 112, 120, 128].includes(tl)) throw err('OperationError', 'Invalid tag length.'); return gcm(keyInfo(key).raw, bytesOf(a.iv), data, a.additionalData ? bytesOf(a.additionalData) : new Uint8Array(0), tl, decrypt); }
+      case 'AES-GCM': {
+        const tag = a.tagLength === undefined ? 128 : Number(a.tagLength) & 255;
+        if (![32, 64, 96, 104, 112, 120, 128].includes(tag)) throw err('OperationError', 'Invalid tag length.');
+        const aad = a.additionalData === undefined ? new Uint8Array(0) : bytesOf(a.additionalData);
+        return new Uint8Array(N.aesGcm(keyInfo(key).raw, bytesOf(a.iv), data, aad, tag / 8, decrypt));
+      }
       default: throw err('NotSupportedError', `${name} does not support encryption.`);
     }
   }

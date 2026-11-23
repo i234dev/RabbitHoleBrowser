@@ -1,5 +1,7 @@
 //! Native hash and HMAC operations shared by WebCrypto key derivation and
 //! signatures. A PBKDF2 operation can yield between batches of PRF calls.
+mod gcm;
+
 use crate::fetch::{buffer_source_bytes, make_array_buffer};
 use crate::host::{arg, arg_str};
 use rabbithole_js::{JsResult, ObjectId, Realm, Value, V};
@@ -147,7 +149,20 @@ fn ed_verify(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Bool(signature::UnparsedPublicKey::new(&signature::ED25519, public).verify(&message, &sig).is_ok()))
 }
 
+fn aes_gcm(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let key = buffer_source_bytes(realm, &arg(args, 0), "AES-GCM key")?;
+    let iv = buffer_source_bytes(realm, &arg(args, 1), "AES-GCM IV")?;
+    let data = buffer_source_bytes(realm, &arg(args, 2), "AES-GCM data")?;
+    let aad = buffer_source_bytes(realm, &arg(args, 3), "AES-GCM additional data")?;
+    let tag_len = realm.to_number(arg(args, 4))? as usize;
+    let decrypt = realm.to_boolean(&arg(args, 5));
+    let out = gcm::crypt(&key, &iv, &aad, data, tag_len, decrypt)
+        .ok_or_else(|| crate::misc::dom_exception(realm, "OperationError", "AES-GCM operation failed"))?;
+    Ok(make_array_buffer(realm, out))
+}
+
 pub(crate) fn install(realm: &mut Realm, internals: ObjectId) {
+    realm.define_method(internals, "aesGcm", 6, aes_gcm);
     realm.define_method(internals, "ed25519Key", 3, ed_key);
     realm.define_method(internals, "ed25519KeyBytes", 2, ed_key_bytes);
     realm.define_method(internals, "ed25519Sign", 2, ed_sign);

@@ -25,3 +25,6 @@ rabbithole-wasm-js.workspace = true
 rabbithole-media.workspace = true
 
 rabbithole-webgl = { path = "../webgl" }
+aes = "0.8.4"
+ghash = "0.5.1"
+subtle = "2.6"
