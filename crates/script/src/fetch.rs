@@ -1149,8 +1149,8 @@ fn build_request(url: &str, method: &str, headers: &[(String, String)], body: &[
             req = req.with_header(k, v);
         }
     }
-    let referer = with_env(|env| env.document_url());
-    Ok(req.with_referer(referer).with_dest(rabbithole_net::Destination::Empty).with_mode(rabbithole_net::RequestMode::Cors, rabbithole_net::CredentialsMode::SameOrigin))
+    let (referer, policy) = with_env(|env| (env.document_url(), env.referrer_policy()));
+    Ok(req.with_referer(referer).with_referrer_policy(policy).with_dest(rabbithole_net::Destination::Empty).with_mode(rabbithole_net::RequestMode::Cors, rabbithole_net::CredentialsMode::SameOrigin))
 }
 
 /// Start a request on a background thread when the environment can (http

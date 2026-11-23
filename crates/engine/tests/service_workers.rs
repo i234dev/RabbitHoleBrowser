@@ -599,3 +599,33 @@ fn disconnected_forms_do_not_navigate_after_submit_handlers() {
     wait(&e, &mut page, "document.querySelector('iframe').contentWindow.location.pathname === '/done'");
     assert!(!server.requests.lock().unwrap().iter().any(|(path, _)| path.starts_with("/unexpected")));
 }
+
+#[test]
+fn fetch_and_xhr_send_the_effective_document_referrer_policy() {
+    let html = r#"<!doctype html><meta name="referrer" content="no-referrer"><script>
+        let completed = 0;
+        fetch('/fetch').then(() => completed++);
+        fetch(new Request('/override', {referrerPolicy:'origin'})).then(() => completed++);
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/xhr');
+        xhr.onload = () => completed++;
+        xhr.send();
+    </script>"#;
+    let server = Server::new(&[
+        ("/page", "text/html", html, &[("Referrer-Policy", "unsafe-url")]),
+        ("/fetch", "text/plain", "", &[]),
+        ("/override", "text/plain", "", &[]),
+        ("/xhr", "text/plain", "", &[]),
+    ]);
+    let mut engine = engine();
+    let mut page = engine.load(&format!("{}/page?private", server.origin), Viewport { width: 640.0, height: 480.0 }).unwrap();
+    wait(&engine, &mut page, "completed === 3");
+    let requests = server.requests.lock().unwrap();
+    let origin = format!("{}/", server.origin);
+    for (path, expected) in [("/fetch", None), ("/xhr", None), ("/override", Some(origin.as_str()))] {
+        let (_, headers) = requests.iter().find(|(p, _)| p == path).unwrap();
+        let referer = headers.lines().filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("referer")).map(|(_, value)| value.trim());
+        assert_eq!(referer, expected, "{path}");
+    }
+}

@@ -211,6 +211,7 @@ impl HostEnv for EngineEnv<'_> {
     fn document_url(&self) -> Url {
         self.page.url.clone()
     }
+    fn referrer_policy(&self) -> rabbithole_net::ReferrerPolicy { self.page.referrer_policy }
     fn document_is_complete(&self) -> bool { self.page.script.load_complete }
     fn security_origin(&self) -> String { crate::frames::page_origin(self.page) }
     fn window_context(&self) -> Option<rabbithole_script::WindowContext> {

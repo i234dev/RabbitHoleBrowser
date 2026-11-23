@@ -19,6 +19,7 @@ pub trait HostEnv {
     fn service_worker_scope(&self) -> Option<crate::ServiceWorkerScope> { None }
     fn doc(&mut self) -> &mut Document;
     fn document_url(&self) -> Url;
+    fn referrer_policy(&self) -> rabbithole_net::ReferrerPolicy { Default::default() }
     /// The document can finish loading before its first script realm exists.
     fn document_is_complete(&self) -> bool { false }
     /// Effective origin, including inheritance by an initial about:blank.
