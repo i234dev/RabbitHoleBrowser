@@ -579,3 +579,23 @@ fn form_submission_navigates_the_named_child_with_the_encoded_request() {
     assert_eq!(e.eval_in_page(&mut page, "document.querySelector('iframe').contentWindow.location.search"), "'?q=%E9'");
     assert!(page.url.to_string().ends_with("/form"));
 }
+
+#[test]
+fn disconnected_forms_do_not_navigate_after_submit_handlers() {
+    let html = r#"<!doctype html><iframe name="result"></iframe>
+        <form id="form" action="/unexpected" target="result"><button>Submit</button></form>"#;
+    let server = Server::new(&[("/page", "text/html", html, &[]), ("/done", "text/html", "done", &[])]);
+    let mut e = engine();
+    let mut page = e.load(&format!("{}/page", server.origin), Viewport { width: 640.0, height: 480.0 }).unwrap();
+    e.eval_in_page(&mut page, r#"
+        const form = document.querySelector('form');
+        form.onsubmit = () => form.remove();
+        form.querySelector('button').click();
+        form.submit();
+        document.body.appendChild(form);
+        form.action = '/done';
+        form.submit();
+    "#);
+    wait(&e, &mut page, "document.querySelector('iframe').contentWindow.location.pathname === '/done'");
+    assert!(!server.requests.lock().unwrap().iter().any(|(path, _)| path.starts_with("/unexpected")));
+}
