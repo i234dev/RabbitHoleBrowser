@@ -126,6 +126,10 @@ fn send(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
         p.send(handle, binary, &bytes)
     })?))
 }
+fn buffered_amount(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let handle = realm.to_number(arg(args, 1))? as u32;
+    Ok(Value::Number(with_peer(realm, args, |p| Ok(p.buffered_amount(handle)))? as f64))
+}
 fn close_channel(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let id = realm.to_number(arg(args, 1))? as u32;
     with_peer(realm, args, |p| {
@@ -210,6 +214,7 @@ pub(crate) fn install(realm: &mut Realm, o: ObjectId) {
     realm.define_method(o, "rtcAccept", 2, accept);
     realm.define_method(o, "rtcCandidate", 2, candidate);
     realm.define_method(o, "rtcSend", 4, send);
+    realm.define_method(o, "rtcBufferedAmount", 2, buffered_amount);
     realm.define_method(o, "rtcCloseChannel", 2, close_channel);
     realm.define_method(o, "rtcPoll", 1, poll);
 }

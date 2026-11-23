@@ -1157,3 +1157,35 @@ fn indent_and_outdent_preserve_paragraphs_formatting_and_selection() {
     })()"#);
     assert_eq!(result,"<blockquote><p>one</p><p><b>two</b></p></blockquote>|backward|<blockquote><p>one</p></blockquote><p><b>two</b></p><p>three</p>|true|1");
 }
+
+#[test]
+fn closing_a_data_channel_delivers_queued_blob_and_text_in_order() {
+    use std::time::{Duration, Instant};
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<p>data channel drain</p>");
+    eval(&e,&mut page,r#"
+      var drainResult='';
+      (async () => {
+        const a=new RTCPeerConnection(), b=new RTCPeerConnection();
+        b.ondatachannel=e=>{
+          const incoming=e.channel, messages=[];
+          incoming.onmessage=event=>messages.push(typeof event.data==='string'?event.data:event.data.byteLength);
+          incoming.onclose=()=>{drainResult=messages.join('|');a.close();b.close();};
+        };
+        const c=a.createDataChannel('drain');
+        c.onopen=()=>{c.send(new Blob([new Uint8Array(4096)]));c.send('done');c.close();};
+        await a.setLocalDescription(await a.createOffer());
+        await b.setRemoteDescription(a.localDescription);
+        await b.setLocalDescription(await b.createAnswer());
+        await a.setRemoteDescription(b.localDescription);
+      })().catch(e=>drainResult=String(e));
+    "#);
+    let until=Instant::now()+Duration::from_secs(8);
+    loop {
+        e.tick(&mut page);
+        let value=eval(&e,&mut page,"drainResult");
+        if !value.is_empty() { assert_eq!(value,"4096|done"); break; }
+        assert!(Instant::now()<until,"remote channel did not receive and close");
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}

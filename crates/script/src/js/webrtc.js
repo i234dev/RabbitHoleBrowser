@@ -385,7 +385,7 @@
     constructor(token, init) {
       if (token !== channelToken) throw new TypeError('Illegal constructor');
       super();
-      channels.set(this,{...init,readyState:'connecting',binaryType:'arraybuffer',bufferedAmount:0,bufferedAmountLowThreshold:0,queue:[],
+      channels.set(this,{...init,readyState:'connecting',binaryType:'arraybuffer',bufferedAmount:0,bufferedAmountLowThreshold:0,queue:[],queuedBytes:0,resetSent:false,
         opened:false,messagesSent:0,bytesSent:0,messagesReceived:0,bytesReceived:0});
     }
     get binaryType() { return channels.get(this).binaryType; }
@@ -402,19 +402,31 @@
       else { binary = false; data = encoder.encode(string(value)); size = data.length; }
       if (d.readyState !== 'open') return;
       if (size > peers.get(d.pc).sctp.maxMessageSize) throw new TypeError('Message exceeds the negotiated SCTP message size');
-      if (d.bufferedAmount + size > 16 * 1024 * 1024) throw failure('OperationError','Data channel send buffer is full');
+      if (d.bufferedAmount + size > 16 * 1024 * 1024 || d.queue.length >= 65536) throw failure('OperationError','Data channel send buffer is full');
       const entry = {binary, data: data instanceof Blob ? null : data, size};
       d.queue.push(entry);
       d.bufferedAmount += size;
-      if (data instanceof Blob) data.arrayBuffer().then(b=>{entry.data=new Uint8Array(b);},()=>this.close());
+      d.queuedBytes += size;
+      if (data instanceof Blob) data.arrayBuffer().then(b=>{entry.data=new Uint8Array(b);},()=>{
+        const index = d.queue.indexOf(entry);
+        if (index !== -1) {
+          d.queue.splice(index,1);
+          d.queuedBytes -= size;
+          d.bufferedAmount -= size;
+        }
+        this.dispatchEvent(new Event('error'));
+        this.close();
+      });
     }
     close() {
       const d = channels.get(this);
       if (d.readyState === 'closed' || d.readyState === 'closing') return;
       d.readyState = 'closing';
       const p = peers.get(d.pc);
-      if (p.native) N.rtcCloseChannel(p.native,d.handle);
-      schedule(()=>finishChannel(this),0);
+      if (!d.opened) {
+        if (p.native) N.rtcCloseChannel(p.native,d.handle);
+        schedule(()=>finishChannel(this),0);
+      } else pump(d.pc);
     }
   }
   expose(RTCDataChannel,channels,['label','ordered','maxPacketLifeTime','maxRetransmits','protocol','negotiated','id','readyState','bufferedAmount']);
@@ -454,17 +466,25 @@
       try {
         for (const channel of p.byHandle.values()) {
           const d = channels.get(channel);
-          if (d.readyState !== 'open') continue;
+          if (!d.opened || d.resetSent || (d.readyState !== 'open' && d.readyState !== 'closing')) continue;
+          if (!d.queue.length && !d.bufferedAmount && d.readyState === 'open') continue;
           const before = d.bufferedAmount;
-          while (d.queue.length && d.queue[0].data) {
+          for (let sent=0; sent<128 && d.queue.length && d.queue[0].data; ++sent) {
             const item = d.queue[0];
             if (!N.rtcSend(p.native,d.handle,item.binary,item.data)) break;
             d.queue.shift();
-            d.bufferedAmount -= item.size;
+            d.queuedBytes -= item.size;
             ++d.messagesSent;
             d.bytesSent += item.size;
           }
-          if (before > d.bufferedAmountLowThreshold && d.bufferedAmount <= d.bufferedAmountLowThreshold)
+          d.bufferedAmount = d.queuedBytes + N.rtcBufferedAmount(p.native,d.handle);
+          // Reset the stream only after both the application queue and SCTP's
+          // reliable send buffer have drained, preserving message ordering.
+          if (d.readyState === 'closing' && !d.queue.length && !d.bufferedAmount) {
+            d.resetSent = true;
+            N.rtcCloseChannel(p.native,d.handle);
+          }
+          if (d.readyState === 'open' && before > d.bufferedAmountLowThreshold && d.bufferedAmount <= d.bufferedAmountLowThreshold)
             channel.dispatchEvent(new Event('bufferedamountlow'));
         }
         events = N.rtcPoll(p.native);

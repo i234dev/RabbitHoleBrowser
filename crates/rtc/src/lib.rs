@@ -188,6 +188,11 @@ impl Peer {
         self.poll().map(|_| ())
     }
 
+    pub fn buffered_amount(&mut self, handle: u32) -> usize {
+        self.channels.get(&handle).and_then(|id| self.rtc.channel(*id))
+            .map_or(0, |mut channel| channel.buffered_amount())
+    }
+
     pub fn close_channel(&mut self, handle: u32) {
         self.queued.retain(|(h, _)| *h != handle);
         if let Some(&id) = self.channels.get(&handle) {
