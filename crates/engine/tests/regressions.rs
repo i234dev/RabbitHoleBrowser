@@ -1091,6 +1091,23 @@ fn animated_float_exclusion_margin_clamps_after_extrapolation() {
 }
 
 #[test]
+fn empty_text_replaces_a_selection_and_preserves_a_collapsed_caret() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div contenteditable id=ed>abcde</div>");
+    let result = eval(&e, &mut page, r#"(() => {
+        ed.focus();
+        const events = [];
+        ed.addEventListener('input', e => events.push([e.inputType, e.data]));
+        const sel = getSelection(), text = ed.firstChild;
+        sel.setBaseAndExtent(text, 4, text, 1);
+        document.execCommand('insertText', false, '');
+        document.execCommand('insertText', false, '');
+        return JSON.stringify([ed.textContent, sel.isCollapsed, sel.focusOffset, events]);
+    })()"#);
+    assert_eq!(result, r#"["ae",true,1,[["insertText",""]]]"#);
+}
+
+#[test]
 fn float_exclusion_shapes_wrap_lines_without_moving_the_float() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<style>*{margin:0}main{width:300px;line-height:20px}#f{float:left;width:100px;height:100px;shape-outside:inset(0 70px 0 0);shape-margin:5px}i{display:inline-block;width:8px;height:10px}</style><main><div id=f></div><i id=mark></i><br><i></i></main>");

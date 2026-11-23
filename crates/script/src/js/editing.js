@@ -1067,7 +1067,10 @@
     }
     if (cmd === 'insertimage' && !value) return false;
     const { sel, range, host } = t;
-    if (cmd === 'inserttext' && !value) return true;
+    if (cmd === 'inserttext' && !value) {
+      if (!range.collapsed && deleteSelection(t,'delete')) input(host,'insertText','');
+      return true;
+    }
     const toggles = range.collapsed && ['inserttext','insertlinebreak','insertparagraph'].includes(cmd) ? typingStyle(state, range) : null;
     state.typing = null;
     range.deleteContents();
