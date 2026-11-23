@@ -774,3 +774,19 @@ fn font_size_commands_validate_the_entire_numeric_argument() {
     })()"#);
     assert_eq!(out, "true|5|false|false|5");
 }
+
+#[test]
+fn paragraph_deletion_moves_one_line_and_preserves_its_whitespace() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section contenteditable id=ed><p>left</p>\n<div style='white-space:pre-wrap'><b>two  spaces<br>next</b></div></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const sel = getSelection(), left = ed.firstChild.firstChild;
+        const right = ed.lastChild.firstChild.firstChild;
+        sel.collapse(right, 0);
+        document.execCommand('delete');
+        const moved = ed.firstChild.querySelector('b');
+        return [ed.firstChild.textContent, getComputedStyle(moved).whiteSpace,
+                ed.lastChild.textContent, sel.anchorNode === left, sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result, "lefttwo  spaces|pre-wrap|next|true|4");
+}

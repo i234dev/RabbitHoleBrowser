@@ -417,7 +417,116 @@
     control.setSelectionRange(start + text.length, start + text.length);
     input(control, inputTypeFor(cmd), cmd === 'inserttext' ? text : null);
   }
+  function adjacentNode(node, host, forward) {
+    while (node && node !== host) {
+      const sibling = forward ? node.nextSibling : node.previousSibling;
+      if (sibling) return sibling;
+      node = node.parentNode;
+    }
+    return null;
+  }
+  function boundaryLeaf(range, host, forward, whitespace) {
+    const point = forward ? range.endContainer : range.startContainer;
+    const offset = forward ? range.endOffset : range.startOffset;
+    let n;
+    if (point.nodeType === 3)
+      n = (forward ? offset < point.length : offset > 0) ? point : adjacentNode(point, host, forward);
+    else n = point.childNodes[forward ? offset : offset - 1] || adjacentNode(point, host, forward);
+    while (n) {
+      if (n.nodeType === 1 && (!n.isContentEditable || n.localName === 'br')) return null;
+      if (n.hasChildNodes()) {
+        n = forward ? n.firstChild : n.lastChild;
+        continue;
+      }
+      if (n.nodeType === 3 && n.length) {
+        // Inter-block whitespace collapses in normal flow. A space inside
+        // an inline run, or a preserved newline, is itself an editing unit.
+        if (!/^[\t\r\n ]+$/.test(n.data) ||
+            !isBlock(n.parentElement) ||
+            !(isBlock(n.previousSibling) || isBlock(n.nextSibling)) ||
+            !['normal', 'nowrap'].includes(getComputedStyle(n.parentElement).whiteSpace)) return n;
+        whitespace.push(n);
+      } else if (n.nodeType === 1) return null;
+      n = adjacentNode(n, host, forward);
+    }
+    return null;
+  }
+  function containingBlock(node, host) {
+    let block = node.parentElement;
+    while (block !== host && !isBlock(block)) block = block.parentElement;
+    return block;
+  }
+  function branchIn(node, parent) {
+    while (node.parentNode !== parent) node = node.parentNode;
+    return node;
+  }
+  // Delete the paragraph separator as a unit. Preserve inline markup and
+  // the source line's whitespace semantics when moving it into its neighbor.
+  function joinParagraphs(t, cmd) {
+    const { range, host, sel } = t;
+    const point = range.startContainer, offset = range.startOffset;
+    if (range.collapsed && point.nodeType === 3 &&
+        (cmd === 'delete' ? offset !== 0 : offset !== point.length)) return false;
+    if (!range.collapsed && /[^\t\n\r ]/.test(range.toString())) return false;
+    const whitespace = [];
+    const left = boundaryLeaf(range, host, false, whitespace);
+    const right = boundaryLeaf(range, host, true, whitespace);
+    if (!left || !right || left === right || editingHost(left) !== host || editingHost(right) !== host) return false;
+    const dest = containingBlock(left, host), src = containingBlock(right, host);
+    if (src === dest || left.parentElement.closest('td,th,li') !== right.parentElement.closest('td,th,li')) return false;
+    // A range may select text or an atomic element between the two leaves.
+    const doc = host.ownerDocument, gap = doc.createRange();
+    gap.setStart(left, left.length);
+    gap.collapse(true);
+    if (boundaryLeaf(gap, host, true, whitespace) !== right) return false;
+    if (range.collapsed && point.nodeType === 3 && (cmd === 'delete' ? right : left) !== point) return false;
+    if (!range.collapsed && ((point === left && offset !== left.length) ||
+        (range.endContainer === right && range.endOffset !== 0))) return false;
+
+    let first = branchIn(right, src);
+    const move = doc.createRange();
+    move.setStartBefore(first);
+    move.setEnd(src, src.childNodes.length);
+    let n = first, br = null;
+    while (n && src.contains(n)) {
+      if (n.nodeType === 1 && (isBlock(n) || n.localName === 'br' || !n.isContentEditable)) {
+        move.setEndBefore(n);
+        if (n.localName === 'br') br = n;
+        break;
+      }
+      n = n.firstChild || adjacentNode(n, src, true);
+    }
+    if (move.collapsed) return false;
+    const whiteSpace = getComputedStyle(src).whiteSpace;
+    const preserve = whiteSpace !== getComputedStyle(dest).whiteSpace;
+    const before = branchIn(left, dest).nextSibling;
+    const fragment = move.extractContents();
+    if (br) {
+      let el = br.parentElement;
+      br.remove();
+      while (el && el !== src && !el.hasChildNodes()) {
+        const parent = el.parentElement;
+        el.remove();
+        el = parent;
+      }
+    }
+    if (preserve) {
+      const span = doc.createElement('span');
+      span.style.whiteSpace = whiteSpace;
+      span.appendChild(fragment);
+      dest.insertBefore(span, before);
+    } else dest.insertBefore(fragment, before);
+    for (const space of whitespace) if (space.isConnected) space.remove();
+    for (let el = src; el !== host && !el.hasChildNodes();) {
+      const parent = el.parentElement;
+      el.remove();
+      el = parent;
+    }
+    sel.collapse(left, left.length);
+    return true;
+  }
   function deleteSelection(t, cmd) {
+    if (joinParagraphs(t, cmd)) return true;
     const { sel, host } = t;
     if (sel.isCollapsed) {
       const node = sel.anchorNode, offset = sel.anchorOffset;
