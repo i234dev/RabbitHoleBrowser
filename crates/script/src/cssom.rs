@@ -918,6 +918,17 @@ fn match_media(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     Ok(Value::Object(o))
 }
 
+/// Legacy HTML editing commands use an absolute CSS color, serialized for
+/// a style declaration or converted to an opaque HTML font color.
+pub(crate) fn editing_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let text = arg_str(realm, args, 0)?;
+    let tokens = rabbithole_css::Tokenizer::tokenize(&text);
+    Ok(match rabbithole_style::values::parse_color(&tokens) {
+        Some(rabbithole_style::values::ColorValue::Color(c)) => Value::str(&color_css(c)),
+        _ => Value::Null,
+    })
+}
+
 fn css_supports(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     if args.is_empty() { return Err(realm.throw_type_error("CSS.supports requires an argument")); }
     let first = arg_str(realm, args, 0)?;

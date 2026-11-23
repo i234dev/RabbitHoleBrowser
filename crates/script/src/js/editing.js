@@ -2,7 +2,8 @@
 // host. Each document keeps its own editing preferences and reentrancy flag.
 (function () {
   'use strict';
-  if (globalThis.__rhNative.workerInfo()) return;
+  const N = globalThis.__rhNative;
+  if (N.workerInfo()) return;
 
   const contexts = new WeakMap();
   function context(doc) {
@@ -25,6 +26,67 @@
     ['subscript', ['sub', 'vertical-align', 'sub', 'baseline', 'formatSubscript']],
     ['superscript', ['sup', 'vertical-align', 'super', 'baseline', 'formatSuperscript']],
   ]);
+  const valueFormats = new Map([
+    ['forecolor', ['color', 'color', 'formatFontColor']],
+    ['backcolor', ['background-color', '', 'formatBackColor']],
+    ['fontsize', ['font-size', 'size', '']],
+    ['fontname', ['font-family', 'face', 'formatFontName']],
+  ]);
+  const sizes = ['x-small','small','medium','large','x-large','xx-large','xxx-large'];
+  const sizePixels = [10,13,16,18,24,32,48];
+  function formatValue(el, cmd) {
+    if (!el) return '';
+    const prop = valueFormats.get(cmd)[0];
+    let value = getComputedStyle(el).getPropertyValue(prop);
+    if (cmd === 'backcolor') {
+      for (let p = el.parentElement; p && value === 'rgba(0, 0, 0, 0)' && p.isContentEditable; p = p.parentElement)
+        value = getComputedStyle(p).backgroundColor;
+    }
+    if (cmd === 'fontsize') {
+      const px = parseFloat(value);
+      let best = 0;
+      for (let i = 1; i < sizePixels.length; ++i)
+        if (Math.abs(px - sizePixels[i]) < Math.abs(px - sizePixels[best])) best = i;
+      return String(best + 1);
+    }
+    return value;
+  }
+  function normalizeFormat(cmd, value) {
+    if (cmd === 'fontsize') {
+      const m = /^([+-]?)([0-9]+)/.exec(value.trimStart());
+      if (!m) return null;
+      const n = m[1] ? 3 + Number(m[1] + m[2]) : Number(m[2]);
+      return String(Math.min(7, Math.max(1, n)));
+    }
+    if (cmd === 'fontname') return value.trim() || null;
+    return N.editingColor(value) ||
+      (/^[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(value) ? N.editingColor('#' + value) : null);
+  }
+  function wrapValue(node, cmd, value, css) {
+    const [prop, attr] = valueFormats.get(cmd);
+    const match = cmd === 'forecolor' && /^rgb\((\d+), (\d+), (\d+)\)$/.exec(value);
+    const legacy = !css && attr && (cmd !== 'forecolor' || match);
+    const wrapper = node.ownerDocument.createElement(legacy ? 'font' : 'span');
+    if (legacy) {
+      const attrValue = match ? '#' + match.slice(1).map(v => Number(v).toString(16).padStart(2,'0')).join('') : value;
+      wrapper.setAttribute(attr, attrValue);
+    } else wrapper.style.setProperty(prop, cmd === 'fontsize' ? sizes[Number(value) - 1] : value);
+    node.parentNode.insertBefore(wrapper, node);
+    wrapper.appendChild(node);
+  }
+  function selectedValue(state, t, cmd, mixed) {
+    if (!t?.range) return mixed ? false : '';
+    const {range} = t;
+    if (range.collapsed) {
+      if (mixed) return false;
+      const pending = typingStyle(state, range);
+      return pending?.get(cmd) ?? formatValue(selectionElement(range), cmd);
+    }
+    const runs = selectedText(t);
+    const first = formatValue(runs[0]?.node.parentElement || selectionElement(range), cmd);
+    return mixed ? runs.some(r => formatValue(r.node.parentElement, cmd) !== first) : first;
+  }
+
   function activeFormat(el, cmd) {
     if (!el) return false;
     const [, prop, on] = formats.get(cmd);
@@ -101,14 +163,17 @@
     }
   }
   function clearFormat(node, host, cmd) {
-    const [tag, prop, on] = formats.get(cmd);
+    const valued = valueFormats.get(cmd);
+    const [tag, prop, on] = valued ? [null, valued[0], null] : formats.get(cmd);
     for (let el = node.parentElement; el && el !== host;) {
       const parent = el.parentElement;
       const semantic = el.localName === tag || (cmd === 'bold' && el.localName === 'strong') ||
         (cmd === 'italic' && el.localName === 'em') || (cmd === 'strikethrough' && el.localName === 'strike');
       const inline = el.style.getPropertyValue(prop) ||
         (prop === 'text-decoration-line' && el.style.getPropertyValue('text-decoration'));
-      if (semantic || inline) {
+      const attr = valued?.[1];
+      const legacy = attr && el.localName === 'font' && el.hasAttribute(attr);
+      if (semantic || inline || legacy) {
         // Do not split block containers to cancel inherited formatting.
         if (!['inline','contents'].includes(getComputedStyle(el).display)) break;
         splitAncestors(node, el);
@@ -120,7 +185,8 @@
           } else el.style.removeProperty(prop);
           if (!el.style.cssText) el.removeAttribute('style');
         }
-        if (semantic || (el.localName === 'span' && !el.attributes.length)) {
+        if (legacy) el.removeAttribute(attr);
+        if (semantic || (legacy && !el.attributes.length) || (el.localName === 'span' && !el.attributes.length)) {
           let dest = parent;
           if (el.attributes.length) {
             dest = el.ownerDocument.createElement('span');
@@ -144,8 +210,9 @@
     node.parentNode.insertBefore(wrapper, node);
     wrapper.appendChild(node);
   }
-  function applyFormat(state, t, cmd) {
-    const enable = !formatState(state, t, cmd, false);
+  function applyFormat(state, t, cmd, value) {
+    const valued = valueFormats.has(cmd);
+    const enable = valued ? value : !formatState(state, t, cmd, false);
     const { sel, range, host } = t;
     if (range.collapsed) {
       const toggles = typingStyle(state, range) || new Map();
@@ -155,19 +222,20 @@
     }
     const runs = selectedText(t), backward = sel.direction === 'backward';
     for (const r of runs) {
-      if (activeFormat(r.node.parentElement, cmd) === enable) continue;
+      if ((valued ? formatValue(r.node.parentElement, cmd) : activeFormat(r.node.parentElement, cmd)) === enable) continue;
       if (r.to < r.node.length) r.node.splitText(r.to);
       if (r.from) r.node = r.node.splitText(r.from);
       r.to -= r.from;
       r.from = 0;
-      if (!enable) clearFormat(r.node, host, cmd);
-      if (activeFormat(r.node.parentElement, cmd) !== enable) wrapFormat(r.node, cmd, enable, state.css);
+      if (valued || !enable) clearFormat(r.node, host, cmd);
+      if (valued) wrapValue(r.node, cmd, value, state.css);
+      else if (activeFormat(r.node.parentElement, cmd) !== enable) wrapFormat(r.node, cmd, enable, state.css);
     }
     if (runs.length) {
       const first = runs[0], last = runs[runs.length - 1];
       if (backward) sel.setBaseAndExtent(last.node,last.to,first.node,first.from);
       else sel.setBaseAndExtent(first.node,first.from,last.node,last.to);
-      input(host, formats.get(cmd)[4]);
+      input(host, valued ? valueFormats.get(cmd)[2] : formats.get(cmd)[4], valued ? value : null);
     }
   }
 
@@ -175,7 +243,7 @@
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
   const richCommands = new Set(['inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
   function supported(cmd) {
-    return formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
+    return valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
   }
   function editingHost(node) {
     let el = node?.nodeType === 1 ? node : node?.parentElement;
@@ -200,7 +268,7 @@
     if (preferences.has(cmd) || cmd === 'selectall') return true;
     if (!t) return false;
     if (textCommands.has(cmd)) return true;
-    return !t.control && (richCommands.has(cmd) || formats.has(cmd)) &&
+    return !t.control && (richCommands.has(cmd) || formats.has(cmd) || valueFormats.has(cmd)) &&
       (t.host.contentEditable !== 'plaintext-only' || cmd === 'insertlinebreak' || cmd === 'insertparagraph');
   }
 
@@ -298,6 +366,12 @@
       else if (doc.body) doc.getSelection()?.selectAllChildren(t?.host || doc.body);
       return true;
     }
+    if (valueFormats.has(cmd)) {
+      const normalized = normalizeFormat(cmd, value);
+      if (normalized === null) return false;
+      applyFormat(state, t, cmd, normalized);
+      return true;
+    }
     if (formats.has(cmd)) { applyFormat(state, t, cmd); return true; }
     if (t.control) { editControl(t.control, cmd, value); return true; }
     if (cmd === 'delete' || cmd === 'forwarddelete') {
@@ -322,6 +396,7 @@
           const node = doc.createTextNode(lines[i]);
           sel.getRangeAt(0).insertNode(node);
           for (const [name, enabled] of toggles) {
+            if (valueFormats.has(name)) { wrapValue(node, name, enabled, state.css); continue; }
             if (!enabled) clearFormat(node, host, name);
             if (activeFormat(node.parentElement, name) !== enabled) wrapFormat(node, name, enabled, state.css);
           }
@@ -343,7 +418,7 @@
     return true;
   }
 
-  globalThis.__rhNative.setFactory('userEdit', function (host, cmd, value) {
+  N.setFactory('userEdit', function (host, cmd, value) {
     const doc = host.ownerDocument, state = context(doc), t = target(doc);
     if (state.executing || !t || t.host !== host) return false;
     state.userEdit = state.executing = true;
@@ -356,7 +431,8 @@
 
   function command(value, count) {
     if (!count) throw new TypeError('A command is required');
-    return `${value}`.toLowerCase();
+    const cmd = `${value}`.toLowerCase();
+    return cmd === 'hilitecolor' ? 'backcolor' : cmd;
   }
   const methods = {
     execCommand(name, showUI = false, value = '') {
@@ -379,11 +455,12 @@
     },
     queryCommandIndeterm(name) {
       const state = context(this), cmd = command(name, arguments.length);
-      return formats.has(cmd) && formatState(state, target(this), cmd, true);
+      return valueFormats.has(cmd) ? selectedValue(state, target(this), cmd, true) : formats.has(cmd) && formatState(state, target(this), cmd, true);
     },
     queryCommandValue(name) {
       const state = context(this);
-      return command(name, arguments.length) === 'defaultparagraphseparator' ? state.separator : '';
+      const cmd = command(name, arguments.length);
+      return valueFormats.has(cmd) ? selectedValue(state, target(this), cmd, false) : cmd === 'defaultparagraphseparator' ? state.separator : '';
     },
   };
   for (const [name, value] of Object.entries(methods))

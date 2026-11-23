@@ -639,3 +639,21 @@ fn computed_colors_preserve_coordinates_through_inheritance_and_shorthands() {
     "#);
     assert_eq!(result, "color(display-p3 1.2 0 0.4 / 0.5)|color(display-p3 1.2 0 0.4 / 0.5)|oklch(1 0 0 / none)|rgba(0, 0, 0, 0)|color(srgb 0.2 0.4 0.6 / 0.8)");
 }
+
+#[test]
+fn editing_applies_color_and_font_values_to_ranges_and_typed_text() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<p id=ed contenteditable>abc</p>");
+    let out = eval(&e, &mut page, r#"(()=>{
+        const d=document, sel=getSelection(), text=ed.firstChild;
+        sel.setBaseAndExtent(text,2,text,1);
+        d.execCommand('foreColor', false, 'blue');
+        const color=d.queryCommandValue('foreColor'), backward=sel.anchorOffset>sel.focusOffset;
+        sel.collapse(ed.lastChild,1);
+        d.execCommand('fontSize', false, '+1');
+        const size=d.queryCommandValue('fontSize');
+        d.execCommand('insertText',false,'!');
+        return [ed.innerHTML,color,backward,size,d.execCommand('foreColor',false,'invalid')].join('|');
+    })()"#);
+    assert_eq!(out, "a<font color=\"#0000ff\">b</font>c<font size=\"4\">!</font>|rgb(0, 0, 255)|true|4|false");
+}
