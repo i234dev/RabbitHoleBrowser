@@ -29,11 +29,13 @@ fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext, c
     for arg in args {
         let mut col = None;
         let mut wide = None;
+        let mut components = None;
         let mut positions = Vec::new();
         for c in arg {
             if let (None, Some(cc)) = (col, color(c, current)) {
                 col = Some(cc);
                 wide = crate::color_spaces::parse_wide(c);
+                components = crate::ComputedColor::parse(c);
             } else if let Some(l) = position(c) {
                 positions.push(l);
             } else {
@@ -46,10 +48,10 @@ fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext, c
                     return None;
                 }
                 if positions.is_empty() {
-                    stops.push(GradientStop { color: col, position: None, hint: false, wide });
+                    stops.push(GradientStop { color: col, position: None, hint: false, wide, components: components.clone() });
                 }
                 for p in positions {
-                    stops.push(GradientStop { color: col, position: Some(p), hint: false, wide });
+                    stops.push(GradientStop { color: col, position: Some(p), hint: false, wide, components: components.clone() });
                 }
             }
             None => {
@@ -57,7 +59,7 @@ fn gradient_stops(args: &[Vec<&[Token]>], current: Color, ctx: &LengthContext, c
                 if positions.len() != 1 || stops.last().is_none_or(|s| s.hint) {
                     return None;
                 }
-                stops.push(GradientStop { color: Color::TRANSPARENT, position: Some(positions[0]), hint: true, wide: None });
+                stops.push(GradientStop { color: Color::TRANSPARENT, position: Some(positions[0]), hint: true, wide: None, components: None });
             }
         }
     }
@@ -344,7 +346,7 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
                 }
             }
             if let Some(col) = args.last().filter(|a| a.len() == 1).and_then(|a| color(a[0], current)) {
-                let stop = GradientStop { color: col, position: None, hint: false, wide: None };
+                let stop = GradientStop { color: col, position: None, hint: false, wide: None, components: None };
                 return Some(BackgroundImage::LinearGradient { direction: GradientDirection::Corner(0, 1), stops: vec![stop.clone(), stop], repeating: false, interp: crate::ColorInterp::default() });
             }
             return None;

@@ -10,6 +10,7 @@ use rabbithole_style::{ComputedStyle, Display, Length, Position};
 
 mod alignment;
 mod grid;
+mod images;
 
 /// Serialize CSS tokens back to text.
 pub(crate) fn tokens_to_css(tokens: &[Token]) -> String {
@@ -838,7 +839,8 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
             None => "0% 0%".into(),
         },
         "direction" => if s.direction == rabbithole_style::Direction::Rtl { "rtl".into() } else { "ltr".into() },
-        "background-image" => s.background_image.as_ref().map(|u| format!("url(\"{u}\")")).unwrap_or_else(|| "none".into()),
+        "background-image" => images::layers(&s.background_layers),
+        "mask-image" => images::layers(&s.mask_layers),
         "min-width" => length_css(&s.min_width, cb.w),
         "max-width" => if s.max_width.is_auto() { "none".into() } else { length_css(&s.max_width, cb.w) },
         "min-height" => length_css(&s.min_height, cb.h),

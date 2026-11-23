@@ -823,6 +823,8 @@ pub struct GradientStop {
     /// The unclipped color of a stop written in a CSS Color 4 notation
     /// (`color` is its sRGB clip); `None` for legacy sRGB colors.
     pub wide: Option<crate::Wide>,
+    /// Unclipped color in its original coordinate system for CSSOM.
+    pub components: Option<std::rc::Rc<crate::ComputedColor>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

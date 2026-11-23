@@ -1098,3 +1098,11 @@ fn retained_computed_declaration_observes_rule_mutations_within_a_script() {
     })()"#);
     assert_eq!(result,"1|0.2|0.7");
 }
+
+#[test]
+fn computed_gradient_layers_retain_geometry_and_color_interpolation() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<style>#sample {font-size:10px;background-image:radial-gradient(ellipse 50% 4em at right center, red, blue),linear-gradient(in oklch longer hue to right, color(srgb 1 0 0), blue);mask-image:conic-gradient(from 30deg,black,white)}</style><div id=sample></div>");
+    let result = eval(&e,&mut page,"[getComputedStyle(sample).backgroundImage,getComputedStyle(sample).maskImage].join('|')");
+    assert_eq!(result,"radial-gradient(50% 40px at 100% 50%, rgb(255, 0, 0), rgb(0, 0, 255)), linear-gradient(to right in oklch longer hue, color(srgb 1 0 0), rgb(0, 0, 255))|conic-gradient(from 30deg, rgb(0, 0, 0), rgb(255, 255, 255))");
+}
