@@ -184,7 +184,7 @@
     const id = normAlg(a);
     if (id.name === undefined) throw new TypeError('An algorithm name is required');
     const n = String(id.name).toUpperCase();
-    const map = { ECDSA: 'ECDSA', ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
+    const map = { 'CHACHA20-POLY1305': 'ChaCha20-Poly1305', ECDSA: 'ECDSA', ECDH: 'ECDH', ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
     throw err('NotSupportedError', 'Algorithm: Unrecognized name');
@@ -384,6 +384,28 @@
     const name = algName(alg);
     if (name === 'ECDH' || name === 'ECDSA') return importEc(name,format,keyData,alg,extractable,Array.from(usages));
     if (okp[name]) return importOctetKey(name, format, keyData, extractable, Array.from(usages));
+    if (name === 'ChaCha20-Poly1305') {
+      const requested = Array.from(usages);
+      usageCheck(requested,['encrypt','decrypt','wrapKey','unwrapKey']);
+      if (format !== 'raw-secret' && format !== 'jwk') throw err('NotSupportedError','Unsupported ChaCha20-Poly1305 key format');
+      let bytes;
+      if (format === 'jwk') {
+        if (!keyData || keyData.kty !== 'oct' || typeof keyData.k !== 'string' ||
+            (keyData.alg !== undefined && keyData.alg !== 'C20P') ||
+            (requested.length && keyData.use !== undefined && keyData.use !== 'enc') ||
+            (extractable && keyData.ext === false)) throw err('DataError','Invalid ChaCha20-Poly1305 JWK');
+        if (keyData.key_ops !== undefined) {
+          const ops = Array.from(keyData.key_ops);
+          if (new Set(ops).size !== ops.length || requested.some(u=>!ops.includes(u))) throw err('DataError','Invalid JWK key operations');
+        }
+        if (!/^[a-zA-Z0-9_-]{43}$/.test(keyData.k)) throw err('DataError','Invalid ChaCha20-Poly1305 JWK key');
+        bytes = unb64u(keyData.k);
+        if (b64u(bytes) !== keyData.k) throw err('DataError','Invalid ChaCha20-Poly1305 JWK key');
+      } else bytes = bytesOf(keyData);
+      if (bytes.length !== 32) throw err('DataError','ChaCha20-Poly1305 requires a 256-bit key');
+      if (!requested.length) throw err('SyntaxError','A secret key requires a usage');
+      return newKey('secret',extractable,{name},requested,bytes);
+    }
     let raw;
     if (format === 'raw' || format === 'raw-secret') raw = bytesOf(keyData);
     else if (format === 'jwk') {
@@ -464,7 +486,7 @@
     }
     return out.buffer;
   }
-  const keyLength = (alg) => { const a = normAlg(alg); const n = algName(alg); if (n === 'HMAC') return a.length || HASHES[hashName(a.hash)][0] * 8; return a.length; };
+  const keyLength = (alg) => { const a = normAlg(alg); const n = algName(alg); if (n === 'ChaCha20-Poly1305') return 256; if (n === 'HMAC') return a.length || HASHES[hashName(a.hash)][0] * 8; return a.length; };
 
   class SubtleCrypto {
     constructor() { ILLEGAL(); }
@@ -500,7 +522,7 @@
         const raw = new Uint8Array(Math.ceil(len / 8));
         nativeRandom(raw);
         if (!usages || !usages.length) throw err('SyntaxError', 'Usages cannot be empty when creating a key.');
-        return importSecret('raw', raw, alg, extractable, usages);
+        return importSecret(name === 'ChaCha20-Poly1305' ? 'raw-secret' : 'raw', raw, alg, extractable, usages);
       });
     }
     importKey(format, keyData, alg, extractable, usages) { return run(() => importSecret(format, keyData, alg, extractable, usages)); }
@@ -510,6 +532,12 @@
         if (!keyInfo(key).extractable) throw err('InvalidAccessError', 'key is not extractable');
         if (['ECDH','ECDSA'].includes(keyInfo(key).algorithm.name)) return exportEc(format,keyInfo(key));
         if (okp[keyInfo(key).algorithm.name]) return exportOctetKey(format, keyInfo(key));
+        if (keyInfo(key).algorithm.name === 'ChaCha20-Poly1305') {
+          const {raw,usages} = keyInfo(key);
+          if (format === 'raw-secret') return raw.slice().buffer;
+          if (format === 'jwk') return {kty:'oct', k:b64u(raw), alg:'C20P', key_ops:usages.slice(), ext:true};
+          throw err('NotSupportedError','Unsupported ChaCha20-Poly1305 key format');
+        }
         const raw = keyInfo(key).raw;
         if (format === 'raw' || format === 'raw-secret') return raw.slice().buffer;
         if (format === 'jwk') {
@@ -537,7 +565,7 @@
     encrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), false, 'encrypt').buffer); }
     decrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), true, 'decrypt').buffer); }
     deriveBits(alg, key, length) { return run(() => { checkKey(key, algName(alg), 'deriveBits'); return deriveBitsImpl(alg, key, length); }); }
-    deriveKey(alg, key, derivedAlg, extractable, usages) { return run(() => { checkKey(key, algName(alg), 'deriveKey'); return Promise.resolve(deriveBitsImpl(alg, key, keyLength(derivedAlg))).then(bits => importSecret('raw', bits, derivedAlg, extractable, usages)); }); }
+    deriveKey(alg, key, derivedAlg, extractable, usages) { return run(() => { checkKey(key, algName(alg), 'deriveKey'); return Promise.resolve(deriveBitsImpl(alg, key, keyLength(derivedAlg))).then(bits => importSecret(algName(derivedAlg) === 'ChaCha20-Poly1305' ? 'raw-secret' : 'raw', bits, derivedAlg, extractable, usages)); }); }
     wrapKey(format, key, wrappingKey, wrapAlg) {
       return this.exportKey(format, key).then((exported) => {
         const bytes = format === 'jwk' ? new TextEncoder().encode(JSON.stringify(exported)) : new Uint8Array(exported);
@@ -566,6 +594,10 @@
     checkKey(key, name, usage);
     const a = normAlg(alg);
     switch (name) {
+      case 'ChaCha20-Poly1305': {
+        const aad = a.additionalData === undefined ? new Uint8Array(0) : bytesOf(a.additionalData);
+        return new Uint8Array(N.chachaPoly1305(keyInfo(key).raw, bytesOf(a.iv), data, aad, decrypt));
+      }
       case 'AES-CBC': return cbc(keyInfo(key).raw, bytesOf(a.iv), data, decrypt);
       case 'AES-CTR': { const c = bytesOf(a.counter); if (c.length !== 16) throw err('OperationError', 'The counter must be 16 bytes.'); return ctr(keyInfo(key).raw, c, data, a.length || 64); }
       case 'AES-GCM': {

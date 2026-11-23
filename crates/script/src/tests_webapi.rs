@@ -2430,6 +2430,31 @@ fn ecdh_checks_points_and_reuses_generated_and_imported_private_keys() {
 }
 
 #[test]
+fn chacha_poly1305_authenticates_and_round_trips_secret_key_encodings() {
+    let output=logs_of("<body>", r#"
+      (async () => {
+        const s=crypto.subtle, name='ChaCha20-Poly1305';
+        const key=await s.importKey('raw-secret',new Uint8Array(32),name,true,['encrypt','decrypt']);
+        const algorithm={name,iv:new Uint8Array(12)};
+        const sealed=new Uint8Array(await s.encrypt(algorithm,key,new Uint8Array(0)));
+        const jwk=await s.exportKey('jwk',key), imported=await s.importKey('jwk',jwk,name,false,['decrypt']);
+        console.log(Array.from(sealed,b=>b.toString(16).padStart(2,'0')).join(''),
+          (await s.decrypt(algorithm,imported,sealed)).byteLength,jwk.alg);
+        sealed[0]^=1;
+        console.log(await s.decrypt(algorithm,imported,sealed).catch(e=>e.name),
+          await s.exportKey('raw-secret',imported).catch(e=>e.name));
+        const wrapper=await s.generateKey(name,false,['wrapKey','unwrapKey']);
+        const salt=new Uint8Array([7]), material=await s.importKey('raw',salt,'HKDF',false,['deriveKey']);
+        const derived=await s.deriveKey({name:'HKDF',hash:'SHA-256',salt,info:salt},material,name,true,['encrypt']);
+        const wrapped=await s.wrapKey('raw-secret',derived,wrapper,algorithm);
+        const recovered=await s.unwrapKey('raw-secret',wrapped,wrapper,algorithm,name,true,['encrypt']);
+        console.log(wrapped.byteLength,(await s.exportKey('jwk',recovered)).k === (await s.exportKey('jwk',derived)).k);
+      })();
+    "#);
+    assert_eq!(output, ["4eb972c9a8fb3a1b382bb4d36f5ffad1 0 C20P","OperationError InvalidAccessError","48 true"]);
+}
+
+#[test]
 fn ecdsa_verifies_a_published_signature_and_supports_independent_hash_selection() {
     let out = logs_of("<body>", r#"
       (async () => {

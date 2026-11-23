@@ -164,9 +164,31 @@ fn aes_gcm(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     Ok(make_array_buffer(realm, out))
 }
 
+fn chacha20_poly1305(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+    let key = buffer_source_bytes(realm, &arg(args, 0), "ChaCha20-Poly1305 key")?;
+    let iv = buffer_source_bytes(realm, &arg(args, 1), "ChaCha20-Poly1305 IV")?;
+    let mut data = buffer_source_bytes(realm, &arg(args, 2), "ChaCha20-Poly1305 data")?;
+    let aad = buffer_source_bytes(realm, &arg(args, 3), "ChaCha20-Poly1305 additional data")?;
+    let decrypt = realm.to_boolean(&arg(args, 4));
+    let cipher = UnboundKey::new(&CHACHA20_POLY1305, &key).map(LessSafeKey::new)
+        .map_err(|_| crate::misc::dom_exception(realm,"OperationError","Invalid ChaCha20-Poly1305 key"))?;
+    let nonce = Nonce::try_assume_unique_for_key(&iv)
+        .map_err(|_| crate::misc::dom_exception(realm,"OperationError","A 12-byte IV is required"))?;
+    let result = if decrypt {
+        cipher.open_in_place(nonce,Aad::from(&aad),&mut data).map(|plain| plain.len())
+    } else {
+        cipher.seal_in_place_append_tag(nonce,Aad::from(&aad),&mut data).map(|_| data.len())
+    };
+    let length = result.map_err(|_| crate::misc::dom_exception(realm,"OperationError","ChaCha20-Poly1305 operation failed"))?;
+    data.truncate(length);
+    Ok(make_array_buffer(realm,data))
+}
+
 pub(crate) fn install(realm: &mut Realm, internals: ObjectId) {
     ecdh::install(realm, internals);
     x25519::install(realm, internals);
+    realm.define_method(internals, "chachaPoly1305", 5, chacha20_poly1305);
     realm.define_method(internals, "aesGcm", 6, aes_gcm);
     realm.define_method(internals, "ed25519Key", 3, ed_key);
     realm.define_method(internals, "ed25519KeyBytes", 2, ed_key_bytes);
