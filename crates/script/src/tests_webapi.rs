@@ -2027,3 +2027,18 @@ fn fetch_blob_and_clone_preserve_serialized_mime_parameter_values() {
     "#);
     assert_eq!(out, ["text/plain;label=\"cAsE,é\" true true"]);
 }
+
+#[test]
+fn transfer_lists_validate_all_entries_before_moving_buffers_and_ports() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const a = new Uint8Array([42]).buffer, c = new MessageChannel();
+        for (const invalid of [[a, new Blob()], [a, a]]) {
+            try { structuredClone({}, {transfer: invalid}); } catch (e) { console.log(e.name, a.byteLength); }
+        }
+        const copy = structuredClone([a, c.port1, c.port1], {transfer: [a, c.port1]});
+        console.log(a.byteLength, new Uint8Array(copy[0])[0], copy[1] === copy[2], copy[1] !== c.port1);
+        try { structuredClone(0, {transfer:[c.port1]}); } catch (e) { console.log(e.name); }
+    "#);
+    assert_eq!(out, ["DataCloneError 1", "DataCloneError 1", "0 42 true true", "DataCloneError"]);
+}

@@ -53,7 +53,7 @@
     port.onmessage = (ev) => post({ t: 'port', b, d: C.serialize(ev.data), ports: outgoingPorts(ev.ports) });
   }
   function portsOf(transfer) {
-    const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
+    const list = C.transferList(transfer);
     return list.filter((t) => typeof g.MessagePort === 'function' && t instanceof g.MessagePort);
   }
   function outgoingPorts(transfer) {

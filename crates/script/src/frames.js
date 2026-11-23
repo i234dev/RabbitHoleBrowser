@@ -30,6 +30,27 @@
     return typeof DOMException === 'function' ? new DOMException(msg, 'DataCloneError') : new TypeError(msg);
   }
 
+  const bufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
+  const bufferDetached = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
+  const transferBuffer = ArrayBuffer.prototype.transfer;
+  function transferList(value) {
+    if (value == null) return [];
+    const sequence = typeof value === 'object' && !(Symbol.iterator in value) ? value.transfer : value;
+    if (sequence === undefined) return [];
+    if (sequence === null || typeof sequence[Symbol.iterator] !== 'function') throw new TypeError('Expected a transfer sequence');
+    const entries = Array.from(sequence);
+    if (new Set(entries).size !== entries.length) throw cloneError('Duplicate transferable');
+    for (const entry of entries) {
+      if (codec.isPort(entry)) {
+        if (codec.portDetached(entry)) throw cloneError('Detached MessagePort');
+      } else {
+        try { bufferLength.call(entry); } catch (_) { throw cloneError('Non-transferable object'); }
+        if (bufferDetached.call(entry)) throw cloneError('Detached ArrayBuffer');
+      }
+    }
+    return entries;
+  }
+
   // ---- structured clone (serialize to a JSON string, rebuild in the target realm)
   // `ports` (optional): a Map from transferred MessagePorts to their index
   // in the transfer list; those ports may appear in the value and are
@@ -70,9 +91,9 @@
         const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
         return { t: 'ta', id, k: tag, v: Array.from(bytes) };
       }
-      if (ports && typeof MessagePort === 'function' && v instanceof MessagePort) {
+      if (ports && codec.isPort(v)) {
         if (!ports.has(v)) throw cloneError(tag);
-        return { t: 'port', i: ports.get(v) };
+        return { t: 'port', id, i: ports.get(v) };
       }
       if (typeof Node === 'function' && v instanceof Node) throw cloneError(tag);
       const props = [];
@@ -92,7 +113,7 @@
         case 'n': return x.v === '-0' ? -0 : Number(x.v);
         case 'b': return BigInt(x.v);
         case 'ref': return objs.get(x.id);
-        case 'port': return ports ? ports[x.i] : undefined;
+        case 'port': out = ports ? ports[x.i] : undefined; break;
         case 'a':
           out = new Array(x.l || 0); objs.set(x.id, out);
           x.v.forEach((e, i) => { put(out, i, dec(e)); });
@@ -160,7 +181,7 @@
     const target = {
       postMessage(message, targetOrigin, transfer) {
         const list = transfer || (targetOrigin && typeof targetOrigin === 'object' ? targetOrigin.transfer : null);
-        const ports = Array.isArray(list) ? list.filter((t) => typeof MessagePort === 'function' && t instanceof MessagePort) : [];
+        const ports = transferList(list).filter(codec.isPort);
         const data = serialize(message);
         post(id, JSON.stringify({ t: 'msg', d: data, ports: ports.map((port) => bridgePort(port, id)) }), targetOriginOf(targetOrigin));
       },
@@ -340,11 +361,18 @@
 
   // The serializer, for the worker message routing (messaging.js,
   // worker.js; removed from the global after startup).
-  Object.defineProperty(g, '__rhClone', { value: { serialize, deserialize }, configurable: true });
+  const codec = { serialize, deserialize, transferList, isPort: () => false };
+  Object.defineProperty(g, '__rhClone', { value: codec, configurable: true });
 
   // structuredClone with the same algorithm as postMessage.
   Object.defineProperty(g, 'structuredClone', {
-    value: function structuredClone(value) { return deserialize(serialize(value)); },
+    value: function structuredClone(value, options = {}) {
+      const list = transferList(options == null ? undefined : options.transfer);
+      const ports = list.filter(codec.isPort);
+      const text = serialize(value, new Map(ports.map((p, i) => [p, i])));
+      for (const item of list) if (!codec.isPort(item)) transferBuffer.call(item);
+      return deserialize(text, ports.length ? ports.map(codec.movePort) : []);
+    },
     writable: true, configurable: true,
   });
 

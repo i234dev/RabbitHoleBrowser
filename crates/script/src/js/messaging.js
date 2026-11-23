@@ -14,19 +14,19 @@
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const S = Symbol('messaging');
+  const C = g.__rhClone;
+  const knownPorts = new WeakSet();
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
   const task = (f) => setTimeout(f, 0);
   const origin = () => g.location.origin;
 
   function cloneWithPorts(data, transfer) {
-    const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
-    const ports = list.filter((t) => t instanceof MessagePort);
-    for (const p of ports) if (p[S].detached) throw domError('Port at index 0 is already neutered.', 'DataCloneError');
-    const cloned = g.structuredClone(data);
-    // Transferred buffers are detached in the sender.
-    for (const t of list) if (t instanceof ArrayBuffer && typeof t.transfer === 'function' && !t.detached) t.transfer();
-    return { data: cloned, ports };
+    const list = C.transferList(transfer);
+    const ports = list.filter(C.isPort);
+    // Clone the payload and its port list together to retain shared identities.
+    const result = g.structuredClone([data, ports], { transfer: list });
+    return { data: result[0], ports: result[1] };
   }
 
   // --------------------------------------------------------------- ports
@@ -49,7 +49,20 @@
   // Setting onmessage implicitly starts the port.
   const onmsg = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage');
   Object.defineProperty(MessagePort.prototype, 'onmessage', { get: onmsg.get, set(v) { onmsg.set.call(this, v); this.start(); }, configurable: true, enumerable: true });
-  function newPort() { const p = Object.create(MessagePort.prototype); hidden(p, S, { entangled: null, queue: [], started: false, closed: false, scheduled: false }); return p; }
+  function newPort() { const p = Object.create(MessagePort.prototype); knownPorts.add(p); hidden(p, S, { entangled: null, queue: [], started: false, closed: false, scheduled: false }); return p; }
+  C.isPort = value => knownPorts.has(value);
+  C.portDetached = port => !!port[S].detached;
+  C.movePort = port => {
+    const old = port[S], copy = newPort(), state = copy[S];
+    state.entangled = old.entangled;
+    if (state.entangled) state.entangled[S].entangled = copy;
+    state.queue = old.queue;
+    state.closed = old.closed;
+    old.queue = [];
+    old.entangled = null;
+    old.closed = old.detached = true;
+    return copy;
+  };
   function flush(port) {
     const st = port[S];
     if (st.scheduled || !st.queue.length) return;
@@ -118,7 +131,6 @@
   // ---------------------------------------------------------------- workers
   // Each worker runs in its own realm (see workers.rs): messages are
   // structured clones serialized to JSON; MessagePorts are bridged by id.
-  const C = g.__rhClone;
   function loadScript(url) {
     if (/^data:/i.test(url)) {
       const m = /^data:([^,]*?)(;base64)?,(.*)$/is.exec(url);
@@ -139,7 +151,7 @@
     port.onmessage = (ev) => send(id, { t: 'port', b, d: C.serialize(ev.data), ports: outgoingWorkerPorts(id, ev.ports) });
   }
   function transferredPorts(transfer) {
-    const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
+    const list = C.transferList(transfer);
     const ports = list.filter((t) => t instanceof MessagePort);
     for (const p of ports) if (p[S].detached) throw domError('Port at index 0 is already neutered.', 'DataCloneError');
     return ports;
