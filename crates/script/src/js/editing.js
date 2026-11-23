@@ -428,6 +428,29 @@
       right.remove();
     }
   }
+  function liftListItem(item,old,host,separator,replacements) {
+    const parent = old.parentElement;
+    const outer = parent.localName === 'li' ? parent.parentElement : parent;
+    if (['ol','ul'].includes(outer?.localName) && host.contains(outer)) {
+      // Lift the selected item by one level. Its following siblings
+      // stay at their original depth underneath it.
+      outer.insertBefore(item,parent === outer ? old : parent.nextSibling);
+      if (old.firstChild) item.appendChild(old);
+    } else if (!item.attributes.length &&
+        ((['td','th'].includes(parent.localName) && parent.childNodes.length === 1 && old.childNodes.length === 1) ||
+         (item.childNodes.length === 1 && item.firstChild.localName === 'table'))) {
+      while (item.firstChild) parent.insertBefore(item.firstChild,old);
+      replacements.set(item,parent);
+      item.remove();
+    } else {
+      const block = item.ownerDocument.createElement(separator);
+      parent.insertBefore(block,old);
+      for (const attr of Array.from(item.attributes)) block.setAttribute(attr.name,attr.value);
+      while (item.firstChild) block.appendChild(item.firstChild);
+      replacements.set(item,block);
+      item.remove();
+    }
+  }
   function applyList(t,tag,separator) {
     const runs = listParagraphs(t), {host,sel} = t, doc = host.ownerDocument;
     if (!runs.length) return true;
@@ -441,27 +464,7 @@
         if (!remove && old.localName === tag) { lists.push(old); continue; }
         splitBeforeChild(old,item);
         if (remove) {
-          const parent = old.parentElement;
-          const outer = parent.localName === 'li' ? parent.parentElement : parent;
-          if (['ol','ul'].includes(outer?.localName) && host.contains(outer)) {
-            // Lift the selected item by one level. Its following siblings
-            // stay at their original depth underneath it.
-            outer.insertBefore(item,parent === outer ? old : parent.nextSibling);
-            if (old.firstChild) item.appendChild(old);
-          } else if (!item.attributes.length &&
-              ((['td','th'].includes(parent.localName) && parent.childNodes.length === 1 && old.childNodes.length === 1) ||
-               (item.childNodes.length === 1 && item.firstChild.localName === 'table'))) {
-            while (item.firstChild) parent.insertBefore(item.firstChild,old);
-            replacements.set(item,parent);
-            item.remove();
-          } else {
-            const block = doc.createElement(separator);
-            parent.insertBefore(block,old);
-            for (const attr of Array.from(item.attributes)) block.setAttribute(attr.name,attr.value);
-            while (item.firstChild) block.appendChild(item.firstChild);
-            replacements.set(item,block);
-            item.remove();
-          }
+          liftListItem(item,old,host,separator,replacements);
         } else {
           list = doc.createElement(tag);
           old.parentNode.insertBefore(list,old);
@@ -496,6 +499,65 @@
     for (const list of lists) if (list.parentNode) mergeAdjacentLists(list);
     sel.setBaseAndExtent(...restorePoint(a,replacements),...restorePoint(b,replacements));
     input(host,tag === 'ol' ? 'insertOrderedList' : 'insertUnorderedList');
+    return true;
+  }
+  function applyIndent(t,indent,separator) {
+    const {host,sel} = t, doc = host.ownerDocument;
+    const a = bookmark(sel.anchorNode,sel.anchorOffset), b = bookmark(sel.focusNode,sel.focusOffset);
+    const replacements = new Map(), handled = new Set();
+    let changed = false;
+    for (const run of listParagraphs(t)) {
+      let nodes = run.nodes, container = run.container;
+      if (run.item) {
+        const list = run.item.parentElement;
+        if (!indent) {
+          splitBeforeChild(list,run.item);
+          liftListItem(run.item,list,host,separator,replacements);
+          if (!list.firstChild) list.remove();
+        } else {
+          const sub = doc.createElement(list.localName);
+          list.insertBefore(sub,run.item);
+          sub.appendChild(run.item);
+          mergeAdjacentLists(sub);
+        }
+        changed = true;
+        continue;
+      }
+      if (container !== host && blockTags.has(container.localName)) {
+        if (handled.has(container)) continue;
+        handled.add(container);
+        nodes = [container];
+        container = container.parentNode;
+      }
+      if (indent) {
+        const first = nodes[0], left = first?.previousSibling;
+        const quote = left?.localName === 'blockquote' && !left.attributes.length && left.isContentEditable ? left : doc.createElement('blockquote');
+        if (!quote.parentNode) container.insertBefore(quote, first || null);
+        for (const node of nodes) quote.appendChild(node);
+        if (!nodes.length) quote.appendChild(caretBreak(doc));
+        changed = true;
+      } else {
+        const quote = container.closest('blockquote');
+        if (!quote || quote === host || !host.contains(quote) || !nodes.length) continue;
+        // Move just the selected children out, retaining quoted siblings
+        // on either side and preserving their original order and style.
+        const selected = new Set();
+        for (let node of nodes) {
+          while (node.parentNode && node.parentNode !== quote) node = node.parentNode;
+          if (node.parentNode === quote) selected.add(node);
+        }
+        for (const node of selected) {
+          splitBeforeChild(quote,node);
+          quote.parentNode.insertBefore(node,quote);
+          changed = true;
+        }
+        if (!quote.firstChild) { replacements.set(quote,quote.parentNode); quote.remove(); }
+      }
+    }
+    if (changed) {
+      sel.setBaseAndExtent(...restorePoint(a,replacements),...restorePoint(b,replacements));
+      input(host,indent ? 'formatIndent' : 'formatOutdent');
+    }
     return true;
   }
   function applyBlock(t,cmd,value) {
@@ -548,7 +610,7 @@
 
   const preferences = new Set(['stylewithcss', 'usecss', 'defaultparagraphseparator']);
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
-  const richCommands = new Set(['removeformat', 'inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
+  const richCommands = new Set(['indent', 'outdent', 'removeformat', 'inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
   function supported(cmd) {
     return blockCommand(cmd) || valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
   }
@@ -860,6 +922,7 @@
     }
     if (cmd === 'removeformat') return removeFormatting(state,t);
     if (listCommands.has(cmd)) return applyList(t,listCommands.get(cmd),state.separator);
+    if (cmd === 'indent' || cmd === 'outdent') return applyIndent(t,cmd === 'indent',state.separator);
     if (blockCommand(cmd)) return applyBlock(t,cmd,value);
     if (valueFormats.has(cmd)) {
       const normalized = normalizeFormat(cmd, value);

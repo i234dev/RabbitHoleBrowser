@@ -1128,3 +1128,20 @@ fn rich_list_commands_respect_sublists_and_table_cell_boundaries() {
     })()"#);
     assert_eq!(result,"false|true|inner|<b>cell</b>|true|1");
 }
+
+#[test]
+fn indent_and_outdent_preserve_paragraphs_formatting_and_selection() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<div id=ed contenteditable><p>one</p><p><b>two</b></p><p>three</p></div>");
+    let result=eval(&e,&mut page,r#"(() => {
+        ed.focus();
+        const sel=getSelection(), a=ed.firstChild.firstChild, b=ed.querySelector('b').firstChild;
+        sel.setBaseAndExtent(b,2,a,1);
+        document.execCommand('indent');
+        const grouped=ed.firstChild.outerHTML, backwards=sel.direction;
+        sel.collapse(b,1);
+        document.execCommand('outdent');
+        return [grouped,backwards,ed.innerHTML,sel.anchorNode===b,sel.anchorOffset].join('|');
+    })()"#);
+    assert_eq!(result,"<blockquote><p>one</p><p><b>two</b></p></blockquote>|backward|<blockquote><p>one</p></blockquote><p><b>two</b></p><p>three</p>|true|1");
+}
