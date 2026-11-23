@@ -2171,6 +2171,30 @@ fn trickled_ice_replaces_only_the_matching_remote_description() {
 }
 
 #[test]
+fn complete_html_replacement_commits_filtered_children_before_running_callbacks() {
+    let out = logs_of("<body><main id=host></main>", r#"
+        const root = document.getElementById('host').attachShadow({mode:'closed'});
+        const events = [];
+        customElements.define('sample-item', class extends HTMLElement {
+            static get observedAttributes() { return ['data-kind']; }
+            constructor() { super(); events.push('construct'); }
+            connectedCallback() { events.push('connect'); }
+            disconnectedCallback() { events.push('disconnect'); }
+            attributeChangedCallback(name, old, value) { events.push(value); }
+        });
+        root.setHTMLUnsafe("<sample-item data-kind='first'></sample-item><i>absent</i>",
+                           {sanitizer:{removeElements:['i']}});
+        console.log(root.children.length, events.join(','));
+        events.length = 0;
+        window.readCompleteFragment = () => events.push(root.lastChild.textContent);
+        root.setHTMLUnsafe("<script>readCompleteFragment()</script><sample-item>complete</sample-item>",
+                           {runScripts:true});
+        console.log(events.join(','));
+    "#);
+    assert_eq!(out, ["1 construct,first,connect", "complete,disconnect,construct,connect"]);
+}
+
+#[test]
 fn rtc_signaling_values_keep_local_metadata_out_of_signaling() {
     let result = result_of("<body>", r#"
         const line = 'candidate:aB/7 2 TCP 1024 2001:db8::8 9 typ srflx raddr local.example rport 5000 tcptype active';

@@ -521,6 +521,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "openPopovers", 1, crate::element::open_popovers);
     realm.define_method(o, "attrNamespace", 2, crate::element::attr_namespace_native);
     realm.define_method(o, "validateQName", 1, crate::document::validate_qname);
+    realm.define_method(o, "setFragmentHTML", 4, crate::docparser::set_fragment_html);
     realm.define_method(o, "streamOpen", 3, crate::docparser::stream_open);
     realm.define_method(o, "contextualFragment", 2, crate::misc::contextual_fragment_native);
     realm.define_method(o, "streamWrite", 2, crate::docparser::stream_write);

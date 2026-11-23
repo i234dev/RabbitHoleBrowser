@@ -198,6 +198,10 @@
     const runScripts = !safe && !!(opts && opts.runScripts);
     N.streamOpen(node, pos, { check: true });
     const cfg = streamSanitizerConfig(opts, safe);
+    if (pos === 'html') {
+      N.setFragmentHTML(node,markup,runScripts,cfg ? elements => sanitizeCreated(elements,cfg,safe) : null);
+      return;
+    }
     const h = N.streamOpen(node, pos, { runScripts, dsd: !!dsd });
     sanitizeCreated(N.streamWrite(h, markup), cfg, safe);
     sanitizeCreated(N.streamClose(h), cfg, safe);
@@ -211,7 +215,7 @@
   // variants never run scripts and sanitize what they insert.
   function streamSanitizerConfig(opts, safe) {
     const s = opts && opts.sanitizer;
-    if (s === undefined || s === null || s === 'default') return safe ? { elements: null, removeElements: DEFAULT_REMOVE.slice(), replaceWithChildrenElements: [], attributes: null, removeAttributes: [] } : null;
+    if (s === undefined || s === null || s === 'default') return safe || s === 'default' ? { elements: null, removeElements: DEFAULT_REMOVE.slice(), replaceWithChildrenElements: [], attributes: null, removeAttributes: [] } : null;
     const cfg = (g.Sanitizer && s instanceof g.Sanitizer) ? s.get() : s;
     if (typeof cfg !== 'object') throw new TypeError("Failed to execute: the sanitizer option is not a Sanitizer or SanitizerConfig.");
     if (cfg.elements && cfg.removeElements) throw new TypeError("A sanitizer config cannot have both 'elements' and 'removeElements'.");
