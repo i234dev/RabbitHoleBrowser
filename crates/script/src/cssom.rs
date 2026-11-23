@@ -286,7 +286,7 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
 }
 
 fn checked_property(name: &str) -> bool {
-    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-anchor" | "anchor-name" | "anchor-scope") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
@@ -298,7 +298,7 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
         if name == "shape-outside" { return Some(shapes::specified(tokens)); }
     }
     if single_color_property(name) { return specified_color(name, tokens); }
-    if matches!(name, "position-area" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
+    if matches!(name, "position-area" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
         let parts = rabbithole_style::values::components(tokens);
         if let [value] = parts.as_slice() {
             if let Some(k) = rabbithole_style::values::ident(value).filter(|k| matches!(k.as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer")) {
@@ -312,6 +312,7 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
                 let [c] = parts.as_slice() else { return None };
                 return if rabbithole_style::values::is_ident(c,"auto") { Some("auto".into()) } else { rabbithole_style::props::anchor::dashed_ident(c).map(str::to_owned) };
             }
+            if name == "position-try-fallbacks" { use rabbithole_style::props::anchor::TryOption; return TryOption::parse_list(&parts).map(|v| TryOption::list_css(&v,false)); }
             if name == "position-area" { return rabbithole_style::props::anchor::PositionArea::parse(&parts).map(|a| a.to_css(false)); }
             return rabbithole_style::props::flex::specified_alignment(name, &parts);
         }
@@ -326,6 +327,15 @@ pub(crate) fn cssom_valid_selector(realm: &mut Realm, _: Value, args: &[Value]) 
     let declarations = arg_str(realm, args, 2)?;
     let declarations = rabbithole_css::Tokenizer::tokenize(&declarations);
     Ok(Value::Bool(rabbithole_css::selector::valid_rule_selector_with_namespaces(&tokens, nested, &declarations)))
+}
+
+pub(crate) fn cssom_try_name(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let tokens = rabbithole_css::Tokenizer::tokenize(&arg_str(realm, args, 0)?);
+    Ok(rabbithole_css::position_try::name(&tokens).map_or(Value::Null,Value::str))
+}
+
+pub(crate) fn cssom_try_descriptors(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(realm.new_array_value(rabbithole_css::position_try::DESCRIPTORS.iter().map(|name| Value::str(name)).collect()))
 }
 
 pub(crate) fn cssom_namespace(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
@@ -580,7 +590,8 @@ fn display_css(d: Display) -> &'static str {
 }
 
 fn anchor_style(node: NodeRef, prop: &str, frame: Option<u64>, style: std::rc::Rc<ComputedStyle>) -> std::rc::Rc<ComputedStyle> {
-    if rabbithole_style::props::anchor_length::property(prop).is_some() && style.has_anchor_lengths() {
+    if (rabbithole_style::props::anchor_length::property(prop).is_some() && style.has_anchor_lengths())
+        || (style.position_try_fallbacks.is_some() && rabbithole_css::position_try::DESCRIPTORS.contains(&prop)) {
         return with_env(|env| env.anchor_style(frame,node.node)).unwrap_or(style);
     }
     style
@@ -640,7 +651,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
             env.ensure_layout();
             (env.computed_style(n.node), ())
         });
-        st.unwrap_or(s)
+        st.map_or(s, |style| anchor_style(n,prop,None,style))
     } else {
         s
     };
@@ -760,6 +771,7 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "display" => display_css(s.display).to_string(),
         "shape-outside" => shapes::computed(s.shape_outside.as_deref(), s.shape_outside_position_explicit),
         "shape-margin" => position_css(&s.shape_margin),
+        "position-try-fallbacks" => rabbithole_style::props::anchor::TryOption::list_css(s.position_try_fallbacks.as_deref().unwrap_or_default(),true),
         "position-area" => s.position_area.to_css(true),
         "anchor-scope" => s.anchor_scope.to_css(),
         "anchor-name" => s.anchor_names.as_ref().map_or_else(|| "none".into(),|names| names.join(", ")),

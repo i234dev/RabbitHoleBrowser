@@ -1296,6 +1296,29 @@ fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
 }
 
 #[test]
+fn position_try_descriptors_are_live_and_fallbacks_follow_layout() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=rules>@position-try --fit { left: 12px; top: 8px; color:red; height:1px!important } #cb{width:80px;height:60px;position:relative}#target{position:absolute;left:65px;top:0;width:25px;height:12px;position-try-fallbacks:--missing,--fit}</style><div id=cb><i id=target></i></div>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const rule = rules.sheet.cssRules[0], s = rule.style;
+        const x = () => target.getBoundingClientRect().left - cb.getBoundingClientRect().left;
+        const fields = [rule instanceof CSSPositionTryRule, s instanceof CSSPositionTryDescriptors, rule.name,
+            s.length, s.getPropertyValue('height'), s.color, x()];
+        s.left = '20px';
+        fields.push(x(), getComputedStyle(target).top);
+        s.setProperty('background-color','blue');
+        s.setProperty('left','30px','important');
+        fields.push(s.left, s.length);
+        cb.style.width='120px';
+        fields.push(x());
+        cb.style.width='25px';
+        fields.push(x());
+        return fields.join('|');
+    })()"#);
+    assert_eq!(result,"true|true|--fit|2|||12|20|8px|20px|2|65|65");
+}
+
+#[test]
 fn anchor_math_serialization_preserves_grouping_and_sorts_numeric_terms() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<i id=box></i>");

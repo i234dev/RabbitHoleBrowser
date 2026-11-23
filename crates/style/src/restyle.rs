@@ -771,7 +771,16 @@ impl StyleEngine {
         self.feature_values = Rc::new(fv);
         crate::props::text::set_feature_values(self.feature_values.clone());
         tree.keyframes.clear();
+        tree.position_tries.clear();
         for sheet in author {
+            let mut tries = Vec::new();
+            sheet.position_tries(&self.env, &mut tries);
+            for (name, declarations) in tries {
+                let scopes = if sheet.shadow_scopes.is_empty() { &[Document::ROOT][..] } else { &sheet.shadow_scopes };
+                for scope in scopes {
+                    tree.position_tries.entry(*scope).or_default().insert(name.into(), declarations.to_vec());
+                }
+            }
             let mut kf = Vec::new();
             sheet.keyframes(&mut kf);
             for (name, frames) in kf {

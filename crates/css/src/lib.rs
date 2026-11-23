@@ -2,6 +2,7 @@
 //! with `@media` evaluation and `@import` discovery.
 
 pub mod container;
+pub mod position_try;
 pub mod selector;
 pub mod supports;
 pub mod tokenizer;
@@ -96,6 +97,7 @@ pub enum Rule {
     },
     /// `@font-face { ... }` descriptors (font-family, src, font-weight, ...).
     FontFace(Vec<Declaration>),
+    PositionTry { name: String, declarations: Vec<Declaration> },
     /// `@font-feature-values <family>#` (CSS Fonts 4 §6.9.1): for each
     /// family, (block kind such as `styleset`, value name, numbers).
     FontFeatureValues {
@@ -273,7 +275,7 @@ impl Stylesheet {
                             walk(rules, env, out);
                         }
                     }
-                    Rule::Import { .. } | Rule::FontFace(_) | Rule::Keyframes { .. } | Rule::FontFeatureValues { .. } => {}
+                    Rule::Import { .. } | Rule::PositionTry { .. } | Rule::FontFace(_) | Rule::Keyframes { .. } | Rule::FontFeatureValues { .. } => {}
                 }
             }
         }
@@ -309,6 +311,21 @@ impl Stylesheet {
             }
         }
         walk(&self.rules, env, out);
+    }
+
+    /// Named position fallbacks in active conditional groups, in source order.
+    pub fn position_tries<'a>(&'a self, env: &MediaEnv, out: &mut Vec<(&'a str, &'a [Declaration])>) {
+        fn collect<'a>(rules: &'a [Rule], env: &MediaEnv, out: &mut Vec<(&'a str, &'a [Declaration])>) {
+            for r in rules {
+                match r {
+                    Rule::PositionTry { name, declarations } => out.push((name,declarations)),
+                    Rule::Media { query, rules } if query.evaluate(env) => collect(rules,env,out),
+                    Rule::Supports { matches: true, rules } => collect(rules,env,out),
+                    _ => {}
+                }
+            }
+        }
+        collect(&self.rules, env, out);
     }
 
     /// All `@keyframes` rules as (name, frames).
@@ -572,6 +589,13 @@ impl<'a> Parser<'a> {
                                     // Transparent grouping.
                                     let mut sub = self.subparser(inner);
                                     rules.extend(if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) });
+                                }
+                                "position-try" if parent.is_none() => {
+                                    if let Some(name) = position_try::name(prelude) {
+                                        let mut declarations = self.subparser(inner).parse_declarations();
+                                        declarations.retain(|d| !d.important && position_try::DESCRIPTORS.contains(&d.name.as_str()));
+                                        rules.push(Rule::PositionTry { name: name.to_string(), declarations });
+                                    }
                                 }
                                 "font-face" if parent.is_none() => {
                                     let mut dp = self.subparser(inner);

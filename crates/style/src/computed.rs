@@ -1646,6 +1646,7 @@ pub struct ComputedStyle {
     pub anchor_scope: crate::props::anchor::AnchorScope,
     pub anchor_names: Option<std::rc::Rc<[String]>>,
     pub position_anchor: Option<std::rc::Rc<str>>,
+    pub position_try_fallbacks: Option<std::rc::Rc<[crate::props::anchor::TryOption]>>,
     pub float: Float,
     pub clear: Clear,
     pub flex_direction: FlexDirection,
@@ -2060,6 +2061,7 @@ impl ComputedStyle {
             anchor_scope: Default::default(),
             anchor_names: None,
             position_anchor: None,
+            position_try_fallbacks: None,
             float: Float::None,
             clear: Clear::None,
             flex_direction: FlexDirection::Row,
@@ -2501,7 +2503,7 @@ impl ComputedStyle {
 
     pub fn needs_anchor_layout(&self) -> bool {
         matches!(self.position, Position::Absolute | Position::Fixed) &&
-            (!self.position_area.is_none() || self.has_anchor_lengths())
+            (!self.position_area.is_none() || self.position_try_fallbacks.is_some() || self.has_anchor_lengths())
     }
 
     pub fn has_transform(&self) -> bool {

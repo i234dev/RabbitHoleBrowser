@@ -522,13 +522,22 @@ impl<'a> Layouter<'a> {
     pub(crate) fn layout_document_with(&mut self, reuse: Option<&crate::incremental::Reuse>) -> LayoutTree {
         let initial = self.layout_pass(reuse);
         if !self.ctx.styles.any_position_area { return initial; }
-        let areas = crate::anchor::placements(self.ctx,&initial);
-        if areas.is_empty() { return initial; }
-        let mut positioned = Self::new(self.ctx);
-        positioned.anchor_areas = areas;
-        let mut tree = positioned.layout_pass(None);
-        tree.resolved_anchor_styles = positioned.anchor_areas.lengths;
-        tree
+        let mut choices = HashMap::new();
+        let mut areas = crate::anchor::placements(self.ctx,&initial,&choices);
+        let mut pending = std::mem::take(&mut areas.fallback_targets);
+        let mut tree = initial;
+        loop {
+            if !areas.is_empty() {
+                let mut positioned = Self::new(self.ctx);
+                positioned.anchor_areas = areas;
+                tree = positioned.layout_pass(None);
+                tree.resolved_anchor_styles = positioned.anchor_areas.lengths;
+            } else if !choices.is_empty() || !tree.resolved_anchor_styles.is_empty() {
+                tree = Self::new(self.ctx).layout_pass(None);
+            }
+            if !crate::anchor::advance_fallbacks(self.ctx,&tree,&mut pending,&mut choices) { return tree; }
+            areas = crate::anchor::placements(self.ctx,&tree,&choices);
+        }
     }
 
     fn layout_pass(&mut self, reuse: Option<&crate::incremental::Reuse>) -> LayoutTree {

@@ -31,6 +31,7 @@
     let depth = 0, prelude = null, blockStart = 0;
     while (i < n) {
       const c = src[i];
+      if (c === '\\') { i += 2; continue; }
       if (c === '/' && src[i + 1] === '*') {
         const e = src.indexOf('*/', i + 2);
         if (depth === 0 && prelude === null) {
@@ -73,7 +74,7 @@
   const checkedProperties = new Set(['shape-outside', 'shape-margin', 'color', 'background-color', 'border-top-color', 'border-right-color',
     'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
     'accent-color', 'column-rule-color', 'align-self', 'align-items', 'align-content', 'justify-self', 'justify-items',
-    'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-anchor', 'anchor-name', 'anchor-scope']);
+    'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-try-fallbacks', 'position-anchor', 'anchor-name', 'anchor-scope']);
   const placeLonghands = new Map([
     ['place-items',['align-items','justify-items']], ['place-self',['align-self','justify-self']],
     ['place-content',['align-content','justify-content']]
@@ -127,7 +128,7 @@
     }
     return out.join(' ');
   }
-  function parseDecls(text) {
+  function parseDecls(text, allowed) {
     const out = [];
     let i = 0, start = 0, depth = 0;
     const n = text.length;
@@ -143,6 +144,7 @@
       const m = /!\s*important\s*$/i.exec(value);
       if (m) { important = true; value = value.slice(0, m.index).trim(); }
       if (!name.startsWith('--')) name = name.toLowerCase();
+      if (allowed && (important || !allowed.has(name) || !CSS.supports(name, value))) return;
       if (checkedProperties.has(name) || /anchor(?:-size)?\(/i.test(value)) {
         value = N.cssomSpecifiedValue(name, value);
         if (value === null) return;
@@ -167,14 +169,15 @@
 
   // Declarations of a rule: a Proxy so `style.color = ...` works like the
   // element.style object (whose prototype, CSSStyleDeclaration, it shares).
-  function makeDecl(rule, text) {
+  function makeDecl(rule, text, allowed) {
     // Parsed on first use: most rules are only serialized back.
     const st = { raw: text || '', parsed: null, rule };
-    Object.defineProperty(st, 'decls', { get() { if (!this.parsed) this.parsed = parseDecls(this.raw); return this.parsed; }, set(v) { this.parsed = v; } });
+    Object.defineProperty(st, 'decls', { get() { if (!this.parsed) this.parsed = parseDecls(this.raw, allowed); return this.parsed; }, set(v) { this.parsed = v; } });
     const changed = () => { if (st.rule) touch(st.rule); };
     const get = (p) => declarationValue(st.decls,p)[1];
     const set = (p, v, imp) => {
       v = v === null ? '' : `${v}`.trim();
+      if (allowed && (!allowed.has(p) || imp || (v && !CSS.supports(p,v)))) return;
       if (v && (checkedProperties.has(p) || /anchor(?:-size)?\(/i.test(v))) {
         v = N.cssomSpecifiedValue(p, v);
         if (v === null) return;
@@ -184,7 +187,7 @@
       changed();
     };
     const cssText = () => {
-      if (st.parsed) return declarationText(st.parsed);
+      if (allowed || st.parsed) return declarationText(st.decls);
       const t = st.raw.trim();
       return t && !t.endsWith(';') ? t + ';' : t;
     };
@@ -203,7 +206,7 @@
       item: (i) => (st.decls[i] ? st.decls[i][0] : ''),
       toString: () => '[object CSSStyleDeclaration]',
     };
-    const target = Object.create(g.CSSStyleDeclaration ? g.CSSStyleDeclaration.prototype : Object.prototype);
+    const target = Object.create(allowed ? CSSPositionTryDescriptors.prototype : (g.CSSStyleDeclaration ? g.CSSStyleDeclaration.prototype : Object.prototype));
     for (const k in methods) hidden(target, k, methods[k]);
     hidden(target, S, st);
     const proxy = new Proxy(target, {
@@ -213,18 +216,20 @@
         if (k === 'cssText') return cssText();
         if (k === 'length') return st.decls.length;
         if (k === 'parentRule') return st.rule || null;
-        if (k === 'cssFloat') return get('float');
+        if (k === 'cssFloat' && !allowed) return get('float');
         if (/^\d+$/.test(k)) return methods.item(+k);
         if (k in Object.prototype || k === 'constructor') return t[k];
+        if (allowed && !allowed.has(kebab(k))) return t[k];
         return get(kebab(k));
       },
       set(t, k, v) {
         if (typeof k === 'symbol') { t[k] = v; return true; }
-        if (k === 'cssText') { st.decls = parseDecls(String(v)); changed(); return true; }
+        if (k === 'cssText') { st.decls = parseDecls(String(v), allowed); changed(); return true; }
+        if (allowed && !allowed.has(kebab(k))) { t[k] = v; return true; }
         set(kebab(k), v, false);
         return true;
       },
-      has(t, k) { return typeof k === 'string' ? true : k in t; },
+      has(t, k) { return typeof k === 'string' && !allowed ? true : k in t; },
       ownKeys() { return st.decls.map((_, i) => String(i)); },
       getOwnPropertyDescriptor(t, k) {
         if (typeof k === 'string' && /^\d+$/.test(k) && +k < st.decls.length) return { value: st.decls[+k][0], enumerable: true, configurable: true, writable: false };
@@ -380,6 +385,25 @@
     get style() { return this[S].style; }
   }
   tag(CSSMarginRule, 'CSSMarginRule');
+  class CSSPositionTryDescriptors extends CSSStyleDeclaration {}
+  tag(CSSPositionTryDescriptors, 'CSSPositionTryDescriptors');
+  const tryDescriptors = new Set(N.cssomTryDescriptors());
+  for (const name of tryDescriptors) {
+    const idl = name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    for (const key of new Set([name, idl])) {
+      Object.defineProperty(CSSPositionTryDescriptors.prototype, key, {
+        enumerable: true, configurable: true,
+        get() { return this.getPropertyValue(name); },
+        set(value) { this.setProperty(name, value); }
+      });
+    }
+  }
+  class CSSPositionTryRule extends CSSRule {
+    get name() { return this[S].condition; }
+    get style() { return this[S].style; }
+    set style(value) { this[S].style.cssText = value; }
+  }
+  tag(CSSPositionTryRule, 'CSSPositionTryRule');
   class CSSFontFaceRule extends CSSRule { get style() { return this[S].style; } }
   tag(CSSFontFaceRule, 'CSSFontFaceRule');
   class CSSImportRule extends CSSRule {
@@ -468,6 +492,17 @@
           r[S].children = splitRules(block || '').map((c) => parseChunk(c, sheet, r, true));
           const kw = name;
           r[S].text = () => `@${kw} ${r[S].condition} {\n${serializeChildren(r)}\n}`;
+          break;
+        }
+        case 'position-try': {
+          const ident = N.cssomTryName(rest);
+          if (ident === null || (parent && !(parent instanceof CSSGroupingRule))) return null;
+          r = newRule(CSSPositionTryRule, 0, { condition: CSS.escape(ident) });
+          r[S].style = makeDecl(r, block, tryDescriptors);
+          r[S].text = () => {
+            const text = r[S].style.cssText;
+            return `@position-try ${r.name} { ${text}${text ? ' ' : ''}}`;
+          };
           break;
         }
         case 'font-face':
@@ -829,6 +864,8 @@
   define('CSSPageRule', CSSPageRule);
   define('CSSMarginRule', CSSMarginRule);
   define('CSSFontFaceRule', CSSFontFaceRule);
+  define('CSSPositionTryRule', CSSPositionTryRule);
+  define('CSSPositionTryDescriptors', CSSPositionTryDescriptors);
   define('CSSImportRule', CSSImportRule);
   define('CSSNamespaceRule', CSSNamespaceRule);
   define('CSSKeyframeRule', CSSKeyframeRule);

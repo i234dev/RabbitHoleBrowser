@@ -118,6 +118,7 @@ fn name_scope(ctx: &LayoutContext, mut node: NodeId, name: &str) -> Option<NodeI
 #[derive(Default)]
 pub(crate) struct AnchoredLayout {
     pub areas: HashMap<NodeId, Placement>,
+    pub fallback_targets: Vec<NodeId>,
     pub lengths: HashMap<NodeId, std::rc::Rc<ComputedStyle>>,
 }
 
@@ -129,7 +130,7 @@ impl AnchoredLayout {
     pub fn apply_lengths(&self, node: &mut crate::tree::LayoutBox) {
         if self.lengths.is_empty() { return; }
         if let Some(style) = node.node.and_then(|id| self.lengths.get(&id)) {
-            if node.style.has_anchor_lengths() { node.style = style.clone(); }
+            if node.style.has_anchor_lengths() || node.style.position_try_fallbacks.is_some() { node.style = style.clone(); }
         }
         for child in &mut node.children { self.apply_lengths(child); }
     }
@@ -216,7 +217,38 @@ impl QueryBox {
     }
 }
 
-pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> AnchoredLayout {
+/// Try the next declared alternative only for boxes that overflow in the
+/// actual layout. Once the list is exhausted, restore the original style.
+pub(crate) fn advance_fallbacks(ctx: &LayoutContext, tree: &LayoutTree, pending: &mut Vec<NodeId>,
+                                choices: &mut HashMap<NodeId, usize>) -> bool {
+    let mut changed = false;
+    pending.retain(|&id| {
+        let Some(style) = ctx.styles.get(id) else { return false; };
+        let Some(list) = style.position_try_fallbacks.as_deref() else { return false; };
+        let Some((b, matrix)) = tree.box_and_coordinates(ctx.doc,id) else { return false; };
+        let rect = b.margin_rect();
+        let rect = matrix.map_or(rect, |m| rabbithole_gfx::path::transform_rect_bounds(&m,rect));
+        let (cb,_) = container(ctx,tree,containing_node(ctx,id,style));
+        if rect.x >= cb.x-0.01 && rect.y >= cb.y-0.01 && rect.right() <= cb.right()+0.01 && rect.bottom() <= cb.bottom()+0.01 {
+            return false;
+        }
+        let start = choices.get(&id).map_or(0, |index| index+1);
+        let scoped = ctx.styles.position_tries.get(&ctx.doc.tree_root(id));
+        for (i, option) in list.iter().enumerate().skip(start) {
+            if let rabbithole_style::props::anchor::TryOption::Named(name) = option {
+                if !scoped.is_some_and(|rules| rules.contains_key(name)) { continue; }
+            }
+            choices.insert(id,i);
+            changed = true;
+            return true;
+        }
+        changed |= choices.remove(&id).is_some();
+        false
+    });
+    changed
+}
+
+pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree, choices: &HashMap<NodeId,usize>) -> AnchoredLayout {
     let mut named: HashMap<(NodeId,Option<NodeId>,&str),Vec<NodeId>> = HashMap::new();
     let mut targets = Vec::new();
     let mut orders = HashMap::new();
@@ -232,7 +264,26 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> AnchoredLayo
         }
     }
     let mut result = AnchoredLayout::default();
-    for (order,id,s) in targets {
+    for (order,id,base) in targets {
+        let option = base.position_try_fallbacks.as_ref().and_then(|v| v.get(*choices.get(&id)?));
+        if base.position_try_fallbacks.is_some() { result.fallback_targets.push(id); }
+        let trial = option.and_then(|option| {
+            use rabbithole_style::props::anchor::TryOption;
+            match option {
+                TryOption::Area(area) => {
+                    let mut style = (**base).clone();
+                    style.position_area = *area;
+                    Some(style)
+                }
+                TryOption::Named(name) => {
+                    let rules = ctx.styles.position_tries.get(&ctx.doc.tree_root(id))?;
+                    let parent = ctx.doc.flat_parent(id).and_then(|n| ctx.styles.get(n)).unwrap_or(base);
+                    Some(rabbithole_style::cascade::apply_over(base,parent,rules.get(name)?,
+                        ctx.styles.root_font_size,(ctx.viewport_width,ctx.viewport_height)))
+                }
+            }
+        });
+        let s = trial.as_ref().unwrap_or(base);
         let cb_node = containing_node(ctx,id,s);
         let bounds = |a| {
             if ctx.doc.is_shadow_including_inclusive_ancestor(id,a) { return None; }
@@ -248,7 +299,7 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree) -> AnchoredLayo
             ctx.doc.popover_invoker(id).and_then(bounds)
         };
         let (cb,writing) = container(ctx,tree,cb_node);
-        if s.has_anchor_lengths() {
+        if trial.is_some() || s.has_anchor_lengths() {
             let geometry = QueryBox { cb, writing, own:(s.writing_mode,s.direction) };
             result.lengths.insert(id,std::rc::Rc::new(geometry.resolve(s,&lookup)));
         }

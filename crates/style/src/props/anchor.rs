@@ -212,3 +212,31 @@ impl AnchorScope {
         }
     }
 }
+
+/// A named descriptor block or an area in a position-try-fallbacks list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TryOption {
+    Named(String),
+    Area(PositionArea),
+}
+
+impl TryOption {
+    pub fn parse_list(parts: &[&[Token]]) -> Option<Vec<Self>> {
+        if matches!(parts, [p] if crate::values::is_ident(p,"none")) { return Some(Vec::new()); }
+        if parts.is_empty() { return None; }
+        crate::values::split_commas(parts).iter().map(|group| {
+            if let [p] = group.as_slice() {
+                if let Some(name) = dashed_ident(p) { return Some(Self::Named(name.into())); }
+            }
+            PositionArea::parse(group).filter(|a| !a.is_none()).map(Self::Area)
+        }).collect()
+    }
+
+    pub fn list_css(list: &[Self], computed: bool) -> String {
+        if list.is_empty() { return "none".into(); }
+        list.iter().map(|item| match item {
+            Self::Named(n) => n.clone(),
+            Self::Area(a) => a.to_css(computed),
+        }).collect::<Vec<_>>().join(", ")
+    }
+}
