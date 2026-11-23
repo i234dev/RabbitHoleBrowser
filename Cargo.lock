@@ -2504,6 +2504,7 @@ dependencies = [
  "rabbithole-webgl",
  "ring",
  "subtle",
+ "x25519-dalek",
 ]
 
 [[package]]

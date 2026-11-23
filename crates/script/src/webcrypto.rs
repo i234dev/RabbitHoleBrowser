@@ -1,6 +1,7 @@
 //! Native hash and HMAC operations shared by WebCrypto key derivation and
 //! signatures. A PBKDF2 operation can yield between batches of PRF calls.
 mod gcm;
+mod x25519;
 
 use crate::fetch::{buffer_source_bytes, make_array_buffer};
 use crate::host::{arg, arg_str};
@@ -162,6 +163,7 @@ fn aes_gcm(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 pub(crate) fn install(realm: &mut Realm, internals: ObjectId) {
+    x25519::install(realm, internals);
     realm.define_method(internals, "aesGcm", 6, aes_gcm);
     realm.define_method(internals, "ed25519Key", 3, ed_key);
     realm.define_method(internals, "ed25519KeyBytes", 2, ed_key_bytes);

@@ -179,12 +179,12 @@
   }
 
   const normAlg = a => typeof a === 'object' && a !== null ? a : { name: `${a}` };
-  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ECDH', 'X25519', 'ED448', 'X448'];
+  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ECDH', 'ED448', 'X448'];
   function algName(a) {
     const id = normAlg(a);
     if (id.name === undefined) throw new TypeError('An algorithm name is required');
     const n = String(id.name).toUpperCase();
-    const map = { ED25519: 'Ed25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
+    const map = { ED25519: 'Ed25519', X25519: 'X25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
     throw err('NotSupportedError', 'Algorithm: Unrecognized name');
@@ -195,69 +195,80 @@
 
   // RFC 8410 encodes the 32-byte public value in a BIT STRING and the
   // private seed in a nested OCTET STRING. Algorithm parameters are absent.
-  const edSpki = Uint8Array.of(0x30,42,0x30,5,6,3,0x2b,0x65,0x70,3,33,0);
-  const edPkcs8 = Uint8Array.of(0x30,46,2,1,0,0x30,5,6,3,0x2b,0x65,0x70,4,34,4,32);
-  const edDataError = () => err('DataError', 'Invalid Ed25519 key encoding');
-  function decodeEdPart(text) {
-    if (typeof text !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(text)) throw edDataError();
+  function octetCurve(oid, key, keyBytes, privateUsages, publicUsages, use) {
+    return { key, keyBytes, privateUsages, publicUsages, use,
+      spki: Uint8Array.of(0x30,42,0x30,5,6,3,0x2b,0x65,oid,3,33,0),
+      pkcs8: Uint8Array.of(0x30,46,2,1,0,0x30,5,6,3,0x2b,0x65,oid,4,34,4,32) };
+  }
+  const okp = {
+    __proto__: null,
+    Ed25519: octetCurve(0x70, N.ed25519Key, N.ed25519KeyBytes, ['sign'], ['verify'], 'sig'),
+    X25519: octetCurve(0x6e, N.x25519Key, N.x25519KeyBytes, ['deriveBits', 'deriveKey'], [], 'enc')
+  };
+  const keyDataError = () => err('DataError', 'Invalid octet curve key encoding');
+  function decodeKeyPart(text) {
+    if (typeof text !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(text)) throw keyDataError();
     const raw = unb64u(text);
-    if (raw.length !== 32 || b64u(raw) !== text) throw edDataError();
+    if (raw.length !== 32 || b64u(raw) !== text) throw keyDataError();
     return raw;
   }
-  function encodeEdDer(prefix, raw) {
+  function encodeKeyDer(prefix, raw) {
     const result = new Uint8Array(prefix.length + raw.length);
     result.set(prefix); result.set(raw, prefix.length);
     return result.buffer;
   }
-  function importEdKey(format, data, extractable, usages) {
+  function importOctetKey(name, format, data, extractable, usages) {
+    const curve = okp[name];
     const jwk = format === 'jwk';
     const privateKey = format === 'pkcs8' || format === 'raw-seed' || (jwk && data?.d !== undefined);
-    usageCheck(usages, privateKey ? ['sign'] : ['verify']);
-    if (privateKey && !usages.length) throw err('SyntaxError', 'A private key requires a signing usage');
+    usageCheck(usages, privateKey ? curve.privateUsages : curve.publicUsages);
+    if (privateKey && !usages.length) throw err('SyntaxError', 'A private key requires a usage');
     let raw, publicBytes;
     if (jwk) {
-      if (!data || data.kty !== 'OKP' || data.crv !== 'Ed25519' ||
-          (data.alg !== undefined && data.alg !== 'EdDSA' && data.alg !== 'Ed25519') ||
-          (usages.length && data.use !== undefined && data.use !== 'sig') ||
-          (data.ext === false && extractable)) throw edDataError();
+      if (!data || data.kty !== 'OKP' || data.crv !== name ||
+          (name === 'Ed25519' && data.alg !== undefined && data.alg !== 'EdDSA' && data.alg !== 'Ed25519') ||
+          (usages.length && data.use !== undefined && data.use !== curve.use) ||
+          (data.ext === false && extractable)) throw keyDataError();
       if (data.key_ops !== undefined) {
         const ops = Array.from(data.key_ops);
-        if (new Set(ops).size !== ops.length || usages.some(u => !ops.includes(u))) throw edDataError();
+        if (new Set(ops).size !== ops.length || usages.some(u => !ops.includes(u))) throw keyDataError();
       }
-      publicBytes = decodeEdPart(data.x);
-      raw = privateKey ? decodeEdPart(data.d) : publicBytes;
+      publicBytes = decodeKeyPart(data.x);
+      raw = privateKey ? decodeKeyPart(data.d) : publicBytes;
     } else {
       raw = bytesOf(data);
       if (format === 'pkcs8' || format === 'spki') {
-        const prefix = privateKey ? edPkcs8 : edSpki;
-        if (raw.length !== prefix.length + 32 || !prefix.every((v, i) => raw[i] === v)) throw edDataError();
+        const prefix = privateKey ? curve.pkcs8 : curve.spki;
+        if (raw.length !== prefix.length + 32 || !prefix.every((v, i) => raw[i] === v)) throw keyDataError();
         raw = raw.subarray(prefix.length);
       } else if (!['raw', 'raw-public', 'raw-seed'].includes(format)) {
-        throw err('NotSupportedError', 'Unsupported Ed25519 key format');
+        throw err('NotSupportedError', 'Unsupported octet curve key format');
       }
-      if (raw.length !== 32) throw edDataError();
+      if (raw.length !== 32) throw keyDataError();
     }
-    const material = privateKey ? N.ed25519Key(raw, publicBytes, !!extractable) : raw;
-    return newKey(privateKey ? 'private' : 'public', extractable, { name:'Ed25519' }, usages, material);
+    const material = privateKey ? curve.key(raw, publicBytes, !!extractable) : raw;
+    return newKey(privateKey ? 'private' : 'public', extractable, { name }, usages, material);
   }
-  function exportEdKey(format, k) {
+  function exportOctetKey(format, k) {
+    const name = k.algorithm.name, curve = okp[name];
     const priv = k.type === 'private';
     if (format === 'jwk') {
-      const publicBytes = priv ? new Uint8Array(N.ed25519KeyBytes(k.raw, false)) : k.raw;
-      const jwk = { kty:'OKP', crv:'Ed25519', x:b64u(publicBytes), alg:'Ed25519', ext:true, key_ops:k.usages.slice() };
-      if (priv) jwk.d = b64u(new Uint8Array(N.ed25519KeyBytes(k.raw, true)));
+      const publicBytes = priv ? new Uint8Array(curve.keyBytes(k.raw, false)) : k.raw;
+      const jwk = { kty:'OKP', crv:name, x:b64u(publicBytes), ext:true, key_ops:k.usages.slice() };
+      if (name === 'Ed25519') jwk.alg = name;
+      if (priv) jwk.d = b64u(new Uint8Array(curve.keyBytes(k.raw, true)));
       return jwk;
     }
     if ((format === 'raw' || format === 'raw-public') && !priv) return k.raw.slice().buffer;
-    if (format === 'raw-seed' && priv) return N.ed25519KeyBytes(k.raw, true);
-    if (format === 'spki' && !priv) return encodeEdDer(edSpki, k.raw);
-    if (format === 'pkcs8' && priv) return encodeEdDer(edPkcs8, new Uint8Array(N.ed25519KeyBytes(k.raw, true)));
+    if (format === 'raw-seed' && priv) return curve.keyBytes(k.raw, true);
+    if (format === 'spki' && !priv) return encodeKeyDer(curve.spki, k.raw);
+    if (format === 'pkcs8' && priv) return encodeKeyDer(curve.pkcs8, new Uint8Array(curve.keyBytes(k.raw, true)));
     throw err('InvalidAccessError', 'The key type cannot be exported in this format');
   }
 
   function importSecret(format, keyData, alg, extractable, usages) {
     const name = algName(alg);
-    if (name === 'Ed25519') return importEdKey(format, keyData, extractable, Array.from(usages));
+    if (okp[name]) return importOctetKey(name, format, keyData, extractable, Array.from(usages));
     let raw;
     if (format === 'raw' || format === 'raw-secret') raw = bytesOf(keyData);
     else if (format === 'jwk') {
@@ -287,6 +298,17 @@
     const name = algName(alg);
     const a = normAlg(alg);
     if (keyInfo(key).algorithm.name !== name) throw err('InvalidAccessError', 'The requested operation is not valid for the provided key.');
+    if (name === 'X25519') {
+      const peer = a.public;
+      if (!hasKey(peer)) throw new TypeError('A public CryptoKey is required');
+      if (keyInfo(key).type !== 'private' || keyInfo(peer).type !== 'public' || keyInfo(peer).algorithm.name !== name)
+        throw err('InvalidAccessError', 'Expected X25519 private and public keys');
+      const bits = length == null ? 256 : Number(length) >>> 0;
+      if (bits > 256) throw err('OperationError', 'Requested length exceeds the shared secret');
+      const result = new Uint8Array(N.x25519Derive(keyInfo(key).raw, keyInfo(peer).raw), 0, Math.ceil(bits / 8)).slice();
+      if (bits % 8) result[result.length - 1] &= 0xff << (8 - bits % 8);
+      return result.buffer;
+    }
     if (length == null || !Number.isInteger(length) || length < 0 || length > 0xffffffff || length % 8)
       throw err('OperationError', 'The length must be a multiple of 8.');
     const n = length / 8;
@@ -332,13 +354,14 @@
     generateKey(alg, extractable, usages) {
       return run(() => {
         const name = algName(alg);
-        if (name === 'Ed25519') {
-          const requested = Array.from(usages);
-          usageCheck(requested, ['sign','verify']);
-          if (!requested.includes('sign')) throw err('SyntaxError', 'A private key requires a signing usage');
-          const handle = N.ed25519Key(null, null, !!extractable);
-          const privateKey = newKey('private', extractable, {name}, ['sign'], handle);
-          const publicKey = newKey('public', true, {name}, requested.filter(u => u === 'verify'), new Uint8Array(N.ed25519KeyBytes(handle, false)));
+        if (okp[name]) {
+          const curve = okp[name], requested = Array.from(usages);
+          usageCheck(requested, [...curve.privateUsages, ...curve.publicUsages]);
+          const privateUsages = requested.filter(u => curve.privateUsages.includes(u));
+          if (!privateUsages.length) throw err('SyntaxError', 'A private key requires a usage');
+          const handle = curve.key(null, null, !!extractable);
+          const privateKey = newKey('private', extractable, {name}, privateUsages, handle);
+          const publicKey = newKey('public', true, {name}, requested.filter(u => curve.publicUsages.includes(u)), new Uint8Array(curve.keyBytes(handle, false)));
           return { publicKey, privateKey };
         }
         const len = keyLength(alg);
@@ -354,7 +377,7 @@
       return run(() => {
         if (!hasKey(key)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
         if (!keyInfo(key).extractable) throw err('InvalidAccessError', 'key is not extractable');
-        if (keyInfo(key).algorithm.name === 'Ed25519') return exportEdKey(format, keyInfo(key));
+        if (okp[keyInfo(key).algorithm.name]) return exportOctetKey(format, keyInfo(key));
         const raw = keyInfo(key).raw;
         if (format === 'raw' || format === 'raw-secret') return raw.slice().buffer;
         if (format === 'jwk') {

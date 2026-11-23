@@ -2372,3 +2372,27 @@ fn html_insertion_methods_require_markup_and_exclude_optional_arguments_from_len
     "#);
     assert_eq!(out,"'1|TypeError|text'");
 }
+
+#[test]
+fn web_crypto_x25519_matches_rfc7748_and_rejects_noncontributory_peers() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const bytes = hex => Uint8Array.from(hex.match(/../g), h => parseInt(h, 16));
+        const hex = data => Array.from(new Uint8Array(data), b => b.toString(16).padStart(2, '0')).join('');
+        const s = crypto.subtle, name = 'X25519';
+        const alice = await s.importKey('raw-seed', bytes('77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a'), name, false, ['deriveBits']);
+        const bob = await s.importKey('raw', bytes('de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f'), name, true, []);
+        const zero = await s.importKey('raw', new Uint8Array(32), name, false, []);
+        console.log(hex(await s.deriveBits({name, public:bob}, alice, null)));
+        console.log(hex(await s.deriveBits({name, public:bob}, alice, 13)),
+          await s.deriveBits({name, public:zero}, alice, 0).catch(e => e.name),
+          await s.exportKey('pkcs8', alice).catch(e => e.name));
+        const pair = await s.generateKey(name, true, ['deriveKey']);
+        const jwk = await s.exportKey('jwk', pair.privateKey);
+        console.log(await s.importKey('jwk', jwk, name, true, ['deriveBits']).catch(e => e.name));
+        const imported = await s.importKey('jwk', jwk, name, true, ['deriveKey']);
+        console.log(jwk.crv, 'alg' in jwk, (await s.exportKey('pkcs8', imported)).byteLength);
+      })();
+    "#);
+    assert_eq!(out, ["4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", "4a58 OperationError InvalidAccessError", "DataError", "X25519 false 48"]);
+}
