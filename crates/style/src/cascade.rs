@@ -2223,6 +2223,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.grid_lanes = from.grid_lanes;
         }
         "position" => to.position = from.position,
+        "position-area" => to.position_area = from.position_area,
         "float" => to.float = from.float,
         "clear" => to.clear = from.clear,
         "flex-direction" => to.flex_direction = from.flex_direction,
@@ -3450,6 +3451,9 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.run_in = comps.iter().any(|c| values::is_ident(c, "run-in"));
             }
         }
+        "position-area" => {
+            if let Some(area) = props::anchor::PositionArea::parse(&comps) { style.position_area = area; }
+        }
         "position" => {
             if let Some(kw) = values::ident(c0) {
                 style.position = match kw.as_str() {
@@ -4132,6 +4136,7 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
         return Some(recognizes_property(name));
     }
+    if name == "position-area" { return Some(props::anchor::PositionArea::parse(&values::components(value)).is_some()); }
     if matches!(name, "grid-template-columns" | "grid-template-rows") {
         if let Some(valid) = crate::props::grid::valid_subgrid(value) { return Some(valid); }
     }

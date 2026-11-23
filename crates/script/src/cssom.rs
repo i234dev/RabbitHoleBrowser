@@ -196,12 +196,12 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
 }
 
 fn checked_property(name: &str) -> bool {
-    single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    name == "position-area" || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
     if single_color_property(name) { return specified_color(name, tokens); }
-    if rabbithole_style::props::flex::alignment_property(name) {
+    if name == "position-area" || rabbithole_style::props::flex::alignment_property(name) {
         let parts = rabbithole_style::values::components(tokens);
         if let [value] = parts.as_slice() {
             if let Some(k) = rabbithole_style::values::ident(value).filter(|k| matches!(k.as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer")) {
@@ -209,6 +209,7 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
             }
         }
         if !tokens.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
+            if name == "position-area" { return rabbithole_style::props::anchor::PositionArea::parse(&parts).map(|a| a.to_css(false)); }
             return rabbithole_style::props::flex::specified_alignment(name, &parts);
         }
     }
@@ -642,6 +643,7 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "grid-template-columns" => grid::computed(&s.grid_template_columns),
         "grid-template-rows" => grid::computed(&s.grid_template_rows),
         "display" => display_css(s.display).to_string(),
+        "position-area" => s.position_area.to_css(true),
         "position" => match s.position {
             Position::Static => "static",
             Position::Relative => "relative",

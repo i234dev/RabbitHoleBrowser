@@ -1592,6 +1592,7 @@ pub struct ComputedStyle {
     /// positions distinguish hypothetical block and inline-level boxes.
     pub display_before_blockification: Display,
     pub position: Position,
+    pub position_area: crate::props::anchor::PositionArea,
     pub float: Float,
     pub clear: Clear,
     pub flex_direction: FlexDirection,
@@ -1998,6 +1999,7 @@ impl ComputedStyle {
             display: Display::Inline,
             display_before_blockification: Display::Inline,
             position: Position::Static,
+            position_area: Default::default(),
             float: Float::None,
             clear: Clear::None,
             flex_direction: FlexDirection::Row,

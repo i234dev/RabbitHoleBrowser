@@ -2,6 +2,7 @@
 //! backgrounds, effects (radii/shadows/outline/transform), text, generated
 //! content/counters and miscellaneous properties.
 
+pub mod anchor;
 pub mod background;
 pub mod clip_path;
 pub mod content;
