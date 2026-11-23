@@ -218,7 +218,17 @@ pub(crate) fn cssom_valid_selector(realm: &mut Realm, _: Value, args: &[Value]) 
     let selector = arg_str(realm, args, 0)?;
     let nested = realm.to_boolean(&arg(args, 1));
     let tokens = rabbithole_css::Tokenizer::tokenize(&selector);
-    Ok(Value::Bool(rabbithole_css::selector::valid_rule_selector(&tokens, nested)))
+    let declarations = arg_str(realm, args, 2)?;
+    let declarations = rabbithole_css::Tokenizer::tokenize(&declarations);
+    Ok(Value::Bool(rabbithole_css::selector::valid_rule_selector_with_namespaces(&tokens, nested, &declarations)))
+}
+
+pub(crate) fn cssom_namespace(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let tokens = rabbithole_css::Tokenizer::tokenize(&arg_str(realm, args, 0)?);
+    Ok(match rabbithole_css::parse_namespace(&tokens) {
+        Some((prefix, uri)) => realm.new_array_value(vec![Value::str(prefix), Value::str(uri)]),
+        None => Value::Null,
+    })
 }
 
 pub(crate) fn cssom_specified_value(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {

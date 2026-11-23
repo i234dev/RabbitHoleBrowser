@@ -258,7 +258,14 @@
       const selector = `${v}`.trim();
       let parent = this[S].parentRule;
       while (parent && !(parent instanceof CSSStyleRule)) parent = parent[S].parentRule;
-      if (!N.cssomValidSelector(selector, !!parent)) return;
+      const declarations = [];
+      if (selector.includes('|') && this[S].sheet) {
+        for (const rule of this[S].sheet[S].rules) {
+          if (rule instanceof CSSNamespaceRule) declarations.push(rule[S].condition);
+          else if (!(rule instanceof CSSImportRule)) break;
+        }
+      }
+      if (!N.cssomValidSelector(selector, !!parent, declarations.join(';'))) return;
       this[S].selector = selector;
       touch(this);
     }
@@ -331,8 +338,8 @@
   }
   tag(CSSImportRule, 'CSSImportRule');
   class CSSNamespaceRule extends CSSRule {
-    get namespaceURI() { const m = /(?:url\(\s*)?["']([^"']*)["']/.exec(this[S].condition); return m ? m[1] : ''; }
-    get prefix() { const m = /^([a-zA-Z_][\w-]*)\s+/.exec(this[S].condition); return m && !/^url$/i.test(m[1]) ? m[1] : ''; }
+    get namespaceURI() { return this[S].namespace[1]; }
+    get prefix() { return this[S].namespace[0]; }
   }
   tag(CSSNamespaceRule, 'CSSNamespaceRule');
   class CSSKeyframeRule extends CSSRule {
@@ -441,7 +448,11 @@
           r[S].text = () => `@import ${r[S].condition};`;
           break;
         case 'namespace;':
-          r = newRule(CSSNamespaceRule, TYPES.NAMESPACE_RULE, { condition: rest });
+          {
+            const namespace = N.cssomNamespace(rest);
+            if (!namespace) return null;
+            r = newRule(CSSNamespaceRule, TYPES.NAMESPACE_RULE, { condition: rest, namespace });
+          }
           r[S].text = () => `@namespace ${r[S].condition};`;
           break;
         case 'layer;':

@@ -994,3 +994,23 @@ fn rich_editing_preserves_paragraph_styles_typing_formats_and_preformatted_newli
     })()"#);
     assert_eq!(result, "a\nb|code|code|Yb|Y|code|true");
 }
+
+#[test]
+fn stylesheet_namespaces_limit_type_and_attribute_selectors_in_nested_rules() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, r#"<style id=sheet>@namespace H url(http://www.w3.org/1999/xhtml);
+      @namespace S "http://www.w3.org/2000/svg"; @namespace a "urn:flag";
+      @media all { H|*.item { opacity: 0.2 } S|*.item[a|flag] { opacity: 0.6 } }
+      .absent { opacity: 0.8 }</style><div id=h class=item></div><svg><g id=s class=item></g></svg>"#);
+    let result = eval(&e, &mut page, r#"(() => {
+        s.setAttributeNS('urn:flag','flag','set');
+        const rules = sheet.sheet.cssRules, rule = rules[rules.length - 1];
+        const before = [getComputedStyle(h).opacity,getComputedStyle(s).opacity];
+        rule.selectorText = 'unknown|g';
+        const rejected = rule.selectorText;
+        rule.selectorText = 'S|g.item[a|flag]';
+        return [...before, rules[0].prefix, rules[0].namespaceURI, rejected,
+            rule.selectorText, getComputedStyle(s).opacity].join('|');
+    })()"#);
+    assert_eq!(result, "0.2|0.6|H|http://www.w3.org/1999/xhtml|.absent|S|g.item[a|flag]|0.8");
+}

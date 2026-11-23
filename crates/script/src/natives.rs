@@ -486,7 +486,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "requestRenderUpdate", 0, request_render_update);
     realm.define_method(o, "setFactory", 2, set_factory);
     realm.define_method(o, "setAdoptedStyles", 2, set_adopted_styles);
-    realm.define_method(o, "cssomValidSelector", 2, crate::cssom::cssom_valid_selector);
+    realm.define_method(o, "cssomNamespace", 1, crate::cssom::cssom_namespace);
+    realm.define_method(o, "cssomValidSelector", 3, crate::cssom::cssom_valid_selector);
     realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
     realm.define_method(o, "setSheetText", 2, set_sheet_text);

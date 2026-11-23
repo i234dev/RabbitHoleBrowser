@@ -22,6 +22,7 @@ pub enum AttrOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttrSelector {
     pub any_namespace: bool,
+    pub namespace: Option<Arc<str>>,
     pub name: String,
     pub op: AttrOp,
     pub value: String,
@@ -117,7 +118,8 @@ enum PseudoParse {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Compound {
-    pub no_namespace: bool,
+    /// A required namespace URI. The empty URI selects unnamespaced elements.
+    pub namespace: Option<Arc<str>>,
     pub tag: Option<String>,
     pub id: Option<String>,
     pub classes: Vec<String>,
@@ -323,7 +325,10 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
 
 // ---------------------------------------------------------------- parsing
 
+pub(crate) type Namespaces = Option<Arc<HashMap<String, Arc<str>>>>;
+
 pub struct SelectorParser<'a> {
+    pub(crate) namespaces: Namespaces,
     parent: Option<Arc<Vec<Selector>>>,
     implicit_parent: bool,
     in_has: bool,
@@ -333,15 +338,15 @@ pub struct SelectorParser<'a> {
 
 impl<'a> SelectorParser<'a> {
     pub fn new(toks: &'a [Token]) -> Self {
-        SelectorParser { toks, pos: 0, parent: None, implicit_parent: false, in_has: false }
+        SelectorParser { namespaces: None, toks, pos: 0, parent: None, implicit_parent: false, in_has: false }
     }
 
     pub(crate) fn nested(toks: &'a [Token], parent: Arc<Vec<Selector>>) -> Self {
-        Self { toks, pos: 0, parent: Some(parent), implicit_parent: true, in_has: false }
+        Self { namespaces: None, toks, pos: 0, parent: Some(parent), implicit_parent: true, in_has: false }
     }
 
     fn subparser(&self, toks: &'a [Token]) -> Self {
-        Self { toks, pos: 0, parent: self.parent.clone(), implicit_parent: false, in_has: self.in_has }
+        Self { namespaces: self.namespaces.clone(), toks, pos: 0, parent: self.parent.clone(), implicit_parent: false, in_has: self.in_has }
     }
 
     fn nesting(&self) -> Pseudo {
@@ -446,6 +451,7 @@ impl<'a> SelectorParser<'a> {
     fn parse_compound(&mut self) -> Option<Compound> {
         let mut c = Compound::default();
         let mut any = false;
+        let prefix_start = self.pos;
         // Type / universal
         match self.peek() {
             Some(Token::Ident(name)) => {
@@ -460,9 +466,13 @@ impl<'a> SelectorParser<'a> {
             }
             _ => {}
         }
-        // Namespace prefix `*|` or `svg|` – accept and ignore
+        // Resolve prefixes in the stylesheet that contains this selector.
         if self.peek() == Some(&Token::Delim('|')) {
-            c.no_namespace = !any;
+            c.namespace = match &self.toks[prefix_start] {
+                Token::Ident(prefix) => Some(self.namespaces.as_ref()?.get(prefix)?.clone()),
+                Token::Delim('*') => None,
+                _ => Some(Arc::from("")),
+            };
             any = true;
             self.pos += 1;
             match self.bump() {
@@ -470,6 +480,8 @@ impl<'a> SelectorParser<'a> {
                 Some(Token::Delim('*')) => c.tag = Some("*".into()),
                 _ => return None,
             }
+        } else {
+            c.namespace = self.namespaces.as_ref().and_then(|names| names.get("")).cloned();
         }
         loop {
             match self.peek() {
@@ -521,9 +533,17 @@ impl<'a> SelectorParser<'a> {
 
     fn parse_attr(&mut self) -> Option<AttrSelector> {
         self.skip_ws();
-        let any_namespace = self.toks.get(self.pos..self.pos + 2) == Some(&[Token::Delim('*'), Token::Delim('|')]);
-        if any_namespace { self.pos += 2; }
-        else if self.peek() == Some(&Token::Delim('|')) { self.pos += 1; }
+        let mut any_namespace = false;
+        let mut namespace = None;
+        match self.toks.get(self.pos..) {
+            Some([Token::Delim('*'), Token::Delim('|'), ..]) => { any_namespace = true; self.pos += 2; }
+            Some([Token::Ident(prefix), Token::Delim('|'), Token::Ident(_), ..]) => {
+                namespace = Some(self.namespaces.as_ref()?.get(prefix)?.clone());
+                self.pos += 2;
+            }
+            Some([Token::Delim('|'), ..]) => self.pos += 1,
+            _ => {}
+        }
         let name = match self.bump() {
             Some(Token::Ident(n)) => n.to_ascii_lowercase(),
             _ => return None,
@@ -533,7 +553,7 @@ impl<'a> SelectorParser<'a> {
             Some(Token::CloseBracket) => {
                 self.pos += 1;
                 return Some(AttrSelector {
-                    any_namespace,
+                    any_namespace, namespace,
                     name,
                     op: AttrOp::Exists,
                     value: String::new(),
@@ -578,7 +598,7 @@ impl<'a> SelectorParser<'a> {
             return None;
         }
         Some(AttrSelector {
-            any_namespace,
+            any_namespace, namespace,
             name,
             op,
             value,
@@ -708,6 +728,13 @@ impl<'a> SelectorParser<'a> {
                         let mut sub = self.subparser(inner);
                         // Forgiving selector list: drop invalid parts.
                         let mut list = if lname == "not" { sub.parse_list()? } else { sub.parse_list_forgiving() };
+                        // The default namespace applies to the subject of a logical
+                        // combination only when it has an explicit type or universal.
+                        for selector in &mut list {
+                            if let Some(subject) = selector.compounds.last_mut() {
+                                if subject.tag.is_none() { subject.namespace = None; }
+                            }
+                        }
                         if lname != "not" { list.retain(|s| s.pseudo_element.is_none()); }
                         match lname.as_str() {
                             "not" => Pseudo::Not(list),
@@ -858,6 +885,10 @@ impl<'a> SelectorParser<'a> {
 /// Validate a selector list in CSSOM's style-rule context. Forgiving
 /// functional pseudo-classes can contain unsupported alternatives.
 pub fn valid_rule_selector(tokens: &[Token], nested: bool) -> bool {
+    valid_rule_selector_with_namespaces(tokens, nested, &[])
+}
+
+pub fn valid_rule_selector_with_namespaces(tokens: &[Token], nested: bool, declarations: &[Token]) -> bool {
     fn valid(sel: &Selector) -> bool {
         sel.compounds.iter().all(|c| c.pseudos.iter().all(|p| match p {
             Pseudo::Never => false,
@@ -869,6 +900,12 @@ pub fn valid_rule_selector(tokens: &[Token], nested: bool) -> bool {
         }))
     }
     let mut parser = if nested { SelectorParser::nested(tokens, Arc::new(Vec::new())) } else { SelectorParser::new(tokens) };
+    for declaration in declarations.split(|t| *t == Token::Semicolon) {
+        if let Some((prefix, uri)) = crate::parse_namespace(declaration) {
+            let names = parser.namespaces.get_or_insert_with(Default::default);
+            Arc::make_mut(names).insert(prefix.to_owned(), Arc::from(uri));
+        }
+    }
     parser.parse_list().is_some_and(|list| list.iter().all(valid))
 }
 
@@ -1198,7 +1235,7 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
         Some(e) => e,
         None => return false,
     };
-    if c.no_namespace && el.ns != rabbithole_dom::Namespace::None { return false; }
+    if c.namespace.as_deref().is_some_and(|uri| el.ns.uri().unwrap_or("") != uri) { return false; }
     if let Some(t) = &c.tag {
         // Selectors are lower-cased; SVG / XML elements keep their case
         // (`linearGradient`, `Foo`), so compare without ASCII case.
@@ -1228,9 +1265,11 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
         } else {
             attr_op_matches(&a.op, v, &a.value)
         };
-        let ok = if a.any_namespace {
+        let ok = if a.any_namespace || a.namespace.is_some() {
             el.attrs.iter().any(|(name, value)| {
-                let local = if doc.attr_namespace(node, name).is_some() { name.rsplit(':').next().unwrap_or(name) } else { name };
+                let ns = doc.attr_namespace(node, name);
+                if !a.any_namespace && ns.unwrap_or("") != a.namespace.as_deref().unwrap_or("") { return false; }
+                let local = if ns.is_some() { name.rsplit(':').next().unwrap_or(name) } else { name };
                 local == a.name && matches_value(value)
             })
         } else {
