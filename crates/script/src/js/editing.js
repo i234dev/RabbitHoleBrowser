@@ -483,24 +483,38 @@
     if (!range.collapsed && ((point === left && offset !== left.length) ||
         (range.endContainer === right && range.endOffset !== 0))) return false;
 
-    let first = branchIn(right, src);
+    const first = branchIn(right, src);
     const move = doc.createRange();
     move.setStartBefore(first);
     move.setEnd(src, src.childNodes.length);
-    let n = first, br = null;
+    let n = first, br = null, newline = null;
     while (n && src.contains(n)) {
       if (n.nodeType === 1 && (isBlock(n) || n.localName === 'br' || !n.isContentEditable)) {
         move.setEndBefore(n);
         if (n.localName === 'br') br = n;
         break;
       }
+      if (n.nodeType === 3) {
+        const index = n.data.indexOf('\n');
+        if (index !== -1 && ['pre', 'pre-wrap', 'pre-line', 'break-spaces'].includes(getComputedStyle(n.parentElement).whiteSpace)) {
+          // The retained Text node starts at the separator after extraction.
+          if (index) move.setEnd(n, index);
+          else move.setEndBefore(n);
+          newline = n;
+          break;
+        }
+      }
       n = n.firstChild || adjacentNode(n, src, true);
     }
-    if (move.collapsed) return false;
+    if (move.collapsed && !newline) return false;
     const whiteSpace = getComputedStyle(src).whiteSpace;
     const preserve = whiteSpace !== getComputedStyle(dest).whiteSpace;
     const before = branchIn(left, dest).nextSibling;
     const fragment = move.extractContents();
+    if (newline) {
+      newline.deleteData(0, 1);
+      if (!newline.length) br = newline;
+    }
     if (br) {
       let el = br.parentElement;
       br.remove();
@@ -510,7 +524,7 @@
         el = parent;
       }
     }
-    if (preserve) {
+    if (preserve && fragment.hasChildNodes()) {
       const span = doc.createElement('span');
       span.style.whiteSpace = whiteSpace;
       span.appendChild(fragment);

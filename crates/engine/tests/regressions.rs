@@ -825,3 +825,17 @@ fn css_style_rule_selector_changes_are_atomic() {
     })()"#);
     assert_eq!(result, ".selected|rgb(255, 0, 0)|section, :is(.other, :unknown-pseudo)|rgb(0, 0, 0)");
 }
+
+#[test]
+fn a_preserved_newline_ends_the_line_moved_by_delete() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=ed contenteditable><p>old</p><div style='white-space:pre-wrap'><i>first\nsecond</i></div></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const start = ed.firstChild.firstChild;
+        getSelection().collapse(start, start.length);
+        document.execCommand('forwardDelete');
+        return [ed.firstChild.textContent, ed.lastChild.innerHTML,
+                ed.firstChild.querySelector('i').textContent].join('|');
+    })()"#);
+    assert_eq!(result, "oldfirst|<i>second</i>|first");
+}
