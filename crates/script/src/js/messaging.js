@@ -32,11 +32,7 @@
     postMessage(message, transfer) {
       const st = this[S];
       if (st.closed) return;
-      const { data, ports } = cloneWithPorts(message, transfer);
-      const target = st.entangled;
-      if (!target) return;
-      target[S].queue.push({ data, ports });
-      if (target[S].started) flush(target);
+      enqueuePeer(this, C.pack(message, transfer));
     }
     start() { this[S].started = true; flush(this); }
     close() { const st = this[S]; st.closed = true; if (st.entangled) { st.entangled[S].entangled = null; st.entangled.dispatchEvent(new Event('close')); } st.entangled = null; }
@@ -60,6 +56,20 @@
     old.closed = old.detached = true;
     return copy;
   };
+  function enqueuePeer(port, packet) {
+    const target = port[S].entangled;
+    if (!target) return;
+    target[S].queue.push(packet);
+    if (target[S].started) flush(target);
+  }
+  // A realm bridge relays the serialized graph unchanged. Only the receiving
+  // event materializes its objects; event.ports lists MessagePorts exclusively.
+  C.enqueuePeer = enqueuePeer;
+  C.forwardPort = (port, forward) => {
+    port[S].forward = forward;
+    port[S].started = true;
+    flush(port);
+  };
   function flush(port) {
     const st = port[S];
     if (st.scheduled || !st.queue.length) return;
@@ -69,8 +79,14 @@
     task(() => {
       st.scheduled = false;
       if (!st.queue.length || !st.started) return;
-      const { data, ports } = st.queue.shift();
-      port.dispatchEvent(new g.MessageEvent('message', { data, ports, origin: '' }));
+      const packet = st.queue.shift();
+      if (st.forward) st.forward(packet);
+      else {
+        let data;
+        try { data = C.deserialize(packet.d, packet.ports); }
+        catch (_) { port.dispatchEvent(new g.MessageEvent('messageerror')); flush(port); return; }
+        port.dispatchEvent(new g.MessageEvent('message', { data, ports: packet.ports, origin: '' }));
+      }
       flush(port);
     });
   }
@@ -145,10 +161,9 @@
   const send = (id, msg) => N.workerSend(id, JSON.stringify(msg));
   function bridgeTo(id, port, b) {
     workerBridges.set(b, port);
-    port.onmessage = ev => send(id, { t: 'port', b, ...workerPacket(id, ev.data, ev.ports) });
+    C.forwardPort(port, packet => send(id, { t: 'port', b, ...workerPacket(id, packet) }));
   }
-  function workerPacket(id, message, transfer) {
-    const packet = C.pack(message, transfer);
+  function workerPacket(id, packet) {
     const ports = packet.ports.map(port => {
       const b = 'o' + nextWorkerBridge++;
       bridgeTo(id, port, b);
@@ -171,7 +186,7 @@
       const p = workerBridges.get(m.b);
       if (p) {
         const ports = incomingWorkerPorts(id, m.ports);
-        p.postMessage(C.deserialize(m.d, ports), ports);
+        C.enqueuePeer(p, { d: m.d, ports });
       }
       return;
     }
@@ -202,7 +217,7 @@
     postMessage(message, transfer) {
       const st = this[S];
       if (st.terminated) return;
-      send(st.id, { t: 'msg', ...workerPacket(st.id, message, transfer) });
+      send(st.id, { t: 'msg', ...workerPacket(st.id, C.pack(message, transfer)) });
     }
     terminate() {
       const st = this[S];

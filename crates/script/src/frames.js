@@ -403,11 +403,10 @@
   const bridges = new Map();
   let nextBridge = 0;
   function forward(port, bridge, frame) {
-    port.onmessage = (ev) => {
-      const packet = pack(ev.data, ev.ports);
+    codec.forwardPort(port, packet => {
       post(frame, JSON.stringify({ t: 'port', id: bridge, d: packet.d,
         ports: packet.ports.map(p => bridgePort(p, frame)) }), '*');
-    };
+    });
   }
   // `port` (ours) goes to frame `frame`: messages arriving on it are sent
   // there; messages from there are posted into it.
@@ -434,7 +433,7 @@
       const port = bridges.get(env.id);
       if (port) {
         const ports = incomingPorts(env.ports, source);
-        port.postMessage(deserialize(env.d, ports), ports);
+        codec.enqueuePeer(port, { d: env.d, ports });
       }
       return;
     }

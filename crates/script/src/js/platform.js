@@ -717,7 +717,7 @@
   const swPost = (kind, id, msg) => N.swPostMessage(kind, id, JSON.stringify(msg));
   function swBridge(port, b, kind, id) {
     swBridges.set(b, port);
-    port.onmessage = ev => swSend(kind, id, ev.data, ev.ports, b);
+    swClone.forwardPort(port, packet => swPost(kind, id, { t: 'port', b, d: packet.d, ports: swOutgoing(kind, id, packet.ports) }));
   }
   function swOutgoing(kind, id, ports) {
     if (swBridgePrefix === null) { const s = swSnapshot(); swBridgePrefix = s.worker !== null ? `w${s.worker}` : `c${s.client}`; }
@@ -727,15 +727,15 @@
     return (bridges || []).map(b => { const ch = new g.MessageChannel(); swBridge(ch.port2, b, kind, id); return ch.port1; });
   }
   // Serialize before any side effect: DataCloneError leaves ports untouched.
-  function swSend(kind, id, message, transfer, b) {
+  function swSend(kind, id, message, transfer) {
     const packet = swClone.pack(message, transfer);
-    return swPost(kind, id, { t: b === undefined ? 'msg' : 'port', b, d: packet.d, ports: swOutgoing(kind, id, packet.ports) });
+    return swPost(kind, id, { t: 'msg', d: packet.d, ports: swOutgoing(kind, id, packet.ports) });
   }
   function swPortMessage(m, kind, id) {
     const p = swBridges.get(m.b);
     if (!p) return;
     const ports = swIncoming(kind, id, m.ports);
-    p.postMessage(swClone.deserialize(m.d, ports), ports);
+    swClone.enqueuePeer(p, { d: m.d, ports });
   }
   class ServiceWorker extends g.EventTarget {
     constructor() { super(); ILLEGAL(); }

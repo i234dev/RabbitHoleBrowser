@@ -2106,3 +2106,31 @@ fn contextless_offscreen_canvas_transfers_with_its_final_dimensions() {
     "#);
     assert_eq!(out, ["DataCloneError", "0 0 true 7 2", "InvalidStateError", "InvalidStateError", "DataCloneError"]);
 }
+
+#[test]
+fn shared_worker_ports_forward_transferred_objects_in_the_message_graph() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/canvas-worker.js".into(), (200, "text/javascript".into(), r#"
+        onconnect = connection => {
+            const port = connection.ports[0];
+            port.onmessage = e => {
+                const canvas = e.data.canvas;
+                canvas.height += 2;
+                port.postMessage([canvas, canvas, e.ports.length], [canvas]);
+            };
+        };
+    "#.into()));
+    run(&mut env, &mut host, r#"
+        const {port} = new SharedWorker('canvas-worker.js');
+        const canvas = new OffscreenCanvas(11, 3);
+        port.onmessage = e => console.log(e.data[0] === e.data[1], e.data[0].width, e.data[0].height, e.ports.length, e.data[2]);
+        port.postMessage({canvas}, [canvas]);
+        console.log(canvas.width);
+    "#);
+    for i in 1..=10 {
+        host.run_timers(&mut env, 1000.0 + 10.0 * i as f64);
+        host.run_jobs(&mut env);
+    }
+    let logs: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, message)| message.as_str()).collect();
+    assert_eq!(logs, ["0", "true 11 5 0 0"]);
+}

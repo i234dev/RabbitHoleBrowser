@@ -50,10 +50,9 @@
   // A local MessagePort bridged to the owner's realm under id `b`.
   function bridge(port, b) {
     bridges.set(b, port);
-    port.onmessage = ev => post({ t: 'port', b, ...workerPacket(ev.data, ev.ports) });
+    C.forwardPort(port, packet => post({ t: 'port', b, ...workerPacket(packet) }));
   }
-  function workerPacket(message, transfer) {
-    const packet = C.pack(message, transfer);
+  function workerPacket(packet) {
     const ports = packet.ports.map(port => {
       const b = 'w' + info.id + '.' + nextBridge++;
       bridge(port, b);
@@ -71,7 +70,7 @@
 
   const scope = {
     postMessage(message, transfer) {
-      post({ t: 'msg', ...workerPacket(message, transfer) });
+      post({ t: 'msg', ...workerPacket(C.pack(message, transfer)) });
     },
     close() { N.workerClose(); },
     importScripts(...urls) {
@@ -94,7 +93,7 @@
       const p = bridges.get(m.b);
       if (p) {
         const ports = incomingPorts(m.ports);
-        p.postMessage(C.deserialize(m.d, ports), ports);
+        C.enqueuePeer(p, { d: m.d, ports });
       }
       return;
     }
