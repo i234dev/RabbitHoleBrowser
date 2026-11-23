@@ -32,6 +32,24 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.2.45 opens the 0.2 series with a broad pass over the web platform
+APIs, measured with WPT testharness: **87.4 %** of 1,756,838 subtests on 38,226
+browser pages, against 44.0 % for 0.1.44 on the same pages
+([record](docs/benchmarks/wpt-apis-2026-11-24-v0.2.45.md)). It adds rich text
+editing (`execCommand`, `beforeinput` target ranges and keyboard editing in
+`contenteditable`), WebCrypto with native primitives (SHA, HKDF/PBKDF2, AES-GCM,
+ChaCha20-Poly1305, ECDH/ECDSA on NIST curves, X25519, Ed25519 and RSA), WebRTC
+data channels over UDP with ICE, DTLS and SCTP, CSS anchor positioning with
+`position-try` fallbacks, motion paths, wide-gamut computed colors, popovers,
+declarative shadow DOM options, Blob/File/FormData/XMLHttpRequest conformance,
+structured cloning across frames and workers, and restricted network ports.
+WPT CSS reftests rise to 83.7 % with no test lost
+([record](docs/benchmarks/wpt-css-2026-11-23-v0.2.45.md)). Speedometer 3.1 is
+about 0.7 % slower than 0.1.44 in 22 paired runs; no single cause was found
+([record](docs/benchmarks/speedometer-2026-11-23-v0.2.45.md)). The cryptography
+and WebRTC dependencies add about 9 MB to the executable. From this version the
+last version number counts deliveries without resetting (0.1.44 → 0.2.45).
+
 Version 0.1.44 fixes app startup on popular sites: built-in Web APIs
 (`MessageChannel`, `requestIdleCallback`, `scheduler.postTask`, observers) keep the
 engine's own timers when pages replace `setTimeout`; stylesheet `<link>` load
@@ -207,8 +225,8 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 | Suite | Result | Notes |
 |---|---|---|
 | **test262** (ECMAScript) | **99.90 %** (46,017 / 46,064 run) | 2026-11-18, 0.1.34 JavaScript code `fe3d71e`, JIT on, 8 workers, profile ci; **99.93 % excluding Intl**, ECMA-402 98.6 %; multi-agent `Atomics` and `Intl.NumberFormat` v3 tests included; [measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md) and `crates/js/tests/test262_baseline.txt` |
-| **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **83.5 %** (16,398 / 19,627) | 2026-11-21, 0.1.44 CSS/layout code `0935148c`; transforms 94.2 %, color 93.6 %, CSS2 92.8 %, css-ui 91.2 %, images 90.0 %, flexbox 85.2 %, filter-effects 75.9 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-21-v0.1.44.md) and `crates/engine/tests/wpt-css-baseline.txt` |
+| **WPT testharness** (web APIs: DOM, HTML, Encoding, Fetch, WebCrypto, editing, CSSOM, …) | **87.4 %** (1,534,634 / 1,756,838 subtests, 38,226 pages) | 2026-11-23/24, 0.2.45 engine `de718d24`, WPT `831baf28`, natively discovered browser pages (1,946 wptserve variants not rerun); 0.1.44 had 44.0 % on the same pages; [measurement](docs/benchmarks/wpt-apis-2026-11-24-v0.2.45.md) and `tools/wpt/` |
+| **WPT CSS reftests** (pixel comparison) | **83.7 %** (16,435 / 19,627) | 2026-11-23, 0.2.45 CSS/layout code `b6879c73`; transforms 94.3 %, color 96.5 %, CSS2 92.8 %, css-ui 91.2 %, images 90.5 %, flexbox 85.6 %, filter-effects 75.9 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-23-v0.2.45.md) and `crates/engine/tests/wpt-css-baseline.txt` |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
@@ -333,6 +351,10 @@ reports agent-task results supplied by the project owner for v0.1.15 on
   to `event.request.signal`; existing HTTP transport is not physically canceled.
 - Complex sign-in screens, including Google Account pages, still have layout
   and interaction gaps; a complete authenticated sign-in has not been validated.
+- WebRTC covers peer connections with data channels over UDP host candidates
+  (ICE, DTLS, SCTP, ICE restarts). Camera and microphone capture, audio/video
+  tracks and interoperability with other browsers' media are not available;
+  `getUserMedia` reports `NotSupportedError`.
 - No Temporal API; Intl is partial.
 - The JIT gains about 2 % on Speedometer as a whole: most browser time is in
   layout, memory management, painting and DOM work, not in the JS interpreter.
@@ -503,6 +525,14 @@ functionality: `winit` (windows/input), `softbuffer` (presenting pixels),
 (OpenType shaping and glyph outlines), `symphonia`, `opus-decoder` and
 `rusty_vp9` (audio/video decoding), compression crates (`flate2`,
 `brotli-decompressor`, `ruzstd`), and `serde_json` for MCP messages.
+
+Since 0.2.45, cryptography and the WebRTC transport also use external crates:
+`ring`, `aes`, `ghash`, `x25519-dalek` and AWS-LC (`aws-lc-rs`/`aws-lc-sys`)
+for WebCrypto primitives and RSA; `str0m` for ICE, DTLS and SRTP, with
+`rcgen`/`x509-parser` for DTLS certificates (Windows uses the system crypto
+provider for DTLS); and `sctp-proto` for data channels, vendored in
+`vendor/sctp-proto` with a seven-line patch for empty messages
+(RFC 8831 §6.6). They add about 9 MB to the executable.
 
 ## Roadmap
 

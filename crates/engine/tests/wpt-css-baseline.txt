@@ -1,32 +1,32 @@
 # WPT reftest baseline: per-directory pass/total, then failing tests.
-dir css/CSS2 5782 6232
+dir css/CSS2 5783 6232
 dir css/compositing 36 60
 dir css/css-align 37 64
 dir css/css-backgrounds 607 718
 dir css/css-borders 42 123
 dir css/css-box 38 42
 dir css/css-cascade 41 51
-dir css/css-color 291 311
-dir css/css-conditional 149 172
+dir css/css-color 300 311
+dir css/css-conditional 150 172
 dir css/css-contain 307 435
 dir css/css-display 179 223
-dir css/css-flexbox 875 1027
+dir css/css-flexbox 879 1027
 dir css/css-fonts 262 387
-dir css/css-grid 1390 1763
-dir css/css-images 434 482
-dir css/css-masking 268 384
+dir css/css-grid 1397 1763
+dir css/css-images 436 482
+dir css/css-masking 269 384
 dir css/css-nesting 13 17
 dir css/css-overflow 449 719
-dir css/css-position 156 251
+dir css/css-position 161 251
 dir css/css-sizing 400 568
 dir css/css-text 1201 1550
-dir css/css-text-decor 283 339
-dir css/css-transforms 748 794
+dir css/css-text-decor 284 339
+dir css/css-transforms 749 794
 dir css/css-ui 877 962
 dir css/css-values 115 192
 dir css/css-writing-modes 934 1162
 dir css/filter-effects 281 370
-dir css/selectors 203 229
+dir css/selectors 208 229
 fail css/CSS2/abspos/abspos-containing-block-initial-004a.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004b.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004c.xht
@@ -376,7 +376,6 @@ fail css/CSS2/syntax/blocks-001.xht
 fail css/CSS2/syntax/case-sensitive-005.xht
 fail css/CSS2/syntax/case-sensitive-007.xht
 fail css/CSS2/syntax/charset-attr-001.xht
-fail css/CSS2/syntax/colors-004.xht
 fail css/CSS2/syntax/counters-002.xht
 fail css/CSS2/syntax/declarations-009.xht
 fail css/CSS2/syntax/escapes-001.xht
@@ -737,22 +736,13 @@ fail css/css-cascade/scope-visited.html
 fail css/css-color/animation/contrast-color-interpolation.html
 fail css/css-color/at-color-profile-001.html
 fail css/css-color/clip-opacity-out-of-flow.html
-fail css/css-color/color-layers-no-blend-mode.html
 fail css/css-color/currentcolor-003.html
 fail css/css-color/deprecated-sameas-018.html
 fail css/css-color/hsl-009.html
 fail css/css-color/hsl-010.html
 fail css/css-color/inline-opacity-float-child.html
-fail css/css-color/relative-currentcolor-a98rgb-01.html
-fail css/css-color/relative-currentcolor-displayp3-01.html
-fail css/css-color/relative-currentcolor-prophoto-01.html
-fail css/css-color/relative-currentcolor-rec2020-01.html
-fail css/css-color/relative-currentcolor-rec2020-02.html
 fail css/css-color/t32-opacity-offscreen-multiple-boxes-1-c.xht
 fail css/css-color/t32-opacity-offscreen-multiple-boxes-2-c.xht
-fail css/css-color/t421-rgb-func-no-mixed-f.xht
-fail css/css-color/t422-rgba-func-no-mixed-f.xht
-fail css/css-color/t425-hsla-parsing-f.xht
 fail css/css-color/t44-currentcolor-inherited-c.xht
 fail css/css-conditional/at-media-002.html
 fail css/css-conditional/at-media-003.html
@@ -776,7 +766,6 @@ fail css/css-conditional/container-queries/multiple-conditions-001.html
 fail css/css-conditional/container-queries/no-layout-containment-fixedpos-dynamic.html
 fail css/css-conditional/container-queries/no-layout-containment-fixedpos.html
 fail css/css-conditional/container-queries/query-style-color.html
-fail css/css-conditional/container-queries/whitespace-update-after-removal.html
 fail css/css-contain/contain-body-overflow-002.html
 fail css/css-contain/contain-body-w-m-004.html
 fail css/css-contain/contain-content-003.html
@@ -959,10 +948,6 @@ fail css/css-flexbox/abspos/position-absolute-containing-block-002.html
 fail css/css-flexbox/align-baseline.html
 fail css/css-flexbox/align-items-007.html
 fail css/css-flexbox/align-self-016.html
-fail css/css-flexbox/alignment/flow-start-flow-end-align-properties.html
-fail css/css-flexbox/alignment/flow-start-flow-end-justify-content.html
-fail css/css-flexbox/alignment/flow-start-flow-end-reverse.html
-fail css/css-flexbox/alignment/flow-start-flow-end-wrap-reverse.html
 fail css/css-flexbox/aspect-ratio-intrinsic-size-009.html
 fail css/css-flexbox/aspect-ratio-nonreplaced-max-content-contribution-001.html
 fail css/css-flexbox/auto-margins-001.html
@@ -1295,8 +1280,6 @@ fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-004.htm
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-005.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-006.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-007.html
-fail css/css-grid/animation/grid-template-columns-001.html
-fail css/css-grid/animation/grid-template-rows-001.html
 fail css/css-grid/grid-definition/fr-unit-with-percentage.html
 fail css/css-grid/grid-definition/fr-unit.html
 fail css/css-grid/grid-definition/grid-auto-repeat-aspect-ratio-002.html
@@ -1350,8 +1333,6 @@ fail css/css-grid/grid-lanes/alignment/column-track-reverse-justify-items-001.ht
 fail css/css-grid/grid-lanes/alignment/column-track-reverse-justify-items-002.html
 fail css/css-grid/grid-lanes/alignment/grid-lanes-align-content-001.html
 fail css/css-grid/grid-lanes/alignment/grid-lanes-content-distribution-001.html
-fail css/css-grid/grid-lanes/alignment/grid-lanes-flow-start-flow-end-align-properties.html
-fail css/css-grid/grid-lanes/alignment/grid-lanes-flow-start-flow-end-justify-properties.html
 fail css/css-grid/grid-lanes/alignment/row-fill-reverse-justify-content-001.html
 fail css/css-grid/grid-lanes/alignment/row-fill-reverse-justify-content-003.html
 fail css/css-grid/grid-lanes/alignment/row-fill-reverse-justify-content-indefinite-size-001.html
@@ -1363,8 +1344,6 @@ fail css/css-grid/grid-lanes/alignment/row-grid-lanes-alignment-positioned-items
 fail css/css-grid/grid-lanes/alignment/row-justify-items-016.html
 fail css/css-grid/grid-lanes/alignment/row-track-reverse-align-content-001.html
 fail css/css-grid/grid-lanes/alignment/row-track-reverse-align-items-001.html
-fail css/css-grid/grid-lanes/animation/grid-template-columns-001.html
-fail css/css-grid/grid-lanes/animation/grid-template-rows-001.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-001a.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-002a.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-002b.html
@@ -1391,7 +1370,6 @@ fail css/css-grid/grid-lanes/baseline/row-grid-lanes-item-baseline-005.html
 fail css/css-grid/grid-lanes/grid-placement/grid-lanes-grid-placement-named-lines-001.html
 fail css/css-grid/grid-lanes/grid-placement/grid-lanes-grid-placement-named-lines-002.html
 fail css/css-grid/grid-lanes/grid-placement/grid-lanes-grid-placement-named-lines-dense-packing-001.html
-fail css/css-grid/grid-lanes/grid-placement/row-explicit-placement-007.html
 fail css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-contain-intrinsic-size-008.html
 fail css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-contain-intrinsic-size-010.html
 fail css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-intrinsic-sizing-rows-003-mix1.html
@@ -1613,10 +1591,8 @@ fail css/css-images/css-image-fallbacks-and-annotations002.html
 fail css/css-images/css-image-fallbacks-and-annotations003.html
 fail css/css-images/css-image-fallbacks-and-annotations004.html
 fail css/css-images/css-image-fallbacks-and-annotations005.html
-fail css/css-images/gradient/display-p3-linear-gradient.html
 fail css/css-images/gradient/gradient-analogous-missing-components-004.html
 fail css/css-images/gradient/gradient-eval-004.html
-fail css/css-images/gradient/gradient-eval-predefined-color-spaces.html
 fail css/css-images/gradient/gradient-infinity-001.html
 fail css/css-images/gradient/gradient-infinity-002.html
 fail css/css-images/gradient/gradient-infinity-003.html
@@ -1662,7 +1638,6 @@ fail css/css-masking/clip-path/animations/clip-path-animation-view-transition-mi
 fail css/css-masking/clip-path/animations/clip-path-path-interpolation-with-zoom.html
 fail css/css-masking/clip-path/animations/clip-path-shape-interpolation-with-zoom.html
 fail css/css-masking/clip-path/animations/clip-path-shape-transition-with-zoom.html
-fail css/css-masking/clip-path/animations/clip-path-transition-allow-discrete.html
 fail css/css-masking/clip-path/animations/two-clip-path-animation-diff-length4.html
 fail css/css-masking/clip-path/clip-path-columns-shape-001.html
 fail css/css-masking/clip-path/clip-path-columns-shape-002.html
@@ -2052,7 +2027,6 @@ fail css/css-position/multicol/vrl-rtl-ltr-in-multicols.tentative.html
 fail css/css-position/multicol/vrl-rtl-rtl-in-multicols.html
 fail css/css-position/nested-inline-abspos-child-with-siblings.html
 fail css/css-position/nested-inline-abspos-child.html
-fail css/css-position/overlay/overlay-button-appearance.html
 fail css/css-position/overlay/overlay-transition-backdrop.html
 fail css/css-position/overlay/overlay-transition-dialog.html
 fail css/css-position/overlay/overlay-transition-finished.html
@@ -2082,16 +2056,12 @@ fail css/css-position/position-absolute-semi-replaced-stretch-input.html
 fail css/css-position/position-absolute-semi-replaced-stretch-other.html
 fail css/css-position/position-fixed-overflow-print.html
 fail css/css-position/position-fixed-scroll-nested-fixed.html
-fail css/css-position/replaced-object-backdrop.html
 fail css/css-position/static-position/htb-rtl-ltr.tentative.html
 fail css/css-position/static-position/htb-rtl-rtl.html
-fail css/css-position/static-position/top-layer-box-uses-icb-htb-ltr.html
 fail css/css-position/static-position/top-layer-box-uses-icb-htb-rtl.html
 fail css/css-position/static-position/top-layer-box-uses-icb-slr-ltr.html
-fail css/css-position/static-position/top-layer-box-uses-icb-slr-rtl.html
 fail css/css-position/static-position/top-layer-box-uses-icb-srl-ltr.html
 fail css/css-position/static-position/top-layer-box-uses-icb-srl-rtl.html
-fail css/css-position/static-position/top-layer-box-uses-icb-vlr-ltr.html
 fail css/css-position/static-position/top-layer-box-uses-icb-vlr-rtl.html
 fail css/css-position/static-position/top-layer-box-uses-icb-vrl-ltr.html
 fail css/css-position/static-position/top-layer-box-uses-icb-vrl-rtl.html
@@ -2304,7 +2274,6 @@ fail css/css-text-decor/invalidation/selection-pseudo-with-decoration-invalidati
 fail css/css-text-decor/invalidation/selection-pseudo-with-decoration-invalidation-002.html
 fail css/css-text-decor/invalidation/text-decoration-thickness.html
 fail css/css-text-decor/ruby-text-decoration-01.html
-fail css/css-text-decor/text-decoration-color-selection-pseudo-01.html
 fail css/css-text-decor/text-decoration-color.html
 fail css/css-text-decor/text-decoration-dotted-001.html
 fail css/css-text-decor/text-decoration-dotted-002.html
@@ -2708,7 +2677,6 @@ fail css/css-text/writing-system/writing-system-segment-break-001.html
 fail css/css-transforms/animation/rotate-explicit-and-implicit-keyframes.html
 fail css/css-transforms/animation/rotate-transform-equivalent.html
 fail css/css-transforms/animation/scale-explicit-and-implicit-keyframes.html
-fail css/css-transforms/animation/transform-additive-animation.html
 fail css/css-transforms/animation/transform-box-will-change-transform-layer.html
 fail css/css-transforms/animation/transform-box.html
 fail css/css-transforms/animation/transform-percent-with-width-and-height-separate.html
@@ -3233,7 +3201,6 @@ fail css/filter-effects/will-change-blur-filter-under-clip.html
 fail css/selectors/child-indexed-no-parent.html
 fail css/selectors/dir-style-01a.html
 fail css/selectors/dir-style-01b.html
-fail css/selectors/dir-style-02b.html
 fail css/selectors/featureless-002.html
 fail css/selectors/featureless-003.html
 fail css/selectors/featureless-004.html
@@ -3245,14 +3212,10 @@ fail css/selectors/focus-within-shadow-006.html
 fail css/selectors/focus-within-shadow-007.html
 fail css/selectors/focus-within-shadow-008.html
 fail css/selectors/has-visited.html
-fail css/selectors/invalidation/nth-child-of-attr-largedom.html
 fail css/selectors/invalidation/part-pseudo.html
-fail css/selectors/is-default-ns-001.html
 fail css/selectors/not-links.html
 fail css/selectors/of-type-selectors.xhtml
-fail css/selectors/popover-open-with-has-sibling-selector.html
 fail css/selectors/remove-hovered-element.html
 fail css/selectors/selection-image-001.html
 fail css/selectors/selector-structural-pseudo-root.html
-fail css/selectors/selectors-attr-white-space-001.html
 fail css/selectors/user-invalid-form-submission-invalidation.html
