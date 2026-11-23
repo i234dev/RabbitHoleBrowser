@@ -563,3 +563,24 @@ fn css_style_property_detection_and_color_serialization() {
     let out = eval(&e, &mut page, "var b=document.getElementById('box'),s=getComputedStyle(b); [s.color,s.backgroundColor,'color' in s,'background-color' in s,'fontSize' in b.style,'notAProperty' in s,'notAProperty' in b.style,'toString' in s].join('|')");
     assert_eq!(out, "rgba(1, 2, 3, 0.5)|rgba(6, 5, 4, 0.004)|true|true|true|false|false|true");
 }
+
+#[test]
+fn inline_editing_preserves_unselected_text_and_caret_format() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div id=ed contenteditable>abcdef</div>");
+    let out = eval(&e, &mut page, r#"(()=>{
+        const d=document,h=d.getElementById('ed'),s=getSelection();
+        s.setBaseAndExtent(h.firstChild,1,h.firstChild,5);
+        d.execCommand('bold');
+        const before=h.innerHTML, on=d.queryCommandState('bold');
+        const text=h.querySelector('b').firstChild;
+        s.setBaseAndExtent(text,1,text,3);
+        d.execCommand('bold');
+        const after=h.innerHTML;
+        s.collapse(h.lastChild,1);
+        d.execCommand('italic');
+        d.execCommand('insertText',false,'!');
+        return [before,on,after,h.lastElementChild.outerHTML].join('|');
+    })()"#);
+    assert_eq!(out, "a<b>bcde</b>f|true|a<b>b</b>cd<b>e</b>f|<i>!</i>");
+}

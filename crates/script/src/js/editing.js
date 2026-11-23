@@ -17,15 +17,169 @@
     return state;
   }
 
+  const formats = new Map([
+    ['bold', ['b', 'font-weight', 'bold', 'normal', 'formatBold']],
+    ['italic', ['i', 'font-style', 'italic', 'normal', 'formatItalic']],
+    ['underline', ['u', 'text-decoration-line', 'underline', 'none', 'formatUnderline']],
+    ['strikethrough', ['s', 'text-decoration-line', 'line-through', 'none', 'formatStrikeThrough']],
+    ['subscript', ['sub', 'vertical-align', 'sub', 'baseline', 'formatSubscript']],
+    ['superscript', ['sup', 'vertical-align', 'super', 'baseline', 'formatSuperscript']],
+  ]);
+  function activeFormat(el, cmd) {
+    if (!el) return false;
+    const [, prop, on] = formats.get(cmd);
+    const style = getComputedStyle(el).getPropertyValue(prop);
+    if (cmd === 'bold') return style === 'bold' || Number(style) >= 600;
+    if (style.split(' ').includes(on)) return true;
+    if (['subscript','superscript','underline','strikethrough'].includes(cmd)) {
+      for (let p = el.parentElement; p; p = p.parentElement) {
+        if (getComputedStyle(p).getPropertyValue(prop).split(' ').includes(on)) return true;
+      }
+    }
+    return false;
+  }
+  // Boundary text nodes are split only when formatting actually changes.
+  // Excluding indices at the open ends avoids styling adjacent siblings.
+  function selectedText(t) {
+    const { range, host } = t;
+    const root = range.commonAncestorContainer, result = [], stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!range.intersectsNode(node)) continue;
+      if (node.nodeType === 3) {
+        const from = node === range.startContainer ? range.startOffset : 0;
+        const to = node === range.endContainer ? range.endOffset : node.length;
+        if (from < to && editingHost(node) === host) result.push({ node, from, to });
+      } else {
+        for (let child = node.lastChild; child; child = child.previousSibling) stack.push(child);
+      }
+    }
+    return result;
+  }
+  function selectionElement(range) {
+    const n = range.startContainer;
+    if (n.nodeType === 3) return n.parentElement;
+    const child = n.childNodes[range.startOffset] || n.childNodes[range.startOffset - 1];
+    return child?.nodeType === 1 ? child : n.nodeType === 1 ? n : null;
+  }
+  function typingStyle(state, range) {
+    const previous = state.typing;
+    if (previous && range.collapsed && previous.node === range.startContainer && previous.offset === range.startOffset) return previous.formats;
+    state.typing = null;
+    return null;
+  }
+  function formatState(state, t, cmd, mixed) {
+    if (!t?.range) return false;
+    if (t.range.collapsed) {
+      if (mixed) return false;
+      const pending = typingStyle(state, t.range);
+      return pending?.has(cmd) ? pending.get(cmd) : activeFormat(selectionElement(t.range), cmd);
+    }
+    const runs = selectedText(t);
+    const values = runs.map(r => activeFormat(r.node.parentElement, cmd));
+    if (!values.length) return !mixed && activeFormat(selectionElement(t.range), cmd);
+    return mixed ? values.includes(true) && values.includes(false) : values.every(Boolean);
+  }
+  function splitAncestors(node, ancestor) {
+    let child = node;
+    for (;;) {
+      const el = child.parentNode;
+      if (child.previousSibling) {
+        const left = el.cloneNode(false);
+        left.removeAttribute('id');
+        el.parentNode.insertBefore(left, el);
+        while (el.firstChild !== child) left.appendChild(el.firstChild);
+      }
+      if (child.nextSibling) {
+        const right = el.cloneNode(false);
+        right.removeAttribute('id');
+        el.parentNode.insertBefore(right, el.nextSibling);
+        while (child.nextSibling) right.appendChild(child.nextSibling);
+      }
+      if (el === ancestor) break;
+      child = el;
+    }
+  }
+  function clearFormat(node, host, cmd) {
+    const [tag, prop, on] = formats.get(cmd);
+    for (let el = node.parentElement; el && el !== host;) {
+      const parent = el.parentElement;
+      const semantic = el.localName === tag || (cmd === 'bold' && el.localName === 'strong') ||
+        (cmd === 'italic' && el.localName === 'em') || (cmd === 'strikethrough' && el.localName === 'strike');
+      const inline = el.style.getPropertyValue(prop) ||
+        (prop === 'text-decoration-line' && el.style.getPropertyValue('text-decoration'));
+      if (semantic || inline) {
+        // Do not split block containers to cancel inherited formatting.
+        if (!['inline','contents'].includes(getComputedStyle(el).display)) break;
+        splitAncestors(node, el);
+        if (inline) {
+          if (prop === 'text-decoration-line') {
+            el.style.removeProperty('text-decoration');
+            const rest = inline.split(' ').filter(v => v !== on).join(' ');
+            el.style.setProperty(prop, rest);
+          } else el.style.removeProperty(prop);
+          if (!el.style.cssText) el.removeAttribute('style');
+        }
+        if (semantic || (el.localName === 'span' && !el.attributes.length)) {
+          let dest = parent;
+          if (el.attributes.length) {
+            dest = el.ownerDocument.createElement('span');
+            for (const a of Array.from(el.attributes)) dest.setAttribute(a.name, a.value);
+            parent.insertBefore(dest, el);
+          }
+          while (el.firstChild) {
+            if (dest === parent) parent.insertBefore(el.firstChild, el);
+            else dest.appendChild(el.firstChild);
+          }
+          el.remove();
+        }
+      }
+      el = parent;
+    }
+  }
+  function wrapFormat(node, cmd, enable, css) {
+    const [tag, prop, on, off] = formats.get(cmd);
+    const wrapper = node.ownerDocument.createElement(css || !enable ? 'span' : tag);
+    if (css || !enable) wrapper.style.setProperty(prop, enable ? on : off);
+    node.parentNode.insertBefore(wrapper, node);
+    wrapper.appendChild(node);
+  }
+  function applyFormat(state, t, cmd) {
+    const enable = !formatState(state, t, cmd, false);
+    const { sel, range, host } = t;
+    if (range.collapsed) {
+      const toggles = typingStyle(state, range) || new Map();
+      toggles.set(cmd, enable);
+      state.typing = { node: range.startContainer, offset: range.startOffset, formats: toggles };
+      return;
+    }
+    const runs = selectedText(t), backward = sel.direction === 'backward';
+    for (const r of runs) {
+      if (activeFormat(r.node.parentElement, cmd) === enable) continue;
+      if (r.to < r.node.length) r.node.splitText(r.to);
+      if (r.from) r.node = r.node.splitText(r.from);
+      r.to -= r.from;
+      r.from = 0;
+      if (!enable) clearFormat(r.node, host, cmd);
+      if (activeFormat(r.node.parentElement, cmd) !== enable) wrapFormat(r.node, cmd, enable, state.css);
+    }
+    if (runs.length) {
+      const first = runs[0], last = runs[runs.length - 1];
+      if (backward) sel.setBaseAndExtent(last.node,last.to,first.node,first.from);
+      else sel.setBaseAndExtent(first.node,first.from,last.node,last.to);
+      input(host, formats.get(cmd)[4]);
+    }
+  }
+
   const preferences = new Set(['stylewithcss', 'usecss', 'defaultparagraphseparator']);
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
   const richCommands = new Set(['inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
   function supported(cmd) {
-    return preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
+    return formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
   }
   function editingHost(node) {
     let el = node?.nodeType === 1 ? node : node?.parentElement;
-    if (!el?.isContentEditable) return null;
+    if (!el?.isContentEditable || el.closest('select,textarea,input')) return null;
     while (el.parentElement?.isContentEditable) el = el.parentElement;
     return el;
   }
@@ -46,7 +200,7 @@
     if (preferences.has(cmd) || cmd === 'selectall') return true;
     if (!t) return false;
     if (textCommands.has(cmd)) return true;
-    return !t.control && richCommands.has(cmd) &&
+    return !t.control && (richCommands.has(cmd) || formats.has(cmd)) &&
       (t.host.contentEditable !== 'plaintext-only' || cmd === 'insertlinebreak' || cmd === 'insertparagraph');
   }
 
@@ -79,7 +233,8 @@
     if (sel.isCollapsed) {
       const node = sel.anchorNode, offset = sel.anchorOffset;
       sel.modify('extend', cmd === 'delete' ? 'backward' : 'forward', 'character');
-      if (sel.isCollapsed || editingHost(sel.focusNode) !== host) { sel.collapse(node, offset); return false; }
+      const cell = n => (n.nodeType === 1 ? n : n.parentElement)?.closest('td,th');
+      if (sel.isCollapsed || editingHost(sel.focusNode) !== host || cell(node) !== cell(sel.focusNode)) { sel.collapse(node, offset); return false; }
     }
     const range = sel.getRangeAt(0);
     range.deleteContents();
@@ -141,6 +296,7 @@
       else if (doc.body) doc.getSelection()?.selectAllChildren(t?.host || doc.body);
       return true;
     }
+    if (formats.has(cmd)) { applyFormat(state, t, cmd); return true; }
     if (t.control) { editControl(t.control, cmd, value); return true; }
     if (cmd === 'delete' || cmd === 'forwarddelete') {
       if (deleteSelection(t, cmd)) input(t.host, inputTypeFor(cmd));
@@ -149,6 +305,8 @@
     if (cmd === 'insertimage' && !value) return false;
     const { sel, range, host } = t;
     if (cmd === 'inserttext' && !value) return true;
+    const toggles = cmd === 'inserttext' && range.collapsed ? typingStyle(state, range) : null;
+    state.typing = null;
     range.deleteContents();
     if (cmd === 'insertparagraph') {
       splitParagraph(doc, t, state.separator);
@@ -157,7 +315,17 @@
       const lines = value.replace(/\r\n?/g, '\n').split('\n');
       for (let i = 0; i < lines.length; ++i) {
         if (i) splitParagraph(doc, {host, sel, range:sel.getRangeAt(0)}, state.separator);
-        if (lines[i]) insertText(doc, sel.getRangeAt(0), sel, lines[i]);
+        if (!lines[i]) continue;
+        if (toggles?.size) {
+          const node = doc.createTextNode(lines[i]);
+          sel.getRangeAt(0).insertNode(node);
+          for (const [name, enabled] of toggles) {
+            if (!enabled) clearFormat(node, host, name);
+            if (activeFormat(node.parentElement, name) !== enabled) wrapFormat(node, name, enabled, state.css);
+          }
+          sel.collapse(node, node.length);
+          state.typing = { node, offset: node.length, formats: toggles };
+        } else insertText(doc, sel.getRangeAt(0), sel, lines[i]);
       }
       input(host, 'insertText', value);
     } else {
@@ -193,9 +361,13 @@
     },
     queryCommandState(name) {
       const state = context(this);
-      return command(name, arguments.length) === 'stylewithcss' && state.css;
+      const cmd = command(name, arguments.length);
+      return formats.has(cmd) ? formatState(state, target(this), cmd, false) : cmd === 'stylewithcss' && state.css;
     },
-    queryCommandIndeterm(name) { context(this); command(name, arguments.length); return false; },
+    queryCommandIndeterm(name) {
+      const state = context(this), cmd = command(name, arguments.length);
+      return formats.has(cmd) && formatState(state, target(this), cmd, true);
+    },
     queryCommandValue(name) {
       const state = context(this);
       return command(name, arguments.length) === 'defaultparagraphseparator' ? state.separator : '';
