@@ -626,6 +626,13 @@ impl HostEnv for EngineEnv<'_> {
         }
         child.styles.get(node).cloned().or_else(|| self.engine.unrendered_style(child, node))
     }
+    fn frame_viewport(&mut self, id: u64) -> Option<(f32, f32)> {
+        self.ensure_layout();
+        self.engine.update_frame_viewport(self.page, id);
+        let origin = crate::frames::page_origin(self.page);
+        let child = crate::frames::find_frame_page_mut(self.page, id)?;
+        (crate::frames::page_origin(child) == origin).then_some((child.viewport.width, child.viewport.height))
+    }
     fn frame_node_rect(&mut self, id: u64, node: NodeId) -> Option<Rect> {
         self.ensure_layout();
         self.engine.update_frame_viewport(self.page, id);

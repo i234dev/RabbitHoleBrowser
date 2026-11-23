@@ -2378,6 +2378,11 @@ impl ComputedStyle {
         !self.transform.is_empty() || self.transform3d.as_ref().is_some_and(|t| t.translate.is_some() || t.rotate.is_some() || t.scale.is_some())
     }
 
+    /// A transformed or filtered ancestor contains even fixed descendants.
+    pub fn establishes_fixed_containing_block(&self) -> bool {
+        self.has_transform() || !self.filters.is_empty() || !self.backdrop_filters.is_empty() || self.perspective().is_some() || self.preserve_3d()
+    }
+
     /// The 3D properties, for writing.
     pub fn transform3d_mut(&mut self) -> &mut Transform3dProps {
         self.transform3d.get_or_insert_with(Default::default)

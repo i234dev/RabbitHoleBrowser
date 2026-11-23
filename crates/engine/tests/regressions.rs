@@ -544,3 +544,14 @@ fn media_text_tracks_include_track_children() {
     );
     assert_eq!(eval(&e, &mut page, "r"), "2,showing,captions,metadata,disabled,t2|3,true,true,hidden,true,true");
 }
+
+#[test]
+fn resolved_insets_follow_the_positioning_scheme() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, r#"<div style="transform:scale(1);width:240px;height:120px;padding:10px">
+        <div id=f style="position:fixed;top:25%;left:0;width:40px;height:10px"></div>
+        <section style="width:160px"><div id=r style="position:relative;right:25%"></div></section>
+        <div id=s style="top:30%"></div><div id=n style="display:none;position:absolute;left:10%"></div></div>"#);
+    let out = eval(&e, &mut page, "[getComputedStyle(f).top,getComputedStyle(f).right,getComputedStyle(r).left,getComputedStyle(s).top,getComputedStyle(n).left].join('|')");
+    assert_eq!(out, "35px|220px|-40px|30%|10%");
+}

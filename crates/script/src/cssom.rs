@@ -351,6 +351,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
                 return Some(grid::used(&tracks));
             }
         }
+        if let Some(value) = resolved_inset(n, &s, prop) { return Some(value); }
         return Some(computed_from_style(&s, prop, Default::default(), Default::default()));
     }
     if n.doc != 0 {
@@ -365,6 +366,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     // that interleave style writes and reads don't force full layouts.
     let style = with_env(|env| env.computed_style(n.node));
     let s: std::rc::Rc<ComputedStyle> = style?;
+    if let Some(value) = resolved_inset(n, &s, prop) { return Some(value); }
     let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_) | rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_));
     let needs_box = match prop {
         "grid-template-columns" | "grid-template-rows" => true,
@@ -378,10 +380,6 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         "padding-right" => pct(&s.padding.right),
         "padding-bottom" => pct(&s.padding.bottom),
         "padding-left" => pct(&s.padding.left),
-        "top" => pct(&s.inset.top),
-        "left" => pct(&s.inset.left),
-        "right" => pct(&s.inset.right),
-        "bottom" => pct(&s.inset.bottom),
         "min-width" => pct(&s.min_width),
         "max-width" => pct(&s.max_width),
         "min-height" => pct(&s.min_height),
@@ -411,7 +409,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     let r = if needs_box { with_env(|env| env.node_rect(n.node)).unwrap_or_default() } else { Default::default() };
     let pct_padding = [&s.padding.top, &s.padding.right, &s.padding.bottom, &s.padding.left].into_iter().any(|l| pct(l));
     let cb = if needs_box && prop != "transform" && (!matches!(prop, "width" | "height" | "inline-size" | "block-size") || pct_padding) {
-        containing_block(n.node, &s)
+        containing_block(n, s.position, false)
     } else {
         Default::default()
     };
@@ -423,31 +421,71 @@ pub(crate) fn computed_value_of_style(s: &ComputedStyle, prop: &str) -> String {
     computed_from_style(s, prop, Default::default(), Default::default())
 }
 
+fn layout_rect(n: NodeRef) -> Option<rabbithole_gfx::Rect> {
+    with_env(|env| if n.doc == 0 { env.node_rect(n.node) } else { env.frame_node_rect((n.doc & !FRAME_DOC) as u64, n.node) })
+}
+
+/// CSSOM returns the computed inset for unpositioned elements and elements
+/// without a layout box. Positioned boxes resolve percentages, and relative
+/// and absolutely positioned boxes also expose used values for auto insets.
+fn resolved_inset(n: NodeRef, s: &ComputedStyle, prop: &str) -> Option<String> {
+    let (value, opposite, vertical, start) = match prop {
+        "top" => (&s.inset.top, &s.inset.bottom, true, true),
+        "bottom" => (&s.inset.bottom, &s.inset.top, true, false),
+        "left" => (&s.inset.left, &s.inset.right, false, true),
+        "right" => (&s.inset.right, &s.inset.left, false, false),
+        _ => return None,
+    };
+    if s.position == Position::Static || matches!(s.display, Display::None | Display::Contents)
+        || matches!(value, Length::Px(_)) || (value.is_auto() && s.position == Position::Sticky) {
+        return Some(position_css(value));
+    }
+    let Some(rect) = layout_rect(n) else { return Some(position_css(value)); };
+    let cb = containing_block(n, s.position, true);
+    let base = if vertical { cb.h } else { cb.w };
+    if !value.is_auto() { return Some(length_css(value, base)); }
+    if s.position == Position::Relative {
+        let offset = -opposite.resolve_or_zero(base);
+        return Some(px(if offset == 0.0 { 0.0 } else { offset }));
+    }
+    let (origin, extent, margin_start, margin_end) = if vertical {
+        (rect.y - cb.y, rect.h, s.margin.top, s.margin.bottom)
+    } else {
+        (rect.x - cb.x, rect.w, s.margin.left, s.margin.right)
+    };
+    let offset = if start { origin - margin_start.resolve_or_zero(cb.w) } else { base - origin - extent - margin_end.resolve_or_zero(cb.w) };
+    Some(px(offset))
+}
+
 /// The containing block of `node` (after layout), the base of its
 /// percentage margins, padding, insets and min/max sizes: the padding box
 /// of the nearest positioned ancestor for absolute positioning, the
 /// viewport for fixed, else the parent's content box.
-fn containing_block(node: rabbithole_dom::NodeId, s: &ComputedStyle) -> rabbithole_gfx::Rect {
+fn containing_block(n: NodeRef, position: Position, sticky_inset: bool) -> rabbithole_gfx::Rect {
     let viewport = || {
-        let (w, h) = with_env(|env| env.viewport());
+        let (w, h) = with_env(|env| if n.doc == 0 { env.viewport() } else { env.frame_viewport((n.doc & !FRAME_DOC) as u64).unwrap_or_default() });
         rabbithole_gfx::Rect { x: 0.0, y: 0.0, w, h }
     };
-    if s.position == Position::Fixed {
-        return viewport();
-    }
-    let abs = s.position == Position::Absolute;
-    let mut cur = with_doc(0, |doc| doc.flat_parent(node));
+    let out_of_flow = matches!(position, Position::Fixed | Position::Absolute);
+    let mut cur = with_doc(n.doc, |doc| doc.flat_parent(n.node));
     while let Some(p) = cur {
-        let is_element = with_doc(0, |doc| doc.element(p).is_some());
+        let is_element = with_doc(n.doc, |doc| doc.element(p).is_some());
         if !is_element {
             break;
         }
-        let ps = with_env(|env| env.computed_style(p));
-        if let Some(ps) = ps.filter(|ps| ps.display != Display::Contents && (!abs || ps.position != Position::Static)) {
-            if let Some(pr) = with_env(|env| env.node_rect(p)) {
+        let frame = (n.doc & !FRAME_DOC) as u64;
+        let ps = with_env(|env| if n.doc == 0 { env.computed_style(p) } else { env.frame_computed_style(frame, p) });
+        if let Some(ps) = ps.filter(|ps| ps.display != Display::Contents && match position {
+            Position::Fixed => ps.establishes_fixed_containing_block(),
+            Position::Absolute => ps.position != Position::Static || ps.establishes_fixed_containing_block(),
+            Position::Sticky if sticky_inset => [ps.overflow_x, ps.overflow_y].into_iter()
+                .any(|o| !matches!(o, rabbithole_style::Overflow::Visible | rabbithole_style::Overflow::Clip)),
+            _ => ps.display != Display::Inline,
+        }) {
+            if let Some(pr) = layout_rect(NodeRef { doc: n.doc, node: p }) {
                 let b = &ps.border_width;
                 let (mut x, mut y, mut w, mut h) = (pr.x + b.left, pr.y + b.top, pr.w - b.left - b.right, pr.h - b.top - b.bottom);
-                if !abs {
+                if !out_of_flow {
                     let pw = w;
                     let pad = &ps.padding;
                     let (pl, pt) = (pad.left.resolve_or_zero(pw), pad.top.resolve_or_zero(pw));
@@ -459,7 +497,7 @@ fn containing_block(node: rabbithole_dom::NodeId, s: &ComputedStyle) -> rabbitho
                 return rabbithole_gfx::Rect { x, y, w: w.max(0.0), h: h.max(0.0) };
             }
         }
-        cur = with_doc(0, |doc| doc.flat_parent(p));
+        cur = with_doc(n.doc, |doc| doc.flat_parent(p));
     }
     viewport()
 }

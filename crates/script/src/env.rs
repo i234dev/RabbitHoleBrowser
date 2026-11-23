@@ -202,6 +202,8 @@ pub trait HostEnv {
     fn frame_computed_style(&mut self, _id: u64, _node: NodeId) -> Option<Rc<ComputedStyle>> {
         None
     }
+    /// Viewport of a same-origin frame, in CSS pixels.
+    fn frame_viewport(&mut self, _id: u64) -> Option<(f32, f32)> { None }
     /// As used_grid_tracks, in the identified same-origin document.
     fn frame_used_grid_tracks(&mut self, _id: u64, _node: NodeId, _rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> { None }
     /// Border box of a node of a same-origin frame's document (frame
