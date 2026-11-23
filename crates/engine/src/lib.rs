@@ -10,6 +10,7 @@
 pub mod animations;
 pub mod consent;
 pub mod diff;
+mod editing;
 pub mod forms;
 pub mod frames;
 mod home;

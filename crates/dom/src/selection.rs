@@ -70,6 +70,25 @@ pub struct CustomHighlight {
 }
 
 impl Document {
+    /// Outermost editable element within the nearest editing boundary.
+    pub fn editing_host(&self, node: NodeId) -> Option<NodeId> {
+        let mut host = None;
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n == Document::ROOT {
+                return if self.design_mode { self.html_element().or(host) } else { host };
+            }
+            if let Some(value) = self.attr(n, "contenteditable") {
+                if value.eq_ignore_ascii_case("false") { return host; }
+                if value.is_empty() || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("plaintext-only") {
+                    host = Some(n);
+                }
+            }
+            current = self.parent(n);
+        }
+        host
+    }
+
     /// The selection's range, if the selection is not empty.
     pub fn selection(&self) -> Option<SelectionRange> {
         let s = self.selection?;

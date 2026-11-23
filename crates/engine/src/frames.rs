@@ -1254,9 +1254,14 @@ fn key_into_page(engine: &Engine, page: &mut Page, key: &str, code: &str, presse
     let Some(target) = target else { return ScriptOutcome::default() };
     let init = crate::scripting::key_init(key, code, m.ctrl, m.shift, m.alt, m.meta, false);
     let mut out = engine.dispatch_event(page, target, if pressed { "keydown" } else { "keyup" }, init);
-    if !pressed || out.default_prevented || m.ctrl || m.alt || m.meta {
+    if !pressed || out.default_prevented || out.navigation.is_some() {
         return out;
     }
+    if let Some(edit) = engine.editable_key_default(page, key, m) {
+        out.merge(edit);
+        return out;
+    }
+    if m.ctrl || m.alt || m.meta { return out; }
     let Some(focused) = page.state.focused else { return out };
     if !crate::pointer::is_text_entry(&page.doc, focused) || page.doc.attr(focused, "contenteditable").is_some() {
         if key == "Enter" {

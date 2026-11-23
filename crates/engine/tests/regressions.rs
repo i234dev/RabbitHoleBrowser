@@ -584,3 +584,18 @@ fn inline_editing_preserves_unselected_text_and_caret_format() {
     })()"#);
     assert_eq!(out, "a<b>bcde</b>f|true|a<b>b</b>cd<b>e</b>f|<i>!</i>");
 }
+
+#[test]
+fn keyboard_edits_the_selection_only_after_uncanceled_beforeinput() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section contenteditable id=ed>xyz</section>");
+    eval(&e,&mut page,r#"
+        var ed=document.getElementById('ed'), events=[];
+        ed.focus();getSelection().setBaseAndExtent(ed.firstChild,1,ed.firstChild,2);
+        ed.addEventListener('beforeinput',e=>{events.push(e.type+' '+e.inputType);if(e.data==='!')e.preventDefault()});
+        ed.addEventListener('input',e=>events.push(e.type+' '+e.isTrusted));
+    "#);
+    e.key_input(&mut page,"!","Digit1",true,Modifiers::default());
+    e.key_input(&mut page,"0","Digit0",true,Modifiers::default());
+    assert_eq!(eval(&e,&mut page,"ed.innerHTML+'|'+events.join('|')"),"x0z|beforeinput insertText|beforeinput insertText|input true");
+}

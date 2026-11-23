@@ -1995,6 +1995,11 @@ impl Worker {
         if self.page_key_event(k) {
             return;
         }
+        if let Some(edit) = self.page.as_mut().and_then(|p| self.engine.editable_key_default(p, &k.key, k.mods)) {
+            self.apply_outcome(edit);
+            self.dirty = true;
+            return;
+        }
         // Escape closes the topmost modal dialog (after its `cancel`).
         if k.key == "Escape" && self.page_op(|engine, page| engine.cancel_modal(page).map_or((false, ScriptOutcome::default()), |o| (true, o))).unwrap_or(false) {
             self.dirty = true;

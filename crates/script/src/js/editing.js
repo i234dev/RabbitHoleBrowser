@@ -205,6 +205,8 @@
   }
 
   function input(host, inputType, data = null) {
+    const state = contexts.get(host.ownerDocument);
+    if (state?.userEdit) { state.changed = true; return; }
     host.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType, data }));
   }
   const inputTypeFor = cmd => cmd === 'delete' ? 'deleteContentBackward'
@@ -340,6 +342,17 @@
     }
     return true;
   }
+
+  globalThis.__rhNative.setFactory('userEdit', function (host, cmd, value) {
+    const doc = host.ownerDocument, state = context(doc), t = target(doc);
+    if (state.executing || !t || t.host !== host) return false;
+    state.userEdit = state.executing = true;
+    state.changed = false;
+    try {
+      execute(doc, state, cmd, value);
+      return state.changed;
+    } finally { state.userEdit = state.executing = false; }
+  });
 
   function command(value, count) {
     if (!count) throw new TypeError('A command is required');

@@ -1623,17 +1623,7 @@ fn e_content_editable_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsR
 /// `contenteditable` value says so.
 fn e_is_content_editable(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "isContentEditable")?;
-    let editable = with_doc(n.doc, |doc| {
-        let mut cur = Some(n.node);
-        while let Some(c) = cur {
-            if let Some((on, _)) = content_editable_state(doc.attr(c, "contenteditable")) {
-                return on;
-            }
-            if c == Document::ROOT { return doc.design_mode; }
-            cur = doc.parent(c);
-        }
-        false
-    });
+    let editable = with_doc(n.doc, |doc| doc.editing_host(n.node).is_some());
     Ok(Value::Bool(editable))
 }
 

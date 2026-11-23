@@ -570,6 +570,20 @@ impl ScriptHost {
         })
     }
 
+    /// Execute the default edit after a trusted beforeinput event. The
+    /// editing implementation is captured at startup and shared with
+    /// execCommand. The embedder sends input only if this changed the DOM.
+    pub fn user_edit(&mut self, env: &mut dyn HostEnv, target: NodeId, command: &str, text: &str) -> bool {
+        self.enter(env, |realm| {
+            let factory = state().borrow().factories.get("userEdit").cloned();
+            let Some(factory) = factory else { return false };
+            let host = host::wrap_main(realm, target);
+            let changed = host::call_logged(realm, &factory, Value::Undefined, &[host, Value::str(command), Value::str(text)], "keyboard editing");
+            shadow::flush(realm);
+            realm.to_boolean(&changed)
+        })
+    }
+
     /// Run a request from a same-origin ancestor's realm in this realm
     /// (see [`FrameCall`]). Microtasks it queues run at the caller's next
     /// microtask checkpoint ([`HostEnv::frame_checkpoint`]).
