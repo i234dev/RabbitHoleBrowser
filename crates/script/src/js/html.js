@@ -215,7 +215,11 @@
   // variants never run scripts and sanitize what they insert.
   function streamSanitizerConfig(opts, safe) {
     const s = opts && opts.sanitizer;
-    if (s === undefined || s === null || s === 'default') return safe || s === 'default' ? { elements: null, removeElements: DEFAULT_REMOVE.slice(), replaceWithChildrenElements: [], attributes: null, removeAttributes: [] } : null;
+    if (s === undefined || s === null || s === 'default') {
+      if (!safe && s !== 'default') return null;
+      return { useDefaults: true, elements: null, removeElements: DEFAULT_REMOVE,
+        replaceWithChildrenElements: [], attributes: null, removeAttributes: ['is'] };
+    }
     const cfg = (g.Sanitizer && s instanceof g.Sanitizer) ? s.get() : s;
     if (typeof cfg !== 'object') throw new TypeError("Failed to execute: the sanitizer option is not a Sanitizer or SanitizerConfig.");
     if (cfg.elements && cfg.removeElements) throw new TypeError("A sanitizer config cannot have both 'elements' and 'removeElements'.");
@@ -230,11 +234,15 @@
     if (!cfg) return;
     for (const el of els) {
       const name = el.localName;
-      if (cfg.removeElements.includes(name) || (cfg.elements && !cfg.elements.includes(name))) { el.remove(); continue; }
+      // HTML custom elements and customized built-ins require explicit opt-in.
+      if (cfg.useDefaults && el.namespaceURI === 'http://www.w3.org/1999/xhtml' && name.includes('-')) {
+        el.remove(); continue;
+      }
       if (cfg.replaceWithChildrenElements.includes(name)) { el.replaceWith(...el.childNodes); continue; }
+      if (cfg.removeElements.includes(name) || (cfg.elements && !cfg.elements.includes(name))) { el.remove(); continue; }
       for (const a of Array.from(el.getAttributeNames())) {
         const v = el.getAttribute(a) || '';
-        if ((safe && (/^on/i.test(a) || ((a === 'href' || a === 'src' || a === 'action' || a === 'formaction') && /^\s*javascript:/i.test(v)))) || cfg.removeAttributes.includes(a) || (cfg.attributes && !cfg.attributes.includes(a))) el.removeAttribute(a);
+        if (((safe || cfg.useDefaults) && (/^on/i.test(a) || ((a === 'href' || a === 'src' || a === 'action' || a === 'formaction') && /^\s*javascript:/i.test(v)))) || cfg.removeAttributes.includes(a) || (cfg.attributes && !cfg.attributes.includes(a))) el.removeAttribute(a);
       }
     }
   }

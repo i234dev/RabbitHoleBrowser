@@ -2182,8 +2182,10 @@ fn complete_html_replacement_commits_filtered_children_before_running_callbacks(
             disconnectedCallback() { events.push('disconnect'); }
             attributeChangedCallback(name, old, value) { events.push(value); }
         });
-        root.setHTMLUnsafe("<sample-item data-kind='first'></sample-item><i>absent</i>",
-                           {sanitizer:{removeElements:['i']}});
+        root.setHTML("<sample-item></sample-item><div is='some-widget'>plain</div>");
+        console.log(root.childElementCount, root.firstChild.localName, root.firstChild.hasAttribute('is'), events.length);
+        root.setHTMLUnsafe("<section><sample-item data-kind='first'></sample-item></section><i>absent</i>",
+                           {sanitizer:{elements:['sample-item'],replaceWithChildrenElements:['section']}});
         console.log(root.children.length, events.join(','));
         events.length = 0;
         window.readCompleteFragment = () => events.push(root.lastChild.textContent);
@@ -2191,7 +2193,7 @@ fn complete_html_replacement_commits_filtered_children_before_running_callbacks(
                            {runScripts:true});
         console.log(events.join(','));
     "#);
-    assert_eq!(out, ["1 construct,first,connect", "complete,disconnect,construct,connect"]);
+    assert_eq!(out, ["1 div false 0", "1 construct,first,connect", "complete,disconnect,construct,connect"]);
 }
 
 #[test]
