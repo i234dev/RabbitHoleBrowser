@@ -271,6 +271,12 @@ impl WebSocket {
         });
         let (ev_tx, events) = channel();
         let (cmd, cmd_rx) = channel();
+        // Known network failures still deliver error and close on the socket
+        // event queue. They need neither a resolver nor a connection thread.
+        if url.port.is_some_and(crate::url::is_bad_port) {
+            fail(&shared, &ev_tx, "Restricted network port".into());
+            return Ok(WebSocket { shared, events, cmd, url });
+        }
         let fetcher = fetcher.clone();
         let protocols = protocols.to_vec();
         let initiator = initiator.cloned();
@@ -367,6 +373,12 @@ impl WebSocket {
 
 impl Drop for WebSocket {
     fn drop(&mut self) {
+        if self.ready_state() == CLOSED {
+            if let Some(writer) = self.shared.writer.lock().unwrap().take() {
+                writer.shutdown();
+            }
+            return;
+        }
         if self.ready_state() == OPEN {
             let _ = self.close(Some(1000), "");
         }
@@ -694,6 +706,20 @@ fn inflate(d: &mut flate2::Decompress, data: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_port_rejects_the_websocket_handshake() {
+        for scheme in ["ws", "wss"] {
+            let url = Url::parse_absolute(&format!("{scheme}://127.0.0.1:25/")).unwrap();
+            let socket = WebSocket::connect(&Fetcher::default(), &url, &[], None, None).unwrap();
+            assert_eq!(socket.ready_state(), CLOSED);
+            assert_eq!(socket.poll(), vec![
+                WsEvent::Error("Restricted network port".into()),
+                WsEvent::Close { code: 1006, reason: String::new(), was_clean: false },
+            ]);
+            assert!(socket.poll().is_empty());
+        }
+    }
 
     #[test]
     fn sha1_vectors() {

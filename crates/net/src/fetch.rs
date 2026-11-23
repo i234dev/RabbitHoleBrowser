@@ -1270,6 +1270,9 @@ impl Fetcher {
         if let Some(context) = &req.navigation_redirect { cookie_ctx.same_site_chain &= context.same_site_chain; }
         let author_headers: Vec<(String, String)> = req.headers.iter().filter(|(k, _)| !(req.mode.is_some() && cors::is_forbidden_request_header(k))).cloned().collect();
         for _hop in 0..20 {
+            if url.port.is_some_and(crate::url::is_bad_port) {
+                return Err(FetchError::Other("Restricted network port".into()));
+            }
             let referer = referrer_source.as_ref().and_then(|r| cors::referrer_for(r, &url, policy));
             referrer_source = referer.as_deref().and_then(Url::parse_absolute);
             let same_origin = origin_str.as_ref().map(|o| *o == url.origin()).unwrap_or(true);
@@ -1890,6 +1893,18 @@ mod tests {
         assert_eq!(mime_for_extension("HTM"), "text/html");
         assert_eq!(mime_for_extension("svg"), "image/svg+xml");
         assert_eq!(mime_for_extension("bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn restricted_ports_fail_before_cache_or_transport() {
+        let fetcher = Fetcher::default();
+        for url in ["http://127.0.0.1:0/", "https://127.0.0.1:4190/"] {
+            let req = Request::get(Url::parse_absolute(url).unwrap());
+            assert!(matches!(fetcher.fetch_api(&req),
+                Err(FetchError::Other(message)) if message == "Restricted network port"));
+        }
+        assert!(!crate::url::is_bad_port(443));
+        assert!(!crate::url::is_bad_port(8443));
     }
 
     #[test]
