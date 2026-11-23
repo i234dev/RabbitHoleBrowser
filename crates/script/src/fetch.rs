@@ -1900,7 +1900,7 @@ fn text_decoder_ignore_bom(realm: &mut Realm, this: Value, _: &[Value]) -> JsRes
 }
 
 /// Bytes of an `AllowSharedBufferSource` (copied).
-fn buffer_source_bytes(realm: &mut Realm, v: &Value, what: &str) -> JsResult<Vec<u8>> {
+pub(crate) fn buffer_source_bytes(realm: &mut Realm, v: &Value, what: &str) -> JsResult<Vec<u8>> {
     let V::Object(o) = v.v() else {
         return Err(realm.throw_type_error(&format!("{what}: The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")));
     };

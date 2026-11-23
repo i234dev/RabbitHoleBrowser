@@ -19,6 +19,7 @@ mod live;
 mod media;
 mod node;
 mod canvas2d;
+mod webcrypto;
 mod webgl;
 mod natives;
 mod webanim;

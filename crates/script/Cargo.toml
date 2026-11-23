@@ -12,6 +12,7 @@ authors.workspace = true
 jit = ["rabbithole-js/jit"]
 
 [dependencies]
+ring = "0.17"
 rabbithole-js.workspace = true
 rabbithole-dom.workspace = true
 rabbithole-html.workspace = true

@@ -465,6 +465,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "webidlEnumerable", 1, webidl_enumerable);
     realm.define_method(o, "inflate", 2, native_inflate);
     realm.define_method(o, "deflate", 2, native_deflate);
+    crate::webcrypto::install(realm, o);
     crate::sockets::install(realm, o);
     crate::media::install(realm, o);
     crate::canvas2d::install(realm, o);

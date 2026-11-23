@@ -1688,6 +1688,7 @@ dependencies = [
  "rabbithole-style",
  "rabbithole-wasm-js",
  "rabbithole-webgl",
+ "ring",
 ]
 
 [[package]]
