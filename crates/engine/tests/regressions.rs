@@ -893,3 +893,22 @@ fn editable_viewport_restyles_and_keeps_author_focus_indicators() {
     let color = eval(&e, &mut page, "document.designMode='off'; getComputedStyle(bodytext).color");
     assert_eq!(color, "rgb(0, 0, 0)");
 }
+
+#[test]
+fn aria_dom_strings_reflect_absence_and_keep_their_content_attributes() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section id=el></section><svg id=icon></svg>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const initial = el.ariaLabel === null;
+        el.ariaColIndexText = 4;
+        icon.ariaRoleDescription = 'marker';
+        el.role = 'button';
+        el.ariaLabel = '';
+        const values = [initial, el.hasAttribute('aria-label'), el.getAttribute('aria-colindextext'),
+            icon.getAttribute('aria-roledescription'), el.getAttribute('role')];
+        el.ariaLabel = undefined;
+        el.role = null;
+        return [...values, el.ariaLabel === null, el.hasAttribute('role')].join('|');
+    })()"#);
+    assert_eq!(result, "true|true|4|marker|button|true|false");
+}

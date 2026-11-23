@@ -414,7 +414,9 @@
   tag(ElementInternals, 'ElementInternals');
   // ARIA reflection on ElementInternals (role, aria*): stored, not rendered.
   for (const k of ['role', 'ariaActiveDescendantElement', 'ariaAtomic', 'ariaAutoComplete', 'ariaBrailleLabel', 'ariaBrailleRoleDescription', 'ariaBusy', 'ariaChecked', 'ariaColCount', 'ariaColIndex', 'ariaColIndexText', 'ariaColSpan', 'ariaControlsElements', 'ariaCurrent', 'ariaDescribedByElements', 'ariaDescription', 'ariaDetailsElements', 'ariaDisabled', 'ariaErrorMessageElements', 'ariaExpanded', 'ariaFlowToElements', 'ariaHasPopup', 'ariaHidden', 'ariaInvalid', 'ariaKeyShortcuts', 'ariaLabel', 'ariaLabelledByElements', 'ariaLevel', 'ariaLive', 'ariaModal', 'ariaMultiLine', 'ariaMultiSelectable', 'ariaOrientation', 'ariaOwnsElements', 'ariaPlaceholder', 'ariaPosInSet', 'ariaPressed', 'ariaReadOnly', 'ariaRelevant', 'ariaRequired', 'ariaRoleDescription', 'ariaRowCount', 'ariaRowIndex', 'ariaRowIndexText', 'ariaRowSpan', 'ariaSelected', 'ariaSetSize', 'ariaSort', 'ariaValueMax', 'ariaValueMin', 'ariaValueNow', 'ariaValueText']) {
-    Object.defineProperty(ElementInternals.prototype, k, { get() { return this[S].aria[k] ?? null; }, set(v) { this[S].aria[k] = v; }, configurable: true, enumerable: true });
+    Object.defineProperty(ElementInternals.prototype, k, { get() { return this[S].aria[k] ?? null; }, set(v) {
+      this[S].aria[k] = v == null ? null : /Elements?$/.test(k) ? v : `${v}`;
+    }, configurable: true, enumerable: true });
   }
   const formAssociated = (el) => { try { const C = customElements.get(el.localName); return !!(C && C.formAssociated); } catch (e) { return false; } };
   method(HE, 'attachInternals', function () {

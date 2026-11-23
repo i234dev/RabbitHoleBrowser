@@ -16,6 +16,7 @@ const ACC: u8 = CONFIGURABLE | ENUMERABLE;
 #[allow(dead_code)]
 pub(crate) enum Reflect {
     Str,
+    NullableStr,
     Bool,
     /// Number (`NaN`-free: 0 when missing)
     Num,
@@ -38,6 +39,7 @@ fn reflect_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let raw = with_doc(n.doc, |doc| doc.attr(n.node, spec.attr).map(|s| s.to_string()));
     Ok(match spec.kind {
         Reflect::Str => Value::str(raw.as_deref().unwrap_or("")),
+        Reflect::NullableStr => raw.as_deref().map(Value::str).unwrap_or(Value::Null),
         Reflect::Bool => Value::Bool(raw.is_some()),
         Reflect::Num => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0)),
         Reflect::Int(d) => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(d as f64)),
@@ -57,6 +59,9 @@ fn reflect_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
         Reflect::Bool => {
             let b = realm.to_boolean(&v);
             set_attribute(n, spec.attr, if b { Some("") } else { None });
+        }
+        Reflect::NullableStr if v.is_nullish() => {
+            if get_attribute(n, spec.attr).is_some() { set_attribute(n, spec.attr, None); }
         }
         Reflect::Num | Reflect::Int(_) => {
             let num = realm.to_number(v)?;
@@ -2573,11 +2578,53 @@ pub(crate) fn install(realm: &mut Realm) {
     m(realm, "releasePointerCapture", 1, e_noop);
     m(realm, "hasPointerCapture", 1, node_false);
     m(realm, "checkVisibility", 0, node_true);
-    reflect(realm, el, "role", "role", Reflect::Str);
-    for aria in ["label", "hidden", "expanded", "controls", "describedby", "labelledby", "live", "selected", "checked", "disabled", "pressed", "current", "haspopup", "valuenow", "valuemin", "valuemax", "valuetext", "level", "modal", "busy", "atomic", "orientation", "sort", "readonly", "required", "invalid", "multiline", "multiselectable", "placeholder", "roledescription", "keyshortcuts", "description", "colcount", "rowcount", "setsize", "posinset"] {
-        let prop = format!("aria{}{}", aria[..1].to_ascii_uppercase(), &aria[1..]);
-        let attr: &'static str = Box::leak(format!("aria-{aria}").into_boxed_str());
-        reflect(realm, el, &prop, attr, Reflect::Str);
+    for (prop, attr) in [
+        ("role", "role"),
+        ("ariaAtomic", "aria-atomic"),
+        ("ariaAutoComplete", "aria-autocomplete"),
+        ("ariaBrailleLabel", "aria-braillelabel"),
+        ("ariaBrailleRoleDescription", "aria-brailleroledescription"),
+        ("ariaBusy", "aria-busy"),
+        ("ariaChecked", "aria-checked"),
+        ("ariaColCount", "aria-colcount"),
+        ("ariaColIndex", "aria-colindex"),
+        ("ariaColIndexText", "aria-colindextext"),
+        ("ariaColSpan", "aria-colspan"),
+        ("ariaCurrent", "aria-current"),
+        ("ariaDescription", "aria-description"),
+        ("ariaDisabled", "aria-disabled"),
+        ("ariaExpanded", "aria-expanded"),
+        ("ariaHasPopup", "aria-haspopup"),
+        ("ariaHidden", "aria-hidden"),
+        ("ariaInvalid", "aria-invalid"),
+        ("ariaKeyShortcuts", "aria-keyshortcuts"),
+        ("ariaLabel", "aria-label"),
+        ("ariaLevel", "aria-level"),
+        ("ariaLive", "aria-live"),
+        ("ariaModal", "aria-modal"),
+        ("ariaMultiLine", "aria-multiline"),
+        ("ariaMultiSelectable", "aria-multiselectable"),
+        ("ariaOrientation", "aria-orientation"),
+        ("ariaPlaceholder", "aria-placeholder"),
+        ("ariaPosInSet", "aria-posinset"),
+        ("ariaPressed", "aria-pressed"),
+        ("ariaReadOnly", "aria-readonly"),
+        ("ariaRelevant", "aria-relevant"),
+        ("ariaRequired", "aria-required"),
+        ("ariaRoleDescription", "aria-roledescription"),
+        ("ariaRowCount", "aria-rowcount"),
+        ("ariaRowIndex", "aria-rowindex"),
+        ("ariaRowIndexText", "aria-rowindextext"),
+        ("ariaRowSpan", "aria-rowspan"),
+        ("ariaSelected", "aria-selected"),
+        ("ariaSetSize", "aria-setsize"),
+        ("ariaSort", "aria-sort"),
+        ("ariaValueMax", "aria-valuemax"),
+        ("ariaValueMin", "aria-valuemin"),
+        ("ariaValueNow", "aria-valuenow"),
+        ("ariaValueText", "aria-valuetext"),
+    ] {
+        reflect(realm, el, prop, attr, Reflect::NullableStr);
     }
     crate::events::install_handler_props(realm, el, EVENT_HANDLER_NAMES);
 
