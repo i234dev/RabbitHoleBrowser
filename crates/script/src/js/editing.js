@@ -765,7 +765,15 @@
     }
     if (move.collapsed && !newline) return false;
     const whiteSpace = getComputedStyle(src).whiteSpace;
-    const preserve = whiteSpace !== getComputedStyle(dest).whiteSpace;
+    const destinationSpace = getComputedStyle(dest).whiteSpace;
+    // Extraction can clone a partial inline ancestor. Save the formatting
+    // of the source line while its elements still match their old selectors.
+    const styles = [];
+    const after = move.endContainer === src ? src.childNodes[move.endOffset] :
+        branchIn(move.endContainer,src).nextSibling;
+    for (let part = first; part && part !== after; part = part.nextSibling) {
+      styles.push(part.nodeType === 1 ? getComputedStyle(part).whiteSpace : whiteSpace);
+    }
     const before = branchIn(left, dest).nextSibling;
     const fragment = move.extractContents();
     if (newline) {
@@ -781,12 +789,27 @@
         el = parent;
       }
     }
-    if (preserve && fragment.hasChildNodes()) {
-      const span = doc.createElement('span');
-      span.style.whiteSpace = whiteSpace;
-      span.appendChild(fragment);
-      dest.insertBefore(span, before);
-    } else dest.insertBefore(fragment, before);
+    let wrapper = null;
+    for (const [i,part] of Array.from(fragment.childNodes).entries()) {
+      const value = styles[i] || whiteSpace;
+      if (part.nodeType === 1 && value !== whiteSpace) {
+        // Carry a contextual class's computed whitespace across the block
+        // boundary even if the class stops matching in the destination.
+        if (part.style.whiteSpace !== value) part.style.whiteSpace = value;
+        dest.insertBefore(part,before);
+        wrapper = null;
+      } else if (value !== destinationSpace) {
+        if (!wrapper) {
+          wrapper = doc.createElement('span');
+          wrapper.style.whiteSpace = value;
+          dest.insertBefore(wrapper,before);
+        }
+        wrapper.appendChild(part);
+      } else {
+        dest.insertBefore(part,before);
+        wrapper = null;
+      }
+    }
     for (const space of whitespace) if (space.isConnected) space.remove();
     for (let el = src; el !== host && !el.hasChildNodes();) {
       const parent = el.parentElement;

@@ -1243,3 +1243,17 @@ fn named_anchor_areas_reposition_and_resize_the_target_after_style_changes() {
     })()"#);
     assert_eq!(result,"--card, --other|right center|20,90,20,10|20,110,20,10|160,20,70,10");
 }
+
+#[test]
+fn joining_an_inline_line_preserves_contextual_whitespace_on_the_moved_fragment() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>#ed > .code { white-space:pre-wrap }</style><main contenteditable id=ed><p>left</p><span class=code><b>two  words<br>right</b></span></main>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const first=ed.firstChild.firstChild;
+        getSelection().collapse(first,first.length);
+        document.execCommand('forwardDelete');
+        const moved=ed.firstChild.querySelector('.code');
+        return [moved.textContent,getComputedStyle(moved).whiteSpace,ed.lastChild.textContent].join('|');
+    })()"#);
+    assert_eq!(result,"two  words|pre-wrap|right");
+}
