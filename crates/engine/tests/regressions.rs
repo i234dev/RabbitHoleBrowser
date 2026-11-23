@@ -1122,9 +1122,17 @@ fn editing_keeps_neighboring_inline_spaces_and_releases_trailing_space_when_typi
         ed.textContent = 'x'; ed.focus(); sel.collapse(ed.firstChild,1);
         document.execCommand('insertText',false,' ');
         document.execCommand('insertText',false,'y');
-        return [untouched,first,ed.textContent,sel.focusOffset].join('|');
+        const typed = [ed.textContent,sel.focusOffset];
+        ed.innerHTML = 'a&nbsp;&nbsp;<i>&nbsp;b</i>';
+        sel.collapse(ed.firstChild,1);
+        document.execCommand('forwardDelete');
+        const joined = ed.innerHTML;
+        ed.innerHTML = 'a&nbsp;<i style="white-space:pre">b</i>';
+        sel.collapse(ed.firstChild,2);
+        document.execCommand('insertText',false,'\u00a0');
+        return [untouched,first,...typed,joined,ed.firstChild.data].join('|');
     })()"#);
-    assert_eq!(result,"a&nbsp;<b>&nbsp;b</b>|&nbsp;|x y|3");
+    assert_eq!(result,"a&nbsp;<b>&nbsp;b</b>|&nbsp;|x y|3|a&nbsp;<i>&nbsp;b</i>|a\u{a0}\u{a0}");
 }
 
 #[test]

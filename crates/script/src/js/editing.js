@@ -970,9 +970,12 @@
         if (n.nodeType !== 3) return false;
         if (deletion) {
           // Across an inline boundary the adjoining node owns its spaces.
-          // Protect the join if its first/last character is collapsible.
+          // Keep an existing nonbreaking space at the edge of an adjoining
+          // run or a span with a different whitespace mode.
           const adjacent = forward ? n.data[0] : n.data[n.length-1];
-          return adjacent === ' ' || adjacent === '\n';
+          const edge = forward ? text[text.length-1] : text[0];
+          return adjacent === ' ' || adjacent === '\n' ||
+            (edge === '\u00a0' && (adjacent === '\u00a0' || !collapses(n)));
         }
         if (!collapses(n)) return false;
         at = forward ? 0 : n.length;
@@ -1182,7 +1185,7 @@
         const inserted = sel.focusNode, end = sel.focusOffset;
         if (inserted.nodeType === 3) {
           const start = end - lines[i].length;
-          if (start > 0 && inserted.data[start-1] === '\u00a0' && lines[i][0] !== ' ')
+          if (start > 0 && inserted.data[start-1] === '\u00a0' && !/^[ \u00a0]/.test(lines[i]))
             rebalanceSpaces(inserted,start,host);
           for (const match of lines[i].matchAll(/ +/g)) rebalanceSpaces(inserted,start + match.index,host);
           sel.collapse(inserted,end);
