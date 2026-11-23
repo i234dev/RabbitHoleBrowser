@@ -1,0 +1,11 @@
+[package]
+name = "rabbithole-rtc"
+description = "RabbitHole WebRTC peer and data channel transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+str0m = { version = "0.26", default-features = false, features = ["rust-crypto"] }
