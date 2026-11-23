@@ -567,3 +567,25 @@ fn same_origin_frame_window_is_a_window() {
     );
     assert_eq!(r, "true,Window,true,true,[object Window],function");
 }
+
+#[test]
+fn same_origin_window_assignment_runs_property_setters_in_the_child() {
+    let mut e = engine();
+    let inner = r#"<script>
+        let writes = 0;
+        Object.defineProperty(window, 'count', {
+            get() { return writes; }, set(value) { writes += value; }
+        });
+        Object.defineProperty(window, 'fixed', {value: 1});
+        function read() { return [count, initial, typeof missing].join(','); }
+    </script>"#;
+    let mut page = load(&mut e, &format!(r#"<iframe srcdoc="{}"></iframe>"#, escape_attr(inner)));
+    let output = eval(&e, &mut page, r#"(() => {
+        const child = window.frames[0];
+        child.count = 5;
+        child.initial = 'from parent';
+        child.missing = undefined;
+        return [child.read(), 'missing' in child, 'absent' in child, Reflect.set(child, 'fixed', 4)].join('|');
+    })()"#);
+    assert_eq!(output, "5,from parent,undefined|true|false|false");
+}

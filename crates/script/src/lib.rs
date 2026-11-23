@@ -252,6 +252,10 @@ pub enum FrameCall {
     Method { node: NodeId, name: String },
     /// Read global property `name` of the frame's window.
     GetGlobal { name: String },
+    /// Assign a structured-clone value to a property in the frame's realm.
+    SetGlobal { name: String, value: String },
+    /// Test for a property in the frame's realm, without calling its getter.
+    HasGlobal { name: String },
     /// Call the frame's global function `name` with the arguments (a
     /// structured clone, serialized).
     CallGlobal { name: String, args: String },

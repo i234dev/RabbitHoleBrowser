@@ -256,11 +256,14 @@
         return typeof g.Window === 'function' && sameOrigin(id) ? g.Window.prototype : Object.getPrototypeOf(t);
       },
       has(t, key) {
-        return key in t || ((BUILTINS.has(key) || (typeof key === 'string' && /^[A-Z]/.test(key) && typeof g[key] === 'function')) && sameOrigin(id));
+        if (key in t) return true;
+        return typeof key === 'string' && sameOrigin(id) && !!info(id, 'has', key);
       },
       set(t, key, v) {
         if (key === 'location') { info(id, 'navigate', String(v)); return true; }
-        return true;
+        if (!sameOrigin(id)) throw new DOMException('Cannot write a cross-origin Window property', 'SecurityError');
+        if (typeof key !== 'string') return false;
+        return !!info(id, 'set', key, serialize(v));
       },
     });
     ids.set(p, id);
@@ -297,6 +300,9 @@
     if (typeof Node === 'function' && v instanceof Node) return v;
     try { return serialize(v); } catch (e) { return undefined; }
   }
+  const setProperty = Reflect.set;
+  function foreignSet(name, value) { return setProperty(g, name, deserialize(value)); }
+  function foreignHas(name) { return name in g; }
   function foreignGet(name) { return toForeign(g[name]); }
   function foreignCall(name, args) {
     const f = g[name];
@@ -444,6 +450,6 @@
     g.dispatchEvent(ev);
   }
 
-  return { serialize, deserialize, windowFor, deliver, foreignGet, foreignCall, foreignDispatch, eventInit,
+  return { serialize, deserialize, windowFor, deliver, foreignGet, foreignSet, foreignHas, foreignCall, foreignDispatch, eventInit,
     registerWindow(proxy) { ids.set(proxy, -1); } };
 })

@@ -134,6 +134,8 @@ pub(crate) fn foreign(realm: &mut Realm, call: crate::FrameCall) -> crate::Frame
             realm.invoke(n, &name, &[]).map(|_| Value::Undefined)
         }
         FrameCall::GetGlobal { name } => api_call(realm, "foreignGet", &[Value::str(&name)]),
+        FrameCall::SetGlobal { name, value } => api_call(realm, "foreignSet", &[Value::str(&name), Value::str(&value)]),
+        FrameCall::HasGlobal { name } => api_call(realm, "foreignHas", &[Value::str(&name)]),
         FrameCall::CallGlobal { name, args } => api_call(realm, "foreignCall", &[Value::str(&name), Value::str(&args)]),
         FrameCall::Document { op } => return crate::docparser::foreign_op(realm, op),
     };
@@ -220,6 +222,17 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         "global" => {
             let name = realm.to_rust_string(arg(args, 2))?;
             let r = call_frame(id, crate::FrameCall::GetGlobal { name });
+            reply_value(realm, id, r)?
+        }
+        "set" => {
+            let name = realm.to_rust_string(arg(args, 2))?;
+            let value = realm.to_rust_string(arg(args, 3))?;
+            let r = call_frame(id, crate::FrameCall::SetGlobal { name, value });
+            reply_value(realm, id, r)?
+        }
+        "has" => {
+            let name = realm.to_rust_string(arg(args, 2))?;
+            let r = call_frame(id, crate::FrameCall::HasGlobal { name });
             reply_value(realm, id, r)?
         }
         "call" => {
