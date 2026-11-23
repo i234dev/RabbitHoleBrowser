@@ -26,6 +26,21 @@ git diff --stat a43c8e0..8d6a0be9
 
 El checkout separado permite revisar e identificar bloques aptos para tu rama de integración. El autor seguirá añadiendo commits posteriores en `WPT_API`. Para reproducir un resultado, conserva el SHA asociado a la medición. Si seleccionas commits individuales, comprueba sus dependencias y valida el árbol que resulte de combinarlos. Por ejemplo, `8d6a0be9` reutiliza la lista de puertos restringidos de `84bdd663`.
 
+## Disponibilidad de TheOtherSide para rendimiento
+
+**A las 16:53 CET del 23 de noviembre, el autor de WPT_API está usando TheOtherSide para compilaciones y pruebas dirigidas. La ventana de rendimiento sigue pendiente.** En ese momento se estaba ejecutando WPT de edición y la carga media de un minuto era 2,90. Quedan comprobaciones y posibles recompilaciones. Se puede empezar ya la revisión del código en un worktree propio.
+
+Los trabajos del autor usan los CPU 0–3 y 10–15. Aunque el CPU 8 esté libre, una compilación o un barrido WPT paralelo compite por memoria, caché, disco y presupuesto térmico. Una pausa entre lotes puede parecer una máquina libre durante unos segundos.
+
+Para el Speedometer 3.1 A/B, **espera al aviso explícito de liberación de TheOtherSide por el autor de WPT_API**. Después, comprueba también la actividad de otros usuarios y que la carga de un minuto sea inferior a 2. Puedes consultar la máquina sin iniciar una compilación:
+
+```sh
+ssh -p 2222 -i ~/.ssh/rabbithole_wsl rhbuild@192.168.1.101 \
+  'date -Is; uptime; ps -eo pid,comm,pcpu --sort=-pcpu | head -15; lslocks -o PID,COMMAND,PATH | grep -F rabbithole-compile-heavy.lock'
+```
+
+Con la ventana disponible, usa dos builds alineados, ocho pares alternados y el CPU 8. Reserva el bloqueo compartido `/tmp/rabbithole-compile-heavy.lock` durante las mediciones para impedir que se cuele otra compilación gestionada por el guardián. Las compilaciones previas adquieren ese bloqueo a través del propio guardián. Si una compilación u otro trabajo pesado coincide con un par, repítelo antes de usarlo para decidir la integración.
+
 ## Qué está medido
 
 | Área | Resultado disponible | Alcance |
