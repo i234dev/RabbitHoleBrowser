@@ -2136,6 +2136,41 @@ fn shared_worker_ports_forward_transferred_objects_in_the_message_graph() {
 }
 
 #[test]
+fn trickled_ice_replaces_only_the_matching_remote_description() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+        try {
+          a.createDataChannel('local');
+          const offer = await a.createOffer();
+          const sdp = offer.sdp.replace(/^a=(?:candidate:[^\r\n]*|end-of-candidates)\r?\n/gm, '');
+          await b.setRemoteDescription({type:'offer',sdp});
+          const previous = b.pendingRemoteDescription;
+          const mid = /^a=mid:([^\r\n]+)/m.exec(sdp)[1];
+          const fragment = /^a=ice-ufrag:([^\r\n]+)/m.exec(sdp)[1];
+          const candidate = 'candidate:7 1 udp 16777215 127.0.0.1 35001 typ host';
+          const init = {candidate,sdpMid:mid,usernameFragment:fragment,
+            get url() { throw Error('local-only field read'); }};
+          const accepted = b.addIceCandidate(init);
+          init.sdpMid = 'changed';
+          await accepted;
+          const updated = b.pendingRemoteDescription;
+          console.log(previous !== updated, previous.sdp === sdp, updated.sdp.includes('a=' + candidate));
+          await b.setLocalDescription();
+          const stable = b.currentRemoteDescription;
+          await b.addIceCandidate({sdpMLineIndex:0,usernameFragment:fragment});
+          console.log(b.currentRemoteDescription !== stable, !stable.sdp.includes('a=end-of-candidates'),
+                      b.remoteDescription.sdp.includes('a=end-of-candidates'));
+          const same = b.remoteDescription;
+          const error = await b.addIceCandidate({candidate,sdpMid:mid,usernameFragment:'obsolete'}).catch(e=>e.name);
+          console.log(error, b.remoteDescription === same);
+        } finally { a.close(); b.close(); }
+      })().catch(e => console.log(String(e)));
+    "#);
+    assert_eq!(out, ["true true true", "true true true", "OperationError true"]);
+}
+
+#[test]
 fn rtc_signaling_values_keep_local_metadata_out_of_signaling() {
     let result = result_of("<body>", r#"
         const line = 'candidate:aB/7 2 TCP 1024 2001:db8::8 9 typ srflx raddr local.example rport 5000 tcptype active';

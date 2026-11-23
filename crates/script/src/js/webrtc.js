@@ -559,6 +559,61 @@
       pump(pc);
     }, 4);
   }
+  function remoteIceSections(description) {
+    const parts = description.sdp.split(/(?=^m=)/m);
+    const attribute = (part, field) => {
+      const prefix = 'a=' + field + ':';
+      const line = part.split(/\r?\n/).find(line => line.startsWith(prefix));
+      return line === undefined ? null : line.slice(prefix.length);
+    };
+    const sections = parts.slice(1).map((part, index) => ({
+      index, mid:attribute(part,'mid'),
+      ufrag:attribute(part,'ice-ufrag') ?? attribute(parts[0],'ice-ufrag'),
+      pwd:attribute(part,'ice-pwd') ?? attribute(parts[0],'ice-pwd'),
+      rejected:/^m=\S+ 0(?: |\/)/.test(part) && !/^a=bundle-only\r?$/m.test(part),
+    }));
+    return {parts,sections};
+  }
+
+  function addRemoteIce(peer, init) {
+    const remote = peer.pendingRemoteDescription || peer.currentRemoteDescription;
+    if (!remote) throw failure('InvalidStateError','A remote description is required');
+    const active = remoteIceSections(remote);
+    const {candidate,sdpMid,sdpMLineIndex,usernameFragment} = init;
+    const matches = section => sdpMid !== null ? section.mid === sdpMid :
+      sdpMLineIndex === null || section.index === sdpMLineIndex;
+    const addressed = active.sections.filter(matches);
+    if (!addressed.length && (sdpMid !== null || sdpMLineIndex !== null))
+      throw failure('OperationError','Unknown media section');
+    const selected = addressed.filter(s => usernameFragment === null || s.ufrag === usernameFragment);
+    if (usernameFragment !== null && !selected.length) throw failure('OperationError','Unknown ICE generation');
+    const live = selected.filter(section => !section.rejected);
+    if (!live.length) return;
+    if (candidate && /[\r\n]/.test(candidate)) throw failure('OperationError','Invalid ICE candidate');
+    if (candidate && !N.rtcCandidate(backend(peer),candidate)) return;
+    const line = candidate ? 'a=' + candidate.replace(/^a=/,'') : 'a=end-of-candidates';
+    for (const key of ['pendingRemoteDescription','currentRemoteDescription']) {
+      const desc = peer[key];
+      if (!desc) continue;
+      const {parts,sections} = desc === remote ? active : remoteIceSections(desc);
+      let changed = false;
+      for (const section of sections) {
+        if (section.rejected || !live.some(s => s.ufrag === section.ufrag && s.pwd === section.pwd &&
+            (s.mid !== null ? s.mid === section.mid : s.index === section.index))) continue;
+        const i = section.index + 1;
+        const lines = parts[i].split(/\r?\n/);
+        if (lines.includes(line)) continue;
+        if (lines[lines.length-1] === '') lines.pop();
+        const end = lines.indexOf('a=end-of-candidates');
+        lines.splice(end < 0 ? lines.length : end,0,line);
+        parts[i] = lines.join('\r\n') + '\r\n';
+        changed = true;
+      }
+      if (changed) peer[key] = new RTCSessionDescription({type:desc.type,sdp:parts.join('')});
+    }
+    applyTransportDescription(peer,peer.pendingRemoteDescription || peer.currentRemoteDescription,false);
+  }
+
   function gather(pc, desc) {
     const p = peers.get(pc);
     const [generation] = iceCredentials(desc);
@@ -762,30 +817,16 @@
       });
     }
     addIceCandidate(init = {}) {
-      return enqueue(this,p=>{
-        if(!this.remoteDescription) throw failure('InvalidStateError','A remote description is required');
-        if (init == null || !init.candidate) {
-          const ice = p.sctp?.transport.iceTransport;
-          if (ice) {
-            const info = iceTransports.get(ice);
-            const media = this.remoteDescription.sdp.split(/^m=/m).slice(1);
-            const index = media.findIndex(part => part.startsWith('application '));
-            const mid = index < 0 ? null : /^a=mid:([^\r\n]+)/m.exec(media[index])?.[1];
-            if ((init?.sdpMid == null || String(init.sdpMid) === mid) &&
-                (init?.sdpMLineIndex == null || Number(init.sdpMLineIndex) === index) &&
-                (init?.usernameFragment == null || String(init.usernameFragment) === info.remoteParameters?.usernameFragment))
-              info.remoteComplete = true;
-          }
-          return;
-        }
-        const c=new RTCIceCandidate(init);
-        if(c.sdpMid===null && c.sdpMLineIndex===null) throw new TypeError('A media identifier is required');
-        const mids=[...this.remoteDescription.sdp.matchAll(/^a=mid:([^\r\n]+)/gm)].map(m=>m[1]);
-        if(c.sdpMid!==null ? !mids.includes(c.sdpMid) : c.sdpMLineIndex>=mids.length)
-          throw failure('OperationError','Unknown media section');
-        if (!N.rtcCandidate(backend(p),c.candidate)) return;
-        if (p.sctp) rememberCandidate(iceTransports.get(p.sctp.transport.iceTransport).remote,c);
-      });
+      try {
+        const d = dictionary(init);
+        const value = d.candidate;
+        const candidate = value === undefined ? '' : string(value);
+        const index = d.sdpMLineIndex, sdpMLineIndex = index == null ? null : +index & 65535;
+        const sdpMid = nullableString(d.sdpMid), usernameFragment = nullableString(d.usernameFragment);
+        if (candidate && sdpMid === null && sdpMLineIndex === null)
+          throw new TypeError('A media identifier is required');
+        return enqueue(this,p=>addRemoteIce(p,{candidate,sdpMid,sdpMLineIndex,usernameFragment}));
+      } catch (e) { return Promise.reject(e); }
     }
     close() {
       const p=peers.get(this);
