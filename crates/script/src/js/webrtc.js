@@ -188,6 +188,20 @@
     if (value == null || typeof value[Symbol.iterator] !== 'function') throw new TypeError('Expected a sequence');
     return [...value];
   }
+  const certificateData = new WeakMap(), timestamp = Date.now.bind(Date);
+  class RTCCertificate {
+    constructor(token, identity) {
+      if (token !== channelToken) throw new TypeError('Illegal constructor');
+      const [handle,expires,fingerprint] = identity;
+      certificateData.set(this,{handle,expires,fingerprint});
+    }
+    getFingerprints() {
+      const data = certificateData.get(this);
+      if (!data) throw new TypeError('Expected an RTCCertificate');
+      return [{algorithm:'sha-256',value:data.fingerprint}];
+    }
+  }
+  expose(RTCCertificate,certificateData,['expires']);
   function configuration(init) {
     const dict = dictionary(init);
     const config = {
@@ -197,7 +211,11 @@
       iceServers: [], iceTransportPolicy: enumeration(dict.iceTransportPolicy ?? 'all',['all','relay']),
       rtcpMuxPolicy: enumeration(dict.rtcpMuxPolicy ?? 'require',['require']),
     };
-    if (config.certificates.length) throw new TypeError('Expected an RTCCertificate');
+    for (const cert of config.certificates) {
+      const data = certificateData.get(cert);
+      if (!data) throw new TypeError('Expected an RTCCertificate');
+      if (data.expires <= timestamp()) throw failure('InvalidAccessError','The certificate has expired');
+    }
     for (const item of dict.iceServers === undefined ? [] : sequence(dict.iceServers)) {
       const d = dictionary(item);
       if (d.urls === undefined) throw new TypeError('An ICE server URL is required');
@@ -226,7 +244,7 @@
     return p;
   }
   function backend(p) {
-    if (!p.native) p.native = N.rtcCreate(p.config.iceTransportPolicy !== 'relay');
+    if (!p.native) p.native = N.rtcCreate(p.config.iceTransportPolicy !== 'relay',certificateData.get(p.config.certificates[0])?.handle);
     return p.native;
   }
   const channelToken = {};
@@ -568,6 +586,17 @@
         pendingLocalDescription:null,pendingRemoteDescription:null,currentLocalDescription:null,currentRemoteDescription:null,
         gatheringStarted:false,negotiationQueued:false,answer:null,lastOffer:null});
     }
+    static async generateCertificate(algorithm) {
+      if (!arguments.length) throw new TypeError('A key generation algorithm is required');
+      const key = typeof algorithm === 'string' ? {name:algorithm} : dictionary(algorithm);
+      if (key.name === undefined) throw new TypeError('A key algorithm name is required');
+      if (string(key.name).toUpperCase() !== 'ECDSA') throw failure('NotSupportedError','Unsupported DTLS signature algorithm');
+      if (key.namedCurve === undefined) throw new TypeError('A named curve is required');
+      if (string(key.namedCurve) !== 'P-256') throw failure('NotSupportedError','Unsupported DTLS signing curve');
+      const lifetime = key.expires === undefined ? 30 * 86400000 : +key.expires;
+      if (!Number.isFinite(lifetime) || lifetime < 0 || lifetime >= 2**64) throw new TypeError('Invalid certificate lifetime');
+      return new RTCCertificate(channelToken,N.rtcCertificate(Math.min(Math.trunc(lifetime),365 * 86400000)));
+    }
     get localDescription() { const p=peers.get(this);return p.pendingLocalDescription || p.currentLocalDescription; }
     get remoteDescription() { const p=peers.get(this);return p.pendingRemoteDescription || p.currentRemoteDescription; }
     get canTrickleIceCandidates() { const desc=this.remoteDescription;return desc ? /^a=ice-options:.*\btrickle\b/m.test(desc.sdp) : null; }
@@ -581,9 +610,14 @@
       }
       return statsReport(peer);
     }
-    getConfiguration() { return structuredClone(peers.get(this).config); }
+    getConfiguration() {
+      const {certificates,...config} = peers.get(this).config;
+      return {...structuredClone(config),certificates:certificates.slice()};
+    }
     setConfiguration(init = {}) {
       const p=state(this), cfg=configuration(init);
+      if (cfg.certificates.length !== p.config.certificates.length || cfg.certificates.some((cert,i) => cert !== p.config.certificates[i]))
+        throw failure('InvalidModificationError','The DTLS identity cannot change');
       if (cfg.bundlePolicy !== p.config.bundlePolicy || (p.gatheringStarted && cfg.iceCandidatePoolSize!==p.config.iceCandidatePoolSize))
         throw failure('InvalidModificationError','The existing transport configuration cannot be changed');
       if (p.native && cfg.iceTransportPolicy!==p.config.iceTransportPolicy)

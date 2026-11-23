@@ -1,5 +1,8 @@
 //! Nonblocking WebRTC transport. Callers choose the interfaces available
 //! to an origin and drive ICE, DTLS and SCTP from the browser event loop.
+mod certificate;
+pub use certificate::Certificate;
+
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
@@ -48,8 +51,16 @@ pub struct Peer {
 
 impl Peer {
     pub fn bind(addresses: &[IpAddr]) -> io::Result<Self> {
-        let mut rtc = str0m::RtcConfig::new()
-            .set_sctp_max_message_size(MESSAGE_CAPACITY)
+        Self::bind_with_certificate(addresses, None)
+    }
+
+    pub fn bind_with_certificate(addresses: &[IpAddr], cert: Option<&Certificate>) -> io::Result<Self> {
+        let mut config = str0m::RtcConfig::new();
+        if let Some(cert) = cert {
+            if cert.expired() { return Err(io::Error::other("The DTLS certificate has expired")); }
+            config = config.set_dtls_cert(cert.identity.clone());
+        }
+        let mut rtc = config.set_sctp_max_message_size(MESSAGE_CAPACITY)
             .set_sctp_max_buffered_amount(MESSAGE_CAPACITY as usize)
             .set_stats_interval(Some(Duration::from_millis(100)))
             .build(Instant::now());

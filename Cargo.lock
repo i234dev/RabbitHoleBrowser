@@ -2251,7 +2251,10 @@ dependencies = [
 name = "rabbithole-rtc"
 version = "0.1.44"
 dependencies = [
+ "rcgen",
  "str0m",
+ "time",
+ "x509-parser",
 ]
 
 [[package]]

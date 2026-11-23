@@ -3,7 +3,7 @@
 use crate::fetch::{buffer_source_bytes, make_array_buffer};
 use crate::host::{arg, arg_str};
 use rabbithole_js::{JsResult, ObjectId, Realm, Value};
-use rabbithole_rtc::{ChannelConfig, IceConnectionState, Peer, PeerEvent, Reliability};
+use rabbithole_rtc::{Certificate, ChannelConfig, IceConnectionState, Peer, PeerEvent, Reliability};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -31,6 +31,16 @@ fn with_peer<T>(
     operation(realm, result)
 }
 
+fn certificate(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let lifetime = realm.to_number(arg(args, 0))?;
+    let cert = operation(realm, Certificate::generate(lifetime as u64))?;
+    let expiry = Value::Number(cert.expires_ms as f64);
+    let fingerprint = Value::str(&cert.fingerprint);
+    let handle = realm.new_object();
+    realm.set_host_data(handle, Box::new(cert));
+    Ok(realm.new_array_value(vec![Value::Object(handle), expiry, fingerprint]))
+}
+
 fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     // Until the browser has mDNS masking or an interface disclosure permission,
     // only advertise loopback host candidates. Relay-only disables host ICE.
@@ -40,7 +50,9 @@ fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     } else {
         &[]
     };
-    let peer = operation(realm, Peer::bind(addresses))?;
+    let identity = arg(args, 1).as_object().and_then(|id| realm.host_data::<Certificate>(id));
+    let result = Peer::bind_with_certificate(addresses, identity);
+    let peer = operation(realm, result)?;
     let id = realm.new_object();
     realm.set_host_data(id, Box::new(Some(peer)));
     Ok(Value::Object(id))
@@ -189,7 +201,8 @@ fn poll(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 
 pub(crate) fn install(realm: &mut Realm, o: ObjectId) {
     realm.define_property(o, "rtcMessageCapacity", Value::Number(rabbithole_rtc::MESSAGE_CAPACITY.into()), 0);
-    realm.define_method(o, "rtcCreate", 1, create);
+    realm.define_method(o, "rtcCreate", 2, create);
+    realm.define_method(o, "rtcCertificate", 1, certificate);
     realm.define_method(o, "rtcClose", 1, close);
     realm.define_method(o, "rtcChannel", 7, channel);
     realm.define_method(o, "rtcOffer", 1, offer);

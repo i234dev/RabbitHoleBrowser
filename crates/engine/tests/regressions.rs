@@ -664,8 +664,17 @@ fn peer_connections_deliver_over_an_authenticated_data_channel() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<main></main>");
     eval(&e, &mut page, r#"
-        var rtcResult = '', first = new RTCPeerConnection(), second = new RTCPeerConnection();
+        var rtcResult = '', first, second = new RTCPeerConnection();
         (async () => {
+            const algorithm = {name:'ECDSA',namedCurve:'P-256'};
+            const expired = await RTCPeerConnection.generateCertificate({...algorithm,expires:0});
+            let rejected = false;
+            try { new RTCPeerConnection({certificates:[expired]}); } catch (e) { rejected = e.name === 'InvalidAccessError'; }
+            if (!rejected) throw Error('Expired DTLS identity accepted');
+            const certificate = await RTCPeerConnection.generateCertificate({...algorithm,expires:60000});
+            first = new RTCPeerConnection({certificates:[certificate]});
+            if (!(certificate instanceof RTCCertificate) || first.getConfiguration().certificates[0] !== certificate)
+                throw Error('Configuration lost the supplied certificate');
             second.ondatachannel = e => {
                 e.channel.onmessage = msg => e.channel.send(msg.data + '!');
             };
@@ -681,10 +690,13 @@ fn peer_connections_deliver_over_an_authenticated_data_channel() {
                 first.close(); second.close();
             };
             await first.setLocalDescription(await first.createOffer());
+            const fingerprint = certificate.getFingerprints()[0];
+            if (!first.localDescription.sdp.toLowerCase().includes('a=fingerprint:' + fingerprint.algorithm + ' ' + fingerprint.value))
+                throw Error('Offer fingerprint differs from supplied identity');
             await second.setRemoteDescription(first.localDescription);
             await second.setLocalDescription(await second.createAnswer());
             await first.setRemoteDescription(second.localDescription);
-        })().catch(e => {rtcResult = String(e); first.close(); second.close();});
+        })().catch(e => {rtcResult = String(e); first?.close(); second.close();});
     "#);
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
@@ -695,7 +707,7 @@ fn peer_connections_deliver_over_an_authenticated_data_channel() {
             break;
         }
         assert!(Instant::now() < deadline, "{}", eval(&e, &mut page,
-            "[first.signalingState,first.iceConnectionState,first.connectionState,second.connectionState].join('|')"));
+            "[first?.signalingState,first?.iceConnectionState,first?.connectionState,second.connectionState].join('|')"));
         std::thread::sleep(Duration::from_millis(4));
     }
 }
