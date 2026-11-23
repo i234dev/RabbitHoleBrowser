@@ -571,24 +571,85 @@
       sel.collapse(node, text.length);
     }
   }
+  const caretBreaks = new WeakSet();
+  function caretBreak(doc) {
+    const br = doc.createElement('br');
+    caretBreaks.add(br);
+    return br;
+  }
+  function followingContent(range, container) {
+    const point = range.startContainer, offset = range.startOffset;
+    if (point.nodeType === 3 && offset < point.length) return point;
+    let node = point.nodeType === 1 ? point.childNodes[offset] : null;
+    node ||= adjacentNode(point, container, true);
+    while (node) {
+      if (node.nodeType === 3 && node.length || node.nodeType === 1 &&
+          (node.localName === 'br' || isBlock(node) || !node.isContentEditable ||
+           ['img','input','iframe','canvas','video','audio','hr'].includes(node.localName))) return node;
+      node = node.firstChild || adjacentNode(node, container, true);
+    }
+    return null;
+  }
+  function insertLineBreak(doc, t) {
+    const {host, range, sel} = t;
+    const point = range.startContainer;
+    const parent = point.nodeType === 3 ? point.parentElement : point;
+    const block = parent === host || isBlock(parent) ? parent : containingBlock(parent, host);
+    const atEnd = !followingContent(range, block);
+    if (['pre','pre-line','pre-wrap','break-spaces'].includes(getComputedStyle(parent).whiteSpace)) {
+      insertText(doc, range, sel, '\n');
+    } else {
+      insertAt(range, doc.createElement('br'), sel);
+    }
+    if (atEnd) {
+      const caret = sel.getRangeAt(0).cloneRange();
+      const node = caret.startContainer, offset = caret.startOffset;
+      caret.insertNode(caretBreak(doc));
+      sel.collapse(node, offset);
+    }
+  }
+  function hasParagraphContent(block) {
+    return !!block.textContent || !!block.querySelector('br,img,input,iframe,canvas,video,audio,hr,[contenteditable=false]');
+  }
+  function firstCaretContainer(block) {
+    let node = block;
+    while (node.firstChild && node.firstChild.nodeType === 1 && !isBlock(node.firstChild) &&
+           node.firstChild.localName !== 'br' && node.firstChild.isContentEditable &&
+           !['img','input','iframe','canvas','video','audio'].includes(node.firstChild.localName)) node = node.firstChild;
+    return node;
+  }
   function splitParagraph(doc, t, separator) {
     const { host, range, sel } = t;
     let block = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
-    while (block !== host && !['address','div','p','pre','li','blockquote','h1','h2','h3','h4','h5','h6'].includes(block.localName))
+    while (block !== host && (!isBlock(block) || !['address','div','p','pre','li','blockquote','h1','h2','h3','h4','h5','h6'].includes(block.localName)))
       block = block.parentElement;
+    if (!isBlock(block) || block.localName === 'pre' || host.contentEditable === 'plaintext-only') {
+      insertLineBreak(doc, t);
+      return;
+    }
     const tail = doc.createRange();
     tail.selectNodeContents(block);
     tail.setStart(range.startContainer, range.startOffset);
     const after = tail.extractContents();
-    const next = doc.createElement(block === host ? separator : block.localName);
+    const next = block === host ? doc.createElement(separator) : block.cloneNode(false);
+    next.removeAttribute('id');
     next.appendChild(after);
-    if (!next.firstChild) next.appendChild(doc.createElement('br'));
-    if (block === host) block.appendChild(next);
-    else {
+    if (block === host) {
+      if (!hasParagraphContent(block)) {
+        const before = doc.createElement(separator);
+        while (block.firstChild) before.appendChild(block.firstChild);
+        block.appendChild(before);
+        firstCaretContainer(before).appendChild(caretBreak(doc));
+      }
+      block.appendChild(next);
+    } else {
       block.parentNode.insertBefore(next, block.nextSibling);
-      if (!block.firstChild) block.appendChild(doc.createElement('br'));
+      if (!hasParagraphContent(block)) firstCaretContainer(block).appendChild(caretBreak(doc));
     }
-    sel.collapse(next, 0);
+    const caret = firstCaretContainer(next);
+    if (!hasParagraphContent(next)) caret.appendChild(caretBreak(doc));
+    if (caret.firstChild?.nodeType === 3) sel.collapse(caret.firstChild, 0);
+    else sel.collapse(caret, 0);
   }
   function execute(doc, state, cmd, value) {
     if (cmd === 'stylewithcss' || cmd === 'usecss') {
@@ -624,17 +685,23 @@
     if (cmd === 'insertimage' && !value) return false;
     const { sel, range, host } = t;
     if (cmd === 'inserttext' && !value) return true;
-    const toggles = cmd === 'inserttext' && range.collapsed ? typingStyle(state, range) : null;
+    const toggles = range.collapsed && ['inserttext','insertlinebreak','insertparagraph'].includes(cmd) ? typingStyle(state, range) : null;
     state.typing = null;
     range.deleteContents();
-    if (cmd === 'insertparagraph') {
-      splitParagraph(doc, t, state.separator);
-      input(host, 'insertParagraph');
+    if (cmd === 'insertparagraph' || cmd === 'insertlinebreak') {
+      if (cmd === 'insertparagraph') splitParagraph(doc, t, state.separator);
+      else insertLineBreak(doc, t);
+      if (toggles) state.typing = {node:sel.focusNode,offset:sel.focusOffset,formats:toggles};
+      input(host, cmd === 'insertparagraph' ? 'insertParagraph' : 'insertLineBreak');
     } else if (cmd === 'inserttext') {
       const lines = value.replace(/\r\n?/g, '\n').split('\n');
       for (let i = 0; i < lines.length; ++i) {
         if (i) splitParagraph(doc, {host, sel, range:sel.getRangeAt(0)}, state.separator);
         if (!lines[i]) continue;
+        const caret = sel.getRangeAt(0);
+        const point = caret.startContainer, offset = caret.startOffset;
+        const following = point.nodeType === 3 ? (offset === point.length ? point.nextSibling : null) : point.childNodes[offset];
+        if (following && caretBreaks.has(following)) following.remove();
         if (toggles?.size) {
           const node = doc.createTextNode(lines[i]);
           sel.getRangeAt(0).insertNode(node);
@@ -652,11 +719,11 @@
       let node;
       if (cmd === 'inserthtml') node = range.createContextualFragment(value);
       else {
-        node = doc.createElement(cmd === 'insertimage' ? 'img' : cmd === 'insertlinebreak' ? 'br' : 'hr');
+        node = doc.createElement(cmd === 'insertimage' ? 'img' : 'hr');
         if (cmd === 'insertimage') node.setAttribute('src', value);
       }
       insertAt(range, node, sel);
-      input(host, cmd === 'insertlinebreak' ? 'insertLineBreak' : cmd === 'inserthorizontalrule' ? 'insertHorizontalRule' : '');
+      input(host, cmd === 'inserthorizontalrule' ? 'insertHorizontalRule' : '');
     }
     return true;
   }

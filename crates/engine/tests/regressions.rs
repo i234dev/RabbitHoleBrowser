@@ -972,3 +972,25 @@ fn data_channel_transports_report_negotiated_limits_and_the_selected_ice_pair() 
         std::thread::sleep(Duration::from_millis(4));
     }
 }
+
+#[test]
+fn rich_editing_preserves_paragraph_styles_typing_formats_and_preformatted_newlines() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>.code{white-space:pre-wrap}</style><main id=ed contenteditable><p class=code><b>ab</b></p></main>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const sel = getSelection(), doc = document;
+        ed.focus();
+        sel.collapse(ed.querySelector('b').firstChild, 1);
+        doc.execCommand('insertLineBreak');
+        const soft = ed.querySelector('p').textContent;
+        doc.execCommand('insertParagraph');
+        doc.execCommand('italic');
+        doc.execCommand('insertText', false, 'Y');
+        const p = ed.lastChild;
+        sel.collapse(p, p.childNodes.length);
+        doc.execCommand('insertParagraph');
+        return [soft,ed.firstChild.className,p.className,p.querySelector('b').textContent,
+            p.querySelector('i').textContent,ed.lastChild.className,!!ed.lastChild.querySelector('br')].join('|');
+    })()"#);
+    assert_eq!(result, "a\nb|code|code|Yb|Y|code|true");
+}
