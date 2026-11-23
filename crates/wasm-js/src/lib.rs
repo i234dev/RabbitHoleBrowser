@@ -984,30 +984,48 @@ fn enforce_range(realm: &mut Realm, v: Value, max: f64, what: &str) -> JsResult<
     Ok(n as u64)
 }
 
+fn address_is_64(realm: &mut Realm, desc: &Value) -> JsResult<bool> {
+    let Some(address) = get_opt(realm, desc, "address")? else { return Ok(false) };
+    match realm.to_rust_string(address)?.as_str() {
+        "i32" => Ok(false),
+        "i64" => Ok(true),
+        _ => realm.type_error("WebAssembly address must be i32 or i64"),
+    }
+}
+
+fn address_value(realm: &mut Realm, value: Value, is64: bool, name: &str) -> JsResult<u64> {
+    if !is64 {
+        return enforce_range(realm, value, u32::MAX as f64, name);
+    }
+    let n = rabbithole_js::builtins::number::to_bigint_value(realm, value)?;
+    n.to_i128().and_then(|n| u64::try_from(n).ok()).ok_or_else(|| realm.throw_type_error(&format!("{name} is out of range")))
+}
+
+fn descriptor_limits(realm: &mut Realm, desc: &Value, is64: bool) -> JsResult<Limits> {
+    let initial = realm.get_str(desc.clone(), "initial")?;
+    let min = address_value(realm, initial, is64, "initial")?;
+    let max = get_opt(realm, desc, "maximum")?.map(|v| address_value(realm, v, is64, "maximum")).transpose()?;
+    Ok(Limits { min, max })
+}
+
+fn js_address(realm: &mut Realm, n: u64, is64: bool) -> Value {
+    if is64 { realm.new_bigint(i128::from(n)) } else { Value::Number(n as f64) }
+}
+
 fn memory_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     require_new(realm, "Memory")?;
     let desc = arg(args, 0);
     if !desc.is_object() {
         return Err(realm.throw_type_error("WebAssembly.Memory(): Argument 0 must be a memory descriptor"));
     }
-    let is64 = match get_opt(realm, &desc, "address")? {
-        Some(a) => realm.to_rust_string(a)? == "i64",
-        None => false,
-    };
-    let maximum = match get_opt(realm, &desc, "maximum")? {
-        Some(v) => Some(enforce_range(realm, v, 4294967295.0, "maximum")?),
-        None => None,
-    };
-    let initial = match get_opt(realm, &desc, "initial")? {
-        Some(v) => enforce_range(realm, v, 4294967295.0, "initial")?,
-        None => return Err(realm.throw_type_error("WebAssembly.Memory(): Property 'initial' is required")),
-    };
+    let is64 = address_is_64(realm, &desc)?;
+    let limits = descriptor_limits(realm, &desc, is64)?;
     let limit = if is64 { 1u64 << 48 } else { 65536 };
-    if initial > limit {
+    if limits.min > limit {
         return Err(realm.range_error::<Value>("WebAssembly.Memory(): Property 'initial': value is above the upper bound").unwrap_err());
     }
-    if let Some(m) = maximum {
-        if m > limit || m < initial {
+    if let Some(m) = limits.max {
+        if m > limit || m < limits.min {
             return Err(realm.range_error::<Value>("WebAssembly.Memory(): Property 'maximum' is out of range").unwrap_err());
         }
     }
@@ -1015,10 +1033,10 @@ fn memory_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         Some(v) => realm.to_boolean(&v),
         None => false,
     };
-    if shared && maximum.is_none() {
+    if shared && limits.max.is_none() {
         return Err(realm.throw_type_error("WebAssembly.Memory(): shared memory must have a maximum"));
     }
-    let ty = MemoryType { limits: Limits { min: initial, max: maximum }, shared, memory64: is64, page_log2: 16 };
+    let ty = MemoryType { limits, shared, memory64: is64, page_log2: 16 };
     let Some(mem) = store(realm).new_memory(ty) else {
         return Err(realm.range_error::<Value>("WebAssembly.Memory(): could not allocate memory").unwrap_err());
     };
@@ -1057,9 +1075,9 @@ fn memory_buffer(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Va
 
 fn memory_grow(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (_, mem) = this_memory(realm, &this)?;
-    let delta = enforce_range(realm, arg(args, 0), 4294967295.0, "delta")?;
+    let delta = address_value(realm, arg(args, 0), mem.ty.memory64, "delta")?;
     match mem.grow(delta) {
-        Some(old) => Ok(Value::Number(old as f64)),
+        Some(old) => Ok(js_address(realm, old, mem.ty.memory64)),
         None => Err(realm.range_error::<Value>("WebAssembly.Memory.grow(): Maximum memory size exceeded").unwrap_err()),
     }
 }
@@ -1080,28 +1098,20 @@ fn table_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
     if !desc.is_object() {
         return Err(realm.throw_type_error("WebAssembly.Table(): Argument 0 must be a table descriptor"));
     }
+    let is64 = address_is_64(realm, &desc)?;
     let el = realm.get_str(desc.clone(), "element")?;
     let elem = ref_type_name(realm, el)?;
-    let maximum = match get_opt(realm, &desc, "maximum")? {
-        Some(v) => Some(enforce_range(realm, v, 4294967295.0, "maximum")?),
-        None => None,
-    };
-    let initial = match get_opt(realm, &desc, "initial")? {
-        Some(v) => enforce_range(realm, v, 4294967295.0, "initial")?,
-        None => return Err(realm.throw_type_error("WebAssembly.Table(): Property 'initial' is required")),
-    };
-    if initial > 10_000_000 {
-        return Err(realm.range_error::<Value>("WebAssembly.Table(): Property 'initial': value is above the upper bound").unwrap_err());
+    let limits = descriptor_limits(realm, &desc, is64)?;
+    if limits.min > 10_000_000 {
+        return realm.range_error("WebAssembly.Table(): Property 'initial': value is above the upper bound");
     }
-    if let Some(m) = maximum {
-        if m < initial {
-            return Err(realm.range_error::<Value>("WebAssembly.Table(): Property 'maximum' is below 'initial'").unwrap_err());
-        }
+    if limits.max.is_some_and(|max| max < limits.min) {
+        return realm.range_error("WebAssembly.Table(): Property 'maximum' is below 'initial'");
     }
     let t = ValType::Ref(elem);
     let init = if args.len() > 1 && !arg(args, 1).is_undefined() { to_wasm(realm, arg(args, 1), t)? } else { default_value(realm, t)? };
     let Val::Ref(bits) = init else { unreachable!() };
-    let Some(tab) = store(realm).new_table(TableType { elem, limits: Limits { min: initial, max: maximum }, table64: false }, bits) else {
+    let Some(tab) = store(realm).new_table(TableType { elem, limits, table64: is64 }, bits) else {
         return Err(realm.range_error::<Value>("WebAssembly.Table(): could not allocate table").unwrap_err());
     };
     let d = st(realm).protos.table;
@@ -1120,13 +1130,14 @@ fn this_table(realm: &mut Realm, this: &Value) -> JsResult<Rc<TableInst>> {
 
 fn table_length(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let t = this_table(realm, &this)?;
-    Ok(Value::Number(t.size() as f64))
+    Ok(js_address(realm, t.size(), t.ty.table64))
 }
 
 fn table_get(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let t = this_table(realm, &this)?;
-    let i = enforce_range(realm, arg(args, 0), 4294967295.0, "index")?;
-    let bits = t.elems.borrow().get(i as usize).copied();
+    let i = address_value(realm, arg(args, 0), t.ty.table64, "index")?;
+    let index = usize::try_from(i).ok();
+    let bits = index.and_then(|i| t.elems.borrow().get(i).copied());
     match bits {
         Some(b) => Ok(to_js(realm, Val::Ref(b), ValType::Ref(t.ty.elem))),
         None => Err(realm.range_error::<Value>("WebAssembly.Table.get(): invalid address").unwrap_err()),
@@ -1135,12 +1146,12 @@ fn table_get(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
 
 fn table_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let t = this_table(realm, &this)?;
-    let i = enforce_range(realm, arg(args, 0), 4294967295.0, "index")?;
+    let i = address_value(realm, arg(args, 0), t.ty.table64, "index")?;
     let ty = ValType::Ref(t.ty.elem);
     let v = if args.len() > 1 { to_wasm(realm, arg(args, 1), ty)? } else { default_value(realm, ty)? };
     let Val::Ref(bits) = v else { unreachable!() };
     let mut el = t.elems.borrow_mut();
-    match el.get_mut(i as usize) {
+    match usize::try_from(i).ok().and_then(|i| el.get_mut(i)) {
         Some(slot) => {
             *slot = bits;
             Ok(Value::Undefined)
@@ -1154,13 +1165,13 @@ fn table_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
 
 fn table_grow(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let t = this_table(realm, &this)?;
-    let n = enforce_range(realm, arg(args, 0), 4294967295.0, "delta")?;
+    let n = address_value(realm, arg(args, 0), t.ty.table64, "delta")?;
     let ty = ValType::Ref(t.ty.elem);
     let v = if args.len() > 1 { to_wasm(realm, arg(args, 1), ty)? } else { default_value(realm, ty)? };
     let Val::Ref(bits) = v else { unreachable!() };
     let limit = store(realm).table_limit;
     match t.grow(n, bits, limit) {
-        Some(old) => Ok(Value::Number(old as f64)),
+        Some(old) => Ok(js_address(realm, old, t.ty.table64)),
         None => Err(realm.range_error::<Value>("WebAssembly.Table.grow(): failed to grow table").unwrap_err()),
     }
 }
