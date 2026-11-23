@@ -42,7 +42,7 @@ fn parse_transitions(comps: &[&[Token]]) -> Vec<Transition> {
     }
     let mut out = Vec::new();
     for item in values::split_commas(comps) {
-        let mut t = Transition { property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into() };
+        let mut t = Transition { allow_discrete: false, property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into() };
         let mut times = 0;
         for c in item {
             if let Some(s) = super::seconds(c) {
@@ -55,7 +55,11 @@ fn parse_transitions(comps: &[&[Token]]) -> Vec<Transition> {
             } else if let Some(tn) = timing_name(c) {
                 t.timing = tn;
             } else if let Some(kw) = values::ident(c) {
-                t.property = kw;
+                match kw.as_str() {
+                    "normal" => t.allow_discrete = false,
+                    "allow-discrete" => t.allow_discrete = true,
+                    _ => t.property = kw,
+                }
             }
         }
         out.push(t);
@@ -124,7 +128,7 @@ fn each_transition<T: Clone>(style: &mut ComputedStyle, vals: Vec<T>, f: impl Fn
         return;
     }
     if style.transitions.len() < vals.len() {
-        style.transitions.resize(vals.len(), Transition { property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into() });
+        style.transitions.resize(vals.len(), Transition { allow_discrete: false, property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into() });
     }
     let n = style.transitions.len();
     for i in 0..n {
@@ -347,7 +351,15 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 each_transition(style, v, |t, f| t.timing = f);
             }
         }
-        "transition-behavior" => {}
+        "transition-behavior" => {
+            if let Some(v) = single_list(comps, |c| match values::ident(c)?.as_str() {
+                "normal" => Some(false),
+                "allow-discrete" => Some(true),
+                _ => None,
+            }) {
+                each_transition(style, v, |t, allow| t.allow_discrete = allow);
+            }
+        }
         "animation" => style.animations = parse_animations(comps),
         "animation-name" => {
             let v = single_list(comps, |c| match c {

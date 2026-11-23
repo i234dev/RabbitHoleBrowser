@@ -219,3 +219,26 @@ fn css_animations_set_by_scripts_are_listed() {
     }
     assert_eq!(out, vec!["move -50000 50px", "1 2", "rejected AbortError idle true"]);
 }
+
+#[test]
+fn discrete_alignment_keeps_modifiers_and_switches_at_half_progress() {
+    let mut e = engine();
+    let mut p = load(&mut e, r#"<!doctype html>
+        <div id=t style="display:grid;align-items:safe center"></div><script>
+        const t = document.querySelector('#t'), cs = getComputedStyle(t);
+        console.log(cs.alignItems);
+        t.style.transition = 'align-items 1s linear allow-discrete';
+        t.style.alignItems = 'last baseline';
+        const a = t.getAnimations()[0];
+        a.pause();
+        a.currentTime = 499;
+        console.log(cs.transitionBehavior, cs.alignItems);
+        a.currentTime = 500;
+        console.log(cs.alignItems);
+        a.finish();
+        t.style.transitionBehavior = 'normal';
+        t.style.alignItems = 'end';
+        console.log(cs.alignItems, t.getAnimations().filter(x=>x.playState==='running').length);
+        </script>"#);
+    assert_eq!(logs(&mut p), ["safe center", "allow-discrete safe center", "last baseline", "end 0"]);
+}

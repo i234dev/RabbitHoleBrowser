@@ -1447,6 +1447,7 @@ pub enum Content {
 /// Parsed `transition` entries (property, duration s, delay s, easing name).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Transition {
+    pub allow_discrete: bool,
     pub property: String,
     pub duration: f32,
     pub delay: f32,

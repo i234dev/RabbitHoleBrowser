@@ -922,6 +922,7 @@ fn timing_css(s: &ComputedStyle, prop: &str) -> Option<String> {
     let list = |items: Vec<String>, empty: &str| if items.is_empty() { empty.to_string() } else { items.join(", ") };
     Some(match prop {
         "transition-property" => list(s.transitions.iter().map(|t| t.property.clone()).collect(), "all"),
+        "transition-behavior" => list(s.transitions.iter().map(|t| if t.allow_discrete { "allow-discrete".into() } else { "normal".into() }).collect(), "normal"),
         "transition-duration" => list(s.transitions.iter().map(|t| secs(t.duration)).collect(), "0s"),
         "transition-delay" => list(s.transitions.iter().map(|t| secs(t.delay)).collect(), "0s"),
         "transition-timing-function" => list(s.transitions.iter().map(|t| t.timing.clone()).collect(), "ease"),

@@ -2686,6 +2686,17 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "user-select" => to.user_select = from.user_select,
         "resize" => to.resize = from.resize,
         "appearance" | "-webkit-appearance" => to.appearance = from.appearance,
+        "transition-behavior" => {
+            let behavior = &from.transitions;
+            if to.transitions.len() < behavior.len() {
+                to.transitions.resize_with(behavior.len(), || Transition {
+                    property: "all".into(), duration: 0.0, delay: 0.0, timing: "ease".into(), allow_discrete: false,
+                });
+            }
+            for (i, entry) in to.transitions.iter_mut().enumerate() {
+                entry.allow_discrete = !behavior.is_empty() && behavior[i % behavior.len()].allow_discrete;
+            }
+        }
         "transition" | "transition-property" | "transition-duration" | "transition-delay" | "transition-timing-function" => {
             to.transitions = from.transitions.clone()
         }

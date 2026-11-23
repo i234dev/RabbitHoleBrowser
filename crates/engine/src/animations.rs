@@ -17,7 +17,7 @@ use std::rc::Rc;
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::Color;
 use rabbithole_script::{EventDetail, EventInit};
-use rabbithole_style::{BasicShape, ClipPath, ComputedStyle, ControlPoint, FilterOp, Length, ShapeCommand, ShapeRadius, TransformOp, Visibility};
+use rabbithole_style::{AlignFlags, ContentDistribution, ItemAlign, BasicShape, ClipPath, ComputedStyle, ControlPoint, FilterOp, Length, ShapeCommand, ShapeRadius, TransformOp, Visibility};
 
 use crate::scripting::ScriptOutcome;
 use crate::{Engine, Page};
@@ -61,6 +61,12 @@ enum Prop {
     Filter,
     BackdropFilter,
     ClipPath,
+    AlignContent,
+    JustifyContent,
+    AlignSelf,
+    JustifySelf,
+    AlignItems,
+    JustifyItems,
 }
 
 const ALL: &[Prop] = &[
@@ -100,6 +106,12 @@ const ALL: &[Prop] = &[
     Prop::Filter,
     Prop::BackdropFilter,
     Prop::ClipPath,
+    Prop::AlignContent,
+    Prop::JustifyContent,
+    Prop::AlignSelf,
+    Prop::JustifySelf,
+    Prop::AlignItems,
+    Prop::JustifyItems,
 ];
 
 impl Prop {
@@ -141,6 +153,12 @@ impl Prop {
             Prop::Filter => "filter",
             Prop::BackdropFilter => "backdrop-filter",
             Prop::ClipPath => "clip-path",
+            Prop::AlignContent => "align-content",
+            Prop::JustifyContent => "justify-content",
+            Prop::AlignSelf => "align-self",
+            Prop::JustifySelf => "justify-self",
+            Prop::AlignItems => "align-items",
+            Prop::JustifyItems => "justify-items",
         }
     }
 
@@ -157,6 +175,9 @@ impl Prop {
         }
         use Prop::*;
         match n {
+            "place-content" => matches!(self, AlignContent | JustifyContent),
+            "place-items" => matches!(self, AlignItems | JustifyItems),
+            "place-self" => matches!(self, AlignSelf | JustifySelf),
             "margin" => matches!(self, MarginTop | MarginRight | MarginBottom | MarginLeft),
             "padding" => matches!(self, PaddingTop | PaddingRight | PaddingBottom | PaddingLeft),
             "border-color" | "border" => matches!(self, BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor),
@@ -174,6 +195,8 @@ impl Prop {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
+    Distribution(ContentDistribution, AlignFlags),
+    ItemAlignment(ItemAlign, AlignFlags),
     F(f32),
     C(Color),
     L(Length),
@@ -222,12 +245,24 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         Filter => Val::Fl(s.filters.clone()),
         BackdropFilter => Val::Fl(s.backdrop_filters.clone()),
         ClipPath => Val::Cp(s.clip_path.clone()),
+        AlignContent => Val::Distribution(s.align_content, s.align_content_flags),
+        JustifyContent => Val::Distribution(s.justify_content, s.justify_content_flags),
+        AlignSelf => Val::ItemAlignment(s.align_self, s.align_self_flags),
+        JustifySelf => Val::ItemAlignment(s.justify_self, s.justify_self_flags),
+        AlignItems => Val::ItemAlignment(s.align_items, s.align_items_flags),
+        JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
     }
 }
 
 fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
     use Prop::*;
     match (p, v) {
+        (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
+        (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),
+        (AlignSelf, Val::ItemAlignment(value, flags)) => (s.align_self, s.align_self_flags) = (*value, *flags),
+        (JustifySelf, Val::ItemAlignment(value, flags)) => (s.justify_self, s.justify_self_flags) = (*value, *flags),
+        (AlignItems, Val::ItemAlignment(value, flags)) => (s.align_items, s.align_items_flags) = (*value, *flags),
+        (JustifyItems, Val::ItemAlignment(value, flags)) => (s.justify_items, s.justify_items_flags) = (*value, *flags),
         (Opacity, Val::F(f)) => s.opacity = f.clamp(0.0, 1.0),
         (Color, Val::C(c)) => {
             s.color = *c;
@@ -1223,8 +1258,8 @@ fn now_ms(engine: &Engine) -> f64 {
 }
 
 /// The transition entry (duration s, delay s, easing) covering `p`.
-fn transition_for(style: &ComputedStyle, p: Prop) -> Option<(f32, f32, String)> {
-    style.transitions.iter().rev().find(|t| p.covered_by(&t.property)).map(|t| (t.duration, t.delay, t.timing.clone()))
+fn transition_for(style: &ComputedStyle, p: Prop) -> Option<&rabbithole_style::Transition> {
+    style.transitions.iter().rev().find(|t| p.covered_by(&t.property))
 }
 
 impl Engine {
@@ -1347,18 +1382,18 @@ impl Engine {
                     continue; // still heading to the same value
                 }
             }
-            let spec = transition_for(after, p).filter(|(d, _, _)| *d > 0.0);
+            let spec = transition_for(after, p).filter(|t| t.duration.max(0.0) + t.delay > 0.0);
             if let Some(i) = running {
                 // Replaced or no longer transitioned: cancel.
                 let t = page.anim.transitions.remove(i);
                 page.anim.events.push(QueuedEvent { node, ty: "transitioncancel", name: p.name().into(), elapsed: ((t.clock.local(now).unwrap_or(0.0) - t.delay).max(0.0) / 1000.0) as f32, transition: true });
             }
-            let Some((dur, delay, timing)) = spec else { continue };
+            let Some(spec) = spec else { continue };
             if from == to {
                 continue;
             }
-            // Discrete values (auto widths, mismatched transforms) jump.
-            if !interpolable(&from, &to) {
+            // Normally only interpolable pairs start a transition.
+            if !spec.allow_discrete && !interpolable(&from, &to) {
                 continue;
             }
             page.anim.events.push(QueuedEvent { node, ty: "transitionrun", name: p.name().into(), elapsed: 0.0, transition: true });
@@ -1371,10 +1406,10 @@ impl Engine {
                 to,
                 clock: Clock::pending(),
                 generation: page.anim.generation,
-                delay: delay as f64 * 1000.0,
-                duration: dur as f64 * 1000.0,
-                easing: parse_easing(&timing),
-                timing,
+                delay: spec.delay as f64 * 1000.0,
+                duration: spec.duration as f64 * 1000.0,
+                easing: parse_easing(&spec.timing),
+                timing: spec.timing.clone(),
                 started: false,
             });
         }
