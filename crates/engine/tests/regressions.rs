@@ -657,3 +657,40 @@ fn editing_applies_color_and_font_values_to_ranges_and_typed_text() {
     })()"#);
     assert_eq!(out, "a<font color=\"#0000ff\">b</font>c<font size=\"4\">!</font>|rgb(0, 0, 255)|true|4|false");
 }
+
+#[test]
+fn peer_connections_deliver_over_an_authenticated_data_channel() {
+    use std::time::{Duration, Instant};
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<main></main>");
+    eval(&e, &mut page, r#"
+        var rtcResult = '', first = new RTCPeerConnection(), second = new RTCPeerConnection();
+        (async () => {
+            second.ondatachannel = e => {
+                e.channel.onmessage = msg => e.channel.send(msg.data + '!');
+            };
+            const channel = first.createDataChannel('messages');
+            channel.onopen = () => channel.send('hello');
+            channel.onmessage = e => {
+                rtcResult = [channel.label, first.connectionState, e.data].join('|');
+                first.close(); second.close();
+            };
+            await first.setLocalDescription(await first.createOffer());
+            await second.setRemoteDescription(first.localDescription);
+            await second.setLocalDescription(await second.createAnswer());
+            await first.setRemoteDescription(second.localDescription);
+        })().catch(e => {rtcResult = String(e); first.close(); second.close();});
+    "#);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        e.tick(&mut page);
+        let result = eval(&e, &mut page, "rtcResult");
+        if !result.is_empty() {
+            assert_eq!(result, "messages|connected|hello!");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", eval(&e, &mut page,
+            "[first.signalingState,first.iceConnectionState,first.connectionState,second.connectionState].join('|')"));
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}

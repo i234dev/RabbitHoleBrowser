@@ -25,6 +25,7 @@ mod natives;
 mod webanim;
 pub use webanim::{CssAnimationInfo, WebAnimEffect, WebAnimKeyframe, WebAnimRegistry, WebAnimations};
 mod sockets;
+mod rtc;
 mod observers;
 mod shadow;
 mod window;

@@ -2498,6 +2498,7 @@ dependencies = [
  "rabbithole-js",
  "rabbithole-media",
  "rabbithole-net",
+ "rabbithole-rtc",
  "rabbithole-style",
  "rabbithole-wasm-js",
  "rabbithole-webgl",

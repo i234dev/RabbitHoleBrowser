@@ -467,6 +467,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "deflate", 2, native_deflate);
     crate::webcrypto::install(realm, o);
     crate::sockets::install(realm, o);
+    crate::rtc::install(realm, o);
     crate::media::install(realm, o);
     crate::canvas2d::install(realm, o);
     crate::webgl::install(realm, o);
