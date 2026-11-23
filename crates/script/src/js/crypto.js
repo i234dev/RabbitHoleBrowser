@@ -1,8 +1,7 @@
 // Web Cryptography: Crypto / CryptoKey / SubtleCrypto with SHA-1/256/384/
 // 512 digests, HMAC, AES-CBC / AES-CTR / AES-GCM / AES-KW, PBKDF2, HKDF
 // (generate/import/export raw+jwk, sign/verify, encrypt/decrypt, derive,
-// wrap/unwrap). Public-key algorithms (RSA, EC, Ed25519, X25519) reject
-// with NotSupportedError.
+// wrap/unwrap). Ed25519 signing and verification use native key objects.
 (function () {
   'use strict';
   const g = globalThis;
@@ -224,12 +223,12 @@
   }
 
   const normAlg = a => typeof a === 'object' && a !== null ? a : { name: `${a}` };
-  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ECDH', 'ED25519', 'X25519', 'ED448', 'X448'];
+  const UNSUPPORTED = ['RSASSA-PKCS1-V1_5', 'RSA-PSS', 'RSA-OAEP', 'ECDSA', 'ECDH', 'X25519', 'ED448', 'X448'];
   function algName(a) {
     const id = normAlg(a);
     if (id.name === undefined) throw new TypeError('An algorithm name is required');
     const n = String(id.name).toUpperCase();
-    const map = { 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
+    const map = { ED25519: 'Ed25519', 'AES-CBC': 'AES-CBC', 'AES-CTR': 'AES-CTR', 'AES-GCM': 'AES-GCM', 'AES-KW': 'AES-KW', HMAC: 'HMAC', PBKDF2: 'PBKDF2', HKDF: 'HKDF', 'SHA-1': 'SHA-1', 'SHA-256': 'SHA-256', 'SHA-384': 'SHA-384', 'SHA-512': 'SHA-512' };
     if (map[n]) return map[n];
     if (UNSUPPORTED.includes(n)) throw err('NotSupportedError', `Algorithm: ${n} is not supported.`);
     throw err('NotSupportedError', 'Algorithm: Unrecognized name');
@@ -238,8 +237,71 @@
   const unb64u = (s) => { const t = String(s).replace(/-/g, '+').replace(/_/g, '/'); const bin = g.atob(t + '==='.slice((t.length + 3) % 4)); return Uint8Array.from(bin, (c) => c.charCodeAt(0)); };
   const usageCheck = (usages, allowed) => { for (const u of usages) if (!allowed.includes(u)) throw err('SyntaxError', `Cannot create a key using the specified key usages.`); };
 
+  // RFC 8410 encodes the 32-byte public value in a BIT STRING and the
+  // private seed in a nested OCTET STRING. Algorithm parameters are absent.
+  const edSpki = Uint8Array.of(0x30,42,0x30,5,6,3,0x2b,0x65,0x70,3,33,0);
+  const edPkcs8 = Uint8Array.of(0x30,46,2,1,0,0x30,5,6,3,0x2b,0x65,0x70,4,34,4,32);
+  const edDataError = () => err('DataError', 'Invalid Ed25519 key encoding');
+  function decodeEdPart(text) {
+    if (typeof text !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(text)) throw edDataError();
+    const raw = unb64u(text);
+    if (raw.length !== 32 || b64u(raw) !== text) throw edDataError();
+    return raw;
+  }
+  function encodeEdDer(prefix, raw) {
+    const result = new Uint8Array(prefix.length + raw.length);
+    result.set(prefix); result.set(raw, prefix.length);
+    return result.buffer;
+  }
+  function importEdKey(format, data, extractable, usages) {
+    const jwk = format === 'jwk';
+    const privateKey = format === 'pkcs8' || format === 'raw-seed' || (jwk && data?.d !== undefined);
+    usageCheck(usages, privateKey ? ['sign'] : ['verify']);
+    if (privateKey && !usages.length) throw err('SyntaxError', 'A private key requires a signing usage');
+    let raw, publicBytes;
+    if (jwk) {
+      if (!data || data.kty !== 'OKP' || data.crv !== 'Ed25519' ||
+          (data.alg !== undefined && data.alg !== 'EdDSA' && data.alg !== 'Ed25519') ||
+          (usages.length && data.use !== undefined && data.use !== 'sig') ||
+          (data.ext === false && extractable)) throw edDataError();
+      if (data.key_ops !== undefined) {
+        const ops = Array.from(data.key_ops);
+        if (new Set(ops).size !== ops.length || usages.some(u => !ops.includes(u))) throw edDataError();
+      }
+      publicBytes = decodeEdPart(data.x);
+      raw = privateKey ? decodeEdPart(data.d) : publicBytes;
+    } else {
+      raw = bytesOf(data);
+      if (format === 'pkcs8' || format === 'spki') {
+        const prefix = privateKey ? edPkcs8 : edSpki;
+        if (raw.length !== prefix.length + 32 || !prefix.every((v, i) => raw[i] === v)) throw edDataError();
+        raw = raw.subarray(prefix.length);
+      } else if (!['raw', 'raw-public', 'raw-seed'].includes(format)) {
+        throw err('NotSupportedError', 'Unsupported Ed25519 key format');
+      }
+      if (raw.length !== 32) throw edDataError();
+    }
+    const material = privateKey ? N.ed25519Key(raw, publicBytes, !!extractable) : raw;
+    return newKey(privateKey ? 'private' : 'public', extractable, { name:'Ed25519' }, usages, material);
+  }
+  function exportEdKey(format, k) {
+    const priv = k.type === 'private';
+    if (format === 'jwk') {
+      const publicBytes = priv ? new Uint8Array(N.ed25519KeyBytes(k.raw, false)) : k.raw;
+      const jwk = { kty:'OKP', crv:'Ed25519', x:b64u(publicBytes), alg:'Ed25519', ext:true, key_ops:k.usages.slice() };
+      if (priv) jwk.d = b64u(new Uint8Array(N.ed25519KeyBytes(k.raw, true)));
+      return jwk;
+    }
+    if ((format === 'raw' || format === 'raw-public') && !priv) return k.raw.slice().buffer;
+    if (format === 'raw-seed' && priv) return N.ed25519KeyBytes(k.raw, true);
+    if (format === 'spki' && !priv) return encodeEdDer(edSpki, k.raw);
+    if (format === 'pkcs8' && priv) return encodeEdDer(edPkcs8, new Uint8Array(N.ed25519KeyBytes(k.raw, true)));
+    throw err('InvalidAccessError', 'The key type cannot be exported in this format');
+  }
+
   function importSecret(format, keyData, alg, extractable, usages) {
     const name = algName(alg);
+    if (name === 'Ed25519') return importEdKey(format, keyData, extractable, Array.from(usages));
     let raw;
     if (format === 'raw' || format === 'raw-secret') raw = bytesOf(keyData);
     else if (format === 'jwk') {
@@ -314,6 +376,15 @@
     generateKey(alg, extractable, usages) {
       return run(() => {
         const name = algName(alg);
+        if (name === 'Ed25519') {
+          const requested = Array.from(usages);
+          usageCheck(requested, ['sign','verify']);
+          if (!requested.includes('sign')) throw err('SyntaxError', 'A private key requires a signing usage');
+          const handle = N.ed25519Key(null, null, !!extractable);
+          const privateKey = newKey('private', extractable, {name}, ['sign'], handle);
+          const publicKey = newKey('public', true, {name}, requested.filter(u => u === 'verify'), new Uint8Array(N.ed25519KeyBytes(handle, false)));
+          return { publicKey, privateKey };
+        }
         const len = keyLength(alg);
         if (name !== 'HMAC' && ![128, 192, 256].includes(len)) throw err('OperationError', 'AES key length must be 128, 192 or 256 bits.');
         const raw = new Uint8Array(Math.ceil(len / 8));
@@ -327,6 +398,7 @@
       return run(() => {
         if (!hasKey(key)) throw new TypeError("Failed to execute 'exportKey' on 'SubtleCrypto': parameter 2 is not of type 'CryptoKey'.");
         if (!keyInfo(key).extractable) throw err('InvalidAccessError', 'key is not extractable');
+        if (keyInfo(key).algorithm.name === 'Ed25519') return exportEdKey(format, keyInfo(key));
         const raw = keyInfo(key).raw;
         if (format === 'raw' || format === 'raw-secret') return raw.slice().buffer;
         if (format === 'jwk') {
@@ -337,8 +409,18 @@
         throw err('NotSupportedError', `Unsupported export format '${format}'.`);
       });
     }
-    sign(alg, key, data) { return run(() => { checkKey(key, algName(alg), 'sign'); return hmac(keyInfo(key).algorithm.hash.name, keyInfo(key).raw, bytesOf(data)).buffer; }); }
-    verify(alg, key, signature, data) { return run(() => { checkKey(key, algName(alg), 'verify'); return N.cryptoHmac(keyInfo(key).algorithm.hash.name, keyInfo(key).raw, bytesOf(data), bytesOf(signature)); }); }
+    sign(alg, key, data) { return run(() => {
+      const name = algName(alg);
+      checkKey(key, name, 'sign');
+      const k = keyInfo(key), msg = bytesOf(data);
+      return name === 'Ed25519' ? N.ed25519Sign(k.raw, msg) : hmac(k.algorithm.hash.name, k.raw, msg).buffer;
+    }); }
+    verify(alg, key, signature, data) { return run(() => {
+      const name = algName(alg);
+      checkKey(key, name, 'verify');
+      const k = keyInfo(key), msg = bytesOf(data), sig = bytesOf(signature);
+      return name === 'Ed25519' ? N.ed25519Verify(k.raw, msg, sig) : N.cryptoHmac(k.algorithm.hash.name, k.raw, msg, sig);
+    }); }
     encrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), false, 'encrypt').buffer); }
     decrypt(alg, key, data) { return run(() => cipher(alg, key, bytesOf(data), true, 'decrypt').buffer); }
     deriveBits(alg, key, length) { return run(() => { checkKey(key, algName(alg), 'deriveBits'); return deriveBitsImpl(alg, key, length); }); }

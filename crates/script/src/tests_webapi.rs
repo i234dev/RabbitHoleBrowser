@@ -2300,3 +2300,26 @@ fn css_vendor_aliases_and_descriptors_agree_with_feature_queries() {
     "#);
     assert_eq!(out, "'scale(2)|scale(2)|true|false|false|true'");
 }
+
+#[test]
+fn web_crypto_ed25519_matches_rfc8032_and_round_trips_key_pairs() {
+    let out = logs_of("<body>", r#"
+      (async () => {
+        const bytes = hex => Uint8Array.from(hex.match(/../g), h => parseInt(h,16));
+        const hex = data => Array.from(new Uint8Array(data), b => b.toString(16).padStart(2,'0')).join('');
+        const s = crypto.subtle, alg = 'Ed25519', msg = new Uint8Array();
+        const seed = bytes('9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60');
+        const pub = bytes('d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a');
+        const priv = await s.importKey('raw-seed', seed, alg, false, ['sign']);
+        const verify = await s.importKey('raw', pub, alg, false, ['verify']);
+        const sig = await s.sign(alg, priv, msg);
+        console.log(hex(sig), await s.verify(alg,verify,sig,msg));
+        console.log(await s.exportKey('pkcs8',priv).catch(e=>e.name));
+        const { publicKey, privateKey } = await s.generateKey(alg,true,['sign','verify']);
+        const a=await s.importKey('spki',await s.exportKey('spki',publicKey),alg,false,['verify']);
+        const b=await s.importKey('jwk',await s.exportKey('jwk',privateKey),alg,true,['sign']);
+        console.log(await s.verify(alg,a,await s.sign(alg,b,seed),seed),(await s.exportKey('pkcs8',b)).byteLength);
+      })();
+    "#);
+    assert_eq!(out, ["e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b true", "InvalidAccessError", "true 48"]);
+}

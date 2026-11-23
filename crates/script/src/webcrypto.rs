@@ -3,7 +3,7 @@
 use crate::fetch::{buffer_source_bytes, make_array_buffer};
 use crate::host::{arg, arg_str};
 use rabbithole_js::{JsResult, ObjectId, Realm, Value, V};
-use ring::{digest, hmac};
+use ring::{digest, hmac, rand::{SecureRandom, SystemRandom}, signature::{self, Ed25519KeyPair, KeyPair}};
 
 fn algorithms(realm: &mut Realm, args: &[Value]) -> JsResult<(&'static digest::Algorithm, hmac::Algorithm)> {
     Ok(match arg_str(realm, args, 0)?.as_str() {
@@ -96,7 +96,62 @@ fn pbkdf_step(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     Ok(make_array_buffer(realm, output))
 }
 
+struct EdSigningKey {
+    pair: Ed25519KeyPair,
+    exportable_seed: Option<[u8; 32]>,
+}
+
+fn ed_key(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let mut seed = [0u8; 32];
+    if arg(args, 0).is_nullish() {
+        SystemRandom::new().fill(&mut seed).map_err(|_| crate::misc::dom_exception(realm, "OperationError", "Secure random generation failed"))?;
+    } else {
+        seed = buffer_source_bytes(realm, &arg(args, 0), "Ed25519 seed")?.try_into()
+            .map_err(|_| crate::misc::dom_exception(realm, "DataError", "Wrong Ed25519 seed length"))?;
+    }
+    let pair = if arg(args, 1).is_nullish() {
+        Ed25519KeyPair::from_seed_unchecked(&seed)
+    } else {
+        let public = buffer_source_bytes(realm, &arg(args, 1), "Ed25519 public key")?;
+        Ed25519KeyPair::from_seed_and_public_key(&seed, &public)
+    }.map_err(|_| crate::misc::dom_exception(realm, "DataError", "Invalid Ed25519 key pair"))?;
+    let exportable_seed = realm.to_boolean(&arg(args, 2)).then_some(seed);
+    let id = realm.new_object();
+    realm.set_host_data(id, Box::new(EdSigningKey { pair, exportable_seed }));
+    Ok(Value::Object(id))
+}
+
+fn ed_key_bytes(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let private = realm.to_boolean(&arg(args, 1));
+    let V::Object(id) = arg(args, 0).v() else { return Err(realm.throw_type_error("Expected Ed25519 key")) };
+    let Some(key) = realm.host_data::<EdSigningKey>(id) else { return Err(realm.throw_type_error("Expected Ed25519 key")) };
+    let bytes = if private {
+        let Some(seed) = key.exportable_seed else { return Err(crate::misc::dom_exception(realm, "InvalidAccessError", "Key is not extractable")) };
+        seed.to_vec()
+    } else { key.pair.public_key().as_ref().to_vec() };
+    Ok(make_array_buffer(realm, bytes))
+}
+
+fn ed_sign(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let message = buffer_source_bytes(realm, &arg(args, 1), "Ed25519 message")?;
+    let V::Object(id) = arg(args, 0).v() else { return Err(realm.throw_type_error("Expected Ed25519 key")) };
+    let Some(key) = realm.host_data::<EdSigningKey>(id) else { return Err(realm.throw_type_error("Expected Ed25519 key")) };
+    let bytes = key.pair.sign(&message).as_ref().to_vec();
+    Ok(make_array_buffer(realm, bytes))
+}
+
+fn ed_verify(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let public = buffer_source_bytes(realm, &arg(args, 0), "Ed25519 public key")?;
+    let message = buffer_source_bytes(realm, &arg(args, 1), "Ed25519 message")?;
+    let sig = buffer_source_bytes(realm, &arg(args, 2), "Ed25519 signature")?;
+    Ok(Value::Bool(signature::UnparsedPublicKey::new(&signature::ED25519, public).verify(&message, &sig).is_ok()))
+}
+
 pub(crate) fn install(realm: &mut Realm, internals: ObjectId) {
+    realm.define_method(internals, "ed25519Key", 3, ed_key);
+    realm.define_method(internals, "ed25519KeyBytes", 2, ed_key_bytes);
+    realm.define_method(internals, "ed25519Sign", 2, ed_sign);
+    realm.define_method(internals, "ed25519Verify", 3, ed_verify);
     realm.define_method(internals, "cryptoDigest", 2, hash);
     realm.define_method(internals, "cryptoHmac", 3, mac);
     realm.define_method(internals, "pbkdfStart", 5, pbkdf_start);
