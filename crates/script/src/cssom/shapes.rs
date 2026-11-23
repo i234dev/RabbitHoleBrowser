@@ -20,7 +20,7 @@ fn corner_values(x: &[String], y: &[String]) -> String {
     if x == y { x } else { format!("{x} / {y}") }
 }
 
-fn specified_position(parts: &[&[Token]]) -> String {
+pub(super) fn specified_position(parts: &[&[Token]]) -> String {
     let keyword = |part: &[Token]| ident(part).unwrap_or_default();
     let mut values: Vec<String> = parts.iter().map(|p| tokens_to_css(p)).collect();
     let vertical = |s: &str| matches!(s,"top" | "bottom");
@@ -35,7 +35,7 @@ fn specified_position(parts: &[&[Token]]) -> String {
     values.join(" ")
 }
 
-pub(super) fn specified(tokens: &[Token]) -> String {
+pub(super) fn specified(tokens: &[Token], default_box: &str) -> String {
     if tokens.iter().any(|t| matches!(t, Token::Function(name) if ["var","env","attr"].iter().any(|n| name.eq_ignore_ascii_case(n)))) {
         return tokens_to_css(tokens);
     }
@@ -79,7 +79,7 @@ pub(super) fn specified(tokens: &[Token]) -> String {
         value = Some(format!("{name}({inner})"));
     }
     match (value, which) {
-        (Some(s), Some(b)) if b != "margin-box" => format!("{s} {b}"),
+        (Some(s), Some(b)) if b != default_box => format!("{s} {b}"),
         (Some(s), _) | (None,Some(s)) => s,
         _ => tokens_to_css(tokens),
     }
@@ -208,7 +208,7 @@ fn basic(shape: &BasicShape, explicit: bool) -> String {
     }
 }
 
-pub(super) fn computed(value: Option<&ClipPath>, explicit: bool) -> String {
+pub(super) fn computed(value: Option<&ClipPath>, explicit: bool, default_box: ShapeBox) -> String {
     let (shape,which) = match value {
         Some(ClipPath::Shape(shape,which)) => (Some(shape),which),
         Some(ClipPath::Box(which)) => (None,which),
@@ -217,10 +217,11 @@ pub(super) fn computed(value: Option<&ClipPath>, explicit: bool) -> String {
     let name = match which {
         ShapeBox::Margin => "margin-box", ShapeBox::Border => "border-box",
         ShapeBox::Padding => "padding-box", ShapeBox::Content => "content-box",
-        _ => return "none".into(),
+        ShapeBox::Fill => "fill-box", ShapeBox::Stroke => "stroke-box", ShapeBox::View => "view-box",
+        ShapeBox::HalfBorder => "half-border-box",
     };
     match shape {
-        Some(s) if *which != ShapeBox::Margin => format!("{} {name}",basic(s,explicit)),
+        Some(s) if *which != default_box => format!("{} {name}",basic(s,explicit)),
         Some(s) => basic(s,explicit),
         None => name.into(),
     }

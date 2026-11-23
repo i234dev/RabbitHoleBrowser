@@ -1837,6 +1837,7 @@ pub struct ComputedStyle {
     pub shape_outside: Option<std::sync::Arc<ClipPath>>,
     pub shape_outside_position_explicit: bool,
     pub shape_margin: Length,
+    pub motion: Option<Box<crate::props::motion::Motion>>,
     /// Names of the properties declared `!important` for an element with
     /// animations (they do not override them); `None` otherwise.
     pub important: Option<std::rc::Rc<Vec<String>>>,
@@ -2179,6 +2180,7 @@ impl ComputedStyle {
             shape_outside: None,
             shape_outside_position_explicit: false,
             shape_margin: Length::Px(0.0),
+            motion: None,
             clip_rect: None,
             border_shape: None,
             corner_shape: [CornerShape::Round; 4],
@@ -2509,7 +2511,7 @@ impl ComputedStyle {
     }
 
     pub fn has_transform(&self) -> bool {
-        !self.transform.is_empty() || self.transform3d.as_ref().is_some_and(|t| t.translate.is_some() || t.rotate.is_some() || t.scale.is_some())
+        !self.transform.is_empty() || self.has_motion_path() || self.transform3d.as_ref().is_some_and(|t| t.translate.is_some() || t.rotate.is_some() || t.scale.is_some())
     }
 
     /// A transformed or filtered ancestor contains even fixed descendants.

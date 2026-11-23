@@ -11,6 +11,7 @@ pub mod effects;
 pub mod flex;
 pub mod grid;
 pub mod misc;
+pub mod motion;
 pub mod text;
 
 use crate::computed::*;
@@ -50,6 +51,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
     flex::apply(name, comps, style, parent, ctx)
         || grid::apply(name, comps, value, style, ctx)
         || background::apply(name, comps, style, ctx)
+        || motion::apply(name, comps, style, ctx)
         || effects::apply(name, comps, style, ctx)
         || text::apply(name, comps, value, style, parent, ctx)
         || content::apply(name, comps, style, ctx)

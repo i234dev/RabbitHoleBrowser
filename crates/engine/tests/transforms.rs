@@ -133,3 +133,45 @@ fn wheel_events_reach_listeners_and_can_be_cancelled() {
     assert!(!prevented);
     assert_eq!(e.wheel_listeners(&page), (true, true));
 }
+
+#[test]
+fn motion_distance_moves_paint_hit_testing_and_client_rects_on_the_same_path() {
+    let mut engine = engine(true);
+    let mut page = load(&mut engine, r#"
+        <!doctype html><style>
+        body { margin: 0 }
+        #target { position: absolute; left: 10px; top: 15px; width: 12px; height: 8px;
+          background: red; transform-origin: 0 0; offset-anchor: 0 0;
+          offset-path: path("M0 0 h100 v100"); offset-distance: 75%; }
+        </style><div id="target"></div>"#);
+    let result = eval(&engine, &mut page, r#"
+        const el = document.getElementById('target'), r = el.getBoundingClientRect();
+        [r.x,r.y,r.width,r.height].map(Math.round).concat(
+          document.elementFromPoint(106,70) === el,
+          Math.round(el.getClientRects()[0].x),
+          getComputedStyle(el).offsetDistance).join('|')
+    "#);
+    assert_eq!(result,"102|65|8|12|true|102|75%");
+    let mut canvas = Canvas::new(800,600);
+    engine.render(&page,&mut canvas,0.0,0.0);
+    assert_eq!(rgb(&canvas,106,70),(255,0,0));
+    assert_ne!(rgb(&canvas,15,19),(255,0,0));
+}
+
+#[test]
+fn offset_rotation_and_distance_animate_while_closed_paths_wrap() {
+    let mut engine = engine(true);
+    let mut page = load(&mut engine, r#"
+        <!doctype html><style>body{margin:0}#block{position:relative;width:200px;height:100px}
+        #box{width:12px;height:6px;offset-path:polygon(0 0,100px 0,100px 100px,0 100px);
+        offset-distance:-25%;offset-anchor:left top;offset-rotate:0deg}</style>
+        <div id="block"><div id="box"></div></div>"#);
+    assert_eq!(eval(&engine,&mut page,r#"
+        const box = document.getElementById('box'), r = box.getBoundingClientRect();
+        const anim = box.animate([{offsetDistance:'-25%',offsetRotate:'0deg'},
+                                  {offsetDistance:'75%',offsetRotate:'180deg'}],1000);
+        anim.pause(); anim.currentTime = 500;
+        const computed = getComputedStyle(box);
+        [Math.round(r.x),Math.round(r.y),computed.offsetDistance,computed.offsetRotate].join('|')
+    "#),"0|100|25%|90deg");
+}

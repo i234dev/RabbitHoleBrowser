@@ -11,6 +11,7 @@ mod anchor;
 mod background;
 mod border_image;
 mod block;
+mod motion;
 mod build;
 pub mod clip_path;
 mod counters;

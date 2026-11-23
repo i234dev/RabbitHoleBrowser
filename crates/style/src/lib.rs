@@ -85,6 +85,7 @@ pub struct StyledTree {
     pub any_first_letter: bool,
     pub any_first_line: bool,
     pub any_position_area: bool,
+    pub any_motion_path: bool,
     /// @position-try names belong to the tree scope that owns the sheet.
     pub position_tries: HashMap<NodeId, HashMap<String, Vec<Declaration>>>,
     pub font_faces: Vec<FontFace>,
@@ -123,6 +124,7 @@ impl StyledTree {
             any_first_letter: false,
             any_first_line: false,
             any_position_area: false,
+            any_motion_path: false,
             position_tries: HashMap::new(),
             font_faces: Vec::new(),
             keyframes: HashMap::new(),

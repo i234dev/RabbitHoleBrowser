@@ -16,7 +16,7 @@ const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "view-transition-name", "view-transition-class", "animation-timeline", "scroll-timeline", "scroll-timeline-name", "view-timeline", "view-timeline-name",
     "animation-range", "timeline-scope", "initial-letter", "-webkit-initial-letter", "math-depth", "math-shift", "reading-flow", "reading-order",
     "interpolate-size", "field-sizing", "text-box", "text-box-trim", "text-box-edge", "hanging-punctuation", "box-decoration-break", "-webkit-box-reflect",
-    "offset-path", "offset-distance", "offset", "zoom", "corner-shape", "dynamic-range-limit", "overlay", "container-name-x",
+    "offset", "zoom", "corner-shape", "dynamic-range-limit", "overlay", "container-name-x",
 ];
 
 /// Properties disabled in this implementation use the same feature

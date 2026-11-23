@@ -1299,6 +1299,8 @@ impl StyleEngine {
                 tree.any_first_letter |= tree.first_letter[node].is_some();
                 tree.any_first_line |= tree.first_line[node].is_some();
                 tree.any_position_area |= style.needs_anchor_layout();
+                tree.any_motion_path |= style.has_motion_path() || tree.before[node].as_ref().is_some_and(|s| s.has_motion_path())
+                    || tree.after[node].as_ref().is_some_and(|s| s.has_motion_path());
                 let changed = !old.as_ref().map(|o| Rc::ptr_eq(o, &style)).unwrap_or(false);
                 if !all && (changed || pseudo_changed) {
                     changes.push(StyleChange { node, old: old.clone(), new: Some(style.clone()), pseudo_changed });

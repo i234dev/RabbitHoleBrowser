@@ -2503,6 +2503,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.shape_outside = from.shape_outside.clone();
             to.shape_outside_position_explicit = from.shape_outside_position_explicit;
         }
+        p if props::motion::property(p) => props::motion::copy(p, from, to),
         "shape-margin" => to.shape_margin = from.shape_margin,
         "border-shape" => to.border_shape = from.border_shape.clone(),
         "corner-shape" | "corner-top-left-shape" | "corner-top-right-shape" | "corner-bottom-right-shape" | "corner-bottom-left-shape" => {
@@ -4117,6 +4118,7 @@ thread_local! {
 /// value: a valid value of one of these properties changes either the
 /// initial style or this one.
 const SUPPORTS_PROBE: &[(&str, &str)] = &[
+    ("offset-path", "border-box"), ("offset-distance", "2px"), ("offset-position", "2px 3px"), ("offset-anchor", "2px 3px"), ("offset-rotate", "2deg"),
     ("shape-outside", "border-box"), ("shape-margin", "2px"),
     ("display", "table-cell"), ("position", "relative"), ("float", "left"), ("clear", "both"), ("visibility", "hidden"),
     ("margin", "7px 8px 9px 10px"), ("padding", "7px 8px 9px 10px"), ("top", "7px"), ("right", "7px"), ("bottom", "7px"), ("left", "7px"),
@@ -4130,6 +4132,7 @@ const SUPPORTS_PROBE: &[(&str, &str)] = &[
 
 /// Properties every value of which `SUPPORTS_PROBE` detects.
 const SUPPORTS_CHECKED: &[&str] = &[
+    "offset-path", "offset-distance", "offset-rotate", "offset-anchor", "offset-position",
     "shape-outside", "shape-margin",
     "display", "position", "float", "clear", "visibility", "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", "padding",
     "padding-top", "padding-right", "padding-bottom", "padding-left", "top", "right", "bottom", "left", "width", "height", "min-width",

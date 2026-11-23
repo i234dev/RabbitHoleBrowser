@@ -13,6 +13,8 @@
 
 mod grid_tracks;
 
+use rabbithole_style::props::motion::{OffsetPosition as MotionPosition, OffsetRotate as MotionRotation};
+
 use grid_tracks::Operation as GridOperation;
 use rabbithole_style::{AnimationComposition as Composite, TrackListItem};
 use std::collections::HashMap;
@@ -66,6 +68,11 @@ enum Prop {
     BackdropFilter,
     ClipPath,
     ShapeOutside,
+    OffsetDistance,
+    OffsetRotate,
+    OffsetPosition,
+    OffsetAnchor,
+    OffsetPath,
     ShapeMargin,
     AlignContent,
     JustifyContent,
@@ -119,6 +126,11 @@ const ALL: &[Prop] = &[
     Prop::BackdropFilter,
     Prop::ClipPath,
     Prop::ShapeOutside,
+    Prop::OffsetDistance,
+    Prop::OffsetRotate,
+    Prop::OffsetPosition,
+    Prop::OffsetAnchor,
+    Prop::OffsetPath,
     Prop::ShapeMargin,
     Prop::AlignContent,
     Prop::JustifyContent,
@@ -174,6 +186,11 @@ impl Prop {
             Prop::BackdropFilter => "backdrop-filter",
             Prop::ClipPath => "clip-path",
             Prop::ShapeOutside => "shape-outside",
+            Prop::OffsetDistance => "offset-distance",
+            Prop::OffsetRotate => "offset-rotate",
+            Prop::OffsetPosition => "offset-position",
+            Prop::OffsetAnchor => "offset-anchor",
+            Prop::OffsetPath => "offset-path",
             Prop::ShapeMargin => "shape-margin",
             Prop::AlignContent => "align-content",
             Prop::JustifyContent => "justify-content",
@@ -203,6 +220,7 @@ impl Prop {
         }
         use Prop::*;
         match n {
+            "offset" => matches!(self, OffsetPath | OffsetDistance | OffsetPosition | OffsetRotate | OffsetAnchor),
             "grid" | "grid-template" => matches!(self, GridTemplateRows | GridTemplateColumns),
             "place-content" => matches!(self, AlignContent | JustifyContent),
             "place-items" => matches!(self, AlignItems | JustifyItems),
@@ -224,6 +242,8 @@ impl Prop {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
+    MotionPosition(MotionPosition),
+    MotionRotation(MotionRotation),
     AnchorName(Option<Rc<[String]>>),
     PositionAnchor(Option<Rc<str>>),
     PositionArea(rabbithole_style::props::anchor::PositionArea),
@@ -281,6 +301,11 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         ClipPath => Val::Cp(s.clip_path.clone(), false),
         ShapeOutside => Val::Cp(s.shape_outside.clone(), s.shape_outside_position_explicit),
         ShapeMargin => Val::L(s.shape_margin),
+        OffsetDistance => Val::L(s.motion().distance),
+        OffsetRotate => Val::MotionRotation(s.motion().rotate),
+        OffsetPosition => Val::MotionPosition(s.motion().position),
+        OffsetAnchor => Val::MotionPosition(s.motion().anchor),
+        OffsetPath => Val::Cp(s.motion().path.clone(), s.motion().explicit_center),
         AlignContent => Val::Distribution(s.align_content, s.align_content_flags),
         JustifyContent => Val::Distribution(s.justify_content, s.justify_content_flags),
         AlignSelf => Val::ItemAlignment(s.align_self, s.align_self_flags),
@@ -366,6 +391,15 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
             if !f.is_empty() {
                 s.creates_stacking_context = true;
             }
+        }
+        (OffsetDistance, Val::L(v)) => s.motion_mut().distance = *v,
+        (OffsetPosition, Val::MotionPosition(v)) => s.motion_mut().position = *v,
+        (OffsetAnchor, Val::MotionPosition(v)) => s.motion_mut().anchor = *v,
+        (OffsetRotate, Val::MotionRotation(v)) => s.motion_mut().rotate = *v,
+        (OffsetPath, Val::Cp(path, explicit)) => {
+            let m = s.motion_mut();
+            m.path.clone_from(path);
+            m.explicit_center = *explicit;
         }
         (ShapeOutside, Val::Cp(c, explicit)) => {
             s.shape_outside = c.clone();
@@ -932,6 +966,10 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
         (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(t).tracks(x, y).map(Val::Tracks).unwrap_or_else(discrete),
+        (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
+            lerp_pair(&(*x,*y),&(*u,*v),t).map(|(x,y)| Val::MotionPosition(MotionPosition::Coordinates(x,y))).unwrap_or_else(discrete),
+        (Val::MotionRotation(a), Val::MotionRotation(b)) if a.follows_path == b.follows_path =>
+            Val::MotionRotation(MotionRotation { follows_path: a.follows_path, degrees: lerp(a.degrees,b.degrees,t) }),
         (Val::F(x), Val::F(y)) => Val::F(lerp(*x, *y, t)),
         (Val::C(x), Val::C(y)) => {
             let ch = |p: u8, q: u8| lerp(p as f32, q as f32, t).round().clamp(0.0, 255.0) as u8;
@@ -1592,6 +1630,7 @@ impl Engine {
         let changed = page.styles.get(node).map(|s| **s != style).unwrap_or(true);
         if changed {
             page.styles.any_position_area |= style.needs_anchor_layout();
+            page.styles.any_motion_path |= style.has_motion_path();
             if let Some(slot) = page.styles.styles.get_mut(node) {
                 *slot = Some(Rc::new(style));
                 page.incr.style_patched(node);
@@ -2088,6 +2127,9 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
 fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::F(_), Val::F(_)) | (Val::C(_), Val::C(_)) | (Val::V(_), Val::V(_)) => true,
+        (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
+            lerp_pair(&(*x,*y),&(*u,*v),0.5).is_some(),
+        (Val::MotionRotation(a), Val::MotionRotation(b)) => a.follows_path == b.follows_path,
         (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(0.5).tracks(x, y).is_some(),
         (Val::L(x), Val::L(y)) => lerp_lp(x, y, 0.5).is_some(),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),

@@ -2539,20 +2539,28 @@ impl Page {
             }
             if !rects.is_empty() {
                 rects.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
-                return rects;
+                return rects.into_iter().map(|r| self.client_fragment_rect(node, r)).collect();
             }
         }
-        self.layout_rect_of(node).into_iter().collect()
+        self.client_rect_of(node).into_iter().collect()
     }
 
     /// [`Page::layout_rect_of`] as painted: mapped through the CSS transforms of
     /// the node and its ancestors (the bounding box of the result).
     pub fn client_rect_of(&self, node: NodeId) -> Option<Rect> {
-        let mut r = self.layout_rect_of(node)?;
+        Some(self.client_fragment_rect(node, self.layout_rect_of(node)?))
+    }
+
+    fn client_fragment_rect(&self, node: NodeId, mut r: Rect) -> Rect {
         let mut cur = Some(node);
         while let Some(n) = cur {
             if let Some(s) = self.styles.get(n).filter(|s| s.has_transform()) {
-                if let Some(b) = self.layout_rect_of(n) {
+                let motion = if s.has_motion_path() {
+                    self.layout.motion_matrix_in_document(&self.doc, n)
+                } else { None };
+                if let Some(m) = motion {
+                    r = rabbithole_gfx::path::transform_rect_bounds(&m, r);
+                } else if let Some(b) = self.layout_rect_of(n) {
                     let m = rabbithole_style::transform_matrix(&s.transform_ops(), b.w, b.h, s.font_size);
                     let ox = b.x + s.transform_origin.0.resolve_or_zero(b.w);
                     let oy = b.y + s.transform_origin.1.resolve_or_zero(b.h);
@@ -2562,7 +2570,7 @@ impl Page {
             }
             cur = self.doc.flat_parent(n);
         }
-        Some(r)
+        r
     }
 
     /// Scroll container under a document point.

@@ -379,6 +379,7 @@ pub struct LayoutBox {
     pub(crate) fallback_text: bool,
     /// Logical → physical mapping of a wrapper's contents.
     pub(crate) wm_transform: Option<Matrix>,
+    pub(crate) motion_transform: std::cell::Cell<Option<Matrix>>,
     /// How a wrapper's contents are turned (see `wm.rs`).
     pub(crate) wm_kind: WmKind,
     /// A wrapper's physical background layers (images and gradients of the
@@ -463,6 +464,7 @@ impl LayoutBox {
             fallback_text: false,
             ruby: 0,
             wm_transform: None,
+            motion_transform: std::cell::Cell::new(None),
             wm_kind: WmKind::Cw,
             wm_background: None,
         }
@@ -577,6 +579,15 @@ impl LayoutBox {
         self.style.position != Position::Static
     }
 
+    fn used_transform_ops(&self) -> std::borrow::Cow<'_, [rabbithole_style::TransformOp]> {
+        let mut ops = self.style.transform_ops();
+        if let Some(m) = self.motion_transform.get().filter(|_| self.style.has_motion_path()) {
+            let i = ops.len() - self.style.transform.len();
+            ops.to_mut().insert(i,rabbithole_style::TransformOp::Matrix(m));
+        }
+        ops
+    }
+
     /// Transform matrix of this box (document coordinates), if any.
     pub fn transform_matrix(&self) -> Option<Matrix> {
         if let Some(m) = self.wm_transform {
@@ -590,7 +601,7 @@ impl LayoutBox {
         if !self.style.has_transform() {
             return None;
         }
-        let ops = self.style.transform_ops();
+        let ops = self.used_transform_ops();
         if !ops.iter().all(rabbithole_style::TransformOp::is_2d) || self.style.transform3d.as_ref().is_some_and(|t| t.origin_z != 0.0) {
             return self.transform_matrix_3d().map(|m| rabbithole_gfx::mat4::flatten_2d(&m));
         }
@@ -623,7 +634,7 @@ impl LayoutBox {
             return None;
         }
         let r = self.transform_reference_box();
-        let m = rabbithole_style::transform_matrix_3d(&self.style.transform_ops(), r.w, r.h);
+        let m = rabbithole_style::transform_matrix_3d(&self.used_transform_ops(), r.w, r.h);
         let ox = r.x + self.style.transform_origin.0.resolve_or_zero(r.w);
         let oy = r.y + self.style.transform_origin.1.resolve_or_zero(r.h);
         let oz = self.style.transform3d.as_ref().map_or(0.0, |t| t.origin_z);
@@ -1154,6 +1165,21 @@ impl LayoutTree {
     pub fn box_in_document(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<(&LayoutBox, Rect)> {
         let (b,coordinates) = self.box_and_coordinates(doc,node)?;
         Some((b,physical_rect(coordinates,b.rect)))
+    }
+
+    /// The used motion-path transform, including the element's other CSS
+    /// transforms, expressed in physical document coordinates.
+    pub fn motion_matrix_in_document(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<Matrix> {
+        let (b, coordinates) = self.box_and_coordinates(doc, node)?;
+        b.motion_transform.get()?;
+        let used = b.transform_matrix()?;
+        Some(match coordinates {
+            Some(m) => rabbithole_style::multiply_matrix(
+                rabbithole_style::multiply_matrix(m, used),
+                rabbithole_gfx::path::invert(&m),
+            ),
+            None => used,
+        })
     }
 
     pub(crate) fn box_and_coordinates(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<(&LayoutBox, Option<Matrix>)> {

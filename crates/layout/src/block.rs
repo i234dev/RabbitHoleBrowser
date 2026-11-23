@@ -569,6 +569,7 @@ impl<'a> Layouter<'a> {
         }
         let root_definite = height_definite(&root, true);
         self.apply_relative(&mut root, vp_w, Some(vp_h), root_definite);
+        if self.ctx.styles.any_motion_path { crate::motion::apply(&root, Rect::new(0.0, 0.0, vp_w, vp_h)); }
         let (max_r, max_b) = bounds(&root);
         doc_h = doc_h.max(max_b);
         if debug {

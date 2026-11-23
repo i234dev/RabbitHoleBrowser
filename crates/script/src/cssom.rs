@@ -294,7 +294,7 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
 }
 
 fn checked_property(name: &str) -> bool {
-    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::motion::property(name) || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
@@ -303,7 +303,23 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
     }
     if matches!(name, "shape-outside" | "shape-margin") {
         if rabbithole_style::cascade::supports_declaration(name,tokens) == Some(false) { return None; }
-        if name == "shape-outside" { return Some(shapes::specified(tokens)); }
+        if name == "shape-outside" { return Some(shapes::specified(tokens,"margin-box")); }
+    }
+    if rabbithole_style::props::motion::property(name) {
+        if rabbithole_style::cascade::supports_declaration(name,tokens) != Some(true) { return None; }
+        let parts = rabbithole_style::values::components(tokens);
+        if parts.len() == 1 && matches!(parts[0], [Token::Ident(_)]) { return Some(tokens_to_css(tokens)); }
+        if tokens.iter().any(|t| matches!(t,Token::Function(f) if ["var","env","attr"].iter().any(|n| f.eq_ignore_ascii_case(n)))) {
+            return Some(tokens_to_css(tokens));
+        }
+        match name {
+            "offset-path" => return Some(shapes::specified(tokens,"border-box")),
+            "offset-anchor" | "offset-position" => return Some(shapes::specified_position(&parts)),
+            "offset-rotate" if parts.len() == 2 && matches!(parts[1],[Token::Ident(_)]) => {
+                return Some(format!("{} {}", tokens_to_css(parts[1]),tokens_to_css(parts[0])));
+            }
+            _ => {}
+        }
     }
     if single_color_property(name) { return specified_color(name, tokens); }
     if matches!(name, "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
@@ -782,8 +798,22 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "grid-template-columns" => grid::computed(&s.grid_template_columns),
         "grid-template-rows" => grid::computed(&s.grid_template_rows),
         "display" => display_css(s.display).to_string(),
-        "shape-outside" => shapes::computed(s.shape_outside.as_deref(), s.shape_outside_position_explicit),
+        "shape-outside" => shapes::computed(s.shape_outside.as_deref(), s.shape_outside_position_explicit, rabbithole_style::ShapeBox::Margin),
         "shape-margin" => position_css(&s.shape_margin),
+        "offset-path" => shapes::computed(s.motion().path.as_deref(),s.motion().explicit_center,rabbithole_style::ShapeBox::Border),
+        "offset-distance" => position_css(&s.motion().distance),
+        "offset-rotate" => {
+            let v = s.motion().rotate;
+            if v.follows_path && v.degrees == 0.0 { "auto".into() }
+            else { format!("{}{}deg", if v.follows_path { "auto " } else { "" }, fmt_num(v.degrees)) }
+        }
+        "offset-position" | "offset-anchor" => {
+            use rabbithole_style::props::motion::OffsetPosition;
+            match if prop == "offset-position" { s.motion().position } else { s.motion().anchor } {
+                OffsetPosition::Auto => "auto".into(), OffsetPosition::Normal => "normal".into(),
+                OffsetPosition::Coordinates(x,y) => format!("{} {}",position_css(&x),position_css(&y)),
+            }
+        }
         "position-try" => s.position_try_order.shorthand_css(s.position_try_fallbacks.as_deref().unwrap_or_default(),true),
         "position-try-order" => s.position_try_order.css().into(),
         "position-try-fallbacks" => rabbithole_style::props::anchor::TryOption::list_css(s.position_try_fallbacks.as_deref().unwrap_or_default(),true),
