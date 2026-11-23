@@ -4120,6 +4120,16 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
         return Some(recognizes_property(name));
     }
+    if matches!(name, "grid-template-columns" | "grid-template-rows") {
+        if let Some(valid) = crate::props::grid::valid_subgrid(value) { return Some(valid); }
+    }
+    if matches!(name, "transform-style" | "mix-blend-mode") {
+        let parts = values::components(value);
+        return Some(matches!(parts.as_slice(), [c] if values::ident(c).is_some_and(|k| {
+            if name == "transform-style" { matches!(k.as_str(), "flat" | "preserve-3d") }
+            else { rabbithole_gfx::blend_mode_index(&k).is_some() }
+        })));
+    }
     if crate::props::flex::alignment_property(name) {
         return Some(crate::props::flex::specified_alignment(name, &values::components(value)).is_some());
     }

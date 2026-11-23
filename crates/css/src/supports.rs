@@ -27,8 +27,6 @@ pub fn property_enabled(name: &str) -> bool {
 
 /// Values we do not implement for otherwise supported properties.
 const UNSUPPORTED_VALUES: &[(&str, &str)] = &[
-    ("grid-template-columns", "subgrid"),
-    ("grid-template-rows", "subgrid"),
     ("display", "masonry"),
     ("display", "ruby"),
     ("display", "math"),
@@ -36,8 +34,6 @@ const UNSUPPORTED_VALUES: &[(&str, &str)] = &[
     ("grid-template-columns", "masonry"),
     ("text-wrap", "pretty"),
     ("text-wrap-style", "pretty"),
-    ("transform-style", "preserve-3d"),
-    ("mix-blend-mode", "plus-darker"),
 ];
 
 /// Checks `property: value` against the property grammars, which live in
@@ -319,7 +315,7 @@ mod tests {
         assert!(!ok("not (display: grid)"));
         assert!(ok("(display: grid) or (anchor-name: --a)"));
         assert!(!ok("(anchor-name: --a)"));
-        assert!(!ok("(grid-template-columns: subgrid)"));
+        assert!(ok("(grid-template-columns: subgrid)"));
         assert!(ok("selector(:has(a))"));
         assert!(ok("selector(:focus-visible)"));
         assert!(!ok("selector(:totally-unknown)"));
