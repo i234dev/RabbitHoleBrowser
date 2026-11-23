@@ -235,11 +235,12 @@
     for (const el of els) {
       const name = el.localName;
       // HTML custom elements and customized built-ins require explicit opt-in.
-      if (cfg.useDefaults && el.namespaceURI === 'http://www.w3.org/1999/xhtml' && name.includes('-')) {
+      if (cfg.removeElements.includes(name) ||
+          (cfg.useDefaults && el.namespaceURI === 'http://www.w3.org/1999/xhtml' && name.includes('-'))) {
         el.remove(); continue;
       }
       if (cfg.replaceWithChildrenElements.includes(name)) { el.replaceWith(...el.childNodes); continue; }
-      if (cfg.removeElements.includes(name) || (cfg.elements && !cfg.elements.includes(name))) { el.remove(); continue; }
+      if (cfg.elements && !cfg.elements.includes(name)) { el.remove(); continue; }
       for (const a of Array.from(el.getAttributeNames())) {
         const v = el.getAttribute(a) || '';
         if (((safe || cfg.useDefaults) && (/^on/i.test(a) || ((a === 'href' || a === 'src' || a === 'action' || a === 'formaction') && /^\s*javascript:/i.test(v)))) || cfg.removeAttributes.includes(a) || (cfg.attributes && !cfg.attributes.includes(a))) el.removeAttribute(a);

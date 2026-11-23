@@ -2182,6 +2182,9 @@ fn complete_html_replacement_commits_filtered_children_before_running_callbacks(
             disconnectedCallback() { events.push('disconnect'); }
             attributeChangedCallback(name, old, value) { events.push(value); }
         });
+        root.setHTML("<script>unwanted text</script><section><b>kept</b></section>",
+            {sanitizer:{replaceWithChildrenElements:['section','script']}});
+        console.log(root.textContent, root.firstChild.localName);
         root.setHTML("<sample-item></sample-item><div is='some-widget'>plain</div>");
         console.log(root.childElementCount, root.firstChild.localName, root.firstChild.hasAttribute('is'), events.length);
         root.setHTMLUnsafe("<section><sample-item data-kind='first'></sample-item></section><i>absent</i>",
@@ -2193,7 +2196,7 @@ fn complete_html_replacement_commits_filtered_children_before_running_callbacks(
                            {runScripts:true});
         console.log(events.join(','));
     "#);
-    assert_eq!(out, ["1 div false 0", "1 construct,first,connect", "complete,disconnect,construct,connect"]);
+    assert_eq!(out, ["kept b", "1 div false 0", "1 construct,first,connect", "complete,disconnect,construct,connect"]);
 }
 
 #[test]
