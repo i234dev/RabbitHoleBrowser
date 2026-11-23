@@ -17,6 +17,7 @@ const ACC: u8 = CONFIGURABLE | ENUMERABLE;
 pub(crate) enum Reflect {
     Str,
     NullableStr,
+    Popover,
     Bool,
     /// Number (`NaN`-free: 0 when missing)
     Num,
@@ -39,6 +40,7 @@ fn reflect_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let raw = with_doc(n.doc, |doc| doc.attr(n.node, spec.attr).map(|s| s.to_string()));
     Ok(match spec.kind {
         Reflect::Str => Value::str(raw.as_deref().unwrap_or("")),
+        Reflect::Popover => raw.as_deref().map(Document::popover_mode).map(Value::str).unwrap_or(Value::Null),
         Reflect::NullableStr => raw.as_deref().map(Value::str).unwrap_or(Value::Null),
         Reflect::Bool => Value::Bool(raw.is_some()),
         Reflect::Num => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0)),
@@ -60,7 +62,7 @@ fn reflect_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
             let b = realm.to_boolean(&v);
             set_attribute(n, spec.attr, if b { Some("") } else { None });
         }
-        Reflect::NullableStr if v.is_nullish() => {
+        Reflect::NullableStr | Reflect::Popover if v.is_nullish() => {
             if get_attribute(n, spec.attr).is_some() { set_attribute(n, spec.attr, None); }
         }
         Reflect::Num | Reflect::Int(_) => {
@@ -2643,9 +2645,10 @@ pub(crate) fn install(realm: &mut Realm) {
     hacc(realm, "offsetTop", e_offset_top, None);
     hacc(realm, "offsetLeft", e_offset_left, None);
     hacc(realm, "offsetParent", e_offset_parent, None);
-    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize"), ("nonce", "nonce"), ("popover", "popover")] {
+    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize"), ("nonce", "nonce")] {
         reflect(realm, html, prop, attr, Reflect::Str);
     }
+    reflect(realm, html, "popover", "popover", Reflect::Popover);
     reflect(realm, html, "draggable", "draggable", Reflect::Bool);
     reflect(realm, html, "spellcheck", "spellcheck", Reflect::Bool);
     reflect(realm, html, "inert", "inert", Reflect::Bool);
@@ -2751,6 +2754,7 @@ pub(crate) fn install(realm: &mut Realm) {
 
     // --- HTMLInputElement
     let input = define_class(realm, "HTMLInputElement", Some("HTMLElement"), crate::host::html_element_ctor);
+    realm.define_accessor(input, "popoverTargetElement", Some(popover_target_get), Some(popover_target_set), ACC);
     realm.define_accessor(input, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(input, "defaultValue", Some(input_default_value_get), Some(input_default_value_set), ACC);
     realm.define_accessor(input, "checked", Some(input_checked_get), Some(input_checked_set), ACC);
@@ -2944,6 +2948,7 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, canvas, "height", "height", Reflect::Int(150));
     // --- HTMLButtonElement
     let button = define_class(realm, "HTMLButtonElement", Some("HTMLElement"), crate::host::html_element_ctor);
+    realm.define_accessor(button, "popoverTargetElement", Some(popover_target_get), Some(popover_target_set), ACC);
     realm.define_accessor(button, "type", Some(input_type_get), Some(input_type_set), ACC);
     realm.define_accessor(button, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(button, "form", Some(input_form), None, ACC);
@@ -3087,7 +3092,10 @@ fn dialog_show(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 /// page over its `::backdrop`, `:modal`).
 fn dialog_show_modal(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "showModal")?;
-    let (open, modal, connected) = with_doc(n.doc, |doc| (doc.attr(n.node, "open").is_some(), doc.top_layer.contains(&n.node), doc.is_connected(n.node)));
+    let (open, modal, connected) = with_doc(n.doc, |doc| (doc.attr(n.node, "open").is_some(), doc.is_modal(n.node), doc.is_connected(n.node)));
+    if with_doc(n.doc, |doc| doc.popover_open(n.node)) {
+        return Err(crate::misc::dom_exception(realm, "InvalidStateError", "The dialog is showing as a popover."));
+    }
     if open && modal {
         return Ok(Value::Undefined);
     }
@@ -3250,6 +3258,48 @@ fn e_has_attribute_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let ns = ns_arg(realm, args, 0)?;
     let local = arg_str(realm, args, 1)?;
     Ok(Value::Bool(find_attr_ns(n, ns.as_deref(), &local).is_some()))
+}
+
+fn popover_target_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "popoverTargetElement")?;
+    let target = with_doc(n.doc, |doc| doc.popover_target(n.node));
+    Ok(target.map(|node| wrap(realm, NodeRef { doc: n.doc, node })).unwrap_or(Value::Null))
+}
+
+fn popover_target_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "popoverTargetElement")?;
+    let value = arg(args, 0);
+    if value.is_nullish() {
+        set_attribute(n, "popovertarget", None);
+    } else {
+        let target = node_of(realm, &value).filter(|t| with_doc(t.doc, |doc| doc.element(t.node).is_some()))
+            .ok_or_else(|| realm.throw_type_error("Expected an Element"))?;
+        set_attribute(n, "popovertarget", Some(""));
+        if n.doc == target.doc { with_doc(n.doc, |doc| doc.explicit_popover_targets.insert(n.node, target.node)); }
+    }
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn popover_state(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &arg(args, 0), "popover")?;
+    if let Some(value) = args.get(1) {
+        let open = realm.to_boolean(value);
+        with_doc(n.doc, |doc| {
+            if !open || doc.is_connected(n.node) && !doc.is_modal(n.node)
+                && doc.element(n.node).is_some_and(|el| el.ns == rabbithole_dom::Namespace::Html && el.attr("popover").is_some()) {
+                doc.set_popover_open(n.node, open);
+            }
+        });
+        if n.doc == 0 { mark_dirty(); }
+    }
+    Ok(Value::Bool(with_doc(n.doc, |doc| doc.popover_open(n.node))))
+}
+
+pub(crate) fn open_popovers(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &arg(args, 0), "popover")?;
+    let nodes: Vec<_> = with_doc(n.doc, |doc| doc.top_layer.iter().copied().filter(|&id| doc.popover_open(id)).collect());
+    let values = nodes.into_iter().map(|node| wrap(realm, NodeRef { doc: n.doc, node })).collect();
+    Ok(realm.new_array_value(values))
 }
 
 /// `__rhNative.attrNamespace(element, storedName)`: the attribute's

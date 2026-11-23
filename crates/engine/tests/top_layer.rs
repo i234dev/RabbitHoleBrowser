@@ -71,3 +71,58 @@ fn modal_dialog_is_painted_above_everything_over_its_backdrop() {
     assert!(e.cancel_modal(&mut page).is_none());
     assert_eq!(eval(&e, &mut page, "d.show(); var r; try { d.showModal(); r = 'no'; } catch (x) { r = x.name; } d.close(); r"), "InvalidStateError");
 }
+
+#[test]
+fn popover_activation_shares_state_with_selectors_paint_and_hit_testing() {
+    let mut e = engine();
+    let mut page = e.load_html(
+        r#"<!doctype html><style>
+          body { margin: 0 }
+          #under { position:fixed; inset:0; z-index:50; background:red }
+          #panel { width:100px; height:60px; border:0; padding:0; background:lime }
+        </style><div id=under></div><button id=show type=button></button>
+        <div popover id=panel><span>Menu</span></div><svg><rect id=graphic popover /></svg>"#,
+        Url::parse("http://localhost/").unwrap(),
+        Viewport { width:800.0, height:600.0 },
+    );
+    assert_eq!(eval(&e, &mut page, r#"var changes=[];
+        panel.onbeforetoggle = e => changes.push([e.oldState,e.newState,e.source === show,e.cancelable].join('/'));
+        show.popoverTargetElement = panel;
+        [show.getAttribute('popovertarget'),panel.popover,getComputedStyle(panel).display,
+         getComputedStyle(graphic).display === 'none'].join('|')"#), "|auto|none|false");
+    let button = page.doc.element_by_id("show").unwrap();
+    e.click_element(&mut page, button, None, Default::default());
+    assert_eq!(eval(&e, &mut page, "[panel.matches(':popover-open'),panel.matches(':modal'),changes.join()].join('|')"),
+        "true|false|closed/open/true/true");
+    let canvas = render(&e, &mut page);
+    assert_eq!(rgb(&canvas, 400, 300), (0, 255, 0));
+    assert_eq!(page.node_at_viewport(10.0, 10.0), page.doc.element_by_id("under"));
+    assert!(e.cancel_modal(&mut page).is_some());
+    assert_eq!(eval(&e, &mut page, r#"
+        show.click();
+        const opened = panel.matches(':popover-open');
+        show.setAttribute('popovertarget','');
+        const detached = panel; detached.remove(); document.body.append(detached);
+        [opened,panel.matches(':popover-open'),show.popoverTargetElement,changes.join(',')].join('|')"#),
+        "true|false||closed/open/true/true,open/closed/false/false,closed/open/true/true");
+}
+
+#[test]
+fn popover_beforetoggle_can_cancel_and_toggle_events_coalesce() {
+    let mut e = engine();
+    let mut page = e.load_html(
+        "<main popover id=outer><p popover=hint id=inner></p></main><aside popover id=other></aside>",
+        Url::parse("http://localhost/").unwrap(), Viewport { width:800.0, height:600.0 },
+    );
+    assert_eq!(eval(&e, &mut page, r#"var toggles = [];
+        outer.addEventListener('beforetoggle', e => e.preventDefault(), {once:true});
+        outer.ontoggle = e => toggles.push(e.oldState + '/' + e.newState);
+        const canceled = outer.togglePopover(true);
+        outer.showPopover(); inner.showPopover();
+        const nested = document.querySelectorAll(':popover-open').length;
+        other.showPopover();
+        [canceled,nested,outer.matches(':popover-open'),inner.matches(':popover-open'),
+          other.matches(':popover-open'),toggles.length].join('|')"#), "false|2|false|false|true|0");
+    e.tick(&mut page);
+    assert_eq!(eval(&e, &mut page, "toggles.join()"), "closed/closed");
+}

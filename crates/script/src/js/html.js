@@ -14,7 +14,7 @@
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const S = Symbol('html');
-  const SD = Symbol('defaultValue'), SRV = Symbol('returnValue'), SPOP = Symbol('popoverOpen');
+  const SD = Symbol('defaultValue'), SRV = Symbol('returnValue');
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
   // Define accessors / methods only where the native bindings lack them.
@@ -640,7 +640,6 @@
     });
   }
   for (const C of [g.HTMLButtonElement, g.HTMLInputElement]) {
-    acc(C, 'popoverTargetElement', function () { const id = this.getAttribute('popovertarget'); return id ? document.getElementById(id) : null; }, function (el) { if (el && el.id) this.setAttribute('popovertarget', el.id); else this.removeAttribute('popovertarget'); });
     acc(C, 'popoverTargetAction', function () { const v = (this.getAttribute('popovertargetaction') || '').toLowerCase(); return ['show', 'hide'].includes(v) ? v : 'toggle'; }, function (v) { this.setAttribute('popovertargetaction', v); });
   }
   acc(g.HTMLButtonElement, 'commandForElement', function () { const id = this.getAttribute('commandfor'); return id ? document.getElementById(id) : null; }, function (el) { if (el && el.id) this.setAttribute('commandfor', el.id); else this.removeAttribute('commandfor'); });
@@ -1028,13 +1027,101 @@
 
   // ---------------------------------------------------- HTMLElement misc
 
-  // Popover API (state only; top-layer rendering not available).
-  for (const [name, fn] of [
-    ['showPopover', function () { if (!this.hasAttribute('popover')) throw domError("Failed to execute 'showPopover' on 'HTMLElement': Not supported on elements that do not have a valid value for the 'popover' attribute.", 'NotSupportedError'); if (!this[SPOP]) { this[SPOP] = true; this.dispatchEvent(new ToggleEventCtor('toggle', { oldState: 'closed', newState: 'open' })); } }],
-    ['hidePopover', function () { if (this[SPOP]) { this[SPOP] = false; this.dispatchEvent(new ToggleEventCtor('toggle', { oldState: 'open', newState: 'closed' })); } }],
-    ['togglePopover', function (force) { const open = typeof force === 'boolean' ? force : typeof force === 'object' && force && typeof force.force === 'boolean' ? force.force : !this[SPOP]; if (open) this.showPopover(); else this.hidePopover(); return open; }],
-  ]) method(HE, name, fn, true);
-  const ToggleEventCtor = g.ToggleEvent || g.Event;
+  const pendingPopoverToggles = new WeakMap();
+  const changingPopovers = new WeakSet();
+  const previousPopoverFocus = new WeakMap();
+  const ToggleEventCtor = g.ToggleEvent;
+  function queuePopoverToggle(element, oldState, newState, source) {
+    const pending = pendingPopoverToggles.get(element);
+    if (pending) {
+      oldState = pending.oldState;
+      clearTimeout(pending.timer);
+    }
+    const timer = setTimeout(() => {
+      pendingPopoverToggles.delete(element);
+      element.dispatchEvent(new ToggleEventCtor('toggle', {oldState, newState, source}));
+    }, 0);
+    pendingPopoverToggles.set(element, {oldState, timer});
+  }
+  function popoverContains(ancestor, node) {
+    for (let el = node; el; el = el.assignedSlot || el.parentNode || el.host) {
+      if (el === ancestor) return true;
+    }
+    return false;
+  }
+  function checkPopover(element, open) {
+    if (element.popover === null) throw domError('The element has no popover attribute.', 'NotSupportedError');
+    if (!element.ownerDocument.defaultView) throw domError('The document is not active.', 'InvalidStateError');
+    if (N.popoverState(element) === open) return false;
+    if (!element.isConnected || element.matches(':modal') || element.ownerDocument.fullscreenElement === element)
+      throw domError('The element cannot change its popover state.', 'InvalidStateError');
+    return true;
+  }
+  function changePopover(element, open, source) {
+    if (!checkPopover(element, open) || changingPopovers.has(element)) return;
+    const oldState = open ? 'closed' : 'open', newState = open ? 'open' : 'closed';
+    changingPopovers.add(element);
+    try {
+      if (!element.dispatchEvent(new ToggleEventCtor('beforetoggle', {oldState,newState,source,cancelable:open}))) return;
+      if (!checkPopover(element, open)) return;
+      const mode = element.popover;
+      if (mode !== 'manual') {
+        const stack = N.openPopovers(element).filter(p => p.popover !== 'manual');
+        let keep = -1;
+        if (open) {
+          for (let i = 0; i < stack.length; i++) {
+            const p = stack[i];
+            if (mode === 'hint' && p.popover === 'auto' ||
+                (mode === 'hint' || p.popover === 'auto') && (popoverContains(p, element) || popoverContains(p, source))) keep = i;
+          }
+        } else {
+          keep = stack.indexOf(element);
+        }
+        for (let i = stack.length - 1; i > keep; i--) {
+          const p = stack[i];
+          if (N.popoverState(p)) changePopover(p, false, null);
+        }
+        if (element.popover !== mode) throw domError('The popover mode changed while updating the top layer.', 'InvalidStateError');
+        if (!checkPopover(element, open)) return;
+      }
+      const focused = element.ownerDocument.activeElement;
+      N.popoverState(element, open);
+      if (open) {
+        if (mode !== 'manual' && !N.openPopovers(element).some(p => p !== element && p.popover !== 'manual'))
+          previousPopoverFocus.set(element, focused);
+        const autofocus = element.hasAttribute('autofocus') ? element : element.querySelector('[autofocus]');
+        if (autofocus) autofocus.focus();
+      } else {
+        const previous = previousPopoverFocus.get(element);
+        previousPopoverFocus.delete(element);
+        if (previous && popoverContains(element, focused)) previous.focus();
+      }
+      queuePopoverToggle(element, oldState, newState, source);
+    } finally { changingPopovers.delete(element); }
+  }
+  N.setFactory('popoverAction', (element, dismiss) => {
+    if (dismiss) { changePopover(element, false, null); return true; }
+    const target = element.popoverTargetElement;
+    if (!target || target.popover == null || element.matches(':disabled')) return false;
+    const action = element.popoverTargetAction;
+    const open = action === 'show' || (action !== 'hide' && !N.popoverState(target));
+    changePopover(target, open, element);
+    return true;
+  });
+  function popoverSource(opts) {
+    const source = opts?.source;
+    if (source == null) return null;
+    if (!(source instanceof g.HTMLElement)) throw new TypeError('Expected an HTMLElement source');
+    return source;
+  }
+  method(HE, 'showPopover', function (options = {}) { changePopover(this, true, popoverSource(options)); }, true);
+  method(HE, 'hidePopover', function () { changePopover(this, false, null); }, true);
+  method(HE, 'togglePopover', function (options) {
+    const dictionary = options != null && (typeof options === 'object' || typeof options === 'function');
+    const force = dictionary ? options.force : options;
+    changePopover(this, force === undefined ? !N.popoverState(this) : !!force, dictionary ? popoverSource(options) : null);
+    return N.popoverState(this);
+  }, true);
 
   // -------------------------------------------------------- DOMStringMap
 

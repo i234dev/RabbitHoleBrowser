@@ -507,6 +507,8 @@ pub(crate) fn install(realm: &mut Realm) {
     crate::live::install(realm, o);
     realm.define_method(o, "createDoctype", 4, crate::document::create_doctype);
     realm.define_method(o, "createXMLDocument", 0, crate::document::create_xml_document);
+    realm.define_method(o, "popoverState", 1, crate::element::popover_state);
+    realm.define_method(o, "openPopovers", 1, crate::element::open_popovers);
     realm.define_method(o, "attrNamespace", 2, crate::element::attr_namespace_native);
     realm.define_method(o, "validateQName", 1, crate::document::validate_qname);
     realm.define_method(o, "streamOpen", 3, crate::docparser::stream_open);

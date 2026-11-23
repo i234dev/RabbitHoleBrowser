@@ -1678,6 +1678,14 @@ fn pre_activation(path: &[(TargetKey, Value, Value)], bubbles: bool) -> Option<P
     Some(pre)
 }
 
+pub(crate) fn popover_action(realm: &mut Realm, n: NodeRef, dismiss: bool) -> bool {
+    let callback = state().borrow().factories.get("popoverAction").cloned();
+    let Some(callback) = callback else { return false };
+    let target = wrap(realm, n);
+    let result = call_logged(realm, &callback, Value::Undefined, &[target, Value::Bool(dismiss)], "popover activation");
+    realm.to_boolean(&result)
+}
+
 /// After the dispatch: the activation behavior, or (canceled) the
 /// legacy-canceled-activation behavior.
 fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target: Option<NodeRef>) {
@@ -1714,7 +1722,10 @@ fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target
                 return;
             }
             let form = with_doc(n.doc, |doc| form_owner(doc, n.node));
-            let Some(f) = form else { return };
+            let Some(f) = form else {
+                if with_doc(n.doc, |doc| doc.attr(n.node, "popovertarget").is_some()) { popover_action(realm, n, false); }
+                return;
+            };
             let fw = wrap(realm, NodeRef { doc: n.doc, node: f });
             if pre.kind == Activation::Reset {
                 let _ = realm.invoke(fw, "reset", &[]);
@@ -1769,7 +1780,9 @@ fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target
                 }
             }
         }
-        Activation::Button => {}
+        Activation::Button => {
+            if connected && with_doc(n.doc, |doc| doc.attr(n.node, "popovertarget").is_some()) { popover_action(realm, n, false); }
+        }
     }
 }
 

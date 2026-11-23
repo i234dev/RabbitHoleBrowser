@@ -75,9 +75,10 @@ pub enum Pseudo {
     Default,
     /// `:open` (open `<details>` / `<dialog>`).
     Open,
-    /// `:modal` (an element in the document's top layer).
+    /// A modal dialog in the top layer.
     Modal,
-    /// `:modal`, `:popover-open`, `:fullscreen`, `:autofill`, ... states
+    PopoverOpen,
+    /// `:fullscreen`, `:autofill`, ... states
     /// we are never in, but which are valid selectors.
     NeverState,
     /// `:scope` outside scoped contexts is `:root`.
@@ -663,7 +664,8 @@ impl<'a> SelectorParser<'a> {
                     "open" => Pseudo::Open,
                     "scope" => Pseudo::Scope,
                     "modal" => Pseudo::Modal,
-                    "popover-open" | "fullscreen" | "-webkit-full-screen" | "picture-in-picture" | "autofill" | "-webkit-autofill" | "user-invalid"
+                    "popover-open" => Pseudo::PopoverOpen,
+                    "fullscreen" | "-webkit-full-screen" | "picture-in-picture" | "autofill" | "-webkit-autofill" | "user-invalid"
                     | "user-valid" | "-moz-ui-invalid" | "-moz-ui-valid" | "blank" | "closed" | "playing" | "paused" | "seeking" | "buffering" | "stalled" | "muted"
                     | "volume-locked" | "target-within" | "local-link" | "current" | "past" | "future" | "-moz-focusring" => Pseudo::NeverState,
                     "hover" => Pseudo::Hover,
@@ -1382,7 +1384,8 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
                 _ => false,
             },
             Pseudo::Open => matches!(el.tag.as_str(), "details" | "dialog") && el.attr("open").is_some(),
-            Pseudo::Modal => doc.top_layer.contains(&node),
+            Pseudo::Modal => doc.is_modal(node),
+            Pseudo::PopoverOpen => doc.popover_open(node),
             Pseudo::NeverState => false,
             Pseudo::Scope => match state.scope {
                 Some(scope) => node == scope,

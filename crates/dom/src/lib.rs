@@ -3,7 +3,7 @@
 //! Nodes live in a `Vec` and reference each other by index (`NodeId`), which
 //! keeps the tree cheap to build and trivially `Send`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 mod index;
@@ -343,10 +343,10 @@ pub struct Document {
     /// The document's URL when it differs from its browsing context's
     /// (documents made by `DOMParser` take their creator's URL).
     pub url: Option<String>,
-    /// The top layer (HTML §"top layer"): modal dialogs, in the order they
-    /// were opened (last = topmost). Painted above everything else, each
-    /// over its `::backdrop`; matched by `:modal`.
+    /// Elements painted above the document, in opening order.
     pub top_layer: Vec<NodeId>,
+    open_popovers: HashSet<NodeId>,
+    pub explicit_popover_targets: HashMap<NodeId, NodeId>,
     /// Elements by attribute value and class, for queries.
     lookup: index::LookupIndex,
 }
@@ -435,6 +435,8 @@ impl Document {
             attr_namespaces: HashMap::new(),
             url: None,
             top_layer: Vec::new(),
+            open_popovers: HashSet::new(),
+            explicit_popover_targets: HashMap::new(),
             lookup: index::LookupIndex::default(),
         }
     }
@@ -610,6 +612,41 @@ impl Document {
         &self.nodes[id]
     }
 
+    pub fn popover_mode(value: &str) -> &'static str {
+        if value.is_empty() || value.eq_ignore_ascii_case("auto") { "auto" }
+        else if value.eq_ignore_ascii_case("hint") { "hint" }
+        else { "manual" }
+    }
+
+    pub fn popover_target(&self, invoker: NodeId) -> Option<NodeId> {
+        if let Some(&node) = self.explicit_popover_targets.get(&invoker) {
+            return self.is_shadow_including_inclusive_ancestor(self.tree_root(node), invoker).then_some(node);
+        }
+        let id = self.attr(invoker, "popovertarget").filter(|id| !id.is_empty())?;
+        let root = self.tree_root(invoker);
+        if root == Self::ROOT { return self.element_by_id(id); }
+        self.descendants(root).find(|&node| self.attr(node, "id") == Some(id))
+    }
+
+    pub fn popover_open(&self, node: NodeId) -> bool {
+        self.open_popovers.contains(&node)
+    }
+
+    pub fn is_modal(&self, node: NodeId) -> bool {
+        self.top_layer.contains(&node) && !self.popover_open(node)
+    }
+
+    pub fn set_popover_open(&mut self, node: NodeId, open: bool) {
+        if open {
+            if !self.open_popovers.insert(node) { return; }
+            self.top_layer.push(node);
+        } else {
+            if !self.open_popovers.remove(&node) { return; }
+            self.top_layer.retain(|&id| id != node);
+        }
+        self.record(Mutation::Node { node });
+    }
+
     /// Raw mutable access; recorded as an unknown change of the node.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
         self.record(Mutation::Node { node: id });
@@ -625,6 +662,11 @@ impl Document {
     /// None). No-op for the document node.
     pub fn detach(&mut self, child: NodeId) {
         let Some(parent) = self.nodes[child].parent else { return };
+        if !self.open_popovers.is_empty() {
+            let removed: Vec<_> = self.open_popovers.iter().copied()
+                .filter(|&n| self.is_shadow_including_inclusive_ancestor(child, n)).collect();
+            for node in removed { self.set_popover_open(node, false); }
+        }
         if self.has_live_positions() {
             self.live_before_remove(parent, child);
         }
@@ -922,6 +964,7 @@ impl Document {
         let is_html = self.is_html;
         let NodeData::Element(el) = &mut self.nodes[id].data else { return };
         let name = if is_html && el.ns == Namespace::Html { name.to_ascii_lowercase() } else { name.to_string() };
+        if name == "popovertarget" { self.explicit_popover_targets.remove(&id); }
         let old = match value {
             Some(v) => match el.attrs.iter_mut().find(|(k, _)| *k == name) {
                 Some(slot) => {
@@ -947,6 +990,9 @@ impl Document {
                 None => return,
             },
         };
+        if name == "popover" && self.popover_open(id) && old.as_deref().map(Self::popover_mode) != value.map(Self::popover_mode) {
+            self.set_popover_open(id, false);
+        }
         self.select_attribute_changed(id, &name, old.is_some(), value.is_some());
         if self.lookup.active() {
             self.lookup.attr_changed(id, &name, old.as_deref(), value);

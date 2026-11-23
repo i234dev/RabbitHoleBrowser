@@ -2,6 +2,7 @@
 //! section. Scripting is disabled in RabbitHole, so `noscript` renders.
 
 pub const UA_CSS: &str = r#"
+@namespace html "http://www.w3.org/1999/xhtml";
 /* ---- hidden elements ---- */
 [hidden], area, base, basefont, datalist, head, link, meta, noembed, noframes,
 param, rp, script, style, template, title, dialog:not([open]) { display: none; }
@@ -178,6 +179,10 @@ details:not([open]) > :not(summary) { display: none; }
 marquee { display: block; overflow: hidden; white-space: nowrap; }
 dialog[open] { display: block; position: absolute; left: 0; right: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 1em; background-color: white; color: black; }
 dialog:modal { position: fixed; top: 0; bottom: 0; max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em); overflow: auto; }
+html|*[popover]:not(:popover-open):not(:modal) { display: none; }
+html|*:popover-open { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 0.25em; overflow: auto; color: CanvasText; background-color: Canvas; }
+html|dialog:popover-open { display: block; }
+:popover-open::backdrop { pointer-events: none; background: transparent; }
 dialog:modal::backdrop { background: rgba(0, 0, 0, 0.1); }
 details > summary::marker { content: "\25B8 "; }
 details[open] > summary::marker { content: "\25BE "; }

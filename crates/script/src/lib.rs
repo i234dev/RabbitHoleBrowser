@@ -574,6 +574,14 @@ impl ScriptHost {
         })
     }
 
+    pub fn popover_action(&mut self, env: &mut dyn HostEnv, target: NodeId, dismiss: bool) -> bool {
+        self.enter(env, |realm| {
+            let changed = events::popover_action(realm, NodeRef::main(target), dismiss);
+            shadow::flush(realm);
+            changed
+        })
+    }
+
     /// Execute the default edit after a trusted beforeinput event. The
     /// editing implementation is captured at startup and shared with
     /// execCommand. The embedder sends input only if this changed the DOM.

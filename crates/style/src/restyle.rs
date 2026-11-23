@@ -339,6 +339,7 @@ impl InvalidationMap {
                         *self.attrs.entry(a.into()).or_default() |= rel;
                     }
                 }
+                Pseudo::PopoverOpen => *self.attrs.entry("popover".into()).or_default() |= rel,
                 Pseudo::Checked => {
                     *self.attrs.entry("checked".into()).or_default() |= rel;
                     *self.attrs.entry("selected".into()).or_default() |= rel;
