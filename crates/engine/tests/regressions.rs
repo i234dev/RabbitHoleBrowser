@@ -1375,6 +1375,22 @@ fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
 }
 
 #[test]
+fn fallback_alignment_reflects_logical_edges_and_exchanges_axes() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<style>#cb{position:relative;width:180px;height:120px}#target{position:absolute;left:250px;width:30px;height:20px;position-try-fallbacks:--fit flip-inline}@position-try --fit {inset:0;justify-self:start;align-self:end}</style><div id=cb><div id=target></div></div>");
+    let value = eval(&e,&mut page,r#"(() => {
+        const pos=()=>[target.offsetLeft,target.offsetTop].join(',');
+        const inline=pos();
+        target.style.positionTryFallbacks='--fit flip-start';
+        const swap=[pos(),target.offsetWidth,target.offsetHeight].join(',');
+        cb.style.direction='rtl';
+        target.style.positionTryFallbacks='--fit flip-inline';
+        return [inline,swap,pos()].join('|');
+    })()"#);
+    assert_eq!(value,"150,100|160,0,20,30|0,100");
+}
+
+#[test]
 fn fallback_tactics_reflect_anchor_sides_and_preserve_try_order() {
     let mut e = engine(true);
     let mut page=load(&mut e,"<style>#cb{position:relative;width:180px;height:140px}#a{position:absolute;left:120px;top:100px;width:20px;height:20px;anchor-name:--a}#t{position:absolute;position-anchor:--a;width:55px;height:35px;left:anchor(right);top:anchor(bottom);position-try-fallbacks:flip-block,flip-inline,flip-block flip-inline}</style><main id=cb><i id=a></i><div id=t></div></main>");

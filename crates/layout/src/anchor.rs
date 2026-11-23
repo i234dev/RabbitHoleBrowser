@@ -183,6 +183,37 @@ impl AxisMap {
         [edges.left,edges.right,edges.top,edges.bottom] = v;
     }
 
+    fn alignment(self, style: &mut ComputedStyle, writing: Writing) {
+        use rabbithole_style::{AlignFlags,ItemAlign};
+        let inline_horizontal = !writing.0.is_vertical();
+        let own = (style.writing_mode,style.direction);
+        for (source,mut value,mut flags) in [
+            (inline_horizontal,style.justify_self,style.justify_self_flags),
+            (!inline_horizontal,style.align_self,style.align_self_flags),
+        ] {
+            let (destination,_) = self.side(source,false);
+            if matches!(value,ItemAlign::FlexStart | ItemAlign::FlexEnd) {
+                let physical = flags.has(AlignFlags::LEFT | AlignFlags::RIGHT);
+                let axes = if flags.has(AlignFlags::SELF) { own } else { writing };
+                let end = if physical { flags.has(AlignFlags::RIGHT) } else { (value == ItemAlign::FlexEnd) != reversed(source,axes) };
+                let (_, end) = self.side(source,end);
+                let logical_end = if physical && destination == inline_horizontal {
+                    flags.0 &= !(AlignFlags::LEFT | AlignFlags::RIGHT);
+                    flags.0 |= if end { AlignFlags::RIGHT } else { AlignFlags::LEFT };
+                    end
+                } else if physical {
+                    flags.0 = (flags.0 & !(AlignFlags::LEFT | AlignFlags::RIGHT)) | AlignFlags::SELF;
+                    end != reversed(destination,own)
+                } else {
+                    end != reversed(destination,axes)
+                };
+                value = if logical_end { ItemAlign::FlexEnd } else { ItemAlign::FlexStart };
+            }
+            if destination == inline_horizontal { (style.justify_self,style.justify_self_flags) = (value,flags); }
+            else { (style.align_self,style.align_self_flags) = (value,flags); }
+        }
+    }
+
     fn regions(self, source: [Region;2]) -> [Region;2] {
         let mut regions = [Region::All;2];
         for (i,region) in source.into_iter().enumerate() {
@@ -273,9 +304,8 @@ impl QueryBox {
             std::mem::swap(&mut s.width,&mut s.height);
             std::mem::swap(&mut s.min_width,&mut s.min_height);
             std::mem::swap(&mut s.max_width,&mut s.max_height);
-            std::mem::swap(&mut s.align_self,&mut s.justify_self);
-            std::mem::swap(&mut s.align_self_flags,&mut s.justify_self_flags);
         }
+        self.axes.alignment(&mut s,self.writing);
         s
     }
 }
