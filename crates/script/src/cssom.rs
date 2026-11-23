@@ -215,8 +215,17 @@ fn style_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 }
 
 fn style_has(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let _ = style_target(realm, args)?;
-    Ok(Value::Bool(true))
+    let target = arg(args, 0);
+    let V::Object(id) = target.v() else { return Ok(Value::Bool(false)); };
+    let key = realm.to_property_key(arg(args, 1))?;
+    if realm.has_property(id, &key)? { return Ok(Value::Bool(true)); }
+    let Some(name) = key_of(realm, args) else { return Ok(Value::Bool(false)); };
+    if matches!(name.as_str(), "cssText" | "length" | "parentRule") { return Ok(Value::Bool(true)); }
+    if let Ok(index) = name.parse::<usize>() {
+        let n = style_target(realm, args)?;
+        return Ok(Value::Bool(index.to_string() == name && index < parse_style(n).items.len()));
+    }
+    Ok(Value::Bool(rabbithole_style::cascade::recognizes_property(&camel_to_kebab(&name))))
 }
 
 fn style_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -292,7 +301,12 @@ fn color_css(c: rabbithole_gfx::Color) -> String {
     } else if c.a == 0 {
         "rgba(0, 0, 0, 0)".into()
     } else {
-        format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, (c.a as f32 / 255.0 * 1000.0).round() / 1000.0)
+        // CSS Color 4 serializes a byte alpha with two decimal places if
+        // that value round-trips to the same byte; otherwise use three.
+        let alpha = f32::from(c.a) / 255.0;
+        let short = (alpha * 100.0).round() / 100.0;
+        let a = if (short * 255.0).round() as u8 == c.a { short } else { (alpha * 1000.0).round() / 1000.0 };
+        format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, a)
     }
 }
 
@@ -838,6 +852,14 @@ fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::str(&computed_value(n, &prop).unwrap_or_default()))
 }
 
+fn cs_has(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let target = arg(args, 0);
+    let V::Object(id) = target.v() else { return Ok(Value::Bool(false)); };
+    let key = realm.to_property_key(arg(args, 1))?;
+    if realm.has_property(id, &key)? { return Ok(Value::Bool(true)); }
+    Ok(Value::Bool(key_of(realm, args).is_some_and(|k| rabbithole_style::cascade::recognizes_property(&camel_to_kebab(&k)))))
+}
+
 fn cs_set(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
     Ok(Value::Bool(false))
 }
@@ -872,7 +894,7 @@ fn get_computed_style(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
     realm.define_property(target, "length", Value::Number(0.0), 0);
     realm.define_property(target, "cssText", Value::str(""), 0);
     let _ = cs_zero;
-    Ok(make_proxy(realm, target, &[("get", cs_get), ("set", cs_set)]))
+    Ok(make_proxy(realm, target, &[("get", cs_get), ("set", cs_set), ("has", cs_has)]))
 }
 
 // ---------------------------------------------------------------- matchMedia

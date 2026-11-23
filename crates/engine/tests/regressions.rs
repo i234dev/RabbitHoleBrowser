@@ -555,3 +555,11 @@ fn resolved_insets_follow_the_positioning_scheme() {
     let out = eval(&e, &mut page, "[getComputedStyle(f).top,getComputedStyle(f).right,getComputedStyle(r).left,getComputedStyle(s).top,getComputedStyle(n).left].join('|')");
     assert_eq!(out, "35px|220px|-40px|30%|10%");
 }
+
+#[test]
+fn css_style_property_detection_and_color_serialization() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<div id=box style='color:rgba(1,2,3,0.5);background-color:rgba(6,5,4,0.00392)'></div>");
+    let out = eval(&e, &mut page, "var b=document.getElementById('box'),s=getComputedStyle(b); [s.color,s.backgroundColor,'color' in s,'background-color' in s,'fontSize' in b.style,'notAProperty' in s,'notAProperty' in b.style,'toString' in s].join('|')");
+    assert_eq!(out, "rgba(1, 2, 3, 0.5)|rgba(6, 5, 4, 0.004)|true|true|true|false|false|true");
+}
