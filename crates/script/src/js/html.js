@@ -1085,7 +1085,7 @@
         if (!checkPopover(element, open)) return;
       }
       const focused = element.ownerDocument.activeElement;
-      N.popoverState(element, open);
+      N.popoverState(element, open, source);
       if (open) {
         if (mode !== 'manual' && !N.openPopovers(element).some(p => p !== element && p.popover !== 'manual'))
           previousPopoverFocus.set(element, focused);

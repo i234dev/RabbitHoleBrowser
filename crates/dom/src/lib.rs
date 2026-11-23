@@ -3,7 +3,7 @@
 //! Nodes live in a `Vec` and reference each other by index (`NodeId`), which
 //! keeps the tree cheap to build and trivially `Send`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 
 mod index;
@@ -345,7 +345,7 @@ pub struct Document {
     pub url: Option<String>,
     /// Elements painted above the document, in opening order.
     pub top_layer: Vec<NodeId>,
-    open_popovers: HashSet<NodeId>,
+    open_popovers: HashMap<NodeId, Option<NodeId>>,
     pub explicit_popover_targets: HashMap<NodeId, NodeId>,
     /// Elements by attribute value and class, for queries.
     lookup: index::LookupIndex,
@@ -435,7 +435,7 @@ impl Document {
             attr_namespaces: HashMap::new(),
             url: None,
             top_layer: Vec::new(),
-            open_popovers: HashSet::new(),
+            open_popovers: HashMap::new(),
             explicit_popover_targets: HashMap::new(),
             lookup: index::LookupIndex::default(),
         }
@@ -629,7 +629,24 @@ impl Document {
     }
 
     pub fn popover_open(&self, node: NodeId) -> bool {
-        self.open_popovers.contains(&node)
+        self.open_popovers.contains_key(&node)
+    }
+
+    pub fn light_dismiss_popovers(&self) -> impl DoubleEndedIterator<Item = NodeId> + '_ {
+        self.top_layer.iter().copied().filter(|&n| self.popover_open(n) &&
+            self.attr(n, "popover").is_some_and(|v| Self::popover_mode(v) != "manual"))
+    }
+
+    pub fn related_open_popover(&self, target: NodeId) -> Option<NodeId> {
+        self.light_dismiss_popovers().rev().find(|&popover| {
+            let source = self.open_popovers[&popover];
+            let mut current = Some(target);
+            while let Some(node) = current {
+                if node == popover || source == Some(node) { return true; }
+                current = self.flat_parent(node);
+            }
+            false
+        })
     }
 
     pub fn is_modal(&self, node: NodeId) -> bool {
@@ -637,11 +654,16 @@ impl Document {
     }
 
     pub fn set_popover_open(&mut self, node: NodeId, open: bool) {
+        self.set_popover_open_from(node, open, None);
+    }
+
+    pub fn set_popover_open_from(&mut self, node: NodeId, open: bool, source: Option<NodeId>) {
         if open {
-            if !self.open_popovers.insert(node) { return; }
+            if self.popover_open(node) { return; }
+            self.open_popovers.insert(node, source);
             self.top_layer.push(node);
         } else {
-            if !self.open_popovers.remove(&node) { return; }
+            if self.open_popovers.remove(&node).is_none() { return; }
             self.top_layer.retain(|&id| id != node);
         }
         self.record(Mutation::Node { node });
@@ -663,7 +685,7 @@ impl Document {
     pub fn detach(&mut self, child: NodeId) {
         let Some(parent) = self.nodes[child].parent else { return };
         if !self.open_popovers.is_empty() {
-            let removed: Vec<_> = self.open_popovers.iter().copied()
+            let removed: Vec<_> = self.open_popovers.keys().copied()
                 .filter(|&n| self.is_shadow_including_inclusive_ancestor(child, n)).collect();
             for node in removed { self.set_popover_open(node, false); }
         }

@@ -34,6 +34,8 @@ pub struct PointerState {
     pub hover: Option<NodeId>,
     /// Target and button of the press in progress.
     pub down: Option<(NodeId, u8)>,
+    /// The open popover related to the initial press (None for an outside press).
+    popover_press: Option<NodeId>,
     /// `pointerdown` was cancelled: compatibility mouse events
     /// (`mousedown`/`mouseup`) are suppressed until release.
     pub suppress_mouse: bool,
@@ -357,7 +359,7 @@ impl Engine {
         if let Some(target) = target.filter(|&t| page.doc.attr(t, "popover").is_some() && !page.doc.is_modal(t)) {
             let action = page.doc.attr(node, "popovertargetaction").unwrap_or("toggle");
             let open = !dismiss && (action.eq_ignore_ascii_case("show") || !action.eq_ignore_ascii_case("hide") && !page.doc.popover_open(target));
-            page.doc.set_popover_open(target, open);
+            page.doc.set_popover_open_from(target, open, (!dismiss).then_some(node));
             self.restyle(page);
             return ScriptOutcome { relayout: true, ..ScriptOutcome::default() };
         }
@@ -413,6 +415,7 @@ impl Engine {
             return PointerDown::default();
         };
         let document = page.doc.weak_identity();
+        page.pointer.popover_press = page.doc.related_open_popover(target);
         let disabled = chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n));
         let mut prevented = false;
         page.pointer.pointer_modality = true;
@@ -469,7 +472,19 @@ impl Engine {
             out.relayout = true;
         }
         let suppress = std::mem::take(&mut page.pointer.suppress_mouse);
+        let press_popover = page.pointer.popover_press.take();
         if let Some(t) = target {
+            if down.is_some_and(|(_, pressed)| pressed == button) && !page.doc.top_layer.is_empty() &&
+                page.doc.related_open_popover(t) == press_popover {
+                let dismiss: Vec<_> = page.doc.light_dismiss_popovers().rev().take_while(|&p| Some(p) != press_popover).collect();
+                for p in dismiss {
+                    if !document.is_for(&page.doc) { break; }
+                    if page.doc.popover_open(p) { out.merge(self.popover_action(page, p, true)); }
+                }
+                if !document.is_for(&page.doc) || !page.doc.is_connected(t) {
+                    return PointerUp { target: None, clicked: None, action: ClickAction::None, outcome: out };
+                }
+            }
             let disabled = chain(&page.doc, t).into_iter().any(|n| is_disabled_control(&page.doc, n));
             self.dispatch_into(page, &mut out, t, "pointerup", mouse(x, y, button, m, true, true));
             if !document.is_for(&page.doc) || !page.doc.is_connected(t) {

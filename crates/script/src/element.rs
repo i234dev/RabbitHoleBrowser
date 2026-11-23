@@ -3284,10 +3284,11 @@ pub(crate) fn popover_state(realm: &mut Realm, _: Value, args: &[Value]) -> JsRe
     let n = this_node(realm, &arg(args, 0), "popover")?;
     if let Some(value) = args.get(1) {
         let open = realm.to_boolean(value);
+        let source = args.get(2).and_then(|v| node_of(realm, v)).filter(|s| s.doc == n.doc).map(|s| s.node);
         with_doc(n.doc, |doc| {
             if !open || doc.is_connected(n.node) && !doc.is_modal(n.node)
                 && doc.element(n.node).is_some_and(|el| el.ns == rabbithole_dom::Namespace::Html && el.attr("popover").is_some()) {
-                doc.set_popover_open(n.node, open);
+                doc.set_popover_open_from(n.node, open, source);
             }
         });
         if n.doc == 0 { mark_dirty(); }

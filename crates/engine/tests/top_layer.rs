@@ -126,3 +126,24 @@ fn popover_beforetoggle_can_cancel_and_toggle_events_coalesce() {
     e.tick(&mut page);
     assert_eq!(eval(&e, &mut page, "toggles.join()"), "closed/closed");
 }
+
+#[test]
+fn outside_pointer_release_dismisses_a_popover_before_listeners_even_if_press_was_cancelled() {
+    let mut e = engine();
+    let mut page = e.load_html(
+        r#"<style>body{margin:0} #outside{position:fixed;inset:0} #menu{width:80px;height:40px}</style>
+        <button id=outside>Outside</button><div id=menu popover></div>"#,
+        Url::parse("http://localhost/").unwrap(), Viewport { width:800.0,height:600.0 },
+    );
+    eval(&e,&mut page,r#"var log=[];
+        menu.showPopover();
+        menu.onbeforetoggle=e=>log.push(e.newState);
+        outside.onpointerdown=e=>{log.push(e.type);e.preventDefault()};
+        outside.onpointerup=e=>log.push(e.type);
+        outside.onclick=e=>log.push(e.type);"#);
+    render(&e,&mut page);
+    e.pointer_down(&mut page,5.0,5.0,0,Default::default());
+    assert_eq!(eval(&e,&mut page,"menu.matches(':popover-open')"),"true");
+    e.pointer_up(&mut page,5.0,5.0,0,Default::default());
+    assert_eq!(eval(&e,&mut page,"[menu.matches(':popover-open'),...log].join('|')"),"false|pointerdown|closed|pointerup|click");
+}
