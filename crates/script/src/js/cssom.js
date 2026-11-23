@@ -438,7 +438,13 @@
   tag(CSSNamespaceRule, 'CSSNamespaceRule');
   class CSSKeyframeRule extends CSSRule {
     get keyText() { return this[S].selector; }
-    set keyText(v) { this[S].selector = String(v).trim(); touch(this); }
+    set keyText(v) {
+      if (this[S]?.type !== TYPES.KEYFRAME_RULE) throw new TypeError('Illegal invocation');
+      const selector = normKey(v);
+      if (selector === null) throw domError('Invalid keyframe selector', 'SyntaxError');
+      this[S].selector = selector;
+      touch(this);
+    }
     get style() { return this[S].style; }
   }
   tag(CSSKeyframeRule, 'CSSKeyframeRule');
@@ -447,12 +453,29 @@
     set name(v) { this[S].condition = String(v).trim(); touch(this); }
     get cssRules() { return makeRuleList(() => this[S].children); }
     get length() { return this[S].children.length; }
-    appendRule(text) { const r = parseChunk(splitRules(`${text}`)[0] || { prelude: '', block: '' }, this[S].sheet, this, true); if (r) { this[S].children.push(r); touch(this); } }
-    deleteRule(key) { const i = this[S].children.findIndex((r) => r[S].selector === normKey(key)); if (i >= 0) { this[S].children.splice(i, 1); touch(this); } }
-    findRule(key) { const k = normKey(key); for (let i = this[S].children.length - 1; i >= 0; i--) if (this[S].children[i][S].selector === k) return this[S].children[i]; return null; }
+    appendRule(text) {
+      if (this[S]?.type !== TYPES.KEYFRAMES_RULE) throw new TypeError('Illegal invocation');
+      const chunks = splitRules(`${text}`);
+      if (chunks.length !== 1) return;
+      const r = parseChunk(chunks[0], this[S].sheet, this, true);
+      if (r) { this[S].children.push(r); touch(this); }
+    }
+    deleteRule(key) {
+      const rule = this.findRule(key);
+      if (!rule) return;
+      this[S].children.splice(this[S].children.indexOf(rule), 1);
+      rule[S].parentRule = rule[S].sheet = null;
+      touch(this);
+    }
+    findRule(key) {
+      const selector = normKey(key), children = this[S].children;
+      for (let i = children.length - 1; i >= 0; --i) if (children[i][S].selector === selector) return children[i];
+      return null;
+    }
   }
   tag(CSSKeyframesRule, 'CSSKeyframesRule');
-  const normKey = (k) => String(k).split(',').map((s) => { s = s.trim().toLowerCase(); return s === 'from' ? '0%' : s === 'to' ? '100%' : s; }).join(', ');
+  const normKey = k => N.cssomKeyframeSelector(`${k}`);
+
   class CSSCounterStyleRule extends CSSRule {
     get name() { return this[S].condition; }
   }
@@ -483,7 +506,9 @@
     const { prelude, block } = chunk;
     let r;
     if (inKeyframes) {
-      r = newRule(CSSKeyframeRule, TYPES.KEYFRAME_RULE, { selector: normKey(prelude) });
+      const selector = normKey(prelude);
+      if (block === null || selector === null) return null;
+      r = newRule(CSSKeyframeRule, TYPES.KEYFRAME_RULE, { selector });
       r[S].style = makeDecl(r, block || '');
       r[S].text = () => `${r[S].selector} { ${r[S].style.cssText} }`;
     } else if (prelude[0] === '@') {
@@ -506,7 +531,7 @@
         case 'document': case '-moz-document': r = group(CSSGroupingRule, 0, name); break;
         case 'keyframes': case '-webkit-keyframes': case '-moz-keyframes': {
           r = newRule(CSSKeyframesRule, TYPES.KEYFRAMES_RULE, { condition: unq(rest) });
-          r[S].children = splitRules(block || '').map((c) => parseChunk(c, sheet, r, true));
+          r[S].children = splitRules(block || '').map((c) => parseChunk(c, sheet, r, true)).filter(Boolean);
           const kw = name;
           r[S].text = () => `@${kw} ${r[S].condition} {\n${serializeChildren(r)}\n}`;
           break;

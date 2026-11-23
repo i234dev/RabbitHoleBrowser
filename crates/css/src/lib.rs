@@ -111,6 +111,34 @@ pub enum Rule {
     },
 }
 
+/// An ordinary animation offset or a percentage of a named timeline range.
+#[derive(Debug, PartialEq)]
+pub struct KeyframeSelector {
+    pub range: Option<String>,
+    pub percentage: f32,
+}
+
+/// A malformed selector invalidates its entire comma-separated block.
+pub fn keyframe_selectors(tokens: &[Token]) -> Option<Vec<KeyframeSelector>> {
+    tokens.split(|t| *t == Token::Comma).map(|item| {
+        let mut parts = item.iter().filter(|t| **t != Token::Whitespace);
+        let (range, percentage) = match (parts.next()?, parts.next()) {
+            (Token::Ident(k), None) if k.eq_ignore_ascii_case("from") => (None, 0.0),
+            (Token::Ident(k), None) if k.eq_ignore_ascii_case("to") => (None, 100.0),
+            (Token::Percentage(p), None) if (0.0..=100.0).contains(p) => (None, *p),
+            (Token::Ident(k), Some(Token::Percentage(p))) if p.is_finite() => {
+                let name = k.to_ascii_lowercase();
+                if !matches!(name.as_str(), "cover" | "contain" | "entry" | "exit" | "entry-crossing" | "exit-crossing") {
+                    return None;
+                }
+                (Some(name), *p)
+            }
+            _ => return None,
+        };
+        parts.next().is_none().then_some(KeyframeSelector { range, percentage })
+    }).collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Keyframe {
     /// Offsets in 0.0..=1.0 (`from` = 0, `to` = 1, percentages / 100).
@@ -722,15 +750,11 @@ impl<'a> Parser<'a> {
                 break;
             }
             let inner = self.consume_block();
-            let mut offsets = Vec::new();
-            for t in prelude {
-                match t {
-                    Token::Ident(i) if i.eq_ignore_ascii_case("from") => offsets.push(0.0),
-                    Token::Ident(i) if i.eq_ignore_ascii_case("to") => offsets.push(1.0),
-                    Token::Percentage(p) => offsets.push((p / 100.0).clamp(0.0, 1.0)),
-                    _ => {}
-                }
-            }
+            let Some(selectors) = keyframe_selectors(prelude) else { continue };
+            // Time-based animations sample ordinary offsets. Named ranges
+            // participate when the corresponding scroll timeline is resolved.
+            let offsets: Vec<_> = selectors.into_iter().filter(|s| s.range.is_none())
+                .map(|s| s.percentage / 100.0).collect();
             let mut dp = self.subparser(inner);
             let declarations = dp.parse_declarations();
             if !offsets.is_empty() {

@@ -355,6 +355,17 @@ pub(crate) fn cssom_serialize_selector(realm: &mut Realm, _: Value, args: &[Valu
     Ok(Value::str(&rabbithole_css::selector::serialize_type_selectors(&selector, &namespaces)))
 }
 
+pub(crate) fn cssom_keyframe_selector(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let text = arg_str(realm, args, 0)?;
+    let tokens = rabbithole_css::Tokenizer::tokenize(&text);
+    let Some(keys) = rabbithole_css::keyframe_selectors(&tokens) else { return Ok(Value::Null) };
+    let keys: Vec<_> = keys.iter().map(|k| {
+        let percentage = format!("{}%", if k.percentage == 0.0 { 0.0 } else { k.percentage });
+        match &k.range { Some(name) => format!("{name} {percentage}"), None => percentage }
+    }).collect();
+    Ok(Value::str(&keys.join(", ")))
+}
+
 pub(crate) fn cssom_valid_selector(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let selector = arg_str(realm, args, 0)?;
     let nested = realm.to_boolean(&arg(args, 1));

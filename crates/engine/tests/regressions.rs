@@ -1633,6 +1633,31 @@ fn alignment_shorthands_expand_and_follow_their_longhand_priorities() {
 }
 
 #[test]
+fn keyframe_selectors_validate_one_list_across_stylesheets_and_cssom() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=keyframes>@keyframes fade { from, .5% { opacity: .1 } 30%, bad { opacity: .8 } to { opacity: .9 } }</style>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const frames = document.getElementById('keyframes').sheet.cssRules[0];
+        const first = frames.cssRules[0], last = frames.findRule('100%');
+        frames.appendRule('TO { opacity: .4 }');
+        const duplicate = frames.findRule('to');
+        frames.deleteRule('to');
+        first.keyText = 'ENTRY 2e1%, FROM';
+        let error;
+        try { first.keyText = '25%, 101%'; } catch (e) { error = e.name; }
+        const wrongReceiver = callback => {
+            try { callback(); } catch (e) { return e.name; }
+        };
+        const setter = Object.getOwnPropertyDescriptor(CSSKeyframeRule.prototype,'keyText').set;
+        const wrongSetter = wrongReceiver(() => setter.call(frames,'bad'));
+        const wrongAppend = wrongReceiver(() => frames.appendRule.call(first,''));
+        return [wrongSetter, wrongAppend, frames.cssRules.length, last === frames.findRule('to'), duplicate.parentRule,
+            first.keyText, frames.findRule('entry 20%, 0%') === first, error].join('|');
+    })()"#);
+    assert_eq!(result, "TypeError|TypeError|2|true||entry 20%, 0%|true|SyntaxError");
+}
+
+#[test]
 fn selector_text_preserves_namespace_matching_and_quoted_attribute_spaces() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<style id=namespaces>@namespace url(urn:default); @namespace a url(urn:default); @namespace b url(urn:other); a|*.x > b|*[*|key='a  b'] { color: red }</style>");
