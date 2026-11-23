@@ -230,11 +230,54 @@
     return p.native;
   }
   const channelToken = {};
+  const reports = new WeakMap();
+  class RTCStatsReport {
+    constructor(token, records) {
+      if (token !== channelToken) throw new TypeError('Illegal constructor');
+      reports.set(this, records);
+    }
+    get size() { return reports.get(this).size; }
+    entries() { return reports.get(this).entries(); }
+    keys() { return reports.get(this).keys(); }
+    values() { return reports.get(this).values(); }
+    get(id) {
+      if (!arguments.length) throw new TypeError('A stats identifier is required');
+      return reports.get(this).get(string(id));
+    }
+    has(id) {
+      if (!arguments.length) throw new TypeError('A stats identifier is required');
+      return reports.get(this).has(string(id));
+    }
+    forEach(callback, thisArg = undefined) {
+      if (typeof callback !== 'function') throw new TypeError('Expected a callback');
+      reports.get(this).forEach((record, id) => callback.call(thisArg, record, id, this));
+    }
+  }
+  Object.defineProperty(RTCStatsReport.prototype, Symbol.iterator, {
+    value: RTCStatsReport.prototype.entries, configurable: true, writable: true,
+  });
+  expose(RTCStatsReport, reports, []);
+  function statsReport(peer) {
+    const timestamp = performance.timeOrigin + performance.now();
+    const records = new Map();
+    const add = record => records.set(record.id, { ...record, timestamp });
+    add({id: 'peer-connection', type: 'peer-connection', dataChannelsOpened: peer.opened, dataChannelsClosed: peer.closed});
+    for (const [handle, channel] of peer.byHandle) {
+      const d = channels.get(channel);
+      const record = {id: 'data-channel-' + handle, type: 'data-channel', label: d.label, protocol: d.protocol,
+        state: d.readyState, messagesSent: d.messagesSent, bytesSent: d.bytesSent,
+        messagesReceived: d.messagesReceived, bytesReceived: d.bytesReceived};
+      if (d.id !== null) record.dataChannelIdentifier = d.id;
+      add(record);
+    }
+    return new RTCStatsReport(channelToken, records);
+  }
   class RTCDataChannel extends EventTarget {
     constructor(token, init) {
       if (token !== channelToken) throw new TypeError('Illegal constructor');
       super();
-      channels.set(this,{...init,readyState:'connecting',binaryType:'arraybuffer',bufferedAmount:0,bufferedAmountLowThreshold:0,queue:[]});
+      channels.set(this,{...init,readyState:'connecting',binaryType:'arraybuffer',bufferedAmount:0,bufferedAmountLowThreshold:0,queue:[],
+        opened:false,messagesSent:0,bytesSent:0,messagesReceived:0,bytesReceived:0});
     }
     get binaryType() { return channels.get(this).binaryType; }
     set binaryType(v) { if (v === 'arraybuffer' || v === 'blob') channels.get(this).binaryType = v; }
@@ -280,7 +323,9 @@
     if (d.readyState === 'closed') return;
     d.readyState = 'closed';
     d.queue.length = 0;
-    peers.get(d.pc).byHandle.delete(d.handle);
+    const peer = peers.get(d.pc);
+    if (d.opened) ++peer.closed;
+    peer.byHandle.delete(d.handle);
     channel.dispatchEvent(new Event('close'));
   }
   function change(pc, field, value, event) {
@@ -306,6 +351,8 @@
             if (!N.rtcSend(p.native,d.handle,item.binary,item.data)) break;
             d.queue.shift();
             d.bufferedAmount -= item.size;
+            ++d.messagesSent;
+            d.bytesSent += item.size;
           }
           if (before > d.bufferedAmountLowThreshold && d.bufferedAmount <= d.bufferedAmountLowThreshold)
             channel.dispatchEvent(new Event('bufferedamountlow'));
@@ -332,10 +379,14 @@
             p.byHandle.set(id,ch);
           }
           const d = channels.get(ch);
+          if (!d.opened) { d.opened = true; ++p.opened; }
           d.readyState='open'; d.id=a;
           if (incoming) pc.dispatchEvent(new RTCDataChannelEvent('datachannel',{channel:ch}));
           if (d.readyState === 'open') ch.dispatchEvent(new Event('open'));
         } else if (ch && kind === 'message') {
+          const d = channels.get(ch);
+          ++d.messagesReceived;
+          d.bytesReceived += b.byteLength;
           const data = a ? (ch.binaryType === 'blob' ? new Blob([b]) : b) : decoder.decode(b);
           ch.dispatchEvent(new MessageEvent('message',{data}));
         } else if (ch && kind === 'close') finishChannel(ch);
@@ -374,7 +425,7 @@
       super();
       const config=configuration(init);
       const id=crypto.getRandomValues(new Uint32Array(2));
-      peers.set(this,{config,native:null,byHandle:new Map(),timer:null,operations:Promise.resolve(),
+      peers.set(this,{config,native:null,byHandle:new Map(),opened:0,closed:0,timer:null,operations:Promise.resolve(),
         emptySdp:'v=0\r\no=- '+((BigInt(id[0])<<31n)|BigInt(id[1]>>>1))+' 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n',
         signalingState:'stable',iceConnectionState:'new',connectionState:'new',iceGatheringState:'new',
         pendingLocalDescription:null,pendingRemoteDescription:null,currentLocalDescription:null,currentRemoteDescription:null,
@@ -383,6 +434,16 @@
     get localDescription() { const p=peers.get(this);return p.pendingLocalDescription || p.currentLocalDescription; }
     get remoteDescription() { const p=peers.get(this);return p.pendingRemoteDescription || p.currentRemoteDescription; }
     get canTrickleIceCandidates() { const desc=this.remoteDescription;return desc ? /^a=ice-options:.*\btrickle\b/m.test(desc.sdp) : null; }
+    async getStats(selector = null) {
+      const peer = peers.get(this);
+      if (!peer) throw new TypeError('Expected an RTCPeerConnection');
+      if (selector !== null) {
+        if (typeof MediaStreamTrack !== 'function' || !(selector instanceof MediaStreamTrack))
+          throw new TypeError('Expected a MediaStreamTrack');
+        throw failure('InvalidAccessError','The track has no associated RTP sender or receiver');
+      }
+      return statsReport(peer);
+    }
     getConfiguration() { return structuredClone(peers.get(this).config); }
     setConfiguration(init = {}) {
       const p=state(this), cfg=configuration(init);

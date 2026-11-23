@@ -671,8 +671,13 @@ fn peer_connections_deliver_over_an_authenticated_data_channel() {
             };
             const channel = first.createDataChannel('messages');
             channel.onopen = () => channel.send('hello');
-            channel.onmessage = e => {
-                rtcResult = [channel.label, first.connectionState, e.data].join('|');
+            channel.onmessage = async e => {
+                const stats = await first.getStats();
+                const dc = [...stats.values()].find(r => r.type === 'data-channel');
+                const pc = [...stats.values()].find(r => r.type === 'peer-connection');
+                rtcResult = [channel.label, first.connectionState, e.data, stats instanceof RTCStatsReport,
+                    stats.get(dc.id) === dc, pc.dataChannelsOpened, dc.messagesSent, dc.bytesSent,
+                    dc.messagesReceived, dc.bytesReceived].join('|');
                 first.close(); second.close();
             };
             await first.setLocalDescription(await first.createOffer());
@@ -686,7 +691,7 @@ fn peer_connections_deliver_over_an_authenticated_data_channel() {
         e.tick(&mut page);
         let result = eval(&e, &mut page, "rtcResult");
         if !result.is_empty() {
-            assert_eq!(result, "messages|connected|hello!");
+            assert_eq!(result, "messages|connected|hello!|true|true|1|1|5|1|6");
             break;
         }
         assert!(Instant::now() < deadline, "{}", eval(&e, &mut page,
