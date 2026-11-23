@@ -5,6 +5,7 @@
   const N = globalThis.__rhNative;
   if (N.workerInfo()) return;
 
+  const checkVisibility = Element.prototype.checkVisibility;
   const contexts = new WeakMap();
   function context(doc) {
     if (!(doc instanceof Document)) throw new TypeError('Expected Document');
@@ -372,7 +373,8 @@
     const control = doc.activeElement;
     if (control && (control.localName === 'textarea' ||
         (control.localName === 'input' && ['text','search','url','tel','password'].includes(control.type)))) {
-      return control.disabled || control.readOnly ? null : { control };
+      if (control.matches(':disabled') || control.readOnly || !checkVisibility.call(control, { visibilityProperty: true })) return null;
+      return { control };
     }
     const sel = doc.getSelection();
     if (!sel?.rangeCount) return null;

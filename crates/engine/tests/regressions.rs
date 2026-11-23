@@ -725,3 +725,23 @@ fn editing_aligns_only_selected_paragraphs_and_preserves_the_selection() {
     })()"#);
     assert_eq!(out,"center|true|start|true|true|h2|true|2");
 }
+
+#[test]
+fn editing_rechecks_text_control_visibility_when_commands_run() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<section><textarea id=field>abc</textarea></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        field.focus();
+        field.setSelectionRange(1, 2);
+        const parent = field.parentElement;
+        parent.style.display = 'none';
+        const hidden = document.execCommand('delete');
+        const unchanged = field.value;
+        parent.style.display = 'block';
+        field.focus();
+        field.setSelectionRange(1, 2);
+        const shown = document.execCommand('insertText', false, '!');
+        return [hidden, unchanged, shown, field.value].join('|');
+    })()"#);
+    assert_eq!(result, "false|abc|true|a!c");
+}
