@@ -371,7 +371,11 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
             s.shape_outside = c.clone();
             s.shape_outside_position_explicit = *explicit;
         }
-        (ShapeMargin, Val::L(l)) => s.shape_margin = *l,
+        (ShapeMargin, Val::L(l)) => s.shape_margin = match *l {
+            Length::Px(px) => Length::Px(px.max(0.0)),
+            Length::Percent(pct) => Length::Percent(pct.max(0.0)),
+            other => other,
+        },
         (ClipPath, Val::Cp(c, _)) => {
             s.clip_path = c.clone();
             if c.is_some() {
@@ -933,7 +937,7 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
             let ch = |p: u8, q: u8| lerp(p as f32, q as f32, t).round().clamp(0.0, 255.0) as u8;
             Val::C(Color { r: ch(x.r, y.r), g: ch(x.g, y.g), b: ch(x.b, y.b), a: ch(x.a, y.a) })
         }
-        (Val::L(x), Val::L(y)) => lerp_len(x, y, t).map(Val::L).unwrap_or_else(discrete),
+        (Val::L(x), Val::L(y)) => lerp_lp(x, y, t).map(Val::L).unwrap_or_else(discrete),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, t).map(Val::T).unwrap_or_else(discrete),
         (Val::Fl(x), Val::Fl(y)) => {
             // Filter Effects §8: a missing list is the identity of the other;
@@ -2085,7 +2089,7 @@ fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::F(_), Val::F(_)) | (Val::C(_), Val::C(_)) | (Val::V(_), Val::V(_)) => true,
         (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(0.5).tracks(x, y).is_some(),
-        (Val::L(x), Val::L(y)) => lerp_len(x, y, 0.5).is_some(),
+        (Val::L(x), Val::L(y)) => lerp_lp(x, y, 0.5).is_some(),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),
         (Val::Cp(Some(x), _), Val::Cp(Some(y), _)) => lerp_clip(x, y, 0.5).is_some(),
         _ => false,

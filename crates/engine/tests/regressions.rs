@@ -1076,6 +1076,21 @@ fn css_supports_preserves_selector_combinators_and_checks_anchor_grammar() {
 }
 
 #[test]
+fn animated_float_exclusion_margin_clamps_after_extrapolation() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<div id=box></div>");
+    let value = eval(&e,&mut page,r#"
+        (() => {
+            const animation=box.animate([{shapeMargin:'0px'},{shapeMargin:'20px'}],
+                {duration:1000,easing:'cubic-bezier(0.5,-1,0.5,-1)'});
+            animation.pause(); animation.currentTime=500;
+            return getComputedStyle(box).shapeMargin;
+        })()
+    "#);
+    assert_eq!(value,"0px");
+}
+
+#[test]
 fn float_exclusion_shapes_wrap_lines_without_moving_the_float() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<style>*{margin:0}main{width:300px;line-height:20px}#f{float:left;width:100px;height:100px;shape-outside:inset(0 70px 0 0);shape-margin:5px}i{display:inline-block;width:8px;height:10px}</style><main><div id=f></div><i id=mark></i><br><i></i></main>");
