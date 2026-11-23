@@ -1108,6 +1108,47 @@ fn empty_text_replaces_a_selection_and_preserves_a_collapsed_caret() {
 }
 
 #[test]
+fn editing_keeps_neighboring_inline_spaces_and_releases_trailing_space_when_typing() {
+    let mut e = engine(true);
+    let mut page = load(&mut e,"<div id=ed contenteditable>a&nbsp; <b>&nbsp;b</b></div><div id=plain contenteditable=plaintext-only style=white-space:normal><br></div>");
+    let result = eval(&e,&mut page,r#"(() => {
+        const sel = getSelection();
+        ed.focus(); sel.collapse(ed.firstChild,3);
+        document.execCommand('delete');
+        const untouched = ed.innerHTML;
+        plain.focus(); sel.collapse(plain,0);
+        document.execCommand('insertText',false,' ');
+        const first = plain.innerHTML;
+        ed.textContent = 'x'; ed.focus(); sel.collapse(ed.firstChild,1);
+        document.execCommand('insertText',false,' ');
+        document.execCommand('insertText',false,'y');
+        return [untouched,first,ed.textContent,sel.focusOffset].join('|');
+    })()"#);
+    assert_eq!(result,"a&nbsp;<b>&nbsp;b</b>|&nbsp;|x y|3");
+}
+
+#[test]
+fn editing_preserves_visible_spaces_across_inline_markup_and_leaves_preformatted_text_literal() {
+    let mut e=engine(true);
+    let mut page=load(&mut e,"<div id=ed contenteditable>a<b> </b>z</div><pre id=literal contenteditable>x</pre>");
+    let value=eval(&e,&mut page,r#"(() => {
+        const sel=getSelection(), mark=s=>s.replaceAll('\u00a0','_');
+        ed.focus();
+        sel.collapse(ed.firstChild,1);
+        document.execCommand('insertText',false,' ');
+        const inserted=ed.innerHTML;
+        ed.textContent='x \u00a0';
+        sel.collapse(ed.firstChild,3);
+        document.execCommand('delete');
+        const deleted=mark(ed.textContent);
+        literal.focus(); sel.collapse(literal.firstChild,1);
+        document.execCommand('insertText',false,'  ');
+        return [inserted,deleted,literal.textContent,sel.focusOffset].join('|');
+    })()"#);
+    assert_eq!(value,"a&nbsp;<b> </b>z|x_|x  |3");
+}
+
+#[test]
 fn float_exclusion_shapes_wrap_lines_without_moving_the_float() {
     let mut e = engine(true);
     let mut page = load(&mut e, "<style>*{margin:0}main{width:300px;line-height:20px}#f{float:left;width:100px;height:100px;shape-outside:inset(0 70px 0 0);shape-margin:5px}i{display:inline-block;width:8px;height:10px}</style><main><div id=f></div><i id=mark></i><br><i></i></main>");

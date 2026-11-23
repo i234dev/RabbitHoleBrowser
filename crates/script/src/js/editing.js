@@ -918,6 +918,80 @@
     sel.collapse(left, left.length);
     return true;
   }
+  // Keep typed spaces visible in collapsing white-space modes, while leaving
+  // ordinary wrapping opportunities in the run. Inline markup does not end
+  // a run. A line edge requires a nonbreaking space at that edge.
+  function rebalanceSpaces(node, offset, host, deletion = false) {
+    if (node.nodeType !== 3) return;
+    const space = c => c === ' ' || c === '\u00a0';
+    if (!space(node.data[offset-1]) && !space(node.data[offset])) return;
+    const collapses = n => ['normal','nowrap','pre-line'].includes(getComputedStyle(n.parentElement).whiteSpace);
+    if (!collapses(node)) return;
+    const block = containingBlock(node,host);
+    function neighbor(text,forward) {
+      let next = adjacentNode(text,block,forward);
+      while (next) {
+        if (next.nodeType === 3 && next.length) return next;
+        if (next.nodeType === 1) {
+          if (next.localName === 'br' || isBlock(next)) return null;
+          if (!next.isContentEditable || ['img','input','canvas','svg','video','iframe'].includes(next.localName) ||
+              !['inline','contents','none'].includes(getComputedStyle(next).display)) return next;
+          if (getComputedStyle(next).display !== 'none' && next.firstChild) {
+            next = forward ? next.firstChild : next.lastChild;
+            continue;
+          }
+        }
+        next = adjacentNode(next,block,forward);
+      }
+      return null;
+    }
+    // Deleting at an inline boundary should leave the run on the far side
+    // of the edit intact, including author-supplied nonbreaking spaces.
+    if (deletion && offset === node.length) {
+      const right = neighbor(node,true);
+      if (right) {
+        if (right.nodeType === 3 && right.data[0] === ' ' && collapses(right))
+          rebalanceSpaces(right,0,host,true);
+        return;
+      }
+    }
+    const parts = [];
+    function scan(forward) {
+      let n = node, at = offset;
+      for (;;) {
+        const start = at, text = n.data;
+        while (forward ? space(text[at]) : space(text[at-1])) at += forward ? 1 : -1;
+        if (start !== at) parts.push([n,Math.min(at,start),Math.max(at,start)]);
+        if (forward ? at < text.length : at > 0) {
+          return text[forward ? at : at-1] === '\n' && getComputedStyle(n.parentElement).whiteSpace === 'pre-line';
+        }
+        n = neighbor(n,forward);
+        if (!n) return true;
+        if (n.nodeType !== 3) return false;
+        if (deletion) {
+          // Across an inline boundary the adjoining node owns its spaces.
+          // Protect the join if its first/last character is collapsible.
+          const adjacent = forward ? n.data[0] : n.data[n.length-1];
+          return adjacent === ' ' || adjacent === '\n';
+        }
+        if (!collapses(n)) return false;
+        at = forward ? 0 : n.length;
+      }
+    }
+    const atStart = scan(false);
+    parts.reverse();
+    const atEnd = scan(true);
+    const count = parts.reduce((total,part) => total + part[2]-part[1],0);
+    let index = 0;
+    for (const [text,from,to] of parts) {
+      let replacement = '';
+      for (let i=from;i<to;++i,++index) {
+        const protectedSpace = count === 1 ? atStart || atEnd : index % 2 === 0 || (atEnd && index === count-1);
+        replacement += protectedSpace ? '\u00a0' : ' ';
+      }
+      if (replacement !== text.data.slice(from,to)) text.replaceData(from,to-from,replacement);
+    }
+  }
   function deleteSelection(t, cmd) {
     if (joinParagraphs(t, cmd)) return true;
     const { sel, host } = t;
@@ -928,8 +1002,11 @@
       if (sel.isCollapsed || editingHost(sel.focusNode) !== host || cell(node) !== cell(sel.focusNode)) { sel.collapse(node, offset); return false; }
     }
     const range = sel.getRangeAt(0);
+    const touchedSpace = /[ \u00a0]/.test(range.toString());
     range.deleteContents();
-    sel.collapse(range.startContainer, range.startOffset);
+    const caret = range.startContainer, offset = range.startOffset;
+    if (touchedSpace) rebalanceSpaces(caret,offset,host,true);
+    sel.collapse(caret,offset);
     return true;
   }
   function insertAt(range, node, sel) {
@@ -1087,7 +1164,9 @@
         const caret = sel.getRangeAt(0);
         const point = caret.startContainer, offset = caret.startOffset;
         const following = point.nodeType === 3 ? (offset === point.length ? point.nextSibling : null) : point.childNodes[offset];
-        if (following && caretBreaks.has(following)) following.remove();
+        if (following && (caretBreaks.has(following) ||
+            following.localName === 'br' && following.parentNode === host && host.childNodes.length === 1))
+          following.remove();
         if (toggles?.size) {
           const node = doc.createTextNode(lines[i]);
           sel.getRangeAt(0).insertNode(node);
@@ -1100,6 +1179,14 @@
           sel.collapse(node, node.length);
           state.typing = { node, offset: node.length, formats: toggles };
         } else insertText(doc, sel.getRangeAt(0), sel, lines[i]);
+        const inserted = sel.focusNode, end = sel.focusOffset;
+        if (inserted.nodeType === 3) {
+          const start = end - lines[i].length;
+          if (start > 0 && inserted.data[start-1] === '\u00a0' && lines[i][0] !== ' ')
+            rebalanceSpaces(inserted,start,host);
+          for (const match of lines[i].matchAll(/ +/g)) rebalanceSpaces(inserted,start + match.index,host);
+          sel.collapse(inserted,end);
+        }
       }
       input(host, 'insertText', value);
     } else {
