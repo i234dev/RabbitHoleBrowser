@@ -839,3 +839,20 @@ fn a_preserved_newline_ends_the_line_moved_by_delete() {
     })()"#);
     assert_eq!(result, "oldfirst|<i>second</i>|first");
 }
+
+#[test]
+fn inline_and_rule_declarations_convert_null_and_undefined_per_cssom() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style id=sheet>p {color:blue}</style><p id=box></p>");
+    let result = eval(&e, &mut page, r#"(() => {
+        return [box.style, sheet.sheet.cssRules[0].style].map(s => {
+            s.setProperty('color','red',null);
+            s.setProperty('color',undefined);
+            s.setProperty('--example',undefined);
+            const result = [s.color, s.getPropertyValue('--example')];
+            s.setProperty('color',null);
+            return [...result,s.color].join('/');
+        }).join('|');
+    })()"#);
+    assert_eq!(result, "red/undefined/|red/undefined/");
+}

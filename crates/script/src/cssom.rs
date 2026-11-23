@@ -309,7 +309,7 @@ fn style_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     let n = style_target(realm, args)?;
     let Some(key) = key_of(realm, args) else { return Ok(Value::Bool(true)) };
     let v = arg(args, 2);
-    let value = if v.is_nullish() { String::new() } else { realm.to_rust_string(v)? };
+    let value = if v.is_null() { String::new() } else { realm.to_rust_string(v)? };
     if key == "cssText" {
         set_attribute(n, "style", Some(&value));
         return Ok(Value::Bool(true));
@@ -341,10 +341,12 @@ fn style_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
 
 fn style_set_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "setProperty")?;
+    if args.len() < 2 { return Err(realm.throw_type_error("setProperty requires a name and a value")); }
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let v = arg(args, 1);
-    let value = if v.is_nullish() { String::new() } else { realm.to_rust_string(v)? };
-    let prio = arg_str_opt(realm, args, 2)?.unwrap_or_default();
+    let value = if v.is_null() { String::new() } else { realm.to_rust_string(v)? };
+    let priority = arg(args, 2);
+    let prio = if priority.is_nullish() { String::new() } else { realm.to_rust_string(priority)? };
     if value.is_empty() || prio.is_empty() || prio.eq_ignore_ascii_case("important") {
         set_style_prop(n, &prop, &value, !prio.is_empty());
     }

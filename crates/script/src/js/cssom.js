@@ -121,7 +121,7 @@
     const changed = () => { if (st.rule) touch(st.rule); };
     const get = (p) => { for (let i = st.decls.length - 1; i >= 0; i--) if (st.decls[i][0] === p) return st.decls[i][1]; return ''; };
     const set = (p, v, imp) => {
-      v = v == null ? '' : String(v).trim();
+      v = v === null ? '' : `${v}`.trim();
       if (v && checkedProperties.has(p)) {
         v = N.cssomSpecifiedValue(p, v);
         if (v === null) return;
@@ -139,10 +139,12 @@
       getPropertyValue: (p) => get(String(p).startsWith('--') ? String(p) : String(p).toLowerCase()),
       getPropertyPriority: (p) => (st.decls.find((d) => d[0] === String(p).toLowerCase() && d[2]) ? 'important' : ''),
       setProperty(p, v, prio = '') {
-        p = String(p);
-        const priority = String(prio).toLowerCase();
-        if (v == null || String(v) === '' || !priority || priority === 'important')
-          set(p.startsWith('--') ? p : p.toLowerCase(), v, priority === 'important');
+        if (arguments.length < 2) throw new TypeError('setProperty requires a name and a value');
+        p = `${p}`;
+        const value = v === null ? '' : `${v}`;
+        const priority = prio === null ? '' : `${prio}`.toLowerCase();
+        if (!value || !priority || priority === 'important')
+          set(p.startsWith('--') ? p : p.toLowerCase(), value, priority === 'important');
       },
       removeProperty: (p) => { p = String(p).toLowerCase(); const old = get(p); st.decls = st.decls.filter((d) => d[0] !== p); changed(); return old; },
       item: (i) => (st.decls[i] ? st.decls[i][0] : ''),
