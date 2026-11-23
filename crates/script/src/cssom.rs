@@ -8,6 +8,7 @@ use rabbithole_css::{parse_declaration_list, Declaration, Token};
 use rabbithole_js::{JsResult, ObjectId, Realm, Value};
 use rabbithole_style::{ComputedStyle, Display, Length, Position};
 
+mod alignment;
 mod grid;
 
 /// Serialize CSS tokens back to text.
@@ -193,19 +194,39 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
     Some(rabbithole_style::ComputedColor::parse(c).map_or_else(|| color_css(rgb), |wide| wide.to_css()))
 }
 
-pub(crate) fn cssom_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+fn checked_property(name: &str) -> bool {
+    single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+}
+
+fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
+    if single_color_property(name) { return specified_color(name, tokens); }
+    if rabbithole_style::props::flex::alignment_property(name) {
+        let parts = rabbithole_style::values::components(tokens);
+        if let [value] = parts.as_slice() {
+            if let Some(k) = rabbithole_style::values::ident(value).filter(|k| matches!(k.as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer")) {
+                return Some(k);
+            }
+        }
+        if !tokens.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
+            return rabbithole_style::props::flex::specified_alignment(name, &parts);
+        }
+    }
+    Some(tokens_to_css(tokens))
+}
+
+pub(crate) fn cssom_specified_value(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let name = arg_str(realm, args, 0)?;
     let value = arg_str(realm, args, 1)?;
-    if !single_color_property(&name) { return Ok(Value::str(&value)); }
+    if !checked_property(&name) { return Ok(Value::str(&value)); }
     let tokens = rabbithole_css::Tokenizer::tokenize(&value);
-    Ok(specified_color(&name, &tokens).map_or(Value::Null, |s| Value::str(&s)))
+    Ok(specified_value(&name, &tokens).map_or(Value::Null, |s| Value::str(&s)))
 }
 
 fn parse_style(n: NodeRef) -> DeclList {
     let text = get_attribute(n, "style").unwrap_or_default();
     let decls: Vec<Declaration> = parse_declaration_list(&text);
     DeclList { items: decls.into_iter().filter_map(|d| {
-        let value = if single_color_property(&d.name) { specified_color(&d.name, &d.value)? } else { tokens_to_css(&d.value) };
+        let value = specified_value(&d.name, &d.value)?;
         Some((d.name, value, d.important))
     }).collect() }
 }
@@ -263,8 +284,8 @@ fn style_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
     let value = value.trim();
     let serialized;
-    let value = if single_color_property(prop) && !value.is_empty() {
-        let Some(v) = specified_color(prop, &rabbithole_css::Tokenizer::tokenize(value)) else { return };
+    let value = if checked_property(prop) && !value.is_empty() {
+        let Some(v) = specified_value(prop, &rabbithole_css::Tokenizer::tokenize(value)) else { return };
         serialized = v;
         serialized.as_str()
     } else { value };
@@ -596,6 +617,7 @@ fn containing_block(n: NodeRef, position: Position, sticky_inset: bool) -> rabbi
 /// A computed value from the style (and the border box `r` and the
 /// containing block `cb`, for values that depend on layout).
 fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, cb: rabbithole_gfx::Rect) -> String {
+    if let Some(value) = alignment::computed(s, prop) { return value; }
     match prop {
         "grid-template-columns" => grid::computed(&s.grid_template_columns),
         "grid-template-rows" => grid::computed(&s.grid_template_rows),

@@ -745,3 +745,19 @@ fn editing_rechecks_text_control_visibility_when_commands_run() {
     })()"#);
     assert_eq!(result, "false|abc|true|a!c");
 }
+
+#[test]
+fn alignment_cssom_preserves_modifiers_and_resolves_inherited_legacy_alignment() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>section { justify-items: right legacy } p { justify-items: legacy }</style><section><p id=box>x</p></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const before = getComputedStyle(box).justifyItems;
+        box.style.placeContent = 'first baseline';
+        box.style.placeContent = 'baseline unsafe stretch';
+        box.style.alignSelf = 'unsafe flex-end';
+        const resolved = getComputedStyle(box);
+        return [before, box.style.placeContent, resolved.placeContent, box.style.alignSelf,
+            resolved.alignSelf, CSS.supports('align-content', 'safe self-end')].join('|');
+    })()"#);
+    assert_eq!(result, "legacy right|baseline start|baseline start|unsafe flex-end|unsafe flow-end|false");
+}

@@ -605,23 +605,27 @@ pub enum ContentDistribution {
 /// [`ContentDistribution`] fold together (CSS Align 3): `normal`, the
 /// overflow position, `last baseline` and the flavour of start/end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AlignFlags(pub u8);
+pub struct AlignFlags(pub u16);
 
 impl AlignFlags {
     /// `safe` overflow position.
-    pub const SAFE: u8 = 1;
+    pub const SAFE: u16 = 1;
     /// `last baseline`.
-    pub const LAST: u8 = 2;
+    pub const LAST: u16 = 2;
     /// `self-start` / `self-end`: the item's own writing mode.
-    pub const SELF: u8 = 4;
+    pub const SELF: u16 = 4;
     /// `left` / `right`: physical sides.
-    pub const LEFT: u8 = 8;
-    pub const RIGHT: u8 = 16;
+    pub const LEFT: u16 = 8;
+    pub const RIGHT: u16 = 16;
     /// `normal`.
-    pub const NORMAL: u8 = 32;
+    pub const NORMAL: u16 = 32;
     /// `flex-start` / `flex-end`.
-    pub const FLEX: u8 = 64;
-    pub fn has(self, flag: u8) -> bool {
+    pub const FLEX: u16 = 64;
+    pub const UNSAFE: u16 = 128;
+    pub const LEGACY: u16 = 256;
+    pub const BASELINE: u16 = 512;
+    pub const ANCHOR_CENTER: u16 = 1024;
+    pub fn has(self, flag: u16) -> bool {
         self.0 & flag != 0
     }
 }
@@ -2193,6 +2197,8 @@ impl ComputedStyle {
 
     pub fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         ComputedStyle {
+            justify_items: if parent.justify_items_flags.has(AlignFlags::LEGACY) { parent.justify_items } else { ItemAlign::Normal },
+            justify_items_flags: if parent.justify_items_flags.has(AlignFlags::LEGACY) { parent.justify_items_flags } else { AlignFlags(AlignFlags::NORMAL) },
             color: parent.color,
             color_components: parent.color_components.clone(),
             font_family: parent.font_family,
@@ -2290,6 +2296,8 @@ impl ComputedStyle {
     /// inherited part did not change need no restyle for inheritance.
     pub fn inherited_eq(&self, o: &ComputedStyle) -> bool {
         self.color == o.color
+            && self.justify_items_flags.has(AlignFlags::LEGACY) == o.justify_items_flags.has(AlignFlags::LEGACY)
+            && (!self.justify_items_flags.has(AlignFlags::LEGACY) || self.justify_items == o.justify_items && self.justify_items_flags == o.justify_items_flags)
             && self.color_components == o.color_components
             && self.font_family == o.font_family
             && self.font_monospace_only == o.font_monospace_only

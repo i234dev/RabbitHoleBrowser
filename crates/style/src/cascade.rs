@@ -4120,6 +4120,9 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
         return Some(recognizes_property(name));
     }
+    if crate::props::flex::alignment_property(name) {
+        return Some(crate::props::flex::specified_alignment(name, &values::components(value)).is_some());
+    }
     let initial = ComputedStyle::initial();
     UNKNOWN_PROPERTY.with(|u| u.set(false));
     let a = probe_apply(&initial, name, value);

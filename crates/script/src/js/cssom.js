@@ -70,9 +70,10 @@
   }
 
   // Parse "a: b; c: d !important" into [[name, value, important]].
-  const colorProperties = new Set(['color', 'background-color', 'border-top-color', 'border-right-color',
+  const checkedProperties = new Set(['color', 'background-color', 'border-top-color', 'border-right-color',
     'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
-    'accent-color', 'column-rule-color']);
+    'accent-color', 'column-rule-color', 'align-self', 'align-items', 'align-content', 'justify-self', 'justify-items',
+    'justify-content', 'place-self', 'place-items', 'place-content']);
   function parseDecls(text) {
     const out = [];
     let i = 0, start = 0, depth = 0;
@@ -89,8 +90,8 @@
       const m = /!\s*important\s*$/i.exec(value);
       if (m) { important = true; value = value.slice(0, m.index).trim(); }
       if (!name.startsWith('--')) name = name.toLowerCase();
-      if (colorProperties.has(name)) {
-        value = N.cssomColor(name, value);
+      if (checkedProperties.has(name)) {
+        value = N.cssomSpecifiedValue(name, value);
         if (value === null) return;
       }
       out.push([name, value, important]);
@@ -121,8 +122,8 @@
     const get = (p) => { for (let i = st.decls.length - 1; i >= 0; i--) if (st.decls[i][0] === p) return st.decls[i][1]; return ''; };
     const set = (p, v, imp) => {
       v = v == null ? '' : String(v).trim();
-      if (v && colorProperties.has(p)) {
-        v = N.cssomColor(p, v);
+      if (v && checkedProperties.has(p)) {
+        v = N.cssomSpecifiedValue(p, v);
         if (v === null) return;
       }
       st.decls = st.decls.filter((d) => d[0] !== p);

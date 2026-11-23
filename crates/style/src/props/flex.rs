@@ -7,8 +7,8 @@ use rabbithole_css::Token;
 
 fn content_distribution(kw: &str, for_align_content: bool) -> Option<ContentDistribution> {
     Some(match kw {
-        "flex-start" | "start" | "left" | "self-start" => ContentDistribution::FlexStart,
-        "flex-end" | "end" | "right" | "self-end" => ContentDistribution::FlexEnd,
+        "flex-start" | "flow-start" | "start" | "left" | "self-start" => ContentDistribution::FlexStart,
+        "flex-end" | "flow-end" | "end" | "right" | "self-end" => ContentDistribution::FlexEnd,
         "center" => ContentDistribution::Center,
         "space-between" | "justify" => ContentDistribution::SpaceBetween,
         "space-around" => ContentDistribution::SpaceAround,
@@ -21,7 +21,7 @@ fn content_distribution(kw: &str, for_align_content: bool) -> Option<ContentDist
                 ContentDistribution::FlexStart
             }
         }
-        "baseline" | "first" | "last" => ContentDistribution::FlexStart,
+        "baseline" => ContentDistribution::FlexStart,
         _ => return None,
     })
 }
@@ -31,11 +31,11 @@ fn item_align(kw: &str, allow_auto: bool) -> Option<ItemAlign> {
         "auto" if allow_auto => ItemAlign::Auto,
         "stretch" => ItemAlign::Stretch,
         "normal" => ItemAlign::Normal,
-        "flex-start" | "start" | "self-start" | "left" => ItemAlign::FlexStart,
-        "flex-end" | "end" | "self-end" | "right" => ItemAlign::FlexEnd,
+        "flex-start" | "flow-start" | "start" | "self-start" | "left" => ItemAlign::FlexStart,
+        "flex-end" | "flow-end" | "end" | "self-end" | "right" => ItemAlign::FlexEnd,
         // (`anchor-center` without an anchor behaves as center.)
         "center" | "anchor-center" => ItemAlign::Center,
-        "baseline" | "first" | "last" => ItemAlign::Baseline,
+        "baseline" => ItemAlign::Baseline,
         "legacy" => ItemAlign::Normal,
         _ => return None,
     })
@@ -52,9 +52,7 @@ fn align_prefix(kws: &[String], physical: bool) -> Option<(&str, AlignFlags, usi
     let overflow = matches!(first, "safe" | "unsafe");
     let baseline_prefix = matches!(first, "first" | "last");
     if overflow || baseline_prefix {
-        if first == "safe" {
-            f |= AlignFlags::SAFE;
-        }
+        if overflow { f |= if first == "safe" { AlignFlags::SAFE } else { AlignFlags::UNSAFE }; }
         if first == "last" {
             f |= AlignFlags::LAST;
         }
@@ -63,10 +61,12 @@ fn align_prefix(kws: &[String], physical: bool) -> Option<(&str, AlignFlags, usi
     let mut kw = kws.get(i)?.as_str();
     i += 1;
     // `legacy` combines with left/right/center (justify-items).
-    if kw == "legacy" && kws.get(i).is_some_and(|k| matches!(k.as_str(), "left" | "right" | "center")) {
+    if physical && kw == "legacy" && kws.get(i).is_some_and(|k| matches!(k.as_str(), "left" | "right" | "center")) {
+        f |= AlignFlags::LEGACY;
         kw = kws[i].as_str();
         i += 1;
-    } else if matches!(kw, "left" | "right" | "center") && kws.get(i).is_some_and(|k| k == "legacy") {
+    } else if physical && matches!(kw, "left" | "right" | "center") && kws.get(i).is_some_and(|k| k == "legacy") {
+        f |= AlignFlags::LEGACY;
         i += 1;
     }
     f |= match kw {
@@ -74,11 +74,14 @@ fn align_prefix(kws: &[String], physical: bool) -> Option<(&str, AlignFlags, usi
         "left" => AlignFlags::LEFT,
         "right" => AlignFlags::RIGHT,
         "normal" => AlignFlags::NORMAL,
-        "flex-start" | "flex-end" => AlignFlags::FLEX,
+        "flex-start" | "flex-end" | "flow-start" | "flow-end" => AlignFlags::FLEX,
+        "anchor-center" => AlignFlags::ANCHOR_CENTER,
+        "baseline" => AlignFlags::BASELINE,
+        "legacy" => AlignFlags::LEGACY,
         _ => 0,
     };
-    let positional = matches!(kw, "center" | "start" | "end" | "self-start" | "self-end" | "flex-start" | "flex-end" | "left" | "right" | "anchor-center");
-    if (overflow && !positional) || (baseline_prefix && kw != "baseline") || (!physical && matches!(kw, "left" | "right")) {
+    let positional = matches!(kw, "center" | "start" | "end" | "self-start" | "self-end" | "flex-start" | "flex-end" | "left" | "right" | "anchor-center" | "normal" | "flow-start" | "flow-end");
+    if (overflow && (!positional || f & AlignFlags::LEGACY != 0)) || (baseline_prefix && kw != "baseline") || (!physical && matches!(kw, "left" | "right")) {
         return None;
     }
     Some((kw, AlignFlags(f), i))
@@ -89,34 +92,101 @@ fn idents(comps: &[&[Token]]) -> Option<Vec<String>> {
     comps.iter().map(|c| values::ident(c)).collect()
 }
 
-/// A whole value of an item-alignment property.
-fn item_value(comps: &[&[Token]], allow_auto: bool, physical: bool) -> Option<(ItemAlign, AlignFlags)> {
-    let kws = idents(comps)?;
-    let (kw, flags, used) = align_prefix(&kws, physical)?;
-    (used == kws.len()).then_some(())?;
-    Some((item_align(kw, allow_auto)?, flags))
+/// Alignment shorthands use two complete longhand values. Parsing both
+/// before modifying style makes an invalid second component atomic.
+fn longhands(name: &str) -> Option<(&str, Option<&'static str>)> {
+    Some(match name {
+        "place-content" => ("align-content", Some("justify-content")),
+        "place-items" => ("align-items", Some("justify-items")),
+        "place-self" => ("align-self", Some("justify-self")),
+        "align-content" | "justify-content" | "align-items" | "justify-items" |
+        "align-self" | "justify-self" => (name, None),
+        _ => return None,
+    })
 }
 
-/// A whole value of a content-distribution property.
-fn content_value(comps: &[&[Token]], for_align_content: bool) -> Option<(ContentDistribution, AlignFlags)> {
-    let kws = idents(comps)?;
-    let (kw, flags, used) = align_prefix(&kws, !for_align_content)?;
-    (used == kws.len()).then_some(())?;
-    Some((content_distribution(kw, for_align_content)?, flags))
+#[derive(Clone, Copy)]
+struct Alignment<'a> {
+    keyword: &'a str,
+    flags: AlignFlags,
 }
 
-/// The two values of a `place-*` shorthand (the second defaults to the
-/// first): (align keyword, flags), (justify keyword, flags).
-fn place_values(comps: &[&[Token]]) -> Option<((String, AlignFlags), Option<(String, AlignFlags)>)> {
-    let kws = idents(comps)?;
-    let (a, af, used) = align_prefix(&kws, false)?;
-    let first = (a.to_string(), af);
-    if used == kws.len() {
-        return Some((first, None));
+impl Alignment<'_> {
+    fn allowed(self, property: &str) -> bool {
+        let kw = self.keyword;
+        let legacy = self.flags.has(AlignFlags::LEGACY);
+        let overflow = self.flags.has(AlignFlags::SAFE) || self.flags.has(AlignFlags::UNSAFE);
+        if legacy && property != "justify-items" { return false; }
+        if property.ends_with("content") {
+            return !(kw == "normal" && overflow)
+                && !matches!(kw, "self-start" | "self-end" | "justify")
+                && (kw != "baseline" || property == "align-content")
+                && content_distribution(kw, property == "align-content").is_some();
+        }
+        item_align(kw, property.ends_with("self")).is_some()
     }
-    let (b, bf, used2) = align_prefix(&kws[used..], true)?;
-    (used + used2 == kws.len()).then_some(())?;
-    Some((first, Some((b.to_string(), bf))))
+
+    fn specified(self) -> String {
+        let prefix = if self.flags.has(AlignFlags::LEGACY) && self.keyword != "legacy" { "legacy " }
+            else if self.flags.has(AlignFlags::SAFE) { "safe " }
+            else if self.flags.has(AlignFlags::UNSAFE) { "unsafe " }
+            else if self.flags.has(AlignFlags::LAST) { "last " }
+            else { "" };
+        format!("{prefix}{}", self.keyword)
+    }
+
+    fn apply(self, property: &str, style: &mut ComputedStyle, parent: &ComputedStyle) {
+        let flags = self.flags;
+        if let Some(value) = content_distribution(self.keyword, property == "align-content") {
+            match property {
+                "align-content" => { style.align_content = value; style.align_content_flags = flags; return; }
+                "justify-content" => { style.justify_content = value; style.justify_content_flags = flags; return; }
+                _ => {}
+            }
+        }
+        let Some(item) = item_align(self.keyword, property.ends_with("self")) else { return };
+        let pair = (item, flags);
+        match property {
+            "align-items" => (style.align_items, style.align_items_flags) = pair,
+            "align-self" => (style.align_self, style.align_self_flags) = pair,
+            "justify-self" => (style.justify_self, style.justify_self_flags) = pair,
+            "justify-items" => {
+                (style.justify_items, style.justify_items_flags) = if self.keyword == "legacy" {
+                    if parent.justify_items_flags.has(AlignFlags::LEGACY) { (parent.justify_items, parent.justify_items_flags) }
+                    else { (ItemAlign::Normal, AlignFlags(AlignFlags::NORMAL)) }
+                } else { pair };
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parse_alignment<'a>(kws: &'a [String], first: &str, second: Option<&str>) -> Option<(Alignment<'a>, Option<Alignment<'a>>)> {
+    let (keyword, flags, used) = align_prefix(kws, first.starts_with("justify"))?;
+    let a = Alignment { keyword, flags };
+    if !a.allowed(first) { return None; }
+    let Some(second) = second else { return (used == kws.len()).then_some((a, None)) };
+    let b = if used < kws.len() {
+        let (keyword, flags, n) = align_prefix(&kws[used..], true)?;
+        if used + n != kws.len() { return None; }
+        Alignment { keyword, flags }
+    } else if keyword == "baseline" && second == "justify-content" {
+        Alignment { keyword: "start", flags: AlignFlags::default() }
+    } else { a };
+    b.allowed(second).then_some((a, Some(b)))
+}
+
+pub fn alignment_property(name: &str) -> bool { longhands(name).is_some() }
+
+pub fn specified_alignment(name: &str, comps: &[&[Token]]) -> Option<String> {
+    let (first, second) = longhands(name)?;
+    let kws = idents(comps)?;
+    let (a, b) = parse_alignment(&kws, first, second)?;
+    let a = a.specified();
+    match b.map(Alignment::specified) {
+        Some(b) if a != b => Some(format!("{a} {b}")),
+        _ => Some(a),
+    }
 }
 
 fn flex_basis(c: &[Token], ctx: &ApplyCtx) -> Option<(Length, bool)> {
@@ -285,74 +355,13 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
                 }
             }
         }
-        "justify-content" => {
-            if let Some((v, m)) = content_value(comps, false) {
-                style.justify_content = v;
-                style.justify_content_flags = m;
-            }
-        }
-        "align-content" => {
-            if let Some((v, m)) = content_value(comps, true) {
-                style.align_content = v;
-                style.align_content_flags = m;
-            }
-        }
-        "align-items" => {
-            if let Some((v, m)) = item_value(comps, false, false) {
-                style.align_items = v;
-                style.align_items_flags = m;
-            }
-        }
-        "align-self" => {
-            if let Some((v, m)) = item_value(comps, true, false) {
-                style.align_self = v;
-                style.align_self_flags = m;
-            }
-        }
-        "justify-items" => {
-            if let Some((v, m)) = item_value(comps, false, true) {
-                style.justify_items = v;
-                style.justify_items_flags = m;
-            }
-        }
-        "justify-self" => {
-            if let Some((v, m)) = item_value(comps, true, true) {
-                style.justify_self = v;
-                style.justify_self_flags = m;
-            }
-        }
-        "place-items" => {
-            if let Some(((a, am), second)) = place_values(comps) {
-                let (b, bm) = second.unwrap_or_else(|| (a.clone(), am));
-                if let (Some(av), Some(bv)) = (item_align(&a, false), item_align(&b, false)) {
-                    style.align_items = av;
-                    style.align_items_flags = am;
-                    style.justify_items = bv;
-                    style.justify_items_flags = bm;
-                }
-            }
-        }
-        "place-self" => {
-            if let Some(((a, am), second)) = place_values(comps) {
-                let (b, bm) = second.unwrap_or_else(|| (a.clone(), am));
-                if let (Some(av), Some(bv)) = (item_align(&a, true), item_align(&b, true)) {
-                    style.align_self = av;
-                    style.align_self_flags = am;
-                    style.justify_self = bv;
-                    style.justify_self_flags = bm;
-                }
-            }
-        }
-        "place-content" => {
-            if let Some(((a, am), second)) = place_values(comps) {
-                // A single baseline value sets justify-content to `start`.
-                let (b, bm) = second.unwrap_or_else(|| if a == "baseline" { ("start".to_string(), AlignFlags::default()) } else { (a.clone(), am) });
-                if let (Some(av), Some(bv)) = (content_distribution(&a, true), content_distribution(&b, false)) {
-                    style.align_content = av;
-                    style.align_content_flags = am;
-                    style.justify_content = bv;
-                    style.justify_content_flags = bm;
-                }
+        "align-content" | "justify-content" | "align-items" | "justify-items" | "align-self" | "justify-self"
+        | "place-content" | "place-items" | "place-self" => {
+            let (first, second) = longhands(name).unwrap();
+            let Some(words) = idents(comps) else { return true };
+            if let Some((a, b)) = parse_alignment(&words, first, second) {
+                a.apply(first, style, parent);
+                if let (Some(value), Some(property)) = (b, second) { value.apply(property, style, parent); }
             }
         }
         "order" => {
