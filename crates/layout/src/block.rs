@@ -124,6 +124,7 @@ pub(crate) struct Layouter<'a> {
     /// The absolutely positioned boxes being laid out belong to a
     /// transformed containing block, which also contains fixed boxes.
     fixed_cb: bool,
+    anchor_areas: HashMap<rabbithole_dom::NodeId,crate::anchor::Placement>,
     /// The block children being laid out have a `-webkit-center` parent.
     center_blocks: bool,
     /// The containing block of the block children being laid out is
@@ -412,6 +413,7 @@ impl<'a> Layouter<'a> {
             feature_cache: HashMap::new(),
             abs_cb: HashMap::new(),
             fixed_cb: false,
+            anchor_areas: HashMap::new(),
             center_blocks: false,
             cb_rtl: false,
             clamp: None,
@@ -518,6 +520,16 @@ impl<'a> Layouter<'a> {
 
     /// Lay out the document, taking unchanged boxes from `reuse`.
     pub(crate) fn layout_document_with(&mut self, reuse: Option<&crate::incremental::Reuse>) -> LayoutTree {
+        let initial = self.layout_pass(reuse);
+        if !self.ctx.styles.any_position_area { return initial; }
+        let areas = crate::anchor::placements(self.ctx,&initial);
+        if areas.is_empty() { return initial; }
+        let mut positioned = Self::new(self.ctx);
+        positioned.anchor_areas = areas;
+        positioned.layout_pass(None)
+    }
+
+    fn layout_pass(&mut self, reuse: Option<&crate::incremental::Reuse>) -> LayoutTree {
         let debug = crate::incremental::debug_timing();
         let t0 = std::time::Instant::now();
         let builder = Builder::new(self.ctx, reuse);
@@ -1985,10 +1997,15 @@ impl<'a> Layouter<'a> {
             static_right = false;
         }
         let style = c.style.clone();
-        let l = style.inset.left.resolve(cb.w);
-        let r = style.inset.right.resolve(cb.w);
-        let t = style.inset.top.resolve(cb.h);
-        let btm = style.inset.bottom.resolve(cb.h);
+        let anchored = if self.anchor_areas.is_empty() { None } else {
+            c.abs_node().and_then(|n| self.anchor_areas.get(&n)).copied()
+        };
+        let cb = anchored.map_or(cb,|a| a.area);
+        let auto = anchored.map(|_| 0.0);
+        let l = style.inset.left.resolve(cb.w).or(auto);
+        let r = style.inset.right.resolve(cb.w).or(auto);
+        let t = style.inset.top.resolve(cb.h).or(auto);
+        let btm = style.inset.bottom.resolve(cb.h).or(auto);
         let ml = style.margin.left.resolve_or_zero(cb.w);
         let mr = style.margin.right.resolve_or_zero(cb.w);
         let mt = style.margin.top.resolve_or_zero(cb.w);
@@ -2001,7 +2018,7 @@ impl<'a> Layouter<'a> {
         // A table's auto width is shrink-to-fit, even between two insets.
         let table = matches!(c.formatting, Formatting::Table | Formatting::TableWrapper);
         let (mut mode, mut avail) = match (l, r, style.width.is_auto()) {
-            (Some(l), Some(r), true) if table => (WidthMode::ShrinkToFit, (cb.w - l - r).max(0.0)),
+            (Some(l), Some(r), true) if table || (anchored.is_some() && style.justify_self != ItemAlign::Stretch) => (WidthMode::ShrinkToFit, (cb.w - l - r).max(0.0)),
             (Some(l), Some(r), true) => (WidthMode::Fixed((cb.w - l - r - ml - mr - pb_h).max(0.0)), cb.w),
             _ => {
                 // With both insets auto the box starts at its static
@@ -2066,7 +2083,9 @@ impl<'a> Layouter<'a> {
             self.forced_content_height = Some(height);
         } else if let (Some(t), Some(bt), true) = (t, btm, style.height.is_auto()) {
             if c.kind != BoxKind::Image && ratio.is_none() {
-                self.forced_content_height = Some((cb.h - t - bt - mt - mb - pb_v).max(0.0));
+                if anchored.is_none() || style.align_self == ItemAlign::Stretch {
+                    self.forced_content_height = Some((cb.h - t - bt - mt - mb - pb_v).max(0.0));
+                }
             }
         }
         let mut bfc = Bfc::new();
@@ -2116,6 +2135,14 @@ impl<'a> Layouter<'a> {
         // `align-self` align the box in its static-position rectangle, or
         // in the inset-modified containing block when both insets are set.
         let (mut x, mut y) = (x, y);
+        if let Some(area) = anchored {
+            if matches!(style.justify_self,ItemAlign::Auto | ItemAlign::Normal) && !style.margin.left.is_auto() && !style.margin.right.is_auto() {
+                x = area.align[0].offset(cb.x+l.unwrap_or(0.),cb.right()-r.unwrap_or(0.),area.center.0,c.rect.w+ml+mr)+ml;
+            }
+            if matches!(style.align_self,ItemAlign::Auto | ItemAlign::Normal) && !style.margin.top.is_auto() && !style.margin.bottom.is_auto() {
+                y = area.align[1].offset(cb.y+t.unwrap_or(0.),cb.bottom()-btm.unwrap_or(0.),area.center.1,c.rect.h+mt+mb)+mt;
+            }
+        }
         if let Some(sr) = static_rect {
             let own_rtl = style.direction == rabbithole_style::Direction::Rtl;
             // `auto` uses the parent's `*-items` for the static position

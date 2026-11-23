@@ -412,7 +412,7 @@ impl Loader {
             let cascade = |prune: bool| match discovery_sheets(&doc, &sheets, prune) {
                 Some(discovery) => rabbithole_style::style_tree_with(&doc, &discovery, &env, &opts),
                 // Nothing to discover: no element is looked at.
-                None => StyledTree { styles: Vec::new(), before: Vec::new(), after: Vec::new(), marker: Vec::new(), first_letter: Vec::new(), first_line: Vec::new(), any_first_letter: false, any_first_line: false, font_faces: Vec::new(), keyframes: HashMap::new(), root_font_size: 16.0 },
+                None => StyledTree::empty(),
             };
             let styles = cascade(true);
             if verify_discovery() {
@@ -1346,7 +1346,7 @@ impl Engine {
             title: loaded.title,
             status: loaded.status,
             sheets: loaded.sheets,
-            styles: StyledTree { styles: Vec::new(), before: Vec::new(), after: Vec::new(), marker: Vec::new(), first_letter: Vec::new(), first_line: Vec::new(), any_first_letter: false, any_first_line: false, font_faces: Vec::new(), keyframes: HashMap::new(), root_font_size: 16.0 },
+            styles: StyledTree::empty(),
             layout: empty_layout(),
             display_list: DisplayList::default(),
             images: loaded.images.into_iter().collect(),

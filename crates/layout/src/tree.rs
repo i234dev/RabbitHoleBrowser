@@ -1149,6 +1149,11 @@ impl LayoutTree {
 
     /// A generated box and its physical border rectangle in document coordinates.
     pub fn box_in_document(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<(&LayoutBox, Rect)> {
+        let (b,coordinates) = self.box_and_coordinates(doc,node)?;
+        Some((b,physical_rect(coordinates,b.rect)))
+    }
+
+    pub(crate) fn box_and_coordinates(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<(&LayoutBox, Option<Matrix>)> {
         let path = guided_path(&self.root, doc, node)?;
         let mut b = &self.root;
         let mut coordinates = None;
@@ -1156,7 +1161,7 @@ impl LayoutTree {
             coordinates = b.child_coordinates(coordinates);
             b = &b.children[index];
         }
-        Some((b, physical_rect(coordinates, b.rect)))
+        Some((b, coordinates))
     }
 
     /// Mutable [`LayoutTree::box_of`].

@@ -2224,6 +2224,8 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "position" => to.position = from.position,
         "position-area" => to.position_area = from.position_area,
+        "position-anchor" => to.position_anchor = from.position_anchor.clone(),
+        "anchor-name" => to.anchor_names = from.anchor_names.clone(),
         "float" => to.float = from.float,
         "clear" => to.clear = from.clear,
         "flex-direction" => to.flex_direction = from.flex_direction,
@@ -3451,6 +3453,13 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.run_in = comps.iter().any(|c| values::is_ident(c, "run-in"));
             }
         }
+        "anchor-name" => {
+            if let Some(names) = props::anchor::names(&comps) { style.anchor_names = (!names.is_empty()).then(|| names.into()); }
+        }
+        "position-anchor" if comps.len() == 1 => {
+            if values::is_ident(c0,"auto") { style.position_anchor = None; }
+            else if let Some(name) = props::anchor::dashed_ident(c0) { style.position_anchor = Some(name.into()); }
+        }
         "position-area" => {
             if let Some(area) = props::anchor::PositionArea::parse(&comps) { style.position_area = area; }
         }
@@ -4136,6 +4145,8 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     if value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || f.eq_ignore_ascii_case("attr"))) {
         return Some(recognizes_property(name));
     }
+    if name == "anchor-name" { return Some(props::anchor::names(&values::components(value)).is_some()); }
+    if name == "position-anchor" { return Some(matches!(values::components(value).as_slice(), [c] if values::is_ident(c,"auto") || props::anchor::dashed_ident(c).is_some())); }
     if name == "position-area" { return Some(props::anchor::PositionArea::parse(&values::components(value)).is_some()); }
     if matches!(name, "grid-template-columns" | "grid-template-rows") {
         if let Some(valid) = crate::props::grid::valid_subgrid(value) { return Some(valid); }

@@ -84,6 +84,7 @@ pub struct StyledTree {
     /// `::first-letter` / `::first-line` style.
     pub any_first_letter: bool,
     pub any_first_line: bool,
+    pub any_position_area: bool,
     pub font_faces: Vec<FontFace>,
     /// `@keyframes` by name: (offsets, declarations) per frame, raw.
     pub keyframes: HashMap<String, Vec<(Vec<f32>, Vec<Declaration>)>>,
@@ -109,7 +110,7 @@ impl StyledTree {
         v.get(id).and_then(|s| s.as_ref())
     }
 
-    pub(crate) fn empty() -> StyledTree {
+    pub fn empty() -> StyledTree {
         StyledTree {
             styles: Vec::new(),
             before: Vec::new(),
@@ -119,6 +120,7 @@ impl StyledTree {
             first_line: Vec::new(),
             any_first_letter: false,
             any_first_line: false,
+            any_position_area: false,
             font_faces: Vec::new(),
             keyframes: HashMap::new(),
             root_font_size: 16.0,

@@ -7,6 +7,7 @@ pub mod paint;
 pub mod tree;
 pub mod selection;
 
+mod anchor;
 mod background;
 mod border_image;
 mod block;

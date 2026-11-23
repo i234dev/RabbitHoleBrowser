@@ -122,3 +122,59 @@ mod tests {
         }
     }
 }
+
+/// One physical axis in the nine-cell position-area grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Region { Before, After, SpanBefore, SpanAfter, Center, All }
+
+impl PositionArea {
+    pub fn is_none(self) -> bool { self.first.descriptor().0 == "none" }
+
+    pub fn physical(self, containing: (crate::WritingMode,crate::Direction),
+                    own: (crate::WritingMode,crate::Direction)) -> Option<[Region;2]> {
+        if self.is_none() { return None; }
+        let tracks = [self.first, self.second.unwrap_or(self.first)];
+        let family = tracks.iter().map(|t| t.descriptor().1).find(|f| *f != Neutral).unwrap_or(Neutral);
+        let (wm,dir) = if matches!(family, SelfFlow | SelfLogical) { own } else { containing };
+        let vertical = wm.is_vertical();
+        let mut result = [Region::All;2];
+        for (slot,track) in tracks.iter().enumerate() {
+            let (name,_,axis) = track.descriptor();
+            if slot == 1 && self.second.is_none() && axis != Either { break; }
+            let index = match axis { First=>0, Second=>1, Either=>slot };
+            let horizontal = if family == Physical { index == 0 } else { (index == 0) == vertical };
+            let physical = usize::from(!horizontal);
+            let (wm,dir) = if name.contains("self-") { own } else { (wm,dir) };
+            let block_axis = horizontal == wm.is_vertical();
+            let reversed = if block_axis { wm == crate::WritingMode::VerticalRl }
+                else { (dir == crate::Direction::Rtl) != (wm == crate::WritingMode::SidewaysLr) };
+            let before = match name {
+                "all" => { result[physical] = Region::All; continue; }
+                "center" => { result[physical] = Region::Center; continue; }
+                "left" | "top" => true,
+                "right" | "bottom" => false,
+                _ => name.ends_with("start") != reversed,
+            };
+            result[physical] = match (track.span,before) {
+                (false,true)=>Region::Before, (false,false)=>Region::After,
+                (true,true)=>Region::SpanBefore, (true,false)=>Region::SpanAfter,
+            };
+        }
+        Some(result)
+    }
+}
+
+/// A comma-separated list of dashed identifiers, retaining their case.
+pub fn names(parts: &[&[Token]]) -> Option<Vec<String>> {
+    if matches!(parts, [v] if crate::values::is_ident(v,"none")) { return Some(Vec::new()); }
+    let groups = crate::values::split_commas(parts);
+    if groups.is_empty() { return None; }
+    groups.iter().map(|group| match group.as_slice() {
+        [component] => dashed_ident(component).map(str::to_owned),
+        _ => None,
+    }).collect()
+}
+
+pub fn dashed_ident(tokens: &[Token]) -> Option<&str> {
+    match tokens { [Token::Ident(s)] if s.starts_with("--") && s.len()>2 => Some(s), _=>None }
+}

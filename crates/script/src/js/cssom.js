@@ -73,7 +73,7 @@
   const checkedProperties = new Set(['color', 'background-color', 'border-top-color', 'border-right-color',
     'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color',
     'accent-color', 'column-rule-color', 'align-self', 'align-items', 'align-content', 'justify-self', 'justify-items',
-    'justify-content', 'place-self', 'place-items', 'place-content']);
+    'justify-content', 'place-self', 'place-items', 'place-content', 'position-area', 'position-anchor', 'anchor-name']);
   function parseDecls(text) {
     const out = [];
     let i = 0, start = 0, depth = 0;

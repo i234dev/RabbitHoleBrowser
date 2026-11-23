@@ -1225,3 +1225,21 @@ fn a_rejected_range_insertion_keeps_the_text_and_its_live_endpoints_intact() {
     })()"#);
     assert_eq!(result, "HierarchyRequestError|HierarchyRequestError|true|cde|abcdef|1|true|5");
 }
+
+#[test]
+fn named_anchor_areas_reposition_and_resize_the_target_after_style_changes() {
+    let mut e = engine(true);
+    let mut page = load(&mut e, "<style>*{box-sizing:border-box}body{margin:0}section{position:relative;width:300px;height:200px}#a{position:absolute;left:40px;top:60px;width:50px;height:30px;anchor-name:--card, --other}#t{position:absolute;position-anchor:--card;position-area:bottom left;width:20px;height:10px}#b{position:absolute;left:150px;top:20px;width:10px;height:10px;anchor-name:--second}</style><section><div id=a></div><div id=b></div><div id=t></div></section>");
+    let result = eval(&e, &mut page, r#"(() => {
+        const geometry = () => { const r=t.getBoundingClientRect(); return [r.x,r.y,r.width,r.height].join(','); };
+        const initial=geometry();
+        a.style.top='80px';
+        const moved=geometry();
+        t.style.positionAnchor='--second';
+        t.style.positionArea='right center';
+        t.style.width='50%';
+        const changed=geometry();
+        return [getComputedStyle(a).anchorName,getComputedStyle(t).positionArea,initial,moved,changed].join('|');
+    })()"#);
+    assert_eq!(result,"--card, --other|right center|20,90,20,10|20,110,20,10|160,20,70,10");
+}
