@@ -2134,3 +2134,18 @@ fn shared_worker_ports_forward_transferred_objects_in_the_message_graph() {
     let logs: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, message)| message.as_str()).collect();
     assert_eq!(logs, ["0", "true 11 5 0 0"]);
 }
+
+#[test]
+fn rtc_signaling_values_keep_local_metadata_out_of_signaling() {
+    let result = result_of("<body>", r#"
+        const line = 'candidate:aB/7 2 TCP 1024 2001:db8::8 9 typ srflx raddr local.example rport 5000 tcptype active';
+        const peer = new RTCIceCandidate({ candidate: line, sdpMLineIndex: 65537, relayProtocol: 'tls' });
+        const signaled = new RTCIceCandidate(peer.toJSON());
+        const desc = new RTCSessionDescription({type:'offer', sdp:'v=0\r\n'});
+        const malformed = new RTCIceCandidate({sdpMid:'audio', candidate:line.replace('1024', '1024x')});
+        window.result = [signaled.component, signaled.sdpMLineIndex, signaled.relatedPort, signaled.tcpType,
+          peer.relayProtocol, signaled.relayProtocol === null, malformed.priority === null,
+          malformed.candidate.endsWith('active'), desc.toJSON().sdp === 'v=0\r\n'].join('|');
+    "#);
+    assert_eq!(result, "'rtcp|1|5000|active|tls|true|true|true|true'");
+}

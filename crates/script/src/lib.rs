@@ -109,6 +109,7 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:svg.js", include_str!("js/svg.js")),
     ("rabbithole:media.js", include_str!("js/media.js")),
     ("rabbithole:webaudio.js", include_str!("js/webaudio.js")),
+    ("rabbithole:webrtc.js", include_str!("js/webrtc.js")),
     ("rabbithole:observable.js", include_str!("js/observable.js")),
     ("rabbithole:webidl.js", include_str!("js/webidl.js")),
 ];
