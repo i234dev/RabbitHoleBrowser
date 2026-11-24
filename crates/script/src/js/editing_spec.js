@@ -1130,6 +1130,7 @@ function getActiveRange() {
 // so no one can access anything except via the provided functions, since
 // otherwise callers might mistakenly use outdated overrides (if the selection
 // has changed).
+var moveCaretKeepingOverrides;
 var getStateOverride, setStateOverride, unsetStateOverride,
     getValueOverride, setValueOverride, unsetValueOverride;
 (function() {
@@ -1148,6 +1149,15 @@ var getStateOverride, setStateOverride, unsetStateOverride,
             storedRange = getActiveRange().cloneRange();
         }
     }
+
+    // RabbitHole: move the caret without unsetting the overrides (the caret
+    // stays at the same visible position).
+    moveCaretKeepingOverrides = function(node, offset) {
+        resetOverrides();
+        getSelection().collapse(node, offset);
+        globalRange = null;
+        storedRange = getActiveRange().cloneRange();
+    };
 
     getStateOverride = function(command) {
         resetOverrides();
@@ -5244,6 +5254,11 @@ function canonicalSpaceSequence(n, nonBreakingStart, nonBreakingEnd) {
     return buffer;
 }
 
+// RabbitHole: whether a valid sequence in the edited Text node is rewritten
+// too (when deleting or typing); other commands, such as splitting a line,
+// leave visible sequences as they are, like other browsers.
+var rewriteEditedWhitespace = true;
+
 function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
     if (fixCollapsedSpace === undefined) {
         // "an optional boolean argument fix collapsed space that defaults to
@@ -5419,23 +5434,22 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
         nonBreakingStart, nonBreakingEnd);
 
     // RabbitHole: like other browsers, leave a sequence that already shows
-    // every space alone unless the edit point is in it, e.g. one across an
-    // inline boundary from a deletion.
+    // every space alone unless it is all in the edited Text node (see
+    // rewriteEditedWhitespace), e.g. one across an inline boundary from a
+    // deletion.
     if (length) {
         var sequenceRange = document.createRange();
         sequenceRange.setStart(startNode, startOffset);
         sequenceRange.setEnd(endNode, endOffset);
         var current = sequenceRange.toString();
         var texts = getAllContainedNodes(sequenceRange, function(n) { return n.nodeType == Node.TEXT_NODE })
-            .concat([startNode, endNode].filter(function(n) { return n.nodeType == Node.TEXT_NODE }));
-        var editPointInSequence = node.nodeType == Node.TEXT_NODE
-            && texts.indexOf(node) != -1
-            && texts.every(function(n) { return n == node });
-        if (!editPointInSequence
-        && current.length == length
+            .concat([startNode, endNode].filter(function(n) { return n.nodeType == Node.TEXT_NODE }))
+            .filter(function(n, i, list) { return list.indexOf(n) == i });
+        if (current.length == length
         && !/  /.test(current)
         && !((nonBreakingStart || length == 1 && nonBreakingEnd) && current[0] == " ")
-        && !(nonBreakingEnd && current[current.length - 1] == " ")) {
+        && !(nonBreakingEnd && current[current.length - 1] == " ")
+        && !(rewriteEditedWhitespace && node.nodeType == Node.TEXT_NODE && texts.every(function(n) { return n == node }))) {
             return;
         }
     }
@@ -7869,11 +7883,15 @@ commands.inserttext = {
         }
 
         // "If value's length is greater than one:"
-        if (value.length > 1) {
+        //
+        // RabbitHole: elements are code points, so that surrogate pairs stay
+        // together.
+        var codePoints = Array.from(value);
+        if (codePoints.length > 1) {
             // "For each element el in value, take the action for the
             // insertText command, with value equal to el."
-            for (var i = 0; i < value.length; i++) {
-                commands.inserttext.action(value[i]);
+            for (var i = 0; i < codePoints.length; i++) {
+                commands.inserttext.action(codePoints[i]);
             }
 
             // "Return true."
@@ -8553,8 +8571,9 @@ commandNames.forEach(function(command) {
 // RabbitHole: run(doc, state, callback) binds the algorithms to a document and
 // its editing state (the CSS styling flag and the default single-line
 // container name) while callback runs.
-function run(doc, state, callback) {
+function run(doc, state, callback, command) {
     var saved = [document, cssStylingFlag, defaultSingleLineContainerName];
+    rewriteEditedWhitespace = !command || ["delete", "forwarddelete", "inserttext"].indexOf(command) != -1;
     document = doc;
     cssStylingFlag = state.css;
     defaultSingleLineContainerName = state.separator;
@@ -8571,6 +8590,11 @@ function run(doc, state, callback) {
 
 return {
     run: run,
+    moveCaret: moveCaretKeepingOverrides,
+    unsetOverrides: function(command) {
+        unsetStateOverride(command);
+        unsetValueOverride(command);
+    },
     commands: commands,
     execCommand: myExecCommand,
     queryCommandEnabled: myQueryCommandEnabled,

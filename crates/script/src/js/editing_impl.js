@@ -1181,9 +1181,10 @@
   }
   // Delete the paragraph separator as a unit. Preserve inline markup and
   // the source line's whitespace semantics when moving it into its neighbor.
-  // With differentWhiteSpace, only joins that need the white-space of the
-  // moved line preserved (others run the specification algorithm).
-  function joinParagraphs(t, cmd, differentWhiteSpace = false) {
+  // With probe, only tell whether this is a join of lines with different
+  // white-space, which must keep the white-space of the moved line (others
+  // run the specification algorithm).
+  function joinParagraphs(t, cmd, probe = false) {
     const { range, host, sel } = t;
     const point = range.startContainer, offset = range.startOffset;
     if (range.collapsed && point.nodeType === 3 &&
@@ -1195,6 +1196,10 @@
     if (!left || !right || left === right || editingHost(left) !== host || editingHost(right) !== host) return false;
     const dest = containingBlock(left, host), src = containingBlock(right, host);
     if (src === dest || left.parentElement.closest('td,th,li') !== right.parentElement.closest('td,th,li')) return false;
+    if (probe) {
+      const destinationSpace = getComputedStyle(dest).whiteSpace;
+      return [src, left.parentElement, right.parentElement].some(e => getComputedStyle(e).whiteSpace !== destinationSpace);
+    }
     // A range may select text or an atomic element between the two leaves.
     const doc = host.ownerDocument, gap = doc.createRange();
     gap.setStart(left, left.length);
@@ -1238,7 +1243,6 @@
     for (let part = first; part && part !== after; part = part.nextSibling) {
       styles.push(part.nodeType === 1 ? getComputedStyle(part).whiteSpace : whiteSpace);
     }
-    if (differentWhiteSpace && styles.every(value => value === destinationSpace)) return false;
     const before = branchIn(left, dest).nextSibling;
     const fragment = move.extractContents();
     if (newline) {
@@ -1556,7 +1560,7 @@
     if (specCommands.has(cmd) && specTarget(t, cmd, value)) {
       if ((cmd === 'delete' || cmd === 'forwarddelete') && joinParagraphs(t, cmd, true)) {
         state.typing = null;
-        input(t.host, inputTypeFor(cmd));
+        if (deleteSelection(t, cmd)) input(t.host, inputTypeFor(cmd));
         return true;
       }
       return specExecute(doc, state, t, cmd, value);
@@ -1668,7 +1672,6 @@
     ['inserthorizontalrule', 'insertHorizontalRule'], ['inserthtml', ''], ['insertimage', ''],
   ]);
   const specCommands = specInputTypes;
-  const preservedNewlines = ['pre', 'pre-wrap', 'pre-line', 'break-spaces'];
   function specTarget(t, cmd, value) {
     if (!t || t.control) return false;
     // Deletion in plaintext-only hosts works as in rich ones; nothing else
@@ -1677,10 +1680,11 @@
     // The specification assumes block editing hosts: an inline host gets
     // line breaks instead of paragraphs, as in other browsers.
     if (getComputedStyle(t.host).display.startsWith('inline')) return false;
-    // Where white-space preserves newlines, line breaks are newlines.
+    // Where white-space is not normal, line breaks follow it (newlines where
+    // it preserves them) as in other browsers.
     if (cmd === 'insertparagraph' || cmd === 'insertlinebreak' || (cmd === 'inserttext' && /[\r\n]/.test(value))) {
       const node = t.range.startContainer, el = node.nodeType === 1 ? node : node.parentElement;
-      if (el && preservedNewlines.includes(getComputedStyle(el).whiteSpace)) return false;
+      if (el && getComputedStyle(el).whiteSpace !== 'normal') return false;
     }
     return true;
   }
@@ -1695,13 +1699,16 @@
     observer.observe(doc, { childList: true, subtree: true, characterData: true, attributes: true });
     let result, changed = false;
     state.typing = null;
+    // A deletion from inside a link to outside it leaves the caret outside.
+    const linkOf = n => (n.nodeType === 1 ? n : n.parentElement)?.closest('a[href]');
+    const links = t.range.collapsed ? null : [linkOf(t.range.startContainer), linkOf(t.range.endContainer)];
     try {
-      result = spec.run(doc, state, () => spec.execCommand(name, false, value));
+      result = spec.run(doc, state, () => spec.execCommand(name, false, value), name);
     } finally {
       changed = observer.takeRecords().length > 0;
       observer.disconnect();
     }
-    if (result) placeCaret(doc, cmd);
+    if (result) spec.run(doc, state, () => placeCaret(doc, cmd, links));
     if (result && changed) input(t.host, specInputTypes.get(cmd), specInputData(cmd, value));
     return result;
   }
@@ -1709,20 +1716,40 @@
   // to the end of the inline content before it, so typing and queries use
   // that formatting; one left in a list goes into the list item.
   const inlineContainers = new Set(['abbr','b','bdi','bdo','cite','code','del','dfn','em','font','i','ins','kbd','mark','q','s','samp','small','span','strike','strong','sub','sup','u','var']);
-  function placeCaret(doc, cmd) {
+  function nextTextIn(root, text) {
+    const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    walker.currentNode = text;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) if (n.length) return n;
+    return null;
+  }
+  function placeCaret(doc, cmd, links) {
     const sel = doc.getSelection();
     if (!sel?.rangeCount || !sel.isCollapsed) return;
     const node = sel.focusNode, offset = sel.focusOffset;
+    if (links && links[0] !== links[1] && (cmd === 'delete' || cmd === 'forwarddelete')) {
+      const link = (node.nodeType === 1 ? node : node.parentElement).closest('a[href]');
+      if (link && link.isContentEditable) {
+        const atEnd = link.textContent === '' || (node === link && offset === link.childNodes.length) ||
+          (node.nodeType === 3 && offset === node.length && !nextTextIn(link, node));
+        if (atEnd) {
+          spec.moveCaret(link.parentNode, Array.prototype.indexOf.call(link.parentNode.childNodes, link) + 1);
+        }
+      }
+      spec.unsetOverrides('createlink');
+      return;
+    }
     if (node.nodeType !== 1) return;
     if (listCommands.has(cmd) && (node.localName === 'ol' || node.localName === 'ul')) {
       const item = node.childNodes[offset] || node.childNodes[offset - 1];
-      if (item?.localName === 'li') sel.collapse(item, item === node.childNodes[offset] ? 0 : item.childNodes.length);
+      if (item?.localName === 'li') spec.moveCaret(item, item === node.childNodes[offset] ? 0 : item.childNodes.length);
       return;
     }
-    if ((cmd !== 'delete' && cmd !== 'forwarddelete') || !offset) return;
+    if (cmd !== 'delete' && cmd !== 'forwarddelete') return;
     let before = node.childNodes[offset - 1];
     while (before?.nodeType === 1 && inlineContainers.has(before.localName) && before.isContentEditable && before.lastChild) before = before.lastChild;
-    if (before?.nodeType === 3 && before !== node.childNodes[offset - 1] && before.length) sel.collapse(before, before.length);
+    const after = node.childNodes[offset];
+    if (before?.nodeType === 3 && before.length) spec.moveCaret(before, before.length);
+    else if (!before && after?.nodeType === 3 && after.length) spec.moveCaret(after, 0);
   }
   function specQuery(doc, state, method, name) {
     const t = target(doc);
