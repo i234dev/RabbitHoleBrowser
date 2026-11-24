@@ -1342,6 +1342,70 @@
     sel.collapse(caret,offset);
     return true;
   }
+
+  // Editing spec "allowed child" (HTML content model rules for editing).
+  const inlineContents = new Set(['a','abbr','b','bdi','bdo','cite','code','dfn','em','h1','h2','h3','h4','h5','h6','i','kbd','mark',
+    'p','pre','q','rp','rt','ruby','s','samp','small','span','strong','sub','sup','u','var','acronym','listing','strike','xmp','big',
+    'blink','font','marquee','nobr','tt']);
+  const paragraphProhibited = new Set(['address','article','aside','blockquote','caption','center','col','colgroup','dd','details',
+    'dir','div','dl','dt','fieldset','figcaption','figure','footer','form','h1','h2','h3','h4','h5','h6','header','hgroup','hr','li',
+    'listing','menu','nav','ol','p','plaintext','pre','section','summary','table','tbody','td','tfoot','th','thead','tr','ul','xmp']);
+  const headings = new Set(['h1','h2','h3','h4','h5','h6']);
+  const onlyChildren = { colgroup: ['col'], table: ['caption','col','colgroup','tbody','td','tfoot','th','thead','tr'],
+    tbody: ['td','th','tr'], tfoot: ['td','th','tr'], thead: ['td','th','tr'], tr: ['td','th'], dl: ['dt','dd'],
+    dir: ['dir','li','ol','ul'], ol: ['dir','li','ol','ul'], ul: ['dir','li','ol','ul'], hgroup: [...headings] };
+  const isHtml = (n) => n?.nodeType === 1 && n.namespaceURI === 'http://www.w3.org/1999/xhtml';
+  function allowedChild(child, parent) {
+    const pname = isHtml(parent) ? parent.localName : parent;
+    if (['colgroup','table','tbody','tfoot','thead','tr','script','style','plaintext','xmp'].includes(pname) &&
+        child.nodeType === 3 && !/^[ \t\n\f\r]*$/.test(child.data)) return false;
+    if (['script','style','plaintext','xmp'].includes(pname) && child.nodeType !== 3) return false;
+    if (child.nodeType === 9 || child.nodeType === 11 || child.nodeType === 10) return false;
+    if (!isHtml(child)) return true;
+    const name = child.localName;
+    if (isHtml(parent)) {
+      for (let a = parent; a?.nodeType === 1; a = a.parentNode) {
+        if (name === 'a' && a.localName === 'a') return false;
+        if (paragraphProhibited.has(name) && inlineContents.has(a.localName)) return false;
+        if (headings.has(name) && headings.has(a.localName)) return false;
+      }
+    } else if (parent?.nodeType === 1 || parent?.nodeType === 11) return true;
+    if (typeof pname !== 'string') return false;
+    if (onlyChildren[pname]) return onlyChildren[pname].includes(name);
+    if (['body','caption','col','colgroup','frame','frameset','head','html','tbody','td','tfoot','th','thead','tr'].includes(name)) return false;
+    if ((name === 'dd' || name === 'dt') && pname !== 'dl') return false;
+    if (name === 'li' && pname !== 'ol' && pname !== 'ul') return false;
+    if (pname === 'a' && name === 'a') return false;
+    if ((pname === 'dd' || pname === 'dt') && (name === 'dd' || name === 'dt')) return false;
+    if (headings.has(pname) && headings.has(name)) return false;
+    if (pname === name && (name === 'li' || name === 'nobr')) return false;
+    if (inlineContents.has(pname) && paragraphProhibited.has(name)) return false;
+    if ((pname === 'td' || pname === 'th') && ['caption','col','colgroup','tbody','td','tfoot','th','thead','tr'].includes(name)) return false;
+    return true;
+  }
+  // "Fix disallowed ancestors" for an inserted block-level node: split its
+  // inline ancestors until it is an allowed child of its parent.
+  function fixDisallowedAncestors(node, sel) {
+    if (!editable(node)) return;
+    while (node.parentNode && editable(node.parentNode) && !allowedChild(node, node.parentNode)) {
+      const parent = node.parentNode;
+      splitParent([node], sel);
+      if (node.parentNode === parent) break;
+    }
+  }
+  // insertHorizontalRule (editing spec).
+  function insertHorizontalRule(doc, t) {
+    const { sel, host } = t;
+    const r = sel.getRangeAt(0);
+    let node = r.startContainer, offset = r.startOffset;
+    while (offset === 0 && node !== host && node.parentNode) { offset = indexOf(node); node = node.parentNode; }
+    while (offset === nodeLength(node) && node !== host && node.parentNode) { offset = indexOf(node) + 1; node = node.parentNode; }
+    sel.collapse(node, offset);
+    const hr = doc.createElement('hr');
+    sel.getRangeAt(0).insertNode(hr);
+    fixDisallowedAncestors(hr, sel);
+    sel.collapse(hr.parentNode, indexOf(hr) + 1);
+  }
   function insertAt(range, node, sel) {
     const last = node.nodeType === 11 ? node.lastChild : node;
     if (!last) return;
@@ -1524,6 +1588,11 @@
       }
       input(host, 'insertText', value);
     } else {
+      if (cmd === 'inserthorizontalrule') {
+        insertHorizontalRule(doc, t);
+        input(host, 'insertHorizontalRule');
+        return true;
+      }
       let node;
       if (cmd === 'inserthtml') node = range.createContextualFragment(value);
       else {
