@@ -923,6 +923,9 @@ impl LayoutBox {
         if self.style.position == Position::Sticky {
             let _ = write!(out, " sticky");
         }
+        if let Some(p) = &self.col_pieces {
+            let _ = write!(out, " pieces[{}]", p.pieces.iter().map(|p| format!("{:.1},{:.1} {:.1}x{:.1}", p.rect.x, p.rect.y, p.rect.w, p.rect.h)).collect::<Vec<_>>().join("; "));
+        }
         let _ = writeln!(out);
         if let Some(m) = &self.marker {
             let _ = writeln!(out, "{pad}  marker {:?} @ {:.1}", m.text, m.x);

@@ -319,6 +319,9 @@ struct Plan {
     off: f32,
     /// A break was taken where `break-*: avoid` asked for none.
     violated: bool,
+    /// Containers kept whole in their column (`break-inside: avoid` that
+    /// fits), by event index.
+    locked: Vec<bool>,
 }
 
 /// The columns of a column set: flow position `y0` (strip coordinates
@@ -381,6 +384,23 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
     let mut budget = 4 * (b - a) + 64;
     let mut used = 0usize;
     let mut violated = false;
+    let mut locked = vec![false; n];
+    // The end of each container (by its start).
+    let mut ends = vec![usize::MAX; n];
+    {
+        let mut stack = Vec::new();
+        for (j, e) in evs.iter().enumerate().take(b).skip(a) {
+            match e {
+                Ev::Start { .. } => stack.push(j),
+                Ev::End { .. } => {
+                    if let Some(s) = stack.pop() {
+                        ends[s] = j;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     let mut i = a;
     // Push event `i` (at flow position `t`) so that it starts at `target`;
     // the strut goes before the outermost container starting right there
@@ -465,6 +485,19 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                     shortfall = shortfall.min(h.max(EPS));
                 }
                 placed |= edge;
+                let end = ends[i];
+                if avoid_inside && h <= g.colh + EPS && end < b {
+                    // Kept whole: nothing inside breaks (what overflows it
+                    // stays in its column).
+                    locked[i] = true;
+                    for p in &mut pos[i + 1..end] {
+                        *p = f32::NAN;
+                    }
+                    placed = true;
+                    used = used.max(g.col(pos[i]) + 1);
+                    i = end;
+                    continue;
+                }
             }
             Ev::Leaf { top, bottom, forced, avoid_before, prev, mt, line } => {
                 let t = top + off;
@@ -527,7 +560,7 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
         i += 1;
     }
     struts.truncate(n);
-    Plan { struts, used, shortfall, off, violated }
+    Plan { struts, used, shortfall, off, violated, locked }
 }
 
 /// Does flow position `t` start a column (or the set)?
@@ -663,6 +696,10 @@ struct Mover<'p> {
     /// The translation of the first piece placed in the current container
     /// (for its list marker).
     first: Option<(f32, f32)>,
+    /// Containers kept whole (by event index), and the column of the one
+    /// being moved.
+    locked: &'p [bool],
+    lock: Option<usize>,
 }
 
 impl Mover<'_> {
@@ -678,7 +715,7 @@ impl Mover<'_> {
     /// into its column.
     fn shift(&mut self, top: f32) -> (f32, f32) {
         let t = top + self.off;
-        let k = self.g.col(t);
+        let k = self.lock.unwrap_or_else(|| self.g.col(t));
         let d = (self.g.dx(k), self.off + self.g.dy(k));
         if self.first.is_none() {
             self.first = Some(d);
@@ -694,15 +731,15 @@ impl Mover<'_> {
             return;
         }
         let start = c.rect.y + self.off;
-        if fragmentable_box(c) && self.g.col(start) != self.g.col((c.rect.bottom() + self.off - EPS).max(start)) {
+        if self.lock.is_none() && fragmentable_box(c) && self.g.col(start) != self.g.col((c.rect.bottom() + self.off - EPS).max(start)) {
             let sets = [Set { first: 0, end: 0, g: self.g, flow_end: f32::INFINITY }];
-            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, positioned: 1, first: None };
+            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, positioned: 1, first: None, locked: &[], lock: None };
             sub.contents(c);
             let end = (c.rect.bottom() + self.off).max(start);
             sub.sets = &sets;
             sub.fragment(c, start, end);
         } else {
-            let k = self.g.col(start);
+            let k = self.lock.unwrap_or_else(|| self.g.col(start));
             c.translate(self.g.dx(k), self.off + self.g.dy(k));
         }
     }
@@ -803,8 +840,13 @@ impl Mover<'_> {
 
     /// A fragmentable container: its contents, then its fragments.
     fn container(&mut self, c: &mut LayoutBox) {
+        let at = self.i;
         self.next();
         let start = c.rect.y + self.off;
+        let outer_lock = self.lock;
+        if self.lock.is_none() && self.locked.get(at).copied().unwrap_or(false) {
+            self.lock = Some(self.g.col(start));
+        }
         let outer_first = self.first.take();
         let positioned = crate::block::contains_positioned(&c.style);
         self.positioned += positioned as u32;
@@ -813,6 +855,7 @@ impl Mover<'_> {
         self.next();
         let end = (c.rect.bottom() + self.off).max(start);
         self.fragment(c, start, end);
+        self.lock = outer_lock;
         self.first = outer_first.or(self.first);
     }
 
@@ -849,6 +892,10 @@ impl Mover<'_> {
                 let phi = if k == k1 { hi } else { s.g.end(k) };
                 parts.push((s.g, k, plo, phi));
             }
+        }
+        if let Some(k) = self.lock {
+            parts.clear();
+            parts.push((self.g, k, start, end));
         }
         if parts.is_empty() {
             parts.push((self.g, self.g.col(start), start, end));
@@ -1008,6 +1055,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
     let n = p.n.max(1) as usize;
     let floor = |h: f32| h.max(1.0);
     let mut struts = vec![0.0f32; evs.len()];
+    let mut locked = vec![false; evs.len()];
     let mut sets: Vec<Set> = Vec::new();
     let mut spans: Vec<(usize, f32)> = Vec::new();
     let mut rows: Vec<RowOut> = Vec::new();
@@ -1061,6 +1109,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                 Some((Some(j), k)) if j > a => {
                     for i in a..j {
                         struts[i] += plan.struts[i];
+                        locked[i] |= plan.locked[i];
                     }
                     let f = g.start(k);
                     sets.push(Set { first: a, end: j, g, flow_end: f });
@@ -1073,6 +1122,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                     let (h2, plan2) = choose_height(&evs, j, b, f, phys, rest, n, None, Some(colh), off_j);
                     for i in j..b {
                         struts[i] += plan2.struts[i];
+                        locked[i] |= plan2.locked[i];
                     }
                     let g2 = Geometry { y0: f, colh: floor(h2), lift: f - phys, step: p.step, per_row, row_gap: p.row_gap };
                     off = plan2.off;
@@ -1083,6 +1133,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                 _ => {
                     for i in a..b {
                         struts[i] += plan.struts[i];
+                        locked[i] |= plan.locked[i];
                     }
                     off = plan.off;
                     sets.push(Set { first: a, end: b, g, flow_end: strip_end + off });
@@ -1119,12 +1170,12 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
     if sets.is_empty() {
         // (Spanners only.)
         let g = Geometry { y0: p.y0, colh: 1.0, lift: 0.0, step: p.step, per_row: usize::MAX, row_gap: 0.0 };
-        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None };
+        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None };
         mover.contents(root);
         return (rows, phys);
     }
     let g = sets[0].g;
-    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None };
+    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None };
     mover.contents(root);
     (rows, phys)
 }

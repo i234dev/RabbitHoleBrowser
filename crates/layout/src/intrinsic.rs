@@ -78,11 +78,9 @@ impl<'a> Layouter<'a> {
             && b.kind != BoxKind::Image
         {
             let w = style.contain_intrinsic_width.unwrap_or(0.0);
-            if style.multicol {
-                // (The gaps between columns still count.)
-                let n = style.column_count.unwrap_or(1).max(1) as f32;
-                let w = w + crate::multicol::used_gap(&style, 0.0) * (n - 1.0);
-                (w, w)
+            if style.multicol && style.contain_intrinsic_width.is_none() {
+                // Columns of nothing: their widths and gaps still count.
+                crate::multicol::intrinsic(&style, (0.0, 0.0))
             } else {
                 (w, w)
             }
