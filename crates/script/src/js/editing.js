@@ -713,6 +713,271 @@
     return true;
   }
 
+
+  // ---------------------------------------------------------------------
+  // Justification (editing spec "justify the selection"): block-extend the
+  // selection, clear existing alignment, then wrap runs of sibling nodes in
+  // aligned divs, merging with aligned siblings.
+  const notInDiv = new Set(['li','dt','dd','tbody','thead','tfoot','tr','td','th','caption','col','colgroup','html','head','body',
+    'title','meta','base','link','style','option','optgroup','frame','frameset']);
+  const isElement = (n, name) => n?.nodeType === 1 && (!name || n.localName === name);
+  // Editable (not an editing host, inside one, not contenteditable=false).
+  const editable = (n) => {
+    if (!n?.parentNode) return false;
+    if (n.nodeType === 1) return n.isContentEditable && editingHost(n) !== n;
+    return !!n.parentElement?.isContentEditable;
+  };
+  const blockNode = (n) => n && (n.nodeType === 9 || n.nodeType === 11 || isBlock(n));
+  const inlineNode = (n) => n && !blockNode(n);
+  const hiddenByStyle = (n) => {
+    for (let el = n.nodeType === 1 ? n : n.parentElement; el; el = el.parentElement) if (getComputedStyle(el).display === 'none') return true;
+    return false;
+  };
+  function collapsedWhitespace(node) {
+    if (node.nodeType !== 3) return false;
+    if (node.data === '') return true;
+    if (!/^[ \t\n\r]*$/.test(node.data)) return false;
+    const parent = node.parentElement;
+    if (!parent) return true;
+    const ws = getComputedStyle(parent).whiteSpace;
+    if (ws === 'pre' || ws === 'pre-wrap' || ws === 'break-spaces') return false;
+    if (getComputedStyle(parent).display === 'none') return true;
+    let ancestor = node.parentNode;
+    while (!blockNode(ancestor) && ancestor.parentNode) ancestor = ancestor.parentNode;
+    const solid = (r) => (r.nodeType === 3 && !/^[ \t\n\r]*$/.test(r.data)) || isElement(r, 'img');
+    for (let r = previousNode(node); r && ancestor.contains(r) && r !== ancestor; r = previousNode(r)) {
+      if (blockNode(r) || isElement(r, 'br')) return true;
+      if (solid(r)) break;
+    }
+    for (let r = nextNode(node); r && ancestor.contains(r); r = nextNode(r)) {
+      if (blockNode(r) || isElement(r, 'br')) return true;
+      if (solid(r)) break;
+    }
+    return false;
+  }
+  function previousNode(n) {
+    if (n.previousSibling) { n = n.previousSibling; while (n.lastChild) n = n.lastChild; return n; }
+    return n.parentNode;
+  }
+  function nextNode(n) {
+    if (n.firstChild) return n.firstChild;
+    while (n && !n.nextSibling) n = n.parentNode;
+    return n?.nextSibling || null;
+  }
+  function nextNodeAfter(n) {
+    while (n && !n.nextSibling) n = n.parentNode;
+    return n?.nextSibling || null;
+  }
+  // A <br> with no visual effect: content precedes it on its line and
+  // nothing visible follows it before the end of the block.
+  function extraneousBreak(br) {
+    if (!isElement(br, 'br')) return false;
+    if (isElement(br.parentNode, 'li') && br.parentNode.childNodes.length === 1) return false;
+    let block = br.parentNode;
+    while (block && !blockNode(block)) block = block.parentNode;
+    if (!block) return false;
+    for (let r = nextNode(br); r && block.contains(r); r = nextNode(r)) {
+      if (blockNode(r)) break;
+      if (isElement(r, 'br') || isElement(r, 'img') || (r.nodeType === 3 && !collapsedWhitespace(r))) return false;
+    }
+    for (let r = previousNode(br); r && r !== block; r = previousNode(r)) {
+      if (blockNode(r) || isElement(r, 'br')) return false;
+      if (isElement(r, 'img') || (r.nodeType === 3 && !collapsedWhitespace(r))) return true;
+    }
+    return false;
+  }
+  function visible(n) {
+    if (!n || hiddenByStyle(n)) return false;
+    const walk = (x) => {
+      if (x.nodeType === 3) return !collapsedWhitespace(x);
+      if (x.nodeType !== 1) return false;
+      if (isBlock(x) || x.localName === 'img') return true;
+      if (x.localName === 'br') return !extraneousBreak(x);
+      if (getComputedStyle(x).display === 'none') return false;
+      for (let c = x.firstChild; c; c = c.nextSibling) if (walk(c)) return true;
+      return false;
+    };
+    return walk(n);
+  }
+  const nodeLength = (n) => n.nodeType === 3 || n.nodeType === 8 || n.nodeType === 7 ? n.data.length : n.childNodes.length;
+  const indexOf = (n) => { let i = 0; while ((n = n.previousSibling)) i++; return i; };
+  function blockStartPoint(node, offset) {
+    if (!node.parentNode && offset === 0) return true;
+    const child = node.childNodes[offset - 1];
+    return !!child && visible(child) && (blockNode(child) || isElement(child, 'br'));
+  }
+  function blockEndPoint(node, offset) {
+    if (!node.parentNode && offset === nodeLength(node)) return true;
+    const child = node.childNodes[offset];
+    return !!child && visible(child) && blockNode(child);
+  }
+  function blockExtend(range) {
+    let sn = range.startContainer, so = range.startOffset, en = range.endContainer, eo = range.endOffset;
+    let li = null;
+    for (let a = sn; a; a = a.parentNode) if (isElement(a, 'li')) li = a;
+    if (li) { so = indexOf(li); sn = li.parentNode; }
+    if (!blockStartPoint(sn, so)) {
+      for (;;) {
+        if (so === 0) { if (!sn.parentNode) break; so = indexOf(sn); sn = sn.parentNode; } else so--;
+        if (blockStartPoint(sn, so) || blockEndPoint(sn, so)) break;
+      }
+    }
+    while (so === 0 && sn.parentNode) { so = indexOf(sn); sn = sn.parentNode; }
+    li = null;
+    for (let a = en; a; a = a.parentNode) if (isElement(a, 'li')) li = a;
+    if (li) { eo = indexOf(li) + 1; en = li.parentNode; }
+    if (!blockEndPoint(en, eo)) {
+      for (;;) {
+        if (eo === nodeLength(en)) { if (!en.parentNode) break; eo = indexOf(en) + 1; en = en.parentNode; } else eo++;
+        if (blockStartPoint(en, eo) || blockEndPoint(en, eo)) break;
+      }
+    }
+    while (eo === nodeLength(en) && en.parentNode) { eo = indexOf(en) + 1; en = en.parentNode; }
+    const r = en.ownerDocument ? en.ownerDocument.createRange() : en.createRange();
+    r.setStart(sn, so); r.setEnd(en, eo);
+    return r;
+  }
+  // Nodes contained in a range (DOM "contained"), in tree order.
+  function containedNodes(range) {
+    const out = [], root = range.commonAncestorContainer;
+    for (let n = root.firstChild; n && root.contains(n) && n !== root; n = nextNode(n)) {
+      try {
+        const len = nodeLength(n);
+        if (range.comparePoint(n, 0) >= 0 && !(range.startContainer === n && range.startOffset === 0) &&
+            range.comparePoint(n, len) <= 0 && !(range.endContainer === n && range.endOffset === len)) out.push(n);
+      } catch (e) { /* doctype */ }
+    }
+    return out;
+  }
+  // Move a node, preserving the selection (editing spec "preserving
+  // ranges"): boundaries inside the node or right around it move with it.
+  function moveNode(node, parent, ref, sel) {
+    const oldParent = node.parentNode, oldIndex = oldParent ? indexOf(node) : -1;
+    const points = sel && sel.rangeCount ? [[sel.anchorNode, sel.anchorOffset], [sel.focusNode, sel.focusOffset]] : null;
+    parent.insertBefore(node, ref);
+    if (!points) return;
+    const newIndex = indexOf(node);
+    const moved = points.map(([n, o]) => {
+      if (n === node || node.contains(n)) return [n, o];
+      if (n === oldParent && (o === oldIndex || o === oldIndex + 1)) return [parent, newIndex + o - oldIndex];
+      let off = o;
+      if (n === oldParent && o > oldIndex + 1) off--;
+      if (n === parent && off > newIndex) off++;
+      return [n, off];
+    });
+    try { sel.setBaseAndExtent(moved[0][0], moved[0][1], moved[1][0], moved[1][1]); } catch (e) { /* detached */ }
+  }
+  function removePreserving(el, sel) {
+    while (el.firstChild) moveNode(el.firstChild, el.parentNode, el, sel);
+    el.remove();
+  }
+  function removeExtraneousBreaks(node) {
+    for (const br of Array.from(node.querySelectorAll ? node.querySelectorAll('br') : [])) {
+      if (br.parentNode === node && br === node.lastChild && extraneousBreak(br) && node.childNodes.length > 1) br.remove();
+    }
+  }
+  function wrapNodes(list, criteria, create, sel) {
+    if (list.every((n) => !visible(n) && !isElement(n, 'br'))) return null;
+    if (!list[0].parentNode) return null;
+    const last = list[list.length - 1];
+    if (inlineNode(last) && !isElement(last, 'br') && isElement(last.nextSibling, 'br')) list.push(last.nextSibling);
+    while (list[0].previousSibling && !visible(list[0].previousSibling)) list.unshift(list[0].previousSibling);
+    while (list[list.length - 1].nextSibling && !visible(list[list.length - 1].nextSibling)) list.push(list[list.length - 1].nextSibling);
+    let parent;
+    const prev = list[0].previousSibling, next = list[list.length - 1].nextSibling;
+    if (prev && editable(prev) && criteria(prev)) parent = prev;
+    else if (next && editable(next) && criteria(next)) parent = next;
+    else parent = create();
+    if (!parent) return null;
+    if (!parent.parentNode) list[0].parentNode.insertBefore(parent, list[0]);
+    const original = list[0].parentNode;
+    const firstVisible = list.find(visible), lastVisible = [...list].reverse().find(visible);
+    const doc = parent.ownerDocument;
+    if (parent.compareDocumentPosition(list[0]) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      const lastChild = [...parent.childNodes].reverse().find(visible);
+      if (!inlineNode(parent) && lastChild && firstVisible && inlineNode(lastChild) && inlineNode(firstVisible) && !isElement(parent.lastChild, 'br'))
+        parent.appendChild(doc.createElement('br'));
+      for (const n of list) moveNode(n, parent, null, sel);
+    } else {
+      const firstChild = [...parent.childNodes].find(visible);
+      if (!inlineNode(parent) && firstChild && lastVisible && inlineNode(firstChild) && inlineNode(lastVisible) && !isElement(list[list.length - 1], 'br'))
+        parent.insertBefore(doc.createElement('br'), parent.firstChild);
+      for (let i = list.length - 1; i >= 0; i--) moveNode(list[i], parent, parent.firstChild, sel);
+    }
+    if (original && editable(original) && !original.firstChild) original.remove();
+    const sibling = parent.nextSibling;
+    if (sibling && editable(sibling) && criteria(sibling)) {
+      if (!inlineNode(parent) && inlineNode(parent.lastChild) && inlineNode(sibling.firstChild) && !isElement(parent.lastChild, 'br'))
+        parent.appendChild(doc.createElement('br'));
+      while (sibling.firstChild) moveNode(sibling.firstChild, parent, null, sel);
+      sibling.remove();
+    }
+    removeExtraneousBreaks(parent);
+    return parent;
+  }
+  function alignmentValue(node) {
+    while (node && (node.nodeType !== 1 || ['inline', 'none'].includes(getComputedStyle(node).display))) node = node.parentNode;
+    if (!node || node.nodeType !== 1) return 'left';
+    const value = alignOf(node).replace(/^-webkit-/, '');
+    return ['center', 'left', 'right', 'justify'].includes(value) ? value : 'left';
+  }
+  function setsAlignment(el) {
+    return el.hasAttribute('align') || !!el.style?.textAlign || el.localName === 'center';
+  }
+  function justify(t, state, align) {
+    const { sel, host } = t, doc = host.ownerDocument;
+    let range = blockExtend(sel.getRangeAt(0));
+    const elements = containedNodes(range).filter((n) => n.nodeType === 1 && editable(n) && setsAlignment(n));
+    for (const el of elements) {
+      el.removeAttribute('align');
+      if (el.style.textAlign) { el.style.removeProperty('text-align'); if (!el.getAttribute('style')) el.removeAttribute('style'); }
+      if (['div', 'span', 'center'].includes(el.localName) && !el.attributes.length) removePreserving(el, sel);
+      else if (el.localName === 'center') {
+        const div = doc.createElement('div');
+        for (const a of Array.from(el.attributes)) div.setAttribute(a.name, a.value);
+        el.parentNode.insertBefore(div, el);
+        while (el.firstChild) moveNode(el.firstChild, div, null, sel);
+        el.remove();
+      }
+    }
+    range = blockExtend(sel.getRangeAt(0));
+    const list = [];
+    for (const n of containedNodes(range)) {
+      const lastNode = list[list.length - 1];
+      if (lastNode && lastNode.contains(n)) continue;
+      if (n.parentElement?.isContentEditable && !(n.nodeType === 1 && notInDiv.has(n.localName)) && alignmentValue(n) !== align) list.push(n);
+    }
+    // Like browsers, new wrappers use the text-align property; existing
+    // aligned divs (attribute or property) absorb adjacent content.
+    const criteria = (el) => isElement(el, 'div') && el.attributes.length === 1 &&
+      (el.getAttribute('align') === align || (el.hasAttribute('style') && el.style.length === 1 && el.style.textAlign === align));
+    const create = () => {
+      const div = doc.createElement('div');
+      div.setAttribute('style', `text-align: ${align};`);
+      return div;
+    };
+    while (list.length) {
+      const sub = [list.shift()];
+      while (list.length && list[0] === sub[sub.length - 1].nextSibling) sub.push(list.shift());
+      wrapNodes(sub, criteria, create, sel);
+    }
+    const types = { left: 'formatJustifyLeft', right: 'formatJustifyRight', center: 'formatJustifyCenter', justify: 'formatJustifyFull' };
+    input(host, types[align]);
+    return true;
+  }
+  function justifyQuery(t, align, kind) {
+    if (!t?.range) return kind === 'value' ? 'left' : false;
+    const range = blockExtend(t.range);
+    const leaves = containedNodes(range).filter((n) => !n.firstChild && editable(n) && visible(n));
+    if (kind === 'value') {
+      const node = leaves[0] || range.startContainer;
+      return alignmentValue(node);
+    }
+    const values = leaves.map(alignmentValue);
+    if (kind === 'mixed') return values.some((v) => v === align) && values.some((v) => v !== align);
+    return values.length > 0 && values.every((v) => v === align);
+  }
+
   const preferences = new Set(['stylewithcss', 'usecss', 'defaultparagraphseparator']);
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
   const richCommands = new Set(['createlink', 'unlink', 'indent', 'outdent', 'removeformat', 'inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
@@ -1132,6 +1397,7 @@
     if (cmd === 'removeformat') return removeFormatting(state,t);
     if (listCommands.has(cmd)) return applyList(t,listCommands.get(cmd),state.separator);
     if (cmd === 'indent' || cmd === 'outdent') return applyIndent(t,cmd === 'indent',state.separator);
+    if (alignments.has(cmd)) return justify(t, state, alignments.get(cmd));
     if (blockCommand(cmd)) return applyBlock(t,cmd,value);
     if (valueFormats.has(cmd)) {
       const normalized = normalizeFormat(cmd, value);
@@ -1238,17 +1504,20 @@
     queryCommandState(name) {
       const state = context(this);
       const cmd = command(name, arguments.length);
+      if (alignments.has(cmd)) return justifyQuery(target(this), alignments.get(cmd), 'state');
       if (blockCommand(cmd)) return blockQuery(target(this),cmd,'state');
       return formats.has(cmd) ? formatState(state, target(this), cmd, false) : cmd === 'stylewithcss' && state.css;
     },
     queryCommandIndeterm(name) {
       const state = context(this), cmd = command(name, arguments.length);
+      if (alignments.has(cmd)) return justifyQuery(target(this), alignments.get(cmd), 'mixed');
       if (blockCommand(cmd)) return blockQuery(target(this),cmd,'mixed');
       return valueFormats.has(cmd) ? selectedValue(state, target(this), cmd, true) : formats.has(cmd) && formatState(state, target(this), cmd, true);
     },
     queryCommandValue(name) {
       const state = context(this);
       const cmd = command(name, arguments.length);
+      if (alignments.has(cmd)) return justifyQuery(target(this), alignments.get(cmd), 'value');
       if (blockCommand(cmd)) return blockQuery(target(this),cmd,'value');
       return valueFormats.has(cmd) ? selectedValue(state, target(this), cmd, false) : cmd === 'defaultparagraphseparator' ? state.separator : '';
     },
