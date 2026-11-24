@@ -929,6 +929,8 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "column-rule-width" => px(s.column_rule_width),
         "column-rule-style" => rabbithole_style::props::multicol::rule_style_css(s.column_rule_style_kw).into(),
         "column-rule-color" => color_css(s.column_rule_color.unwrap_or(s.color)),
+        // (Lists of gap decorations have no shorthand form.)
+        "column-rule" if s.column_rule_list => String::new(),
         "column-rule" => {
             let kw = rabbithole_style::props::multicol::rule_style_css(s.column_rule_style_kw);
             let color = color_css(s.column_rule_color.unwrap_or(s.color));

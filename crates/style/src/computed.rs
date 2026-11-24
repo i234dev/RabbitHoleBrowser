@@ -1899,6 +1899,9 @@ pub struct ComputedStyle {
     pub column_rule_style_kw: u8,
     /// `column-rule-color` (`None` = currentcolor).
     pub column_rule_color: Option<Color>,
+    /// A `column-rule-*` longhand holds a list of values (CSS Gaps 1);
+    /// the first is used.
+    pub column_rule_list: bool,
     /// `break-before` / `break-after` / `break-inside` (see
     /// `props::multicol::BREAK_*`).
     pub break_before: u8,
@@ -2241,6 +2244,7 @@ impl ComputedStyle {
             column_rule_style: BorderStyle::None,
             column_rule_style_kw: 0,
             column_rule_color: None,
+            column_rule_list: false,
             break_before: 0,
             break_after: 0,
             break_inside: 0,

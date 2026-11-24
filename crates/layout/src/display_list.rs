@@ -600,6 +600,25 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// The overflow clip of a box broken across columns: its clip edge
     /// sliced by each fragment, in the fragment's column.
     fn push_piece_clip(&mut self, b: &LayoutBox, p: &crate::multicol::ColPieces) -> Option<u32> {
+        let rects = self.piece_clips(b, p);
+        let mut path = Vec::new();
+        let mut bounds: Option<Rect> = None;
+        for r in rects {
+            bounds = Some(bounds.map_or(r, |u| u.union(&r)));
+            path.push(PathSeg::MoveTo(Point::new(r.x, r.y)));
+            path.push(PathSeg::LineTo(Point::new(r.right(), r.y)));
+            path.push(PathSeg::LineTo(Point::new(r.right(), r.bottom())));
+            path.push(PathSeg::LineTo(Point::new(r.x, r.bottom())));
+            path.push(PathSeg::Close);
+        }
+        let bounds = bounds.unwrap_or_default();
+        self.list.push(DisplayItem::PushClipPath { bounds, path: Arc::new(path), evenodd: false, anchor: Point::new(bounds.x, bounds.y), rounded: None });
+        self.push_scope(HitScope::Clip(bounds))
+    }
+
+    /// The overflow clip rects of a box broken across columns, one per
+    /// fragment (document coordinates).
+    fn piece_clips(&self, b: &LayoutBox, p: &crate::multicol::ColPieces) -> Vec<Rect> {
         use rabbithole_style::{BoxArea, Overflow};
         let s = &b.style;
         let scrolls = |o: Overflow| matches!(o, Overflow::Hidden | Overflow::Scroll | Overflow::Auto);
@@ -612,8 +631,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         };
         let edge = Rect::new(edge.x - margin, edge.y - margin, edge.w + 2.0 * margin, edge.h + 2.0 * margin);
         let (clip_x, clip_y) = b.overflow_clip_axes();
-        let mut path = Vec::new();
-        let mut bounds: Option<Rect> = None;
+        let mut out = Vec::new();
         for piece in &p.pieces {
             // The fragment's slice of the flow, unbounded across.
             let (lo, hi) = (piece.rect.y - piece.dy, piece.rect.bottom() - piece.dy);
@@ -622,17 +640,26 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             if y1 <= y0 || x1 <= x0 {
                 continue;
             }
-            let r = Rect::new(x0 + piece.dx, y0 + piece.dy, x1 - x0, y1 - y0);
-            bounds = Some(bounds.map_or(r, |u| u.union(&r)));
-            path.push(PathSeg::MoveTo(Point::new(r.x, r.y)));
-            path.push(PathSeg::LineTo(Point::new(r.right(), r.y)));
-            path.push(PathSeg::LineTo(Point::new(r.right(), r.bottom())));
-            path.push(PathSeg::LineTo(Point::new(r.x, r.bottom())));
-            path.push(PathSeg::Close);
+            out.push(Rect::new(x0 + piece.dx, y0 + piece.dy, x1 - x0, y1 - y0));
         }
-        let bounds = bounds.unwrap_or_default();
-        self.list.push(DisplayItem::PushClipPath { bounds, path: Arc::new(path), evenodd: false, anchor: Point::new(bounds.x, bounds.y), rounded: None });
-        self.push_scope(HitScope::Clip(bounds))
+        out
+    }
+
+    /// Deferred descendants of a clipping box broken across columns are
+    /// clipped by the fragment they are in (`at` indexes its clip).
+    fn clip_deferred_by_pieces(&self, c: &LayoutBox, out: &mut [Deferred<'t>], at: usize) {
+        let Some(p) = c.col_pieces.as_deref() else { return };
+        let clips = self.piece_clips(c, p);
+        for d in out {
+            let r = d.b.rect;
+            let best = clips.iter().max_by(|a, b| {
+                let area = |x: &Rect| { let i = x.intersect(&r); i.w.max(0.0) * i.h.max(0.0) };
+                area(a).total_cmp(&area(b))
+            });
+            if let (Some(best), Some(slot)) = (best, d.clips.get_mut(at)) {
+                *slot = *best;
+            }
+        }
     }
 
     fn pop_clip(&mut self, saved: Option<u32>) {
@@ -1176,7 +1203,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                     if c.clips && !c.rect.is_empty() {
                         inner.push(self.overflow_clip_rect(c));
                     }
+                    let before = out.len();
                     self.collect_hoisted(c, c.padding_rect(), out, order, &inner, &inner);
+                    if c.clips && !c.rect.is_empty() {
+                        self.clip_deferred_by_pieces(c, &mut out[before..], inner.len() - 1);
+                    }
                 }
             } else if c.clips && !c.rect.is_empty() {
                 // A non-positioned clipping box clips in-flow (relative,
@@ -1184,7 +1215,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 // positioned ones (their containing block is outside it).
                 let mut fc = flow_clips.to_vec();
                 fc.push(self.overflow_clip_rect(c));
+                let before = out.len();
                 self.collect_deferred(c, cb_for_children, out, order, &fc, abs_clips);
+                self.clip_deferred_by_pieces(c, &mut out[before..], fc.len() - 1);
             } else {
                 self.collect_deferred(c, cb_for_children, out, order, flow_clips, abs_clips);
             }

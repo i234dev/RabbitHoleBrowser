@@ -486,6 +486,12 @@ impl LayoutBox {
         }
     }
 
+    /// The padding box size of a box broken across columns, as if it were
+    /// not (`None` when unbroken).
+    pub fn unfragmented_padding_size(&self) -> Option<(f32, f32)> {
+        self.col_pieces.as_ref().map(|p| (p.padding.w, p.padding.h))
+    }
+
     /// Is this an inline-level box (participates in a line)?
     pub fn is_inline_level(&self) -> bool {
         self.flow.is_in_flow() && match self.kind {

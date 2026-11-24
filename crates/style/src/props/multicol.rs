@@ -251,9 +251,23 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             Some("none") => style.column_span_all = false,
             _ => {}
         },
+        "column-rule-width" | "column-rule-style" | "column-rule-color" if !single || matches!(c0.first(), Some(Token::Function(f)) if f.eq_ignore_ascii_case("repeat")) => {
+            // A list of gap decorations (CSS Gaps 1 §4): kept as a list,
+            // the first value of which is painted.
+            let valid = |c: &[Token]| match name {
+                "column-rule-width" => rule_width(c, ctx).is_some(),
+                "column-rule-style" => values::ident(c).is_some_and(|kw| rule_style(&kw).is_some()),
+                _ => values::parse_color_component(c).is_some(),
+            };
+            let repeat = |c: &[Token]| matches!(c.first(), Some(Token::Function(f)) if f.eq_ignore_ascii_case("repeat"));
+            if comps.iter().all(|c| valid(c) || repeat(c)) {
+                style.column_rule_list = true;
+            }
+        }
         "column-rule-width" if single => {
             if let Some(w) = rule_width(c0, ctx) {
                 style.column_rule_width = w;
+                style.column_rule_list = false;
             }
         }
         "column-rule-style" if single => {
@@ -261,12 +275,19 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 if let (Some(s), Some(k)) = (rule_style(&kw), rule_style_kw(&kw)) {
                     style.column_rule_style = s;
                     style.column_rule_style_kw = k;
+                    style.column_rule_list = false;
                 }
             }
         }
         "column-rule-color" if single => match values::parse_color_component(c0) {
-            Some(ColorValue::Color(col)) => style.column_rule_color = Some(col),
-            Some(ColorValue::CurrentColor) => style.column_rule_color = None,
+            Some(ColorValue::Color(col)) => {
+                style.column_rule_color = Some(col);
+                style.column_rule_list = false;
+            }
+            Some(ColorValue::CurrentColor) => {
+                style.column_rule_color = None;
+                style.column_rule_list = false;
+            }
             None => {}
         },
         "column-rule" => {
@@ -290,6 +311,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             style.column_rule_style_kw = k;
             style.column_rule_width = width.unwrap_or(3.0);
             style.column_rule_color = color.flatten();
+            style.column_rule_list = false;
         }
         "break-before" | "break-after" if single => {
             if let Some(v) = values::ident(c0).and_then(|kw| break_between(&kw)) {

@@ -1063,15 +1063,16 @@ impl<'a> Layouter<'a> {
         };
         if center {
             crate::table::translate_contents(b, 0.0, (h - content_h) / 2.0);
-        } else if h > content_h && matches!(b.formatting, Formatting::Block | Formatting::Inline) && b.kind != BoxKind::TableCell {
+        } else if (h > content_h || style.align_content_flags.has(rabbithole_style::AlignFlags::UNSAFE)) && matches!(b.formatting, Formatting::Block | Formatting::Inline) && b.kind != BoxKind::TableCell {
             // `align-content` on a block container (CSS Align §5.4):
-            // the contents as one alignment subject.
+            // the contents as one alignment subject (overflowing at the
+            // start too when `unsafe`).
             let shift = match style.align_content {
                 rabbithole_style::ContentDistribution::Center | rabbithole_style::ContentDistribution::SpaceAround | rabbithole_style::ContentDistribution::SpaceEvenly => (h - content_h) / 2.0,
                 rabbithole_style::ContentDistribution::FlexEnd => h - content_h,
                 _ => 0.0,
             };
-            if shift > 0.0 {
+            if shift != 0.0 {
                 crate::table::translate_contents(b, 0.0, shift);
             }
         }

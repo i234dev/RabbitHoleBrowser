@@ -114,7 +114,6 @@ fn fragmentable_box(c: &LayoutBox) -> bool {
         && !(c.clips && [c.style.overflow_x, c.style.overflow_y].iter().any(|o| matches!(o, Overflow::Hidden | Overflow::Auto | Overflow::Scroll)))
         && !c.wm_wrapper
         && !c.style.multicol
-        && !c.style.establishes_fixed_containing_block()
         // (Size containment makes a box monolithic, CSS Contain 2 §3.)
         && !c.style.contain_size
 }
@@ -153,6 +152,13 @@ impl Ev {
     }
 }
 
+/// Does `c` start a context in which descendants are not spanners of the
+/// enclosing flow (a new formatting context, or a containing block for
+/// fixed-position descendants)?
+fn spanner_barrier(c: &LayoutBox) -> bool {
+    c.bfc_root || c.style.establishes_fixed_containing_block() || c.style.contain_paint || c.style.contain_layout
+}
+
 /// Is `c` a spanner of the multicol flow it is in (Multicol 1 §6.1)?
 fn is_spanner(c: &LayoutBox) -> bool {
     c.style.column_span_all && c.flow == Flow::InFlow && !c.is_inline_level() && c.kind != BoxKind::Text
@@ -176,6 +182,8 @@ fn inline_order(b: &LayoutBox) -> Vec<(f32, bool, usize)> {
 #[derive(Default)]
 struct Collector {
     evs: Vec<Ev>,
+    /// Inside a nested formatting context (no spanners there).
+    nested: u32,
     /// Height changes of the spanners, in tree order.
     deltas: std::collections::VecDeque<f32>,
 }
@@ -221,7 +229,10 @@ impl Collector {
             mt: c.margin.top,
             solid: false,
         });
+        let barrier = spanner_barrier(c) as u32;
+        self.nested += barrier;
         self.contents(c);
+        self.nested -= barrier;
         let empty = self.evs.len() == at + 1;
         if empty && c.content_rect.h <= 0.01 {
             // Only borders and padding: unbreakable.
@@ -280,7 +291,7 @@ impl Collector {
             match c.flow {
                 Flow::Absolute => {}
                 Flow::FloatLeft | Flow::FloatRight => self.float(c),
-                Flow::InFlow if is_spanner(c) => {
+                Flow::InFlow if is_spanner(c) && self.nested == 0 => {
                     let delta = self.deltas.pop_front().unwrap_or(0.0);
                     self.evs.push(Ev::Span { top: c.rect.y, h: c.rect.h, mt: c.margin.top, mb: c.margin.bottom, delta });
                     prev = NONE;
@@ -419,7 +430,7 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
         let start = evs[at].top().map_or(t, |st| st + (t - top));
         let amount = target - start;
         if amount <= 0.0 {
-            return;
+            return false;
         }
         struts[at] += amount;
         pushes.push((i, at, amount));
@@ -427,6 +438,9 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
         for p in &mut pos[at..i] {
             *p += amount;
         }
+        // (A first child leaving its container's start behind breaks
+        // inside the container's padding.)
+        at == i && i > a && matches!(evs[i - 1], Ev::Start { edge: true, .. })
     };
     while i < b {
         if budget == 0 {
@@ -464,7 +478,8 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                     if t > g.y0 + EPS {
                         let k = g.col(t - EPS);
                         let target = g.start(k + 1) + if force_at == i { 0.0 } else { mt.max(0.0) };
-                        push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
+                        let glue = push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
+                        violated |= glue && force_at == i;
                     }
                 } else if avoid_inside && h <= g.colh + EPS && t + h > g.end(k) + EPS && t > g.start(k) + EPS {
                     shortfall = shortfall.min(t + h - g.end(k));
@@ -473,7 +488,7 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                         continue;
                     }
                     violated |= avoid_before;
-                    push(i, t, g.end(k), &mut off, &mut struts, &mut pushes, &mut pos);
+                    let _ = push(i, t, g.end(k), &mut off, &mut struts, &mut pushes, &mut pos);
                 }
                 if force_at == i {
                     force_at = usize::MAX;
@@ -507,7 +522,8 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                     if t > g.y0 + EPS {
                         let k = g.col(t - EPS);
                         let target = g.start(k + 1) + if force_at == i { 0.0 } else { mt.max(0.0) };
-                        push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
+                        let glue = push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
+                        violated |= glue && force_at == i;
                     }
                 } else if bt > g.end(k) + EPS && t > g.start(k) + EPS {
                     shortfall = shortfall.min(bt - g.end(k));
@@ -520,7 +536,7 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                     // along breaks inside the container's padding.)
                     let glue = i > a && matches!(evs[i - 1], Ev::Start { edge: true, .. }) && at_column_top(g, pos[i - 1]);
                     violated |= avoid_before || glue || inside_avoid(evs, a, i);
-                    push(i, t, g.end(k), &mut off, &mut struts, &mut pushes, &mut pos);
+                    let _ = push(i, t, g.end(k), &mut off, &mut struts, &mut pushes, &mut pos);
                 }
                 if force_at == i {
                     force_at = usize::MAX;
@@ -700,6 +716,8 @@ struct Mover<'p> {
     /// being moved.
     locked: &'p [bool],
     lock: Option<usize>,
+    /// Inside a nested formatting context (no spanners there).
+    nested: u32,
 }
 
 impl Mover<'_> {
@@ -733,7 +751,7 @@ impl Mover<'_> {
         let start = c.rect.y + self.off;
         if self.lock.is_none() && fragmentable_box(c) && self.g.col(start) != self.g.col((c.rect.bottom() + self.off - EPS).max(start)) {
             let sets = [Set { first: 0, end: 0, g: self.g, flow_end: f32::INFINITY }];
-            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, positioned: 1, first: None, locked: &[], lock: None };
+            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, positioned: 1, first: None, locked: &[], lock: None, nested: 1 };
             sub.contents(c);
             let end = (c.rect.bottom() + self.off).max(start);
             sub.sets = &sets;
@@ -821,7 +839,7 @@ impl Mover<'_> {
             match c.flow {
                 Flow::Absolute => self.move_abs(c),
                 Flow::FloatLeft | Flow::FloatRight => self.float(c),
-                Flow::InFlow if is_spanner(c) => {
+                Flow::InFlow if is_spanner(c) && self.nested == 0 => {
                     let at = self.i;
                     self.next();
                     if let Some(&(_, dy)) = self.spans.iter().find(|s| s.0 == at) {
@@ -850,7 +868,10 @@ impl Mover<'_> {
         let outer_first = self.first.take();
         let positioned = crate::block::contains_positioned(&c.style);
         self.positioned += positioned as u32;
+        let barrier = spanner_barrier(c) as u32;
+        self.nested += barrier;
         self.contents(c);
+        self.nested -= barrier;
         self.positioned -= positioned as u32;
         self.next();
         let end = (c.rect.bottom() + self.off).max(start);
@@ -961,14 +982,37 @@ fn spanner_widths(lay: &mut Layouter, b: &mut LayoutBox, full: &Cb, out: &mut st
             let top = c.rect.y;
             lay.layout_block(c, full, top, &mut bfc, WidthMode::Fill);
             out.push_back(c.rect.h - old);
-        } else if fragmentable(c) {
+        } else if fragmentable(c) && !spanner_barrier(c) {
             spanner_widths(lay, c, full, out);
         }
     }
 }
 
 fn has_spanner(b: &LayoutBox) -> bool {
-    b.formatting == Formatting::Block && b.children.iter().any(|c| c.flow == Flow::InFlow && !c.clamped && (is_spanner(c) || (fragmentable(c) && has_spanner(c))))
+    b.formatting == Formatting::Block && b.children.iter().any(|c| c.flow == Flow::InFlow && !c.clamped && (is_spanner(c) || (fragmentable(c) && !spanner_barrier(c) && has_spanner(c))))
+}
+
+/// Intrinsic (min, max) widths of a multicol container whose direct
+/// children include spanners: the columns hold the other children, the
+/// spanners take the whole width (Blink's model).
+pub(crate) fn spanner_intrinsic(lay: &mut Layouter, b: &mut LayoutBox) -> Option<(f32, f32)> {
+    if b.formatting != Formatting::Block || !b.children.iter().any(|c| c.flow == Flow::InFlow && is_spanner(c)) {
+        return None;
+    }
+    let style = b.style.clone();
+    let (mut cols, mut span) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32));
+    for c in &mut b.children {
+        if !(c.is_in_flow() || c.flow.is_float()) {
+            continue;
+        }
+        let ex = crate::intrinsic::extras_px(&c.style);
+        let (lo, hi) = lay.intrinsic(c);
+        let t = if c.flow == Flow::InFlow && is_spanner(c) { &mut span } else { &mut cols };
+        t.0 = t.0.max(lo + ex);
+        t.1 = t.1.max(hi + ex);
+    }
+    let (lo, hi) = intrinsic(&style, cols);
+    Some((lo.max(span.0), hi.max(span.1)))
 }
 
 impl Layouter<'_> {
@@ -1071,7 +1115,7 @@ struct FlowParams {
 /// Choose the column heights of a laid out flow (the contents of `root`)
 /// and move its pieces into columns; returns the rows of columns.
 fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, p: FlowParams) -> (Vec<RowOut>, f32) {
-    let mut collector = Collector { evs: Vec::new(), deltas };
+    let mut collector = Collector { evs: Vec::new(), deltas, nested: 0 };
     collector.contents(root);
     let evs = collector.evs;
     let n = p.n.max(1) as usize;
@@ -1192,12 +1236,12 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
     if sets.is_empty() {
         // (Spanners only.)
         let g = Geometry { y0: p.y0, colh: 1.0, lift: 0.0, step: p.step, per_row: usize::MAX, row_gap: 0.0 };
-        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None };
+        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None, nested: 0 };
         mover.contents(root);
         return (rows, phys);
     }
     let g = sets[0].g;
-    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None };
+    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None, nested: 0 };
     mover.contents(root);
     (rows, phys)
 }

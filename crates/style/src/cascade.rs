@@ -2448,8 +2448,12 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.column_rule_style = from.column_rule_style;
             to.column_rule_style_kw = from.column_rule_style_kw;
             to.column_rule_color = from.column_rule_color;
+            to.column_rule_list = from.column_rule_list;
         }
-        "column-rule-width" | "-webkit-column-rule-width" | "-moz-column-rule-width" => to.column_rule_width = from.column_rule_width,
+        "column-rule-width" | "-webkit-column-rule-width" | "-moz-column-rule-width" => {
+            to.column_rule_width = from.column_rule_width;
+            to.column_rule_list = from.column_rule_list;
+        }
         "column-rule-style" | "-webkit-column-rule-style" | "-moz-column-rule-style" => {
             to.column_rule_style = from.column_rule_style;
             to.column_rule_style_kw = from.column_rule_style_kw;

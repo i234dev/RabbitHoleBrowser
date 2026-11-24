@@ -135,11 +135,14 @@ impl<'a> Layouter<'a> {
     /// (min, max) of a box's contents by formatting context.
     #[inline]
     fn intrinsic_contents(&mut self, b: &mut LayoutBox) -> (f32, f32) {
-        let r = self.intrinsic_flow(b);
         if b.style.multicol && matches!(b.formatting, Formatting::Inline | Formatting::Block) {
+            if let Some(r) = crate::multicol::spanner_intrinsic(self, b) {
+                return r;
+            }
+            let r = self.intrinsic_flow(b);
             return crate::multicol::intrinsic(&b.style, r);
         }
-        r
+        self.intrinsic_flow(b)
     }
 
     #[inline]

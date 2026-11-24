@@ -1688,6 +1688,11 @@ impl Engine {
     /// box that does not clip reports its padding box (nothing scrolled).
     pub fn element_scroll(&self, page: &Page, node: NodeId) -> Option<((f32, f32), (f32, f32))> {
         let b = page.layout.box_of(&page.doc, node)?;
+        if let Some(size) = b.unfragmented_padding_size().filter(|_| !b.clips) {
+            // Broken across columns: its scrolling area is that of the
+            // unbroken box (CSSOM View in fragmentation, as browsers do).
+            return Some(((0.0, 0.0), size));
+        }
         let area = scrolling_area(b);
         if b.clips {
             Some((b.scroll_offset, (area.0.max(b.scroll_width), area.1.max(b.scroll_height))))
