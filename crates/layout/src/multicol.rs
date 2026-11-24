@@ -329,6 +329,12 @@ struct Geometry {
     y0: f32,
     colh: f32,
     lift: f32,
+    /// Horizontal distance between adjacent columns.
+    step: f32,
+    /// Columns per row (`column-wrap`; `usize::MAX` without wrapping) and
+    /// the gap between rows.
+    per_row: usize,
+    row_gap: f32,
 }
 
 impl Geometry {
@@ -348,7 +354,12 @@ impl Geometry {
     }
     /// Vertical translation from the flow into column `k`.
     fn dy(&self, k: usize) -> f32 {
-        -self.lift - k as f32 * self.colh
+        let row = (k / self.per_row) as f32;
+        -self.lift - k as f32 * self.colh + row * (self.colh + self.row_gap)
+    }
+    /// Horizontal translation from the flow into column `k`.
+    fn dx(&self, k: usize) -> f32 {
+        (k % self.per_row) as f32 * self.step
     }
 }
 
@@ -506,6 +517,13 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                 }
             }
         }
+        if let Ev::End { bottom, .. } = evs[i] {
+            // (A container's own extent uses columns too.)
+            let bt = bottom + off;
+            if bt > g.y0 + EPS {
+                used = used.max(g.col(bt - EPS) + 1);
+            }
+        }
         i += 1;
     }
     struts.truncate(n);
@@ -639,7 +657,6 @@ struct Mover<'p> {
     i: usize,
     off: f32,
     g: Geometry,
-    step: f32,
     /// Nesting depth of positioned containers inside the flow (their
     /// absolutely positioned descendants move with them).
     positioned: u32,
@@ -662,7 +679,7 @@ impl Mover<'_> {
     fn shift(&mut self, top: f32) -> (f32, f32) {
         let t = top + self.off;
         let k = self.g.col(t);
-        let d = (k as f32 * self.step, self.off + self.g.dy(k));
+        let d = (self.g.dx(k), self.off + self.g.dy(k));
         if self.first.is_none() {
             self.first = Some(d);
         }
@@ -679,14 +696,14 @@ impl Mover<'_> {
         let start = c.rect.y + self.off;
         if fragmentable_box(c) && self.g.col(start) != self.g.col((c.rect.bottom() + self.off - EPS).max(start)) {
             let sets = [Set { first: 0, end: 0, g: self.g, flow_end: f32::INFINITY }];
-            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, step: self.step, positioned: 1, first: None };
+            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, positioned: 1, first: None };
             sub.contents(c);
             let end = (c.rect.bottom() + self.off).max(start);
             sub.sets = &sets;
             sub.fragment(c, start, end);
         } else {
             let k = self.g.col(start);
-            c.translate(k as f32 * self.step, self.off + self.g.dy(k));
+            c.translate(self.g.dx(k), self.off + self.g.dy(k));
         }
     }
 
@@ -838,7 +855,7 @@ impl Mover<'_> {
         }
         if parts.len() == 1 {
             let (g, k, _, _) = parts[0];
-            let (dx, dy) = (k as f32 * self.step, g.dy(k));
+            let (dx, dy) = (g.dx(k), g.dy(k));
             c.rect = border.translate(dx, dy);
             c.content_rect = content.translate(dx, dy);
             if growth.abs() > EPS {
@@ -853,7 +870,7 @@ impl Mover<'_> {
         let mut union: Option<Rect> = None;
         let mut content_union: Option<Rect> = None;
         for (g, k, lo, hi) in parts {
-            let (dx, dy) = (k as f32 * self.step, g.dy(k));
+            let (dx, dy) = (g.dx(k), g.dy(k));
             let rect = Rect::new(border.x + dx, lo + dy, border.w, (hi - lo).max(0.0));
             union = Some(union.map_or(rect, |u| u.union(&rect)));
             let (clo, chi) = (lo.max(content.y), hi.min(content.bottom()));
@@ -940,9 +957,17 @@ impl Layouter<'_> {
         b.content_rect.w = saved.w;
         let mut deltas = std::collections::VecDeque::new();
         if has_spanner(b) {
-            spanner_widths(self, b, &Cb { x: cb.x, width: avail_w, height: None }, &mut deltas);
+            spanner_widths(self, b, &Cb { x: cb.x, width: avail_w, height: cb.height }, &mut deltas);
         }
-        let (rows, end) = fragment_flow(b, deltas, FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step, trim: style.margin_trim });
+        // `column-wrap: auto` wraps when the columns have a height.
+        let wrap = match style.column_wrap {
+            1 => false,
+            2 => true,
+            _ => style.column_height.is_some(),
+        };
+        let row_gap = if style.row_gap_normal { 0.0 } else { style.row_gap.resolve_or_zero(cb.height.unwrap_or(0.0)).max(0.0) };
+        let params = FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step, trim: style.margin_trim, column_height: style.column_height, wrap, row_gap };
+        let (rows, end) = fragment_flow(b, deltas, params);
         let mut rules = Vec::new();
         for r in &rows {
             // The rules of a last row (after the last spanner) reach the
@@ -967,6 +992,11 @@ struct FlowParams {
     step: f32,
     /// The container's `margin-trim`.
     trim: u8,
+    /// `column-height` (Multicol 2), whether columns wrap into rows, and
+    /// the gap between rows.
+    column_height: Option<f32>,
+    wrap: bool,
+    row_gap: f32,
 }
 
 /// Choose the column heights of a laid out flow (the contents of `root`)
@@ -1006,17 +1036,62 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
             // The height left for the last row of a container with a
             // height limit.
             let room = p.avail.map(|h| (p.y0 + h - phys).max(0.0));
-            let fixed = if last && p.fill_auto { room } else { None };
+            // (Wrapping columns are as tall as `column-height`, else as the
+            // container.)
+            let fixed = if p.column_height.is_some() { p.column_height } else if last && (p.fill_auto || p.wrap) { room } else { None };
             let cap = if last { room } else { None };
             let (colh, plan) = choose_height(&evs, a, b, y0, phys, total, n, fixed, cap, off);
-            for i in a..b {
-                struts[i] += plan.struts[i];
+            let colh = if fixed.is_some() { floor(colh) } else { colh };
+            let per_row = if p.wrap { n } else { usize::MAX };
+            let g = Geometry { y0, colh: floor(colh), lift: y0 - phys, step: p.step, per_row, row_gap: p.row_gap };
+            let used = plan.used.max(1);
+            let count = if p.wrap { used.div_ceil(n) } else { 1 };
+            // With wrapping rows and `column-fill: balance`, the last row
+            // is balanced (Multicol 2 §7).
+            let split = (count > 1 && !p.fill_auto).then(|| {
+                let k = (count - 1) * n;
+                let mut o = off;
+                let j = (a..b).find(|&i| {
+                    o += plan.struts[i];
+                    evs[i].top().is_some_and(|t| g.col(t + o) >= k)
+                });
+                (j, k)
+            });
+            match split {
+                Some((Some(j), k)) if j > a => {
+                    for i in a..j {
+                        struts[i] += plan.struts[i];
+                    }
+                    let f = g.start(k);
+                    sets.push(Set { first: a, end: j, g, flow_end: f });
+                    for r in 0..count - 1 {
+                        rows.push(RowOut { top: phys, height: colh, used: (used - r * n).min(n) });
+                        phys += colh + p.row_gap;
+                    }
+                    let off_j = off + plan.struts[a..j].iter().sum::<f32>();
+                    let rest = (strip_end + plan.off - f).max(0.0);
+                    let (h2, plan2) = choose_height(&evs, j, b, f, phys, rest, n, None, Some(colh), off_j);
+                    for i in j..b {
+                        struts[i] += plan2.struts[i];
+                    }
+                    let g2 = Geometry { y0: f, colh: floor(h2), lift: f - phys, step: p.step, per_row, row_gap: p.row_gap };
+                    off = plan2.off;
+                    sets.push(Set { first: j, end: b, g: g2, flow_end: strip_end + off });
+                    rows.push(RowOut { top: phys, height: h2, used: plan2.used.clamp(1, n) });
+                    phys += h2;
+                }
+                _ => {
+                    for i in a..b {
+                        struts[i] += plan.struts[i];
+                    }
+                    off = plan.off;
+                    sets.push(Set { first: a, end: b, g, flow_end: strip_end + off });
+                    for r in 0..count {
+                        rows.push(RowOut { top: phys, height: colh, used: if p.wrap { (used - r * n).min(n) } else { used } });
+                        phys += colh + if r + 1 < count { p.row_gap } else { 0.0 };
+                    }
+                }
             }
-            let g = Geometry { y0, colh: floor(colh), lift: y0 - phys };
-            off = plan.off;
-            sets.push(Set { first: a, end: b, g, flow_end: strip_end + off });
-            rows.push(RowOut { top: phys, height: colh, used: plan.used.max(1) });
-            phys += colh;
         }
         let Some(Ev::Span { top, h, mut mt, mut mb, delta }) = evs.get(b).copied() else { break };
         // `margin-trim` on the container trims a spanner's margins at its
@@ -1043,12 +1118,13 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
     phys += pending_mb;
     if sets.is_empty() {
         // (Spanners only.)
-        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g: Geometry { y0: p.y0, colh: 1.0, lift: 0.0 }, step: p.step, positioned: 0, first: None };
+        let g = Geometry { y0: p.y0, colh: 1.0, lift: 0.0, step: p.step, per_row: usize::MAX, row_gap: 0.0 };
+        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None };
         mover.contents(root);
         return (rows, phys);
     }
     let g = sets[0].g;
-    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, step: p.step, positioned: 0, first: None };
+    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None };
     mover.contents(root);
     (rows, phys)
 }
@@ -1057,7 +1133,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
 /// `total` tall, the row at document position `phys`), with its plan.
 #[allow(clippy::too_many_arguments)]
 fn choose_height(evs: &[Ev], a: usize, b: usize, y0: f32, phys: f32, total: f32, n: usize, fixed: Option<f32>, cap: Option<f32>, off: f32) -> (f32, Plan) {
-    let geom = |h: f32| Geometry { y0, colh: h.max(1.0), lift: y0 - phys };
+    let geom = |h: f32| Geometry { y0, colh: h.max(1.0), lift: y0 - phys, step: 0.0, per_row: usize::MAX, row_gap: 0.0 };
     if let Some(h) = fixed {
         return (h.max(0.0), paginate(evs, a, b, &geom(h), off));
     }
@@ -1123,7 +1199,7 @@ mod tests {
     #[test]
     fn pieces_crossing_a_column_end_move_to_the_next_column() {
         let evs = [leaf(0.0, 40.0), leaf(40.0, 80.0), leaf(80.0, 120.0)];
-        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0 }, 0.0);
+        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts, vec![0.0, 0.0, 20.0]);
         assert_eq!(plan.used, 2);
         assert_eq!(plan.shortfall, 20.0);
@@ -1143,7 +1219,7 @@ mod tests {
         let evs: Vec<Ev> = (0..5).map(|i| line(i, i as f32 * 20.0)).collect();
         // Four lines fit in a 90px column; the last one alone would be a
         // widow: the fourth line moves on too.
-        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 90.0, lift: 0.0 }, 0.0);
+        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 90.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts[3], 30.0);
         assert_eq!(plan.used, 2);
     }
@@ -1154,7 +1230,7 @@ mod tests {
         if let Ev::Leaf { forced, .. } = &mut evs[1] {
             *forced = true;
         }
-        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0 }, 0.0);
+        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts[1], 90.0);
         assert_eq!(plan.used, 2);
     }

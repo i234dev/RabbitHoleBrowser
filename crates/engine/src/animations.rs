@@ -434,11 +434,11 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         (FitTolerance, Val::Tolerance(l)) => s.fit_tolerance = *l,
         (ColumnCount, Val::Count(n)) => {
             s.column_count = *n;
-            s.multicol = s.column_count.is_some() || s.column_width.is_some();
+            s.multicol = s.column_count.is_some() || s.column_width.is_some() || s.column_height.is_some();
         }
         (ColumnWidth, Val::OptPx(w)) => {
             s.column_width = w.map(|w| w.max(0.0));
-            s.multicol = s.column_count.is_some() || s.column_width.is_some();
+            s.multicol = s.column_count.is_some() || s.column_width.is_some() || s.column_height.is_some();
         }
         (ColumnRuleWidth, Val::F(w)) => s.column_rule_width = w.max(0.0),
         (ColumnRuleColor, Val::C(c)) => s.column_rule_color = Some(*c),
@@ -456,7 +456,10 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         }
         (ColumnFill, Val::Keyword(k)) => s.column_fill_auto = *k != 0,
         (ColumnSpan, Val::Keyword(k)) => s.column_span_all = *k != 0,
-        (ColumnHeight, Val::OptPx(h)) => s.column_height = h.map(|h| h.max(0.0)),
+        (ColumnHeight, Val::OptPx(h)) => {
+            s.column_height = h.map(|h| h.max(0.0));
+            s.multicol = s.column_count.is_some() || s.column_width.is_some() || s.column_height.is_some();
+        }
         (ColumnWrap, Val::Keyword(k)) => s.column_wrap = *k,
         (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
         (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),

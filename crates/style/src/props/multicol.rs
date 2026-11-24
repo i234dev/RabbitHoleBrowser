@@ -156,7 +156,7 @@ fn positive_integer(c: &[Token]) -> Option<u16> {
 }
 
 fn set_multicol(style: &mut ComputedStyle) {
-    style.multicol = style.column_count.is_some() || style.column_width.is_some();
+    style.multicol = style.column_count.is_some() || style.column_width.is_some() || style.column_height.is_some();
 }
 
 /// Apply a multi-column / fragmentation property. Returns true when the
@@ -220,6 +220,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         "column-height" if single => {
             if let Some(h) = column_width(c0, ctx) {
                 style.column_height = h;
+                set_multicol(style);
             }
         }
         "column-wrap" if single => match values::ident(c0).as_deref() {

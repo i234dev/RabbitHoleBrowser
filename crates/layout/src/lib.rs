@@ -43,6 +43,8 @@ mod tests_css21;
 mod tests_text;
 #[cfg(test)]
 mod tests_wm;
+#[cfg(test)]
+mod tests_multicol;
 
 pub use damage::{damage as display_list_damage, merge_rects as merge_damage};
 pub use incremental::{layout_incremental, take_cache_stats, LayoutDamage};
