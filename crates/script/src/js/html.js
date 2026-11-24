@@ -1002,7 +1002,7 @@
     if (h === null) return null;
     try { return new URL(h, document.baseURI); } catch (e) { return null; }
   };
-  for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement]) {
+  for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement, g.MathMLAnchorElement]) {
     if (!C) continue;
     for (const k of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) {
       const set = k === 'origin' ? undefined : function (v) {

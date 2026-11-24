@@ -2121,7 +2121,8 @@ fn option_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
 /// option's text; setting writes the attribute.
 fn option_label_get(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "label")?;
-    match get_attribute(n, "label") {
+    // (The label attribute in no namespace, not a namespaced one.)
+    match find_attr_ns(n, None, "label").map(|(_, v)| v) {
         Some(l) => Ok(Value::str(&l)),
         None => option_text_get(realm, this, args),
     }
@@ -2319,6 +2320,8 @@ fn img_current_src(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     let n = this_node(realm, &this, "currentSrc")?;
     match img_engine_state(n) {
         Some((_, _, _, src)) if !src.is_empty() => Ok(Value::str(&src)),
+        // No current request: "" for an absent or empty src.
+        _ if get_attribute(n, "src").is_none_or(|s| s.is_empty()) => Ok(Value::str("")),
         _ => img_src_get(realm, this, args),
     }
 }
@@ -3014,6 +3017,16 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(mathml, "dataset", Some(e_dataset), None, ACC);
     realm.define_method(mathml, "focus", 0, e_focus);
     realm.define_method(mathml, "blur", 0, e_blur);
+    // MathML <a> (MathML Core): href, target and HyperlinkElementUtils.
+    let ma = define_class(realm, "MathMLAnchorElement", Some("MathMLElement"), illegal_ctor);
+    realm.define_accessor(ma, "href", Some(a_href_get), Some(a_href_set), ACC);
+    for (name, g) in [("protocol", a_protocol as rabbithole_js::NativeFn), ("host", a_host), ("hostname", a_hostname), ("port", a_port), ("pathname", a_pathname), ("search", a_search), ("hash", a_hash), ("origin", a_origin)] {
+        realm.define_accessor(ma, name, Some(g), None, ACC);
+    }
+    reflect(realm, ma, "target", "target", Reflect::Str);
+    reflect(realm, ma, "rel", "rel", Reflect::Str);
+    realm.define_accessor(ma, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
+    realm.define_method(ma, "toString", 0, a_to_string);
     let svg = define_class(realm, "SVGElement", Some("Element"), illegal_ctor);
     // GlobalEventHandlers: on HTML, SVG and MathML elements (not Element).
     for p in [html, mathml, svg] {

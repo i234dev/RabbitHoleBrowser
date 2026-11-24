@@ -70,7 +70,7 @@ struct Collector {
 
 impl Collector {
     fn style(&self, id: NodeId) -> Option<Rc<ComputedStyle>> {
-        with_env(|env| env.computed_style(id))
+        style_of(self.doc, id)
     }
 
     fn info(&self, id: NodeId) -> Node {
@@ -409,10 +409,21 @@ fn assemble(items: Vec<Item>) -> String {
     res
 }
 
+/// The computed style of `id` in the main document or a frame's document.
+fn style_of(doc: u32, id: NodeId) -> Option<Rc<ComputedStyle>> {
+    if doc == 0 {
+        with_env(|env| env.computed_style(id))
+    } else if doc & FRAME_DOC != 0 {
+        with_env(|env| env.frame_computed_style((doc & !FRAME_DOC) as u64, id))
+    } else {
+        None
+    }
+}
+
 /// Is `n` being rendered (connected, in the rendered document, no
 /// display:none ancestor and not inside replaced content)?
 fn being_rendered(n: NodeRef) -> bool {
-    if n.doc != 0 {
+    if n.doc != 0 && n.doc & FRAME_DOC == 0 {
         return false;
     }
     let mut chain = Vec::new();
@@ -432,7 +443,7 @@ fn being_rendered(n: NodeRef) -> bool {
     }
     for (i, &id) in chain.iter().enumerate() {
         let Some((tag, ns)) = with_doc(n.doc, |doc| doc.element(id).map(|e| (e.tag.clone(), e.ns.clone()))) else { continue };
-        let Some(style) = with_env(|env| env.computed_style(id)) else { return false };
+        let Some(style) = style_of(n.doc, id) else { return false };
         if style.display.is_none() {
             return false;
         }
