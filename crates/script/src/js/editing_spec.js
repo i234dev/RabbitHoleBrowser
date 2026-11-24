@@ -2855,6 +2855,19 @@ function forceValue(node, command, newValue) {
     }
 
     // "Let new parent be null."
+    // RabbitHole: like other browsers, new formatting goes inside an inline
+    // formatting element that does not itself set this command's value.
+    if (command != "createlink"
+    && command != "unlink"
+    && isHtmlElement(node, formattingElementNames)
+    && node.hasChildNodes()
+    && getSpecifiedCommandValue(node, command) === null) {
+        [].slice.call(node.childNodes).forEach(function(child) {
+            forceValue(child, command, newValue);
+        });
+        return;
+    }
+
     var newParent = null;
 
     // "If the CSS styling flag is false:"
@@ -3175,8 +3188,9 @@ commands.backcolor = {
         if (/^([0-9a-fA-F]{3}){1,2}$/.test(value)) {
             value = "#" + value;
         }
-        if (!/^(rgba?|hsla?)\(.*\)$/.test(value)
-        && !parseSimpleColor(value)
+        // RabbitHole: any CSS color, as in other browsers (the reference
+        // accepts only opaque simple colors and color functions).
+        if (normalizeColor(value) === null
         && value.toLowerCase() != "transparent") {
             return false;
         }
@@ -3464,8 +3478,9 @@ commands.forecolor = {
         if (/^([0-9a-fA-F]{3}){1,2}$/.test(value)) {
             value = "#" + value;
         }
-        if (!/^(rgba?|hsla?)\(.*\)$/.test(value)
-        && !parseSimpleColor(value)
+        // RabbitHole: any CSS color, as in other browsers (the reference
+        // accepts only opaque simple colors and color functions).
+        if (normalizeColor(value) === null
         && value.toLowerCase() != "transparent") {
             return false;
         }
@@ -3501,8 +3516,9 @@ commands.hilitecolor = {
         if (/^([0-9a-fA-F]{3}){1,2}$/.test(value)) {
             value = "#" + value;
         }
-        if (!/^(rgba?|hsla?)\(.*\)$/.test(value)
-        && !parseSimpleColor(value)
+        // RabbitHole: any CSS color, as in other browsers (the reference
+        // accepts only opaque simple colors and color functions).
+        if (normalizeColor(value) === null
         && value.toLowerCase() != "transparent") {
             return false;
         }
@@ -6141,7 +6157,7 @@ function justifySelection(alignment) {
             },
             function() {
                 var newParent = document.createElement("div");
-                newParent.setAttribute("style", "text-align: " + alignment);
+                newParent.setAttribute("style", "text-align: " + alignment + ";");
                 return newParent;
             }
         );
@@ -7556,8 +7572,24 @@ commands.insertorderedlist = {
 // at its end (as in <b><br></b>).
 var voidElementNames = ["area", "base", "br", "col", "embed", "hr", "img",
     "input", "link", "meta", "source", "track", "wbr"];
+var formattingElementNames = ["abbr", "b", "bdi", "bdo", "cite", "code",
+    "del", "dfn", "em", "font", "i", "ins", "kbd", "mark", "q", "s", "samp",
+    "small", "span", "strike", "strong", "sub", "sup", "u", "var"];
+var splitInlineChain = [];
 function appendPlaceholderBreak(container) {
     var parent = container;
+    if (!container.hasChildNodes()) {
+        // The line had no inline element left: clone the inline formatting
+        // elements that held the caret before the split.
+        for (var i = splitInlineChain.length - 1; i >= 0; i--) {
+            var clone = splitInlineChain[i].cloneNode(false);
+            clone.removeAttribute("id");
+            parent.appendChild(clone);
+            parent = clone;
+        }
+        parent.appendChild(document.createElement("br"));
+        return;
+    }
     while (parent.lastChild
     && isHtmlElement(parent.lastChild)
     && voidElementNames.indexOf(parent.lastChild.localName) == -1
@@ -7787,6 +7819,22 @@ commands.insertparagraph = {
         // "Let new line range be a new range whose start is the same as
         // the active range's, and whose end is (container, length of
         // container)."
+        // RabbitHole: the inline formatting elements around the caret, for
+        // appendPlaceholderBreak.
+        splitInlineChain = [];
+        for (var inline = getActiveRange().startContainer; inline && inline != container; inline = inline.parentNode) {
+            if (isHtmlElement(inline, "a")) {
+                // Not from inside a link.
+                splitInlineChain = [];
+                break;
+            }
+            if (isHtmlElement(inline, formattingElementNames)
+            && isEditable(inline)
+            && (inline.attributes.length || !isHtmlElement(inline, "span"))) {
+                splitInlineChain.push(inline);
+            }
+        }
+
         var newLineRange = document.createRange();
         newLineRange.setStart(getActiveRange().startContainer, getActiveRange().startOffset);
         newLineRange.setEnd(container, getNodeLength(container));

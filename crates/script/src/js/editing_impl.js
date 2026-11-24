@@ -1198,6 +1198,9 @@
     if (src === dest || left.parentElement.closest('td,th,li') !== right.parentElement.closest('td,th,li')) return false;
     if (probe) {
       const destinationSpace = getComputedStyle(dest).whiteSpace;
+      // Definition list items join like paragraphs in other browsers.
+      const list = e => e.closest('dt,dd')?.parentElement;
+      if (list(src) && list(dest) && list(src) !== list(dest)) return true;
       return [src, left.parentElement, right.parentElement].some(e => getComputedStyle(e).whiteSpace !== destinationSpace);
     }
     // A range may select text or an atomic element between the two leaves.
@@ -1717,6 +1720,29 @@
     return formats;
   }
   const formatsKnown = name => formats.has(name);
+  // Like other browsers, forward deletion at the end of the editable content
+  // (before at most the line break that ends it) changes nothing, also at
+  // the end of a table cell or caption.
+  function atEndOfEditableContent({ range, host }) {
+    if (!range.collapsed) return false;
+    const node = range.startContainer;
+    const limit = (node.nodeType === 1 ? node : node.parentElement).closest('td,th,caption') || host;
+    if (!host.contains(limit)) return false;
+    const rest = host.ownerDocument.createRange();
+    rest.setStart(node, range.startOffset);
+    rest.setEnd(limit, limit.childNodes.length);
+    const after = rest.cloneContents();
+    if (after.textContent !== '') return false;
+    // Only the (now empty) clones of the caret's ancestors and one br.
+    let ancestors = 0;
+    for (let n = node; n && n !== limit; n = n.parentNode) if (n.nodeType === 1) ancestors++;
+    let breaks = 0, others = 0;
+    for (const e of after.querySelectorAll('*')) {
+      if (e.localName === 'br') breaks++;
+      else others++;
+    }
+    return breaks <= 1 && others <= ancestors;
+  }
   function endsInChildBlock({ range, host }) {
     if (range.collapsed) return false;
     const blockOf = node => {
@@ -1769,6 +1795,7 @@
     let result, changed = false;
     const typing = typingStyle(state, t.range);
     state.typing = null;
+    if (cmd === 'forwarddelete' && atEndOfEditableContent(t)) return true;
     if (typing?.size) spec.run(doc, state, () => spec.setOverrides(typingToOverrides(typing)));
     // A deletion from inside a link to outside it leaves the caret outside.
     const linkOf = n => (n.nodeType === 1 ? n : n.parentElement)?.closest('a[href]');
