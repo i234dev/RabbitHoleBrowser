@@ -47,7 +47,8 @@ WPT CSS reftests rise to 83.7 % with no test lost
 ([record](docs/benchmarks/wpt-css-2026-11-23-v0.2.45.md)). Speedometer 3.1 is
 about 0.7 % slower than 0.1.44 in 22 paired runs; no single cause was found
 ([record](docs/benchmarks/speedometer-2026-11-23-v0.2.45.md)). The cryptography
-and WebRTC dependencies add about 9 MB to the executable. From this version the
+and WebRTC dependencies add about 7 MB to the executable (Linux 37.1 → 44.6 MB,
+Windows 37.4 → 43.8 MB). From this version the
 last version number counts deliveries without resetting (0.1.44 → 0.2.45).
 
 Version 0.1.44 fixes app startup on popular sites: built-in Web APIs
@@ -532,7 +533,7 @@ for WebCrypto primitives and RSA; `str0m` for ICE, DTLS and SRTP, with
 `rcgen`/`x509-parser` for DTLS certificates (Windows uses the system crypto
 provider for DTLS); and `sctp-proto` for data channels, vendored in
 `vendor/sctp-proto` with a seven-line patch for empty messages
-(RFC 8831 §6.6). They add about 9 MB to the executable.
+(RFC 8831 §6.6). They add about 7 MB to the executable.
 
 ## Roadmap
 
