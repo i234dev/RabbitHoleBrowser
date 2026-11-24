@@ -83,7 +83,7 @@
       const pending = typingStyle(state, range);
       return pending?.get(cmd) ?? formatValue(selectionElement(range), cmd);
     }
-    const runs = selectedText(t);
+    const runs = formattableRuns(t);
     const first = formatValue(runs[0]?.node.parentElement || selectionElement(range), cmd);
     return mixed ? runs.some(r => formatValue(r.node.parentElement, cmd) !== first) : first;
   }
@@ -130,6 +130,12 @@
     }
     return result;
   }
+  // Selected text runs that formatting applies to: collapsed whitespace
+  // is invisible unless the selection holds nothing else.
+  function formattableRuns(t) {
+    const runs = selectedText(t), visibleRuns = runs.filter(r => !collapsedWhitespace(r.node));
+    return visibleRuns.length ? visibleRuns : runs;
+  }
   function selectionElement(range) {
     const n = range.startContainer;
     if (n.nodeType === 3) return n.parentElement;
@@ -149,7 +155,7 @@
       const pending = typingStyle(state, t.range);
       return pending?.has(cmd) ? pending.get(cmd) : activeFormat(selectionElement(t.range), cmd);
     }
-    const runs = selectedText(t);
+    const runs = formattableRuns(t);
     if (mixed && isScriptFormat(cmd) && runs.some(r => scriptFormat(r.node.parentElement) === 'mixed')) return true;
     const values = runs.map(r => activeFormat(r.node.parentElement, cmd));
     if (!values.length) return !mixed && activeFormat(selectionElement(t.range), cmd);
@@ -301,6 +307,8 @@
     }
     const runs = selectedText(t), backward = sel.direction === 'backward';
     for (const r of runs) {
+      // Collapsed whitespace is invisible: formatting leaves it alone.
+      if (collapsedWhitespace(r.node)) continue;
       if ((valued ? formatValue(r.node.parentElement, cmd) : activeFormat(r.node.parentElement, cmd)) === enable) continue;
       if (r.to < r.node.length) r.node.splitText(r.to);
       if (r.from) r.node = r.node.splitText(r.from);
