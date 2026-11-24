@@ -670,7 +670,7 @@ impl<'a> Layouter<'a> {
                 placed[i].1
             });
             let extent = cb.height.unwrap_or(pl.range);
-            let shift = stacking_shift(style.align_content, extent - pl.range);
+            let shift = stacking_shift(style.align_content, style.align_content_flags, extent - pl.range, dir.fill_reverse);
             let limits = stacking_limits(&items, &pl, row_gap, extent - shift);
             for (i, it) in items.iter().enumerate() {
                 let (x, mut outer) = placed[i];
@@ -804,7 +804,7 @@ impl<'a> Layouter<'a> {
         });
         let extent = cbw;
         let rtl = style.direction == rabbithole_style::Direction::Rtl;
-        let shift = stacking_shift(style.justify_content, extent - pl.range);
+        let shift = stacking_shift(style.justify_content, style.justify_content_flags, extent - pl.range, dir.fill_reverse);
         let limits = stacking_limits(&items, &pl, col_gap, extent - shift);
         for (i, it) in items.iter().enumerate() {
             let (y, mut outer) = placed[i];
@@ -956,11 +956,17 @@ fn last_baseline_as_end((align, flags): (ItemAlign, rabbithole_style::AlignFlags
 }
 
 /// Content distribution of the stacking range (§6.3): only start, center
-/// and end differ.
-fn stacking_shift(d: ContentDistribution, free: f32) -> f32 {
-    match d {
+/// and end differ. The result is the space before the stacking start,
+/// which a reversed fill places at the physical end. `start` and `end`
+/// keep naming the container's own sides there; `flex-start`, `flex-end`
+/// and `normal` follow the reversed fill.
+fn stacking_shift(d: ContentDistribution, flags: rabbithole_style::AlignFlags, free: f32, fill_reverse: bool) -> f32 {
+    use rabbithole_style::AlignFlags as F;
+    let shift = match d {
         ContentDistribution::FlexEnd => free,
         ContentDistribution::Center | ContentDistribution::SpaceAround | ContentDistribution::SpaceEvenly => free / 2.0,
         _ => 0.0,
-    }
+    };
+    let physical = matches!(d, ContentDistribution::FlexStart | ContentDistribution::FlexEnd) && !flags.has(F::FLEX) && !flags.has(F::NORMAL);
+    if fill_reverse && physical { free - shift } else { shift }
 }
