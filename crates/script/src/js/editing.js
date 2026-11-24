@@ -867,14 +867,79 @@
     });
     try { sel.setBaseAndExtent(moved[0][0], moved[0][1], moved[1][0], moved[1][1]); } catch (e) { /* detached */ }
   }
-  function removePreserving(el, sel) {
-    while (el.firstChild) moveNode(el.firstChild, el.parentNode, el, sel);
-    el.remove();
-  }
   function removeExtraneousBreaks(node) {
-    for (const br of Array.from(node.querySelectorAll ? node.querySelectorAll('br') : [])) {
-      if (br.parentNode === node && br === node.lastChild && extraneousBreak(br) && node.childNodes.length > 1) br.remove();
+    removeBreaksBefore(node);
+    removeBreaksAtEnd(node);
+  }
+  function followsLineBreak(node) {
+    let offset = 0;
+    while (!(blockStartPoint(node, offset) || blockEndPoint(node, offset))) {
+      const child = node.childNodes[offset - 1];
+      if (child && visible(child)) return false;
+      if (offset === 0 || !node.firstChild) { if (!node.parentNode) return true; offset = indexOf(node); node = node.parentNode; }
+      else { node = node.childNodes[offset - 1]; offset = nodeLength(node); }
     }
+    return true;
+  }
+  function precedesLineBreak(node) {
+    let offset = nodeLength(node);
+    while (!(blockStartPoint(node, offset) || blockEndPoint(node, offset))) {
+      const child = node.childNodes[offset];
+      if (child && visible(child)) return false;
+      if (offset === nodeLength(node) || !node.firstChild) { if (!node.parentNode) return true; offset = indexOf(node) + 1; node = node.parentNode; }
+      else { node = node.childNodes[offset]; offset = 0; }
+    }
+    return true;
+  }
+  function removeBreaksBefore(node) {
+    let ref = node.previousSibling;
+    if (!ref) return;
+    while (ref.lastChild) ref = ref.lastChild;
+    while (ref && !visible(ref) && !extraneousBreak(ref) && ref !== node.parentNode) ref = previousNode(ref);
+    if (ref && editable(ref) && extraneousBreak(ref) && editable(ref.parentNode)) ref.remove();
+  }
+  function removeBreaksAtEnd(node) {
+    let ref = node;
+    while (ref.lastChild) ref = ref.lastChild;
+    while (ref && ref !== node && !visible(ref) && !extraneousBreak(ref)) ref = previousNode(ref);
+    if (ref && ref !== node && editable(ref) && extraneousBreak(ref)) {
+      while (editable(ref.parentNode) && ref.parentNode !== node && !visible(ref.parentNode)) ref = ref.parentNode;
+      ref.remove();
+    }
+  }
+  // Editing spec "split the parent" of sibling nodes.
+  function splitParent(list, sel) {
+    const original = list[0].parentNode;
+    if (!original || !editable(original) || !original.parentNode) return;
+    const doc = original.ownerDocument;
+    const first = list[0], last = list[list.length - 1];
+    if (list.includes(original.firstChild)) removeBreaksBefore(original);
+    const follows = list.includes(original.firstChild) && followsLineBreak(original);
+    const precedes = list.includes(original.lastChild) && precedesLineBreak(original);
+    if (!list.includes(original.firstChild) && list.includes(original.lastChild)) {
+      for (let i = list.length - 1; i >= 0; i--) moveNode(list[i], original.parentNode, original.nextSibling, sel);
+      if (precedes && !precedesLineBreak(last)) last.parentNode.insertBefore(doc.createElement('br'), last.nextSibling);
+      removeBreaksAtEnd(original);
+      return;
+    }
+    if (!list.includes(original.firstChild)) {
+      const clone = original.cloneNode(false);
+      original.removeAttribute('id');
+      original.parentNode.insertBefore(clone, original);
+      while (first.previousSibling) moveNode(original.firstChild, clone, null, sel);
+    }
+    for (const n of list) moveNode(n, original.parentNode, original, sel);
+    if (follows && !followsLineBreak(first)) first.parentNode.insertBefore(doc.createElement('br'), first);
+    if (inlineNode(last) && !isElement(last, 'br') && isElement(original.firstChild, 'br') && !inlineNode(original)) original.firstChild.remove();
+    if (!original.firstChild) {
+      original.remove();
+      if (precedes && !precedesLineBreak(last)) last.parentNode.insertBefore(doc.createElement('br'), last.nextSibling);
+    } else removeBreaksBefore(original);
+    if (!last.nextSibling && last.parentNode) removeBreaksAtEnd(last.parentNode);
+  }
+  function removePreserving(el, sel) {
+    if (el.firstChild) splitParent(Array.from(el.childNodes), sel);
+    else el.remove();
   }
   function wrapNodes(list, criteria, create, sel) {
     if (list.every((n) => !visible(n) && !isElement(n, 'br'))) return null;
