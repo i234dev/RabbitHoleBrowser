@@ -377,7 +377,20 @@ impl HostEnv for EngineEnv<'_> {
         let (r, c, bw) = (b.rect, b.content_rect, b.style.border_width);
         let m = b.margin;
         let padding = [c.y - r.y - bw.top, r.x + r.w - (c.x + c.w) - bw.right, r.y + r.h - (c.y + c.h) - bw.bottom, c.x - r.x - bw.left];
-        Some(([m.top, m.right, m.bottom, m.left], padding.map(|v| v.max(0.0))))
+        let (margin, padding) = ([m.top, m.right, m.bottom, m.left], padding.map(|v| v.max(0.0)));
+        // A box of a vertical subtree is laid out in its logical space:
+        // its edges map back to their physical sides (the inverse of the
+        // transposition of its style).
+        if !b.style.layout_transposed {
+            return Some((margin, padding));
+        }
+        let mode = b.style.writing_mode;
+        let physical = |[t, r, bo, l]: [f32; 4]| match mode {
+            rabbithole_style::WritingMode::VerticalRl => [l, t, r, bo],
+            rabbithole_style::WritingMode::SidewaysLr => [r, bo, l, t],
+            _ => [l, bo, r, t],
+        };
+        Some((physical(margin), physical(padding)))
     }
     fn element_scroll(&mut self, node: NodeId) -> Option<((f32, f32), (f32, f32))> {
         self.ensure_layout();

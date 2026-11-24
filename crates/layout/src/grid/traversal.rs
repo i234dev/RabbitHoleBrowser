@@ -111,7 +111,20 @@ impl<'a> Layouter<'a> {
                 bases[index]=AvailableSpace::Indefinite;
             }
             let space=ItemSpace::new(constraints,bases,bases[0]);
-            let measurement=self.measure_ordinary_item(&mut b.children[item.idx],item,axis,kind,space,old_reference);
+            let mut measurement=self.measure_ordinary_item(&mut b.children[item.idx],item,axis,kind,space,old_reference);
+            // The automatic minimum fits an area of fixed maximum tracks
+            // (Grid2 §6.6).
+            if let Some(limit)=super::fixed_max_span(&tracks.tracks,start,end,frame.inputs.gaps[index]).filter(|_|tracks.sized()) {
+                let child=&b.children[item.idx];let s=&child.style;
+                let rows=axis==GridAxis::Rows;
+                let (size,min)=if rows {(s.height,s.min_height)} else {(s.width,s.min_width)};
+                if size.is_auto()&&min.is_auto()&&!crate::flex::is_scroll_container(s) {
+                    let extras=if rows {item.edges.pb_v+item.edges.margin_sum(crate::flex::Axis::Column)} else {item.edges.pb_h+item.edges.margin_sum(crate::flex::Axis::Row)};
+                    let c=&mut measurement.contribution;
+                    c.min=c.min.min(limit.max(extras));
+                    c.minimum=c.minimum.min(c.min);
+                }
+            }
             if axis==GridAxis::Rows&&item.align==ItemAlign::Baseline {
                 if let Some(baseline)=measurement.baseline {
                     if let Some(max)=baselines.get_mut(&item.area.row.0) {*max=max.max(baseline);}

@@ -151,6 +151,15 @@ fn wrapped_padding_border(wrapper: &LayoutBox, cbw: f32) -> f32 {
     })
 }
 
+/// Physical vertical padding and border of an orthogonal item, which its
+/// writing-mode wrapper holds in the item's logical inline axis.
+fn wrapped_padding_border_v(wrapper: &LayoutBox, cbw: f32) -> f32 {
+    wrapper.children.first().map_or(0.0, |r| {
+        let s = &r.style;
+        s.padding.left.resolve_or_zero(cbw) + s.padding.right.resolve_or_zero(cbw) + s.border_width.left + s.border_width.right
+    })
+}
+
 /// Resolved placement of an item: [start, end) track indices per axis.
 #[derive(Debug, Clone, Copy)]
 struct Area {
@@ -2033,7 +2042,8 @@ impl<'a> Layouter<'a> {
             let item=if subgrid::requests(&b.children[it.idx])!=(false,false)||percent_edges(&b.children[it.idx].style) {subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw)} else {*it};let it=&item;
             let child = &mut b.children[it.idx];
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
-            let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column);
+            // (An orthogonal item's padding and border are its inner box's.)
+            let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column) + if child.wm_wrapper { wrapped_padding_border_v(child, cbw) } else { 0.0 };
             let baseline = baseline::eligible(child, it, &rows.tracks, true);
             // Percentages of the block size resolve against the grid area
             // only when its rows have fixed sizes; otherwise they are cyclic.
