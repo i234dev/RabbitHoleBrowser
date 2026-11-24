@@ -172,7 +172,12 @@ impl DeclList {
     }
 
     fn value(&self, prop: &str) -> (String,bool) {
-        if let Some((v,imp)) = self.direct(prop) { return (v.into(),imp); }
+        if let Some((v,imp)) = self.direct(prop) {
+            if keeps_source_text(prop, v) {
+                if let Some(serialized) = specified_color(prop, &rabbithole_css::Tokenizer::tokenize(v)) { return (serialized,imp); }
+            }
+            return (v.into(),imp);
+        }
         if let Some([a,b]) = paired_longhands(prop) {
             if let (Some((a,pa)),Some((b,pb))) = (self.direct(a),self.direct(b)) {
                 if pa==pb {
@@ -251,7 +256,7 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
     }
     // Keep expressions in the specified value until their variables, units
     // and origin color can be resolved in the element's computed style.
-    if let [Token::Function(f), rest @ ..] = *c {
+    if let [Token::Function(f), ..] = *c {
         if f.eq_ignore_ascii_case("color-layers") {
             let (mode, layers) = rabbithole_style::layer_parts(c)?;
             let mut items = Vec::new();
@@ -259,42 +264,34 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
             for layer in layers { items.push(specified_color(name, layer)?); }
             return Some(format!("color-layers({})", items.join(", ")));
         }
-        if f.eq_ignore_ascii_case("alpha") {
-            let (origin, component) = rabbithole_style::alpha_parts(c)?;
-            let origin = specified_color(name, origin)?;
-            let valid = match component {
-                [Token::Number(_) | Token::Percentage(_)] => true,
-                [Token::Ident(k)] => k.eq_ignore_ascii_case("alpha") || k.eq_ignore_ascii_case("none"),
-                [Token::Function(k), ..] => {
-                    let math = ["calc","min","max","clamp"].iter().any(|name| k.eq_ignore_ascii_case(name));
-                    let deferred = component.iter().any(|t| matches!(t, Token::Function(f)
-                        if ["var","env","attr","sibling-index","sibling-count"].iter().any(|name| f.eq_ignore_ascii_case(name))));
-                    let replaced: Vec<_> = component.iter().map(|t| match t {
-                        Token::Ident(k) if k.eq_ignore_ascii_case("alpha") => Token::Number(1.0),
-                        t => t.clone(),
-                    }).collect();
-                    deferred || (math && rabbithole_style::values::number(&replaced).is_some())
-                }
-                _ => false,
-            };
-            if !valid { return None; }
-            return Some(format!("alpha(from {origin} / {})", tokens_to_css(component)));
-        }
-        let deferred = rest.iter().any(|t| matches!(t, Token::Function(_))) ||
-            rest.iter().any(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) ||
-            ["var", "env", "attr", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
+        let deferred = c.iter().any(|t| matches!(t, Token::Function(f)
+            if ["var", "env", "attr", "sibling-index", "sibling-count"].iter().any(|k| f.eq_ignore_ascii_case(k))));
         if deferred {
-            let known = ["var", "env", "attr", "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab",
+            let known = ["var", "env", "attr", "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "alpha",
                 "oklch", "color", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
             return known.then(|| tokens_to_css(c));
         }
     }
+    if let Some(spec) = rabbithole_style::color_model::Spec::parse(c) {
+        return Some(spec.to_css());
+    }
     let ColorValue::Color(rgb) = parse_color_component(c)? else { return None };
-    Some(rabbithole_style::ComputedColor::parse(c).map_or_else(|| color_css(rgb), |wide| wide.to_css()))
+    Some(color_css(rgb))
+}
+
+/// Colors computed from other colors (relative colors, mixes, ...) keep
+/// their source text in the declaration block: their serialization rounds
+/// nested legacy colors to bytes, which must not change the computed value.
+fn keeps_source_text(name: &str, value: &str) -> bool {
+    use rabbithole_style::color_model::Spec;
+    if !single_color_property(name) || !value.contains('(') { return false; }
+    let tokens = rabbithole_css::Tokenizer::tokenize(value);
+    let parts = rabbithole_style::values::components(&tokens);
+    matches!(parts.as_slice(), [c] if matches!(Spec::parse(c), Some(Spec::Relative { .. } | Spec::Mix { .. } | Spec::Alpha(..) | Spec::LightDark(..) | Spec::Contrast(..))))
 }
 
 fn checked_property(name: &str) -> bool {
-    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::motion::property(name) || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::motion::property(name) || single_color_property(name) || name == "opacity" || rabbithole_style::props::flex::alignment_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
@@ -322,6 +319,17 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
         }
     }
     if single_color_property(name) { return specified_color(name, tokens); }
+    if name == "opacity" {
+        let parts = rabbithole_style::values::components(tokens);
+        let [c] = parts.as_slice() else { return None };
+        if let Some(k) = rabbithole_style::values::ident(c).filter(|k| matches!(k.as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer")) {
+            return Some(k);
+        }
+        if c.iter().any(|t| matches!(t, Token::Function(f) if ["var","env","attr"].iter().any(|n| f.eq_ignore_ascii_case(n)))) {
+            return Some(tokens_to_css(tokens));
+        }
+        return rabbithole_style::color_model::alpha_specified(c);
+    }
     if matches!(name, "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
         let parts = rabbithole_style::values::components(tokens);
         if let [value] = parts.as_slice() {
@@ -405,7 +413,11 @@ fn parse_style(n: NodeRef) -> DeclList {
     let decls: Vec<Declaration> = parse_declaration_list(&text);
     let mut list = DeclList { items: Vec::with_capacity(decls.len()) };
     for d in decls {
-        if let Some(value) = specified_value(&d.name, &d.value) { list.push(d.name,value,d.important); }
+        if let Some(value) = specified_value(&d.name, &d.value) {
+            let source = tokens_to_css(&d.value);
+            let value = if keeps_source_text(&d.name, &source) { source } else { value };
+            list.push(d.name,value,d.important);
+        }
     }
     list
 }
@@ -469,7 +481,7 @@ fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
     let serialized;
     let value = if !value.is_empty() && (checked_property(prop) || might_use_anchor(value)) {
         let Some(v) = specified_value(prop, &rabbithole_css::Tokenizer::tokenize(value)) else { return };
-        serialized = v;
+        serialized = if keeps_source_text(prop, value) { value.to_string() } else { v };
         serialized.as_str()
     } else { value };
     let mut list = parse_style(n);

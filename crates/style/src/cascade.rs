@@ -1179,6 +1179,7 @@ fn apply_declarations(
     // backgrounds, shadows...) is the element's final color, whatever the
     // declaration order. (In `color` itself it is the parent's.)
     crate::values::set_current_color(Some(parent.color));
+    crate::color_model::set_font_size(len.font_size);
     for (name, value, base) in &resolved {
         if matches!(*name, "color" | "writing-mode" | "-webkit-writing-mode" | "direction") {
             let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
@@ -3791,10 +3792,10 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "opacity" => {
-            if let Some(n) = values::number(c0) {
-                style.opacity = n.clamp(0.0, 1.0);
-            } else if let [Token::Percentage(p)] = c0 {
-                style.opacity = (p / 100.0).clamp(0.0, 1.0);
+            if comps.len() == 1 {
+                if let Some(n) = crate::color_model::alpha_value(c0) {
+                    style.opacity = if n.is_nan() { 0.0 } else { n.clamp(0.0, 1.0) as f32 };
+                }
             }
         }
         "font-weight" => {
@@ -4179,6 +4180,14 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     }
     if let Some(result) = props::anchor_length::specified(name,value,&|_| String::new()) {
         return Some(result.is_some());
+    }
+    if matches!(name, "color" | "background-color" | "border-top-color" | "border-right-color" | "border-bottom-color" |
+        "border-left-color" | "outline-color" | "text-decoration-color" | "caret-color" | "accent-color" | "column-rule-color") {
+        if let [c @ [Token::Function(f), ..]] = values::components(value).as_slice() {
+            if !f.eq_ignore_ascii_case("color-layers") {
+                return Some(crate::color_model::Spec::parse(c).is_some());
+            }
+        }
     }
     if name == "anchor-scope" { return Some(props::anchor::AnchorScope::parse(&values::components(value)).is_some()); }
     if name == "anchor-name" { return Some(props::anchor::names(&values::components(value)).is_some()); }

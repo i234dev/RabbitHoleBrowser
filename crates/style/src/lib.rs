@@ -17,6 +17,8 @@ pub mod ua;
 pub mod values;
 mod vars;
 mod color_spaces;
+pub mod color_calc;
+pub mod color_model;
 
 pub use computed::*;
 pub use color_spaces::{alpha_parts, layer_parts, color_to_wide, interpolate as interpolate_color, interpolate_wide, wide_to_color, ComputedColor, ColorInterp, HueMethod, InterpSpace, Wide};
