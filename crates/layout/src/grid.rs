@@ -1475,6 +1475,13 @@ impl<'a> Layouter<'a> {
                         (None, LineSpec::Span(k)) => e.map(|e| e - k),
                         (a, _) => a,
                     };
+                    // Reversed lines swap; an end line equal to the start
+                    // line is removed (§8.3.1), leaving it auto.
+                    let (a, e) = match (a, e) {
+                        (Some(x), Some(y)) if y < x => (Some(y), Some(x)),
+                        (Some(x), Some(y)) if y == x => (Some(x), None),
+                        other => other,
+                    };
                     (a.map(|l| l + off), e.map(|l| l + off))
                 };
                 // Lines outside the grid are auto for absolutely positioned
@@ -1510,8 +1517,11 @@ impl<'a> Layouter<'a> {
                 // With the grid as containing block, auto lines are the
                 // padding edges (§9.1); otherwise the static position is
                 // the content box's.
-                let content = if positioned { (px0, py0, px1 - px0, py1 - py0) } else { (content_x, content_y, cbw, content_h) };
-                let area = c.abs_node().filter(|_| positioned).and_then(|node| area_of(&c.style).map(|area| (node, area)));
+                // (A fixed box's containing block is this grid only when
+                // the grid establishes one for fixed boxes.)
+                let cb_here = positioned && (c.style.position != rabbithole_style::Position::Fixed || style.establishes_fixed_containing_block());
+                let content = if cb_here { (px0, py0, px1 - px0, py1 - py0) } else { (content_x, content_y, cbw, content_h) };
+                let area = c.abs_node().filter(|_| cb_here).and_then(|node| area_of(&c.style).map(|area| (node, area)));
                 let Some((node, area)) = area else {
                     c.static_pos = (content.0, content.1);
                     c.static_align = Some(crate::tree::StaticAlign { size: (content.2, content.3), factor });
