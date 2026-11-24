@@ -2044,7 +2044,10 @@ impl<'a> Layouter<'a> {
                 // block (a grid area) widens the space up to its right edge.
                 let before = if l.is_none() && r.is_none() && c.static_align.is_none() && !static_right { (c.static_pos.0 + ml - cb.x).min(0.0) } else { 0.0 };
                 let used = l.or(r).unwrap_or(before);
-                (WidthMode::ShrinkToFit, (cb.w - used).max(0.0))
+                // A specified width resolves against the whole containing
+                // block; only shrink-to-fit uses the space past an inset.
+                let specified = !style.width.is_auto() && c.kind != BoxKind::Image && ratio.is_none() && !table;
+                (WidthMode::ShrinkToFit, if specified { cb.w } else { (cb.w - used).max(0.0) })
             }
         };
         if let Some(ratio) = ratio {
