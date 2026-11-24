@@ -284,8 +284,12 @@ mod tests {
         assert_eq!(letter_range("\u{639}\u{627}", WhiteSpace::Normal), Extent::Stop);
         assert_eq!(letter_range("\u{201C}", WhiteSpace::Normal), Extent::Punct(0, 3));
         assert_eq!(letter_range("\nx", WhiteSpace::Pre), Extent::Stop);
-        // A dash is not first-letter punctuation.
-        assert_eq!(letter_range("-x", WhiteSpace::Normal), Extent::Letter(0, 1));
+        // Dash and connector punctuation (Pd, Pc) belong to the first
+        // letter too (CSS Pseudo 4 §2.3), as do typographic spaces before
+        // following punctuation.
+        assert_eq!(letter_range("-x", WhiteSpace::Normal), Extent::Letter(0, 2));
+        assert_eq!(letter_range("x\u{2001}!", WhiteSpace::Normal), Extent::Letter(0, 5));
+        assert_eq!(letter_range("x !", WhiteSpace::Normal), Extent::Letter(0, 1));
         // Combining marks stay with their letter.
         assert_eq!(letter_range("e\u{301}t", WhiteSpace::Normal), Extent::Letter(0, 3));
     }
