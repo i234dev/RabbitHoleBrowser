@@ -618,6 +618,10 @@ impl<'a> Layouter<'a> {
     /// Lay out a grid lanes container's items; returns the content height.
     pub(crate) fn layout_grid_lanes(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
         self.grid_layouts += 1;
+        // Negative margins can stack items over earlier ones: items then
+        // paint atomically, like inline blocks (Grid2 §9.5).
+        let negative = |l: Length| match l { Length::Px(v) => v < 0.0, Length::Percent(p) => p < 0.0, Length::Auto => false, _ => true };
+        b.grid_items_overlap = b.children.iter().any(|c| c.flow == Flow::InFlow && [c.style.margin.top, c.style.margin.bottom, c.style.margin.left, c.style.margin.right].into_iter().any(negative));
         if self.grid_publication.enabled() { b.used_grid_tracks = [None, None]; }
         let style = b.style.clone();
         let rows = row_lanes(b);
