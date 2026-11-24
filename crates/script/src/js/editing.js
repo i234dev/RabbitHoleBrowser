@@ -730,10 +730,25 @@
     'title','meta','base','link','style','option','optgroup','frame','frameset']);
   const isElement = (n, name) => n?.nodeType === 1 && (!name || n.localName === name);
   // Editable (not an editing host, inside one, not contenteditable=false).
+  // Read from the contenteditable attributes (and designMode) so nodes
+  // inserted during the command are classified without a style update.
+  function inEditableContent(el) {
+    const doc = el?.ownerDocument;
+    for (; el?.nodeType === 1; el = el.parentElement) {
+      const v = el.getAttribute('contenteditable');
+      if (v === null) continue;
+      const lower = v.toLowerCase();
+      if (lower === '' || lower === 'true' || lower === 'plaintext-only') return true;
+      if (lower === 'false') return false;
+    }
+    return doc?.designMode === 'on';
+  }
+  // Editable: in editable content, not contenteditable=false and not an
+  // editing host (its parent is editable content too).
   const editable = (n) => {
     if (!n?.parentNode) return false;
-    if (n.nodeType === 1) return n.isContentEditable && editingHost(n) !== n;
-    return !!n.parentElement?.isContentEditable;
+    if (n.nodeType === 1) return !!n.parentElement && inEditableContent(n) && inEditableContent(n.parentElement);
+    return inEditableContent(n.parentElement);
   };
   const blockNode = (n) => n && (n.nodeType === 9 || n.nodeType === 11 || isBlock(n));
   const inlineNode = (n) => n && !blockNode(n);
@@ -962,7 +977,16 @@
     else if (next && editable(next) && criteria(next)) parent = next;
     else parent = create();
     if (!parent) return null;
-    if (!parent.parentNode) list[0].parentNode.insertBefore(parent, list[0]);
+    if (!parent.parentNode) {
+      const container = list[0].parentNode, index = indexOf(list[0]);
+      container.insertBefore(parent, list[0]);
+      // Boundaries right before the new parent move past it.
+      if (sel && sel.rangeCount) {
+        const bump = (n, o) => n === container && o === index ? [n, o + 1] : [n, o];
+        const a = bump(sel.anchorNode, sel.anchorOffset), f = bump(sel.focusNode, sel.focusOffset);
+        try { sel.setBaseAndExtent(a[0], a[1], f[0], f[1]); } catch (e) { /* detached */ }
+      }
+    }
     const original = list[0].parentNode;
     const firstVisible = list.find(visible), lastVisible = [...list].reverse().find(visible);
     const doc = parent.ownerDocument;
@@ -1018,7 +1042,7 @@
     for (const n of containedNodes(range)) {
       const lastNode = list[list.length - 1];
       if (lastNode && lastNode.contains(n)) continue;
-      if (n.parentElement?.isContentEditable && !(n.nodeType === 1 && notInDiv.has(n.localName)) && alignmentValue(n) !== align) list.push(n);
+      if (inEditableContent(n.parentElement) && !(n.nodeType === 1 && notInDiv.has(n.localName)) && alignmentValue(n) !== align) list.push(n);
     }
     // Like browsers, new wrappers use the text-align property; existing
     // aligned divs (attribute or property) absorb adjacent content.
@@ -1026,7 +1050,7 @@
       (el.getAttribute('align') === align || (el.hasAttribute('style') && el.style.length === 1 && el.style.textAlign === align));
     const create = () => {
       const div = doc.createElement('div');
-      div.setAttribute('style', `text-align: ${align};`);
+      div.style.textAlign = align;
       return div;
     };
     while (list.length) {
