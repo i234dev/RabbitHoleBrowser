@@ -3,7 +3,7 @@
 //! path until their separate consumer is ready.
 use std::collections::HashMap;
 
-use super::{subgrid,GridItem,GridSpace,TrackList};
+use super::{subgrid,Contribution,GridItem,GridSpace,TrackList};
 use super::estimate::ItemSpace;
 use super::pass::{Frame,Measurements,Target};
 use super::phases::{AvailableSpace,AxisLayout,GridAxis,GridOperation,MeasureInputs,MeasurePoint,MinContentProbe,OperationKind,PerpendicularEstimate};
@@ -131,10 +131,21 @@ impl<'a> Layouter<'a> {
                     else {self.grid_work.charge(1);baselines.insert(item.area.row.0,baseline);}
                 }
             }
-            measured.push((item,measurement));
+            measured.push((item,measurement,area_basis(&opposite).definite()));
+        }
+        // Column-axis baseline groups shim their items' contributions.
+        if axis==GridAxis::Columns&&items.iter().any(|it|super::baseline::participates(it,false)) {
+            let mut contributions:Vec<Contribution>=measured.iter().map(|m|m.1.contribution).collect();
+            let heights:Vec<Option<f32>>=measured.iter().map(|m|m.2).collect();
+            self.column_baseline_shims_in(b,items,&mut contributions,old_reference,Some(tracks),&heights);
+            for ((_,measurement,_),c) in measured.iter_mut().zip(contributions) {
+                let shim=c.max-measurement.contribution.max;
+                measurement.true_min_content+=shim;
+                measurement.contribution=c;
+            }
         }
         let mut out=Measurements::default();
-        for (item,mut measurement) in measured {
+        for (item,mut measurement,_) in measured {
             if axis==GridAxis::Rows&&item.align==ItemAlign::Baseline {
                 if let Some(baseline)=measurement.baseline {
                     let shift=baselines[&item.area.row.0]-baseline;

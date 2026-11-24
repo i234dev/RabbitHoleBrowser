@@ -218,6 +218,12 @@ impl<'a> Layouter<'a> {
     /// their column contributions. Orthogonal items are laid out at their
     /// max-content width to find their baseline.
     pub(super) fn column_baseline_shims(&mut self, b: &mut LayoutBox, items: &[GridItem], out: &mut [Contribution], cbw: f32, cols: Option<&TrackList>, rows: Option<(&TrackList, f32)>) {
+        let heights: Vec<Option<f32>> = items.iter().map(|it| rows.filter(|r| r.0.sized()).and_then(|(r, gap)| fixed_span(&r.tracks, it.area.row.0, it.area.row.1, gap))).collect();
+        self.column_baseline_shims_in(b, items, out, cbw, cols, &heights);
+    }
+
+    /// [`Self::column_baseline_shims`] with each item's known area height.
+    pub(super) fn column_baseline_shims_in(&mut self, b: &mut LayoutBox, items: &[GridItem], out: &mut [Contribution], cbw: f32, cols: Option<&TrackList>, heights: &[Option<f32>]) {
         if out.len() != items.len() || !items.iter().any(|it| participates(it, false)) || b.style.direction == rabbithole_style::Direction::Rtl {
             return;
         }
@@ -233,7 +239,7 @@ impl<'a> Layouter<'a> {
             }
             let child = &mut b.children[it.idx];
             let width = out[k].max;
-            let height = rows.filter(|r| r.0.sized()).and_then(|(r, gap)| fixed_span(&r.tracks, it.area.row.0, it.area.row.1, gap));
+            let height = heights.get(k).copied().flatten();
             if child.wm_wrapper {
                 let inner_w = self.grid_item_width(child, it, width, cbw);
                 let cb = Cb { x: 0.0, width, height };
