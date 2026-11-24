@@ -214,7 +214,7 @@ fn reflect_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
         },
         Reflect::Enum(e) => match e.state(raw.as_deref()) {
             Some(k) => Value::str(k),
-            None if e.nullable && raw.is_none() => Value::Null,
+            None if e.nullable => Value::Null,
             None => Value::str(""),
         },
     })
@@ -428,6 +428,38 @@ pub(crate) fn install(realm: &mut Realm) {
     def("HTMLCanvasElement", "height", "height", Reflect::ULong(150));
     def("HTMLVideoElement", "width", "width", Reflect::ULong(0));
     def("HTMLVideoElement", "height", "height", Reflect::ULong(0));
+    // ARIA attributes with token values (tentative ARIA enumerated
+    // reflection, w3c/aria#2484): values are canonicalized, invalid ones
+    // map to their invalid value default; an absent attribute stays null
+    // as ARIAMixin's nullable DOMString requires.
+    let tf_false = &[("true", "true"), ("false", "false"), ("", "false")][..];
+    let tf = &[("true", "true"), ("false", "false")][..];
+    let tfm = &[("true", "true"), ("false", "false"), ("mixed", "mixed")][..];
+    let aria: [(&str, &str, &[(&'static str, &'static str)], Option<&'static str>); 20] = [
+        ("ariaAtomic", "aria-atomic", tf_false, Some("false")),
+        ("ariaAutoComplete", "aria-autocomplete", &[("inline", "inline"), ("list", "list"), ("both", "both"), ("none", "none")], Some("none")),
+        ("ariaBusy", "aria-busy", tf_false, Some("false")),
+        ("ariaChecked", "aria-checked", tfm, None),
+        ("ariaCurrent", "aria-current", &[("page", "page"), ("step", "step"), ("location", "location"), ("date", "date"), ("time", "time"), ("true", "true"), ("false", "false"), ("", "false")], Some("true")),
+        ("ariaDisabled", "aria-disabled", tf_false, Some("false")),
+        ("ariaExpanded", "aria-expanded", tf, None),
+        ("ariaHasPopup", "aria-haspopup", &[("true", "true"), ("false", "false"), ("menu", "menu"), ("dialog", "dialog"), ("listbox", "listbox"), ("tree", "tree"), ("grid", "grid")], Some("false")),
+        ("ariaHidden", "aria-hidden", tf_false, Some("false")),
+        ("ariaInvalid", "aria-invalid", &[("true", "true"), ("false", "false"), ("spelling", "spelling"), ("grammar", "grammar"), ("", "false")], Some("true")),
+        ("ariaLive", "aria-live", &[("polite", "polite"), ("assertive", "assertive"), ("off", "off")], Some("off")),
+        ("ariaModal", "aria-modal", tf_false, Some("false")),
+        ("ariaMultiLine", "aria-multiline", tf_false, Some("false")),
+        ("ariaMultiSelectable", "aria-multiselectable", tf_false, Some("false")),
+        ("ariaOrientation", "aria-orientation", &[("horizontal", "horizontal"), ("vertical", "vertical")], None),
+        ("ariaPressed", "aria-pressed", tfm, None),
+        ("ariaReadOnly", "aria-readonly", tf_false, Some("false")),
+        ("ariaRequired", "aria-required", tf_false, Some("false")),
+        ("ariaSelected", "aria-selected", tf, None),
+        ("ariaSort", "aria-sort", &[("ascending", "ascending"), ("descending", "descending"), ("other", "other"), ("none", "none")], Some("none")),
+    ];
+    for (prop, attr, keywords, invalid) in aria {
+        def("Element", prop, attr, Reflect::Enum(Rc::new(EnumSpec { keywords: keywords.to_vec(), missing: None, invalid, nullable: true })));
+    }
     // Obsolete.
     def("HTMLMarqueeElement", "behavior", "behavior", enumerated(&["scroll", "slide", "alternate"], Some("scroll"), Some("scroll")));
     def("HTMLMarqueeElement", "direction", "direction", enumerated(&["up", "right", "down", "left"], Some("left"), Some("left")));
