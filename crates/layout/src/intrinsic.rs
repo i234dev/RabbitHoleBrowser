@@ -78,7 +78,12 @@ impl<'a> Layouter<'a> {
             && b.kind != BoxKind::Image
         {
             let w = style.contain_intrinsic_width.unwrap_or(0.0);
-            (w, w)
+            if style.multicol {
+                // (Columns and gaps still count.)
+                crate::multicol::intrinsic(&style, (w, w))
+            } else {
+                (w, w)
+            }
         } else if b.kind == BoxKind::Image {
             let pct = style.height.has_percent() || style.max_height.has_percent() || style.min_height.has_percent();
             reads_outer |= pct;

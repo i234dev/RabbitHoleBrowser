@@ -132,8 +132,10 @@ struct LineInfo {
 #[derive(Debug, Clone, Copy)]
 enum Ev {
     /// A fragmentable block container begins (its border edge).
-    Start { top: f32, h: f32, edge: bool, forced: bool, avoid_before: bool, avoid_inside: bool, prev: u32, mt: f32 },
-    End,
+    Start { top: f32, h: f32, edge: bool, forced: bool, avoid_before: bool, avoid_inside: bool, prev: u32, mt: f32, solid: bool },
+    /// A container ends: its border edge, whether it has a block-end
+    /// border or padding, and its last child's event.
+    End { bottom: f32, edge: bool, last: u32 },
     /// An unbreakable piece (line box, monolithic box, float).
     Leaf { top: f32, bottom: f32, forced: bool, avoid_before: bool, prev: u32, mt: f32, line: Option<LineInfo> },
     /// A spanner (`column-span: all`): ends a column set. `h` is its height
@@ -146,7 +148,7 @@ impl Ev {
     fn top(&self) -> Option<f32> {
         match *self {
             Ev::Start { top, .. } | Ev::Leaf { top, .. } | Ev::Span { top, .. } => Some(top),
-            Ev::End => None,
+            Ev::End { .. } => None,
         }
     }
 }
@@ -201,14 +203,60 @@ impl Collector {
         }
     }
 
+    /// A fragmentable container: its start, contents and end. Breaks
+    /// fall between its children only (not inside its borders and
+    /// padding, CSS Fragmentation 3 §4.4).
+    fn container(&mut self, c: &LayoutBox, forced: bool, avoid_before: bool, prev: u32) {
+        let s = &c.style;
+        let edge = s.border_width.top > 0.0 || c.content_rect.y > c.rect.y + 0.01;
+        let at = self.evs.len();
+        self.evs.push(Ev::Start {
+            top: c.rect.y,
+            h: c.rect.h,
+            edge,
+            forced,
+            avoid_before,
+            avoid_inside: mc::avoids_column_break(s.break_inside),
+            prev,
+            mt: c.margin.top,
+            solid: false,
+        });
+        self.contents(c);
+        let empty = self.evs.len() == at + 1;
+        if empty && c.content_rect.h <= 0.01 {
+            // Only borders and padding: unbreakable.
+            if let Ev::Start { solid, .. } = &mut self.evs[at] {
+                *solid = true;
+            }
+        }
+        // The last child: the last event at this depth.
+        let mut last = NONE;
+        let mut depth = 0;
+        for j in (at + 1..self.evs.len()).rev() {
+            match self.evs[j] {
+                Ev::End { .. } => depth += 1,
+                Ev::Start { .. } if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        last = j as u32;
+                        break;
+                    }
+                }
+                Ev::Start { .. } | Ev::Leaf { .. } if depth == 0 => {
+                    last = j as u32;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let bottom_edge = s.border_width.bottom > 0.0 || c.rect.bottom() > c.content_rect.bottom() + 0.01;
+        self.evs.push(Ev::End { bottom: c.rect.bottom(), edge: bottom_edge, last });
+    }
+
     /// A float: fragmented like a block when it is a block container.
     fn float(&mut self, c: &LayoutBox) {
         if fragmentable_box(c) {
-            let edge = c.style.border_width.top > 0.0 || c.content_rect.y > c.rect.y + 0.01;
-            let avoid_inside = mc::avoids_column_break(c.style.break_inside);
-            self.evs.push(Ev::Start { top: c.rect.y, h: c.rect.h, edge, forced: false, avoid_before: false, avoid_inside, prev: NONE, mt: 0.0 });
-            self.contents(c);
-            self.evs.push(Ev::End);
+            self.container(c, false, false, NONE);
         } else {
             let r = c.margin_rect();
             self.evs.push(Ev::Leaf { top: r.y, bottom: r.bottom(), forced: false, avoid_before: false, prev: NONE, mt: 0.0, line: None });
@@ -245,19 +293,7 @@ impl Collector {
                     let avoid_before = avoid_after || mc::avoids_column_break(s.break_before);
                     let here = self.evs.len() as u32;
                     if fragmentable(c) {
-                        let edge = s.border_width.top > 0.0 || c.content_rect.y > c.rect.y + 0.01;
-                        self.evs.push(Ev::Start {
-                            top: c.rect.y,
-                            h: c.rect.h,
-                            edge,
-                            forced,
-                            avoid_before,
-                            avoid_inside: mc::avoids_column_break(s.break_inside),
-                            prev,
-                            mt: c.margin.top,
-                        });
-                        self.contents(c);
-                        self.evs.push(Ev::End);
+                        self.container(c, forced, avoid_before, prev);
                     } else {
                         self.evs.push(Ev::Leaf { top: c.rect.y, bottom: c.rect.bottom(), forced, avoid_before, prev, mt: c.margin.top, line: None });
                     }
@@ -338,22 +374,28 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
     // Push event `i` (at flow position `t`) so that it starts at `target`;
     // the strut goes before the outermost container starting right there
     // without a border or padding of its own.
-    let push = |i: usize, t: f32, target: f32, off: &mut f32, struts: &mut Vec<f32>, pushes: &mut Vec<(usize, usize, f32)>| {
-        let amount = target - t;
-        if amount <= 0.0 {
-            return;
-        }
+    let push = |i: usize, t: f32, target: f32, off: &mut f32, struts: &mut Vec<f32>, pushes: &mut Vec<(usize, usize, f32)>, pos: &mut Vec<f32>| {
+        // (The first child of a container goes with the container's start
+        // unless that starts a column.)
         let top = evs[i].top().unwrap_or(t);
         let mut at = i;
         while at > a {
             match evs[at - 1] {
-                Ev::Start { top: st, edge: false, .. } if (st - top).abs() < EPS => at -= 1,
+                Ev::Start { top: st, .. } if !at_column_top(g, st + (t - top)) => at -= 1,
                 _ => break,
             }
+        }
+        let start = evs[at].top().map_or(t, |st| st + (t - top));
+        let amount = target - start;
+        if amount <= 0.0 {
+            return;
         }
         struts[at] += amount;
         pushes.push((i, at, amount));
         *off += amount;
+        for p in &mut pos[at..i] {
+            *p += amount;
+        }
     };
     while i < b {
         if budget == 0 {
@@ -363,24 +405,40 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
         offsets[i] = off;
         placed_at[i] = placed;
         match evs[i] {
-            Ev::End | Ev::Span { .. } => {}
-            Ev::Start { top, h, edge, forced, avoid_before, avoid_inside, prev, mt } => {
+            Ev::Span { .. } => {}
+            Ev::End { bottom, edge: true, last } if last != NONE && force_at == usize::MAX => {
+                // The block-end border and padding go with the last child.
+                let bt = bottom + off;
+                let j = last as usize;
+                let tj = pos[j];
+                if tj.is_finite() {
+                    let k = g.col(tj);
+                    if bt > g.end(k) + EPS && tj > g.start(k) + EPS {
+                        shortfall = shortfall.min(bt - g.end(k));
+                        backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at, &mut pos);
+                        continue;
+                    }
+                }
+            }
+            Ev::End { .. } => {}
+            Ev::Start { top, h, edge, forced, avoid_before, avoid_inside, prev, mt, solid } => {
                 let t = top + off;
                 let k = g.col(t);
+                let avoid_inside = avoid_inside || solid;
                 if force_at == i || (forced && placed) {
                     if t > g.y0 + EPS {
                         let k = g.col(t - EPS);
                         let target = g.start(k + 1) + if force_at == i { 0.0 } else { mt.max(0.0) };
-                        push(i, t, target, &mut off, &mut struts, &mut pushes);
+                        push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
                     }
                 } else if avoid_inside && h <= g.colh + EPS && t + h > g.end(k) + EPS && t > g.start(k) + EPS {
                     shortfall = shortfall.min(t + h - g.end(k));
                     if let Some(j) = earlier_break(&pos, g, avoid_before, prev) {
-                        backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at);
+                        backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at, &mut pos);
                         continue;
                     }
                     violated |= avoid_before;
-                    push(i, t, g.end(k), &mut off, &mut struts, &mut pushes);
+                    push(i, t, g.end(k), &mut off, &mut struts, &mut pushes, &mut pos);
                 }
                 if force_at == i {
                     force_at = usize::MAX;
@@ -401,17 +459,17 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                     if t > g.y0 + EPS {
                         let k = g.col(t - EPS);
                         let target = g.start(k + 1) + if force_at == i { 0.0 } else { mt.max(0.0) };
-                        push(i, t, target, &mut off, &mut struts, &mut pushes);
+                        push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
                     }
                 } else if bt > g.end(k) + EPS && t > g.start(k) + EPS {
                     shortfall = shortfall.min(bt - g.end(k));
                     let earlier = earlier_break(&pos, g, avoid_before, prev).or_else(|| line.and_then(|l| line_break(evs, &pos, g, a, i, k, l)));
                     if let Some(j) = earlier.filter(|&j| j >= a) {
-                        backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at);
+                        backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at, &mut pos);
                         continue;
                     }
                     violated |= avoid_before || inside_avoid(evs, a, i);
-                    push(i, t, g.end(k), &mut off, &mut struts, &mut pushes);
+                    push(i, t, g.end(k), &mut off, &mut struts, &mut pushes, &mut pos);
                 }
                 if force_at == i {
                     force_at = usize::MAX;
@@ -447,6 +505,11 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
     Plan { struts, used, shortfall, off, violated }
 }
 
+/// Does flow position `t` start a column (or the set)?
+fn at_column_top(g: &Geometry, t: f32) -> bool {
+    (t - g.start(g.col(t))).abs() < EPS
+}
+
 /// Does flow position `t` start a column other than the first?
 fn at_column_start(g: &Geometry, t: f32) -> bool {
     let k = g.col(t);
@@ -458,7 +521,7 @@ fn inside_avoid(evs: &[Ev], a: usize, i: usize) -> bool {
     let mut depth = 0i32;
     for e in evs[a..i].iter().rev() {
         match e {
-            Ev::End => depth += 1,
+            Ev::End { .. } => depth += 1,
             Ev::Start { avoid_inside, .. } => {
                 if depth == 0 && *avoid_inside {
                     return true;
@@ -472,10 +535,13 @@ fn inside_avoid(evs: &[Ev], a: usize, i: usize) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn backtrack(j: usize, i: &mut usize, off: &mut f32, offsets: &[f32], placed: &mut bool, placed_at: &[bool], struts: &mut [f32], pushes: &mut Vec<(usize, usize, f32)>, force_at: &mut usize) {
+fn backtrack(j: usize, i: &mut usize, off: &mut f32, offsets: &[f32], placed: &mut bool, placed_at: &[bool], struts: &mut [f32], pushes: &mut Vec<(usize, usize, f32)>, force_at: &mut usize, pos: &mut [f32]) {
     pushes.retain(|&(origin, at, amount)| {
         if origin >= j {
             struts[at] -= amount;
+            for p in pos.iter_mut().take(j).skip(at) {
+                *p -= amount;
+            }
             false
         } else {
             true
@@ -927,7 +993,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
         };
         let y0 = strip_start + off;
         let total = (strip_end - strip_start).max(0.0);
-        let has_content = evs[a..b].iter().any(|e| !matches!(e, Ev::End));
+        let has_content = evs[a..b].iter().any(|e| !matches!(e, Ev::End { .. }));
         if has_content {
             phys += std::mem::take(&mut pending_mb);
             // The height left for the last row of a container with a
@@ -993,7 +1059,7 @@ fn choose_height(evs: &[Ev], a: usize, b: usize, y0: f32, phys: f32, total: f32,
     // and growing by the least amount that avoids a break taken.
     let tallest = evs[a..b].iter().fold(0.0f32, |m, e| match *e {
         Ev::Leaf { top, bottom, .. } => m.max(bottom - top),
-        Ev::Start { h, avoid_inside: true, .. } => m.max(h),
+        Ev::Start { h, avoid_inside: true, .. } | Ev::Start { h, solid: true, .. } => m.max(h),
         _ => m,
     });
     let cap = cap.unwrap_or(f32::INFINITY);

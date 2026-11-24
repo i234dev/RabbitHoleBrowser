@@ -178,9 +178,19 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
     let single = comps.len() == 1;
     match name {
         "columns" => {
-            // `<'column-width'> || <'column-count'>`, each at most once;
-            // `auto` leaves the other one to the other keyword.
-            if comps.len() > 2 {
+            // `[<'column-width'> || <'column-count'>] [ / <'column-height'>]?`,
+            // each at most once; `auto` leaves the other one to the other
+            // keyword. It resets `column-wrap`.
+            let slash = comps.iter().position(|c| matches!(c, [Token::Delim('/')]));
+            let (comps, height) = match slash {
+                Some(i) => {
+                    let [h] = &comps[i + 1..] else { return true };
+                    let Some(h) = column_width(h, ctx) else { return true };
+                    (&comps[..i], h)
+                }
+                None => (comps, None),
+            };
+            if comps.is_empty() || comps.len() > 2 {
                 return true;
             }
             let (mut width, mut count): (Option<Option<f32>>, Option<Option<u32>>) = (None, None);
@@ -203,8 +213,21 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
             style.column_width = width.flatten();
             style.column_count = count.flatten();
+            style.column_height = height;
+            style.column_wrap = 0;
             set_multicol(style);
         }
+        "column-height" if single => {
+            if let Some(h) = column_width(c0, ctx) {
+                style.column_height = h;
+            }
+        }
+        "column-wrap" if single => match values::ident(c0).as_deref() {
+            Some("auto") => style.column_wrap = 0,
+            Some("nowrap") => style.column_wrap = 1,
+            Some("wrap") => style.column_wrap = 2,
+            _ => {}
+        },
         "column-count" if single => {
             if let Some(n) = column_count(c0) {
                 style.column_count = n;
@@ -334,7 +357,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.widows = n;
             }
         }
-        "column-count" | "column-width" | "column-fill" | "column-span" | "column-rule-width" | "column-rule-style"
+        "column-count" | "column-width" | "column-height" | "column-wrap" | "column-fill" | "column-span" | "column-rule-width" | "column-rule-style"
         | "column-rule-color" | "break-before" | "break-after" | "break-inside" | "page-break-before" | "page-break-after"
         | "page-break-inside" | "-webkit-column-break-before" | "-webkit-column-break-after" | "-webkit-column-break-inside" | "orphans" | "widows" => {}
         _ => return false,

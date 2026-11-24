@@ -2420,7 +2420,13 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.multicol = from.multicol;
             to.column_count = from.column_count;
             to.column_width = from.column_width;
+            if prop.contains("columns") {
+                to.column_height = from.column_height;
+                to.column_wrap = from.column_wrap;
+            }
         }
+        "column-height" => to.column_height = from.column_height,
+        "column-wrap" => to.column_wrap = from.column_wrap,
         "column-fill" | "-webkit-column-fill" | "-moz-column-fill" => to.column_fill_auto = from.column_fill_auto,
         "column-span" | "-webkit-column-span" => to.column_span_all = from.column_span_all,
         "column-rule" | "-webkit-column-rule" | "-moz-column-rule" => {
@@ -4163,7 +4169,7 @@ const SUPPORTS_PROBE: &[(&str, &str)] = &[
     ("white-space", "pre"), ("text-transform", "uppercase"), ("font-style", "italic"), ("font-weight", "300"),
     ("flex-direction", "column"), ("flex-wrap", "wrap"), ("border-top-width", "7px"), ("border-top-style", "dotted"),
     ("border-top-color", "rgb(1, 2, 3)"),
-    ("columns", "7px 3"), ("column-fill", "auto"), ("column-span", "all"), ("column-rule", "7px dotted rgb(1, 2, 3)"),
+    ("columns", "7px 3 / 7px"), ("column-wrap", "wrap"), ("column-fill", "auto"), ("column-span", "all"), ("column-rule", "7px dotted rgb(1, 2, 3)"),
     ("break-before", "column"), ("break-after", "column"), ("break-inside", "avoid-column"), ("orphans", "7"), ("widows", "7"),
 ];
 
@@ -4175,7 +4181,7 @@ const SUPPORTS_CHECKED: &[&str] = &[
     "padding-top", "padding-right", "padding-bottom", "padding-left", "top", "right", "bottom", "left", "width", "height", "min-width",
     "min-height", "max-width", "max-height", "color", "background-color", "opacity", "z-index", "box-sizing", "text-align", "white-space",
     "text-transform", "font-style", "font-weight", "flex-direction", "flex-wrap", "border-top-width", "border-top-style", "border-top-color",
-    "columns", "column-count", "column-width", "column-fill", "column-span", "column-rule", "column-rule-width", "column-rule-style",
+    "columns", "column-count", "column-width", "column-height", "column-wrap", "column-fill", "column-span", "column-rule", "column-rule-width", "column-rule-style",
     "column-rule-color", "break-before", "break-after", "break-inside", "orphans", "widows",
 ];
 

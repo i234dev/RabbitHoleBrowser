@@ -910,12 +910,20 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "display" => display_css(s.display).to_string(),
         "column-count" => s.column_count.map_or_else(|| "auto".into(), |n| n.to_string()),
         "column-width" => s.column_width.map_or_else(|| "auto".into(), px),
-        "columns" => match (s.column_width, s.column_count) {
-            (None, None) => "auto".into(),
-            (Some(w), None) => px(w),
-            (None, Some(n)) => n.to_string(),
-            (Some(w), Some(n)) => format!("{} {n}", px(w)),
-        },
+        "columns" => {
+            let wc = match (s.column_width, s.column_count) {
+                (None, None) => "auto".into(),
+                (Some(w), None) => px(w),
+                (None, Some(n)) => n.to_string(),
+                (Some(w), Some(n)) => format!("{} {n}", px(w)),
+            };
+            match s.column_height {
+                Some(h) => format!("{wc} / {}", px(h)),
+                None => wc,
+            }
+        }
+        "column-height" => s.column_height.map_or_else(|| "auto".into(), px),
+        "column-wrap" => ["auto", "nowrap", "wrap"][s.column_wrap.min(2) as usize].into(),
         "column-fill" => if s.column_fill_auto { "auto" } else { "balance" }.into(),
         "column-span" => if s.column_span_all { "all" } else { "none" }.into(),
         "column-rule-width" => px(s.column_rule_width),

@@ -95,6 +95,15 @@ enum Prop {
     GridColumnStart,
     GridColumnEnd,
     FitTolerance,
+    ColumnCount,
+    ColumnWidth,
+    ColumnRuleWidth,
+    ColumnRuleColor,
+    ColumnRuleStyle,
+    ColumnFill,
+    ColumnSpan,
+    ColumnHeight,
+    ColumnWrap,
 }
 
 const ALL: &[Prop] = &[
@@ -162,6 +171,15 @@ const ALL: &[Prop] = &[
     Prop::GridColumnStart,
     Prop::GridColumnEnd,
     Prop::FitTolerance,
+    Prop::ColumnCount,
+    Prop::ColumnWidth,
+    Prop::ColumnRuleWidth,
+    Prop::ColumnRuleColor,
+    Prop::ColumnRuleStyle,
+    Prop::ColumnFill,
+    Prop::ColumnSpan,
+    Prop::ColumnHeight,
+    Prop::ColumnWrap,
 ];
 
 impl Prop {
@@ -231,6 +249,15 @@ impl Prop {
             Prop::GridColumnStart => "grid-column-start",
             Prop::GridColumnEnd => "grid-column-end",
             Prop::FitTolerance => "fit-tolerance",
+            Prop::ColumnCount => "column-count",
+            Prop::ColumnWidth => "column-width",
+            Prop::ColumnRuleWidth => "column-rule-width",
+            Prop::ColumnRuleColor => "column-rule-color",
+            Prop::ColumnRuleStyle => "column-rule-style",
+            Prop::ColumnFill => "column-fill",
+            Prop::ColumnSpan => "column-span",
+            Prop::ColumnHeight => "column-height",
+            Prop::ColumnWrap => "column-wrap",
         }
     }
 
@@ -266,6 +293,8 @@ impl Prop {
             "inset" => matches!(self, Top | Right | Bottom | Left),
             "background" => self == BackgroundColor,
             "font" => self == FontSize,
+            "columns" => matches!(self, ColumnCount | ColumnWidth | ColumnHeight | ColumnWrap),
+            "column-rule" => matches!(self, ColumnRuleWidth | ColumnRuleColor | ColumnRuleStyle),
             _ => false,
         }
     }
@@ -298,6 +327,12 @@ enum Val {
     V(Visibility),
     Fl(Vec<FilterOp>),
     Cp(Option<std::sync::Arc<ClipPath>>, bool),
+    /// `column-count` (`None` = `auto`, discrete).
+    Count(Option<u32>),
+    /// `column-width` (`None` = `auto`, discrete).
+    OptPx(Option<f32>),
+    /// Values that only animate discretely (keyword indices).
+    Keyword(u8),
 }
 
 fn get(s: &ComputedStyle, p: Prop) -> Val {
@@ -366,6 +401,15 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         GridColumnStart => Val::Line(s.grid_column_start.clone()),
         GridColumnEnd => Val::Line(s.grid_column_end.clone()),
         FitTolerance => Val::Tolerance(s.fit_tolerance),
+        ColumnCount => Val::Count(s.column_count),
+        ColumnWidth => Val::OptPx(s.column_width),
+        ColumnRuleWidth => Val::F(s.column_rule_width),
+        ColumnRuleColor => Val::C(s.column_rule_color.unwrap_or(s.color)),
+        ColumnRuleStyle => Val::Keyword(s.column_rule_style_kw),
+        ColumnFill => Val::Keyword(s.column_fill_auto as u8),
+        ColumnSpan => Val::Keyword(s.column_span_all as u8),
+        ColumnHeight => Val::OptPx(s.column_height),
+        ColumnWrap => Val::Keyword(s.column_wrap),
         JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
     }
 }
@@ -388,6 +432,32 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         (GridColumnStart, Val::Line(l)) => s.grid_column_start.clone_from(l),
         (GridColumnEnd, Val::Line(l)) => s.grid_column_end.clone_from(l),
         (FitTolerance, Val::Tolerance(l)) => s.fit_tolerance = *l,
+        (ColumnCount, Val::Count(n)) => {
+            s.column_count = *n;
+            s.multicol = s.column_count.is_some() || s.column_width.is_some();
+        }
+        (ColumnWidth, Val::OptPx(w)) => {
+            s.column_width = w.map(|w| w.max(0.0));
+            s.multicol = s.column_count.is_some() || s.column_width.is_some();
+        }
+        (ColumnRuleWidth, Val::F(w)) => s.column_rule_width = w.max(0.0),
+        (ColumnRuleColor, Val::C(c)) => s.column_rule_color = Some(*c),
+        (ColumnRuleColor, Val::Cw(c)) => s.column_rule_color = Some(c.to_gfx()),
+        (ColumnRuleStyle, Val::Keyword(k)) => {
+            s.column_rule_style_kw = *k;
+            s.column_rule_style = match rabbithole_style::props::multicol::rule_style_css(*k) {
+                "none" => rabbithole_style::BorderStyle::None,
+                "hidden" => rabbithole_style::BorderStyle::Hidden,
+                "dotted" => rabbithole_style::BorderStyle::Dotted,
+                "dashed" => rabbithole_style::BorderStyle::Dashed,
+                "double" => rabbithole_style::BorderStyle::Double,
+                _ => rabbithole_style::BorderStyle::Solid,
+            };
+        }
+        (ColumnFill, Val::Keyword(k)) => s.column_fill_auto = *k != 0,
+        (ColumnSpan, Val::Keyword(k)) => s.column_span_all = *k != 0,
+        (ColumnHeight, Val::OptPx(h)) => s.column_height = h.map(|h| h.max(0.0)),
+        (ColumnWrap, Val::Keyword(k)) => s.column_wrap = *k,
         (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
         (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),
         (AlignSelf, Val::ItemAlignment(value, flags)) => (s.align_self, s.align_self_flags) = (*value, *flags),
@@ -1077,6 +1147,9 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
         (Val::MotionRotation(a), Val::MotionRotation(b)) if a.follows_path == b.follows_path =>
             Val::MotionRotation(MotionRotation { follows_path: a.follows_path, degrees: lerp(a.degrees,b.degrees,t) }),
         (Val::F(x), Val::F(y)) => Val::F(lerp(*x, *y, t)),
+        // Integers interpolate rounded to the nearest (CSS Values 4 §3.1).
+        (Val::Count(Some(x)), Val::Count(Some(y))) => Val::Count(Some((lerp(*x as f32, *y as f32, t) + 0.5).floor().max(1.0) as u32)),
+        (Val::OptPx(Some(x)), Val::OptPx(Some(y))) => Val::OptPx(Some(lerp(*x, *y, t).max(0.0))),
         (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) => interpolate_colors(a, b, t),
         (Val::L(x), Val::L(y)) => lerp_lp(x, y, t).map(Val::L).unwrap_or_else(discrete),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, t).map(Val::T).unwrap_or_else(discrete),
@@ -2142,6 +2215,8 @@ fn add_values(under: &Val, v: &Val) -> Val {
     match (under, v) {
         (Val::Tracks(a), Val::Tracks(b)) => GridOperation::Add.tracks(a, b).map(Val::Tracks).unwrap_or_else(|| v.clone()),
         (Val::F(a), Val::F(b)) => Val::F(a + b),
+        (Val::Count(Some(a)), Val::Count(Some(b))) => Val::Count(Some(a + b)),
+        (Val::OptPx(Some(a)), Val::OptPx(Some(b))) => Val::OptPx(Some(a + b)),
         (Val::L(a), Val::L(b)) => add_lp(*a, *b).map(Val::L).unwrap_or_else(|| v.clone()),
         (Val::T(a), Val::T(b)) => Val::T(a.iter().chain(b.iter()).cloned().collect()),
         (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) => {
@@ -2232,6 +2307,7 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
 fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::F(_), Val::F(_)) | (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) | (Val::V(_), Val::V(_)) => true,
+        (Val::Count(Some(_)), Val::Count(Some(_))) | (Val::OptPx(Some(_)), Val::OptPx(Some(_))) => true,
         (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
             lerp_pair(&(*x,*y),&(*u,*v),0.5).is_some(),
         (Val::MotionRotation(a), Val::MotionRotation(b)) => a.follows_path == b.follows_path,

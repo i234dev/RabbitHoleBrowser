@@ -1883,6 +1883,10 @@ pub struct ComputedStyle {
     pub column_count: Option<u32>,
     /// `column-width` in px (`None` = `auto`).
     pub column_width: Option<f32>,
+    /// `column-height` in px (`None` = `auto`; CSS Multi-column 2).
+    pub column_height: Option<f32>,
+    /// `column-wrap`: 0 `auto`, 1 `nowrap`, 2 `wrap`.
+    pub column_wrap: u8,
     /// `column-fill: auto` (else `balance`).
     pub column_fill_auto: bool,
     /// `column-span: all`.
@@ -2229,6 +2233,8 @@ impl ComputedStyle {
             multicol: false,
             column_count: None,
             column_width: None,
+            column_height: None,
+            column_wrap: 0,
             column_fill_auto: false,
             column_span_all: false,
             column_rule_width: 3.0,
