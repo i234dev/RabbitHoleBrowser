@@ -27,7 +27,6 @@ use crate::tree::{BoxKind, Flow, Formatting, FragmentKind, LayoutBox};
 use rabbithole_gfx::Rect;
 use rabbithole_style::props::multicol as mc;
 use rabbithole_style::ComputedStyle;
-use std::rc::Rc;
 
 /// A fragment of a box broken across columns.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,8 +102,12 @@ pub(crate) fn intrinsic(style: &ComputedStyle, (mut min, mut max): (f32, f32)) -
 /// A box whose contents the fragmentation descends into (a block
 /// container in the same formatting context); other boxes are monolithic.
 fn fragmentable(c: &LayoutBox) -> bool {
-    c.flow == Flow::InFlow
-        && matches!(c.kind, BoxKind::Block | BoxKind::AnonymousBlock)
+    c.flow == Flow::InFlow && fragmentable_box(c)
+}
+
+/// A block container whose contents can break across columns.
+fn fragmentable_box(c: &LayoutBox) -> bool {
+    matches!(c.kind, BoxKind::Block | BoxKind::AnonymousBlock)
         && matches!(c.formatting, Formatting::Block | Formatting::Inline)
         && !c.clips
         && !c.wm_wrapper
@@ -131,15 +134,24 @@ enum Ev {
     End,
     /// An unbreakable piece (line box, monolithic box, float).
     Leaf { top: f32, bottom: f32, forced: bool, avoid_before: bool, prev: u32, mt: f32, line: Option<LineInfo> },
+    /// A spanner (`column-span: all`): ends a column set. `h` is its height
+    /// laid out across the container, `delta` how much taller that is than
+    /// in the flow.
+    Span { top: f32, h: f32, mt: f32, mb: f32, delta: f32 },
 }
 
 impl Ev {
     fn top(&self) -> Option<f32> {
         match *self {
-            Ev::Start { top, .. } | Ev::Leaf { top, .. } => Some(top),
+            Ev::Start { top, .. } | Ev::Leaf { top, .. } | Ev::Span { top, .. } => Some(top),
             Ev::End => None,
         }
     }
+}
+
+/// Is `c` a spanner of the multicol flow it is in (Multicol 1 §6.1)?
+fn is_spanner(c: &LayoutBox) -> bool {
+    c.style.column_span_all && c.flow == Flow::InFlow && !c.is_inline_level() && c.kind != BoxKind::Text
 }
 
 /// The order in which an inline container's lines and floats are met.
@@ -160,6 +172,8 @@ fn inline_order(b: &LayoutBox) -> Vec<(f32, bool, usize)> {
 #[derive(Default)]
 struct Collector {
     evs: Vec<Ev>,
+    /// Height changes of the spanners, in tree order.
+    deltas: std::collections::VecDeque<f32>,
 }
 
 impl Collector {
@@ -206,6 +220,13 @@ impl Collector {
                     let r = c.margin_rect();
                     self.evs.push(Ev::Leaf { top: r.y, bottom: r.bottom(), forced: false, avoid_before: false, prev: NONE, mt: 0.0, line: None });
                 }
+                Flow::InFlow if is_spanner(c) => {
+                    let delta = self.deltas.pop_front().unwrap_or(0.0);
+                    self.evs.push(Ev::Span { top: c.rect.y, h: c.rect.h, mt: c.margin.top, mb: c.margin.bottom, delta });
+                    prev = NONE;
+                    forced_after = false;
+                    avoid_after = false;
+                }
                 Flow::InFlow => {
                     let s = &c.style;
                     let forced = forced_after || mc::is_forced_break(s.break_before);
@@ -237,7 +258,7 @@ impl Collector {
     }
 }
 
-/// Where the flow's pieces go for one column height.
+/// Where the pieces of a column set go for one column height.
 struct Plan {
     /// Strut before each event (moves it and what follows down the flow).
     struts: Vec<f32>,
@@ -246,11 +267,18 @@ struct Plan {
     /// Smallest column height increase that would avoid a break that was
     /// taken (balancing), `INFINITY` when none would.
     shortfall: f32,
+    /// The flow offset after the set.
+    off: f32,
 }
 
+/// The columns of a column set: flow position `y0` (strip coordinates
+/// plus struts) starts the first column; a flow position `t` in column `k`
+/// is at `t - lift - k * colh` in the document.
+#[derive(Debug, Clone, Copy)]
 struct Geometry {
     y0: f32,
     colh: f32,
+    lift: f32,
 }
 
 impl Geometry {
@@ -268,11 +296,16 @@ impl Geometry {
     fn end(&self, k: usize) -> f32 {
         self.start(k + 1)
     }
+    /// Vertical translation from the flow into column `k`.
+    fn dy(&self, k: usize) -> f32 {
+        -self.lift - k as f32 * self.colh
+    }
 }
 
 const EPS: f32 = 0.01;
 
-fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
+/// Paginate events `a..b` (one column set) starting at flow offset `off0`.
+fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
     let n = evs.len();
     let mut struts = vec![0.0f32; n + 1];
     // (origin event, strut index, amount)
@@ -280,13 +313,13 @@ fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
     let mut offsets = vec![0.0f32; n + 1];
     let mut placed_at = vec![false; n + 1];
     let mut pos = vec![f32::NAN; n];
-    let mut off = 0.0f32;
+    let mut off = off0;
     let mut placed = false;
     let mut force_at = usize::MAX;
     let mut shortfall = f32::INFINITY;
-    let mut budget = 4 * n + 64;
+    let mut budget = 4 * (b - a) + 64;
     let mut used = 0usize;
-    let mut i = 0;
+    let mut i = a;
     // Push event `i` (at flow position `t`) so that it starts at `target`;
     // the strut goes before the outermost container starting right there
     // without a border or padding of its own.
@@ -297,7 +330,7 @@ fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
         }
         let top = evs[i].top().unwrap_or(t);
         let mut at = i;
-        while at > 0 {
+        while at > a {
             match evs[at - 1] {
                 Ev::Start { top: st, edge: false, .. } if (st - top).abs() < EPS => at -= 1,
                 _ => break,
@@ -307,7 +340,7 @@ fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
         pushes.push((i, at, amount));
         *off += amount;
     };
-    while i < n {
+    while i < b {
         if budget == 0 {
             break;
         }
@@ -315,7 +348,7 @@ fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
         offsets[i] = off;
         placed_at[i] = placed;
         match evs[i] {
-            Ev::End => {}
+            Ev::End | Ev::Span { .. } => {}
             Ev::Start { top, h, edge, forced, avoid_before, avoid_inside, prev, mt } => {
                 let t = top + off;
                 let k = g.col(t);
@@ -327,7 +360,7 @@ fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
                     }
                 } else if avoid_inside && h <= g.colh + EPS && t + h > g.end(k) + EPS && t > g.start(k) + EPS {
                     shortfall = shortfall.min(t + h - g.end(k));
-                    if let Some(j) = earlier_break(evs, &pos, g, i, avoid_before, prev) {
+                    if let Some(j) = earlier_break(&pos, g, avoid_before, prev) {
                         backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at);
                         continue;
                     }
@@ -351,8 +384,8 @@ fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
                     }
                 } else if bt > g.end(k) + EPS && t > g.start(k) + EPS {
                     shortfall = shortfall.min(bt - g.end(k));
-                    let earlier = earlier_break(evs, &pos, g, i, avoid_before, prev).or_else(|| line.and_then(|l| line_break(evs, &pos, g, i, k, l)));
-                    if let Some(j) = earlier {
+                    let earlier = earlier_break(&pos, g, avoid_before, prev).or_else(|| line.and_then(|l| line_break(evs, &pos, g, a, i, k, l)));
+                    if let Some(j) = earlier.filter(|&j| j >= a) {
                         backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at);
                         continue;
                     }
@@ -373,7 +406,7 @@ fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
                     // what follows starts in the next one.
                     shortfall = shortfall.min(bt - t - g.colh);
                     let next = g.end(k);
-                    if bt > next && i + 1 < n {
+                    if bt > next && i + 1 < b {
                         let amount = next - bt;
                         struts[i + 1] += amount;
                         pushes.push((i, i + 1, amount));
@@ -385,7 +418,7 @@ fn paginate(evs: &[Ev], g: &Geometry) -> Plan {
         i += 1;
     }
     struts.truncate(n);
-    Plan { struts, used, shortfall }
+    Plan { struts, used, shortfall, off }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -407,27 +440,26 @@ fn backtrack(j: usize, i: &mut usize, off: &mut f32, offsets: &[f32], placed: &m
 /// `break-before: avoid` (or the previous sibling's `break-after:
 /// avoid`): break before the previous sibling instead, unless it starts
 /// its column.
-fn earlier_break(evs: &[Ev], pos: &[f32], g: &Geometry, i: usize, avoid_before: bool, prev: u32) -> Option<usize> {
+fn earlier_break(pos: &[f32], g: &Geometry, avoid_before: bool, prev: u32) -> Option<usize> {
     if !avoid_before || prev == NONE {
         return None;
     }
     let j = prev as usize;
     let t = pos[j];
-    let _ = evs;
     (t.is_finite() && t > g.start(g.col(t)) + EPS).then_some(j)
 }
 
 /// `orphans` / `widows` (CSS Fragmentation 3 §4.4): a break before line
 /// `l.idx` of a block that would leave too few lines on either side moves
 /// to an earlier line when that satisfies both.
-fn line_break(evs: &[Ev], pos: &[f32], g: &Geometry, i: usize, k: usize, l: LineInfo) -> Option<usize> {
+fn line_break(evs: &[Ev], pos: &[f32], g: &Geometry, a: usize, i: usize, k: usize, l: LineInfo) -> Option<usize> {
     if l.idx == 0 {
         return None;
     }
     // The block's earlier lines in this column, newest first.
     let mut here: Vec<(usize, u32)> = Vec::new();
     let mut j = i;
-    while j > 0 {
+    while j > a {
         j -= 1;
         match evs[j] {
             Ev::Leaf { line: Some(o), .. } => {
@@ -463,9 +495,24 @@ fn line_break(evs: &[Ev], pos: &[f32], g: &Geometry, i: usize, k: usize, l: Line
     None
 }
 
+/// A column set of the flow: its events, column geometry, and the flow
+/// range it holds.
+#[derive(Debug, Clone, Copy)]
+struct Set {
+    first: usize,
+    end: usize,
+    g: Geometry,
+    /// Flow position where the set's content ends (a spanner's margin
+    /// edge, or infinity for the last set).
+    flow_end: f32,
+}
+
 /// Moves the flow's pieces into their columns.
 struct Mover<'p> {
     struts: &'p [f32],
+    sets: &'p [Set],
+    /// Vertical translation of each spanner (by event index).
+    spans: &'p [(usize, f32)],
     i: usize,
     off: f32,
     g: Geometry,
@@ -476,13 +523,14 @@ struct Mover<'p> {
     /// The translation of the first piece placed in the current container
     /// (for its list marker).
     first: Option<(f32, f32)>,
-    /// Columns that received content.
-    used: usize,
 }
 
 impl Mover<'_> {
     fn next(&mut self) {
         self.off += self.struts.get(self.i).copied().unwrap_or(0.0);
+        if let Some(s) = self.sets.iter().find(|s| s.first <= self.i && self.i < s.end.max(s.first + 1)) {
+            self.g = s.g;
+        }
         self.i += 1;
     }
 
@@ -491,19 +539,55 @@ impl Mover<'_> {
     fn shift(&mut self, top: f32) -> (f32, f32) {
         let t = top + self.off;
         let k = self.g.col(t);
-        self.used = self.used.max(k + 1);
-        let d = (k as f32 * self.step, self.off - k as f32 * self.g.colh);
+        let d = (k as f32 * self.step, self.off + self.g.dy(k));
         if self.first.is_none() {
             self.first = Some(d);
         }
         d
     }
 
+    /// An absolutely positioned box whose containing block is inside the
+    /// flow is fragmented by the columns where it lies (CSS Fragmentation
+    /// 3 §4.1: no content moves past breaks inside it).
     fn move_abs(&mut self, c: &mut LayoutBox) {
-        if self.positioned > 0 && !c.fixed && c.style.position != rabbithole_style::Position::Fixed {
-            let t = c.rect.y + self.off;
-            let k = self.g.col(t);
-            c.translate(k as f32 * self.step, self.off - k as f32 * self.g.colh);
+        if self.positioned == 0 || c.fixed || c.style.position == rabbithole_style::Position::Fixed {
+            return;
+        }
+        let start = c.rect.y + self.off;
+        if fragmentable_box(c) && self.g.col(start) != self.g.col((c.rect.bottom() + self.off - EPS).max(start)) {
+            let sets = [Set { first: 0, end: 0, g: self.g, flow_end: f32::INFINITY }];
+            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, step: self.step, positioned: 1, first: None };
+            sub.contents(c);
+            let end = (c.rect.bottom() + self.off).max(start);
+            sub.sets = &sets;
+            sub.fragment(c, start, end);
+        } else {
+            let k = self.g.col(start);
+            c.translate(k as f32 * self.step, self.off + self.g.dy(k));
+        }
+    }
+
+    /// Move a monolithic box into its column; absolutely positioned
+    /// descendants whose containing block is outside it follow their own
+    /// containing block.
+    fn move_leaf(&mut self, c: &mut LayoutBox, dx: f32, dy: f32) {
+        c.translate(dx, dy);
+        if self.positioned > 0 && !crate::block::contains_positioned(&c.style) {
+            self.reposition_abs(c, dx, dy);
+        }
+    }
+
+    fn reposition_abs(&mut self, b: &mut LayoutBox, dx: f32, dy: f32) {
+        if b.no_abs_below && !b.children.iter().any(|c| c.flow == Flow::Absolute) {
+            return;
+        }
+        for c in &mut b.children {
+            if c.flow == Flow::Absolute {
+                c.translate(-dx, -dy);
+                self.move_abs(c);
+            } else if !crate::block::contains_positioned(&c.style) {
+                self.reposition_abs(c, dx, dy);
+            }
         }
     }
 
@@ -525,12 +609,12 @@ impl Mover<'_> {
                 }
                 for c in boxes {
                     if let Some(c) = b.children.get_mut(c) {
-                        c.translate(dx, dy);
+                        self.move_leaf(c, dx, dy);
                     }
                 }
             } else {
                 let (dx, dy) = self.shift(b.children[i].margin_rect().y);
-                b.children[i].translate(dx, dy);
+                self.move_leaf(&mut b.children[i], dx, dy);
             }
         }
         for c in &mut b.children {
@@ -563,7 +647,14 @@ impl Mover<'_> {
                 Flow::FloatLeft | Flow::FloatRight => {
                     self.next();
                     let (dx, dy) = self.shift(c.margin_rect().y);
-                    c.translate(dx, dy);
+                    self.move_leaf(c, dx, dy);
+                }
+                Flow::InFlow if is_spanner(c) => {
+                    let at = self.i;
+                    self.next();
+                    if let Some(&(_, dy)) = self.spans.iter().find(|s| s.0 == at) {
+                        c.translate(0.0, dy);
+                    }
                 }
                 Flow::InFlow if fragmentable(c) => {
                     self.next();
@@ -581,7 +672,7 @@ impl Mover<'_> {
                 Flow::InFlow => {
                     self.next();
                     let (dx, dy) = self.shift(c.rect.y);
-                    c.translate(dx, dy);
+                    self.move_leaf(c, dx, dy);
                 }
             }
         }
@@ -590,14 +681,30 @@ impl Mover<'_> {
     /// Place a fragmentable container spanning `[start, end)` of the
     /// flow (strut-adjusted strip coordinates); its contents were moved.
     fn fragment(&mut self, c: &mut LayoutBox, start: f32, end: f32) {
-        let g = &self.g;
-        let k0 = g.col(start);
-        let k1 = g.col((end - EPS).max(start)).max(k0);
         let growth = (end - start) - c.rect.h;
         let content = Rect::new(c.content_rect.x, c.content_rect.y + (start - c.rect.y), c.content_rect.w, (c.content_rect.h + growth).max(0.0));
         let border = Rect::new(c.rect.x, start, c.rect.w, end - start);
-        if k0 == k1 {
-            let (dx, dy) = (k0 as f32 * self.step, -(k0 as f32) * g.colh);
+        // The columns (set, column) the box has a part in.
+        let mut parts: Vec<(Geometry, usize, f32, f32)> = Vec::new();
+        for s in self.sets {
+            let lo = start.max(s.g.y0);
+            let hi = end.min(s.flow_end);
+            if hi < lo || (hi == lo && !(start == end && start >= s.g.y0 && start <= s.flow_end)) {
+                continue;
+            }
+            let (k0, k1) = (s.g.col(lo), s.g.col((hi - EPS).max(lo)).max(s.g.col(lo)));
+            for k in k0..=k1 {
+                let plo = if k == k0 { lo } else { s.g.start(k) };
+                let phi = if k == k1 { hi } else { s.g.end(k) };
+                parts.push((s.g, k, plo, phi));
+            }
+        }
+        if parts.is_empty() {
+            parts.push((self.g, self.g.col(start), start, end));
+        }
+        if parts.len() == 1 {
+            let (g, k, _, _) = parts[0];
+            let (dx, dy) = (k as f32 * self.step, g.dy(k));
             c.rect = border.translate(dx, dy);
             c.content_rect = content.translate(dx, dy);
             if growth.abs() > EPS {
@@ -606,16 +713,13 @@ impl Mover<'_> {
             c.col_pieces = None;
             return;
         }
-        self.used = self.used.max(k1 + 1);
         let bw = c.style.border_width;
         let padding = Rect::new(border.x + bw.left, border.y + bw.top, (border.w - bw.left - bw.right).max(0.0), (border.h - bw.top - bw.bottom).max(0.0));
         let mut pieces = Vec::new();
         let mut union: Option<Rect> = None;
         let mut content_union: Option<Rect> = None;
-        for k in k0..=k1 {
-            let lo = if k == k0 { start } else { g.start(k) };
-            let hi = if k == k1 { end } else { g.end(k) };
-            let (dx, dy) = (k as f32 * self.step, -(k as f32) * g.colh);
+        for (g, k, lo, hi) in parts {
+            let (dx, dy) = (k as f32 * self.step, g.dy(k));
             let rect = Rect::new(border.x + dx, lo + dy, border.w, (hi - lo).max(0.0));
             union = Some(union.map_or(rect, |u| u.union(&rect)));
             let (clo, chi) = (lo.max(content.y), hi.min(content.bottom()));
@@ -635,12 +739,38 @@ impl Mover<'_> {
     }
 }
 
-/// The result of fragmenting one column set.
-struct ColumnSet {
-    /// Column height.
+/// A laid out column set (a row of columns): its top, column height, and
+/// how many columns hold content.
+struct RowOut {
+    top: f32,
     height: f32,
-    /// Columns holding content.
     used: usize,
+}
+
+/// Lay out spanners nested in the flow of `b` across the whole container
+/// (`full`); returns how much taller each became, in tree order.
+fn spanner_widths(lay: &mut Layouter, b: &mut LayoutBox, full: &Cb, out: &mut std::collections::VecDeque<f32>) {
+    if b.formatting != Formatting::Block {
+        return;
+    }
+    for c in &mut b.children {
+        if c.clamped || c.flow != Flow::InFlow {
+            continue;
+        }
+        if is_spanner(c) {
+            let old = c.rect.h;
+            let mut bfc = Bfc::new();
+            let top = c.rect.y;
+            lay.layout_block(c, full, top, &mut bfc, WidthMode::Fill);
+            out.push_back(c.rect.h - old);
+        } else if fragmentable(c) {
+            spanner_widths(lay, c, full, out);
+        }
+    }
+}
+
+fn has_spanner(b: &LayoutBox) -> bool {
+    b.formatting == Formatting::Block && b.children.iter().any(|c| c.flow == Flow::InFlow && !c.clamped && (is_spanner(c) || (fragmentable(c) && has_spanner(c))))
 }
 
 impl Layouter<'_> {
@@ -660,138 +790,149 @@ impl Layouter<'_> {
         let pb_v = crate::block::vertical_extras(&style);
         let max_h = self.clamp_height(&style, f32::INFINITY, None, pb_v);
         let avail_h = cb.height.or(max_h.is_finite().then_some(max_h));
-        let fill_auto = style.column_fill_auto && avail_h.is_some();
         let content_y = b.content_rect.y;
-        let mut rules: Vec<Rect> = Vec::new();
-        let spanners = b.formatting == Formatting::Block && b.children.iter().any(|c| c.flow == Flow::InFlow && c.style.column_span_all);
-        let total = if !spanners {
-            let saved = b.content_rect;
-            b.content_rect.x = x0;
-            b.content_rect.w = w;
-            let mut local = Bfc::new();
-            let flow_cb = Cb { x: x0, width: w, height: cb.height };
-            let h = self.layout_flow_contents(b, &flow_cb, &mut local);
-            let h = if local.is_empty() { h } else { h.max(local.max_bottom() - content_y) };
-            b.content_rect.x = saved.x;
-            b.content_rect.w = saved.w;
-            let set = fragment_flow(b, content_y, h, n, if fill_auto { avail_h } else { None }, avail_h, step);
-            push_rules(&mut rules, &style, x0, w, gap, step, content_y, set.height, set.used);
-            set.height
-        } else {
-            self.layout_column_sets(b, cb, (x0, w, gap, step, n), &mut rules)
+        // The flow: the contents laid out as one column.
+        let saved = b.content_rect;
+        b.content_rect.x = x0;
+        b.content_rect.w = w;
+        let mut local = Bfc::new();
+        let flow_cb = Cb { x: x0, width: w, height: cb.height };
+        let h = match b.formatting {
+            Formatting::Inline => self.layout_inline(b, &flow_cb, &mut local),
+            _ => self.layout_block_children_of(b, &flow_cb, &mut local),
         };
-        let paints_rules = style.column_rule_style.is_visible() && style.column_rule_width > 0.0;
-        b.col_rules = (paints_rules && !rules.is_empty()).then(|| Box::new(rules));
-        total
-    }
-
-    fn layout_flow_contents(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc) -> f32 {
-        match b.formatting {
-            Formatting::Inline => self.layout_inline(b, cb, bfc),
-            _ => self.layout_block_children_of(b, cb, bfc),
+        let total = if local.is_empty() { h } else { h.max(local.max_bottom() - content_y) };
+        b.content_rect.x = saved.x;
+        b.content_rect.w = saved.w;
+        let mut deltas = std::collections::VecDeque::new();
+        if has_spanner(b) {
+            spanner_widths(self, b, &Cb { x: cb.x, width: avail_w, height: None }, &mut deltas);
         }
-    }
-
-    /// Column sets separated by `column-span: all` children (Multicol 1
-    /// §6): each set is laid out and balanced on its own, spanners take
-    /// the container's whole width between them.
-    fn layout_column_sets(&mut self, b: &mut LayoutBox, cb: &Cb, (x0, w, gap, step, n): (f32, f32, f32, f32, u32), rules: &mut Vec<Rect>) -> f32 {
-        let style = b.style.clone();
-        let content_y = b.content_rect.y;
-        let mut cursor = content_y;
-        let children = std::mem::take(&mut b.children);
-        let mut out: Vec<LayoutBox> = Vec::with_capacity(children.len());
-        let mut run: Vec<LayoutBox> = Vec::new();
-        let mut anon_style: Option<Rc<ComputedStyle>> = None;
-        let mut finish_run = |this: &mut Self, run: &mut Vec<LayoutBox>, out: &mut Vec<LayoutBox>, cursor: &mut f32, rules: &mut Vec<Rect>| {
-            if run.is_empty() {
-                return;
-            }
-            let st = anon_style
-                .get_or_insert_with(|| {
-                    let mut s = ComputedStyle::inherit_from(&style);
-                    s.display = rabbithole_style::Display::Block;
-                    Rc::new(s)
-                })
-                .clone();
-            let mut set = LayoutBox::new(BoxKind::AnonymousBlock, None, st);
-            set.formatting = Formatting::Block;
-            set.bfc_root = true;
-            set.children = std::mem::take(run);
-            set.rect = Rect::new(x0, *cursor, w, 0.0);
-            set.content_rect = set.rect;
-            let mut local = Bfc::new();
-            let h = this.layout_block_children_of(&mut set, &Cb { x: x0, width: w, height: None }, &mut local);
-            let h = if local.is_empty() { h } else { h.max(local.max_bottom() - *cursor) };
-            let fs = fragment_flow(&mut set, *cursor, h, n, None, None, step);
-            push_rules(rules, &style, x0, w, gap, step, *cursor, fs.height, fs.used);
-            *cursor += fs.height;
-            out.append(&mut set.children);
-        };
-        for mut c in children {
-            if c.flow == Flow::InFlow && c.style.column_span_all {
-                finish_run(self, &mut run, &mut out, &mut cursor, rules);
-                let full = Cb { x: cb.x, width: cb.width, height: None };
-                let mt = self.top_margins(&c, cb.width, None).resolve();
-                let mut bfc = Bfc::new();
-                self.layout_block(&mut c, &full, cursor + mt, &mut bfc, WidthMode::Fill);
-                cursor = c.rect.bottom() + c.margin.bottom;
-                out.push(c);
-            } else {
-                run.push(c);
-            }
+        let (rows, end) = fragment_flow(b, deltas, FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step });
+        let mut rules = Vec::new();
+        for r in &rows {
+            // The rules of a last row (after the last spanner) reach the
+            // container's content end (CSSWG issue 2309).
+            let h = match cb.height {
+                Some(ch) if (r.top + r.height - end).abs() < EPS => r.height.max(content_y + ch - r.top),
+                _ => r.height,
+            };
+            push_rules(&mut rules, &style, x0, w, gap, step, r.top, h, r.used);
         }
-        finish_run(self, &mut run, &mut out, &mut cursor, rules);
-        b.children = out;
-        (cursor - content_y).max(0.0)
+        b.col_rules = (!rules.is_empty()).then(|| Box::new(rules));
+        (end - content_y).max(0.0)
     }
 }
 
-/// Choose the column height of a laid out flow (the contents of `root`,
-/// starting at `y0`, `total` tall) and move its pieces into columns.
-/// `fixed`: a column height to fill (`column-fill: auto`); `max`: the
-/// largest column height.
-fn fragment_flow(root: &mut LayoutBox, y0: f32, total: f32, n: u32, fixed: Option<f32>, max: Option<f32>, step: f32) -> ColumnSet {
-    let mut collector = Collector::default();
+struct FlowParams {
+    y0: f32,
+    total: f32,
+    n: u32,
+    fill_auto: bool,
+    avail: Option<f32>,
+    step: f32,
+}
+
+/// Choose the column heights of a laid out flow (the contents of `root`)
+/// and move its pieces into columns; returns the rows of columns.
+fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, p: FlowParams) -> (Vec<RowOut>, f32) {
+    let mut collector = Collector { evs: Vec::new(), deltas };
     collector.contents(root);
     let evs = collector.evs;
-    if evs.is_empty() || total <= 0.0 && fixed.is_none() {
-        return ColumnSet { height: fixed.unwrap_or(0.0).max(0.0), used: (!evs.is_empty()) as usize };
-    }
-    let n = n.max(1) as usize;
+    let n = p.n.max(1) as usize;
     let floor = |h: f32| h.max(1.0);
-    let (colh, plan) = match fixed {
-        Some(h) => {
-            let g = Geometry { y0, colh: floor(h) };
-            (h.max(0.0), paginate(&evs, &g))
-        }
-        None => {
-            // Balance: the smallest height that fits the flow in `n`
-            // columns, starting from the average and growing by the least
-            // amount that avoids a break taken.
-            let mut h = (total / n as f32).max(0.0);
-            let cap = max.unwrap_or(f32::INFINITY);
-            let mut plan = paginate(&evs, &Geometry { y0, colh: floor(h.min(cap)) });
-            let mut rounds = 0;
-            while plan.used > n && plan.shortfall.is_finite() && h < cap && rounds < 64 {
-                rounds += 1;
-                h = (h + plan.shortfall.max(0.05)).min(cap);
-                plan = paginate(&evs, &Geometry { y0, colh: floor(h) });
+    let mut struts = vec![0.0f32; evs.len()];
+    let mut sets: Vec<Set> = Vec::new();
+    let mut spans: Vec<(usize, f32)> = Vec::new();
+    let mut rows: Vec<RowOut> = Vec::new();
+    let mut off = 0.0f32;
+    // Document position where the next row (or spanner) goes, and the
+    // strip position where the next set's content starts.
+    let mut phys = p.y0;
+    let mut strip_start = p.y0;
+    let mut a = 0;
+    loop {
+        let b = (a..evs.len()).find(|&i| matches!(evs[i], Ev::Span { .. })).unwrap_or(evs.len());
+        let last = b == evs.len();
+        // The set's extent in the strip: up to the spanner's margin edge.
+        let strip_end = match evs.get(b) {
+            Some(Ev::Span { top, mt, .. }) => top - mt.max(0.0),
+            _ => p.y0 + p.total,
+        };
+        let y0 = strip_start + off;
+        let total = (strip_end - strip_start).max(0.0);
+        let has_content = evs[a..b].iter().any(|e| !matches!(e, Ev::End));
+        if has_content {
+            // The height left for the last row of a container with a
+            // height limit.
+            let room = p.avail.map(|h| (p.y0 + h - phys).max(0.0));
+            let fixed = if last && p.fill_auto { room } else { None };
+            let cap = if last { room } else { None };
+            let (colh, plan) = choose_height(&evs, a, b, y0, phys, total, n, fixed, cap, off);
+            for i in a..b {
+                struts[i] += plan.struts[i];
             }
-            if plan.used > n && h < total && h < cap && rounds >= 64 {
-                h = total.min(cap);
-                plan = paginate(&evs, &Geometry { y0, colh: floor(h) });
-            }
-            (h.min(cap), plan)
+            let g = Geometry { y0, colh: floor(colh), lift: y0 - phys };
+            off = plan.off;
+            sets.push(Set { first: a, end: b, g, flow_end: strip_end + off });
+            rows.push(RowOut { top: phys, height: colh, used: plan.used.max(1) });
+            phys += colh;
         }
-    };
-    let mut mover = Mover { struts: &plan.struts, i: 0, off: 0.0, g: Geometry { y0, colh: floor(colh) }, step, positioned: 0, first: None, used: 0 };
+        let Some(Ev::Span { top, h, mt, mb, delta }) = evs.get(b).copied() else { break };
+        // The spanner, across the container below the row.
+        let sp_top = phys + mt.max(0.0);
+        spans.push((b, sp_top - top));
+        phys = sp_top + h + mb.max(0.0);
+        // The flow after it moves by its change of height.
+        if b + 1 < evs.len() {
+            struts[b + 1] += delta;
+        }
+        off += delta;
+        strip_start = top - delta + h + mb.max(0.0);
+        a = b + 1;
+    }
+    if sets.is_empty() {
+        return (rows, phys);
+    }
+    let g = sets[0].g;
+    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, step: p.step, positioned: 0, first: None };
     mover.contents(root);
-    let used = mover.used.max(plan.used);
-    ColumnSet { height: colh, used }
+    (rows, phys)
 }
 
-/// Column rules between adjacent used columns of a set (Multicol 1 §4):
+/// The column height of one column set (events `a..b`, flow from `y0`,
+/// `total` tall, the row at document position `phys`), with its plan.
+#[allow(clippy::too_many_arguments)]
+fn choose_height(evs: &[Ev], a: usize, b: usize, y0: f32, phys: f32, total: f32, n: usize, fixed: Option<f32>, cap: Option<f32>, off: f32) -> (f32, Plan) {
+    let geom = |h: f32| Geometry { y0, colh: h.max(1.0), lift: y0 - phys };
+    if let Some(h) = fixed {
+        return (h.max(0.0), paginate(evs, a, b, &geom(h), off));
+    }
+    // Balance: the smallest height that fits the set in `n` columns,
+    // starting from the average (never shorter than an unbreakable piece)
+    // and growing by the least amount that avoids a break taken.
+    let tallest = evs[a..b].iter().fold(0.0f32, |m, e| match *e {
+        Ev::Leaf { top, bottom, .. } => m.max(bottom - top),
+        Ev::Start { h, avoid_inside: true, .. } => m.max(h),
+        _ => m,
+    });
+    let cap = cap.unwrap_or(f32::INFINITY);
+    let mut h = (total / n as f32).max(tallest).max(0.0).min(cap);
+    let mut plan = paginate(evs, a, b, &geom(h), off);
+    let mut rounds = 0;
+    while plan.used > n && plan.shortfall.is_finite() && h < cap && rounds < 64 {
+        rounds += 1;
+        h = (h + plan.shortfall.max(0.05)).min(cap);
+        plan = paginate(evs, a, b, &geom(h), off);
+    }
+    if plan.used > n && h < total && h < cap && rounds >= 64 {
+        h = total.min(cap);
+        plan = paginate(evs, a, b, &geom(h), off);
+    }
+    (h, plan)
+}
+
+/// Column rules between adjacent used columns of a row (Multicol 1 §4):
 /// centred in the gaps, as tall as the columns.
 #[allow(clippy::too_many_arguments)]
 fn push_rules(rules: &mut Vec<Rect>, style: &ComputedStyle, x0: f32, w: f32, gap: f32, step: f32, y: f32, h: f32, used: usize) {
@@ -827,7 +968,7 @@ mod tests {
     #[test]
     fn pieces_crossing_a_column_end_move_to_the_next_column() {
         let evs = [leaf(0.0, 40.0), leaf(40.0, 80.0), leaf(80.0, 120.0)];
-        let plan = paginate(&evs, &Geometry { y0: 0.0, colh: 100.0 });
+        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0 }, 0.0);
         assert_eq!(plan.struts, vec![0.0, 0.0, 20.0]);
         assert_eq!(plan.used, 2);
         assert_eq!(plan.shortfall, 20.0);
@@ -847,7 +988,7 @@ mod tests {
         let evs: Vec<Ev> = (0..5).map(|i| line(i, i as f32 * 20.0)).collect();
         // Four lines fit in a 90px column; the last one alone would be a
         // widow: the fourth line moves on too.
-        let plan = paginate(&evs, &Geometry { y0: 0.0, colh: 90.0 });
+        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 90.0, lift: 0.0 }, 0.0);
         assert_eq!(plan.struts[3], 30.0);
         assert_eq!(plan.used, 2);
     }
@@ -858,7 +999,7 @@ mod tests {
         if let Ev::Leaf { forced, .. } = &mut evs[1] {
             *forced = true;
         }
-        let plan = paginate(&evs, &Geometry { y0: 0.0, colh: 100.0 });
+        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0 }, 0.0);
         assert_eq!(plan.struts[1], 90.0);
         assert_eq!(plan.used, 2);
     }

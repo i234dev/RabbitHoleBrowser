@@ -334,7 +334,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.widows = n;
             }
         }
-        "columns" | "column-count" | "column-width" | "column-fill" | "column-span" | "column-rule-width" | "column-rule-style"
+        "column-count" | "column-width" | "column-fill" | "column-span" | "column-rule-width" | "column-rule-style"
         | "column-rule-color" | "break-before" | "break-after" | "break-inside" | "page-break-before" | "page-break-after"
         | "page-break-inside" | "-webkit-column-break-before" | "-webkit-column-break-after" | "-webkit-column-break-inside" | "orphans" | "widows" => {}
         _ => return false,
