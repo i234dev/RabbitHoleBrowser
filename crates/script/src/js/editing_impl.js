@@ -1560,7 +1560,10 @@
     }
     const t = target(doc);
     if (!enabled(cmd, t)) return false;
-    if (specCommands.has(cmd) && specTarget(t, cmd, value)) {
+    // A link being typed (createLink at the caret) splits the surrounding
+    // link in the implementation above.
+    const typingLink = cmd === 'inserttext' && t && !t.control && typingStyle(state, t.range)?.has('createlink');
+    if (specCommands.has(cmd) && !typingLink && specTarget(t, cmd, value)) {
       if ((cmd === 'delete' || cmd === 'forwarddelete') && joinParagraphs(t, cmd, true)) {
         state.typing = null;
         if (deleteSelection(t, cmd)) input(t.host, inputTypeFor(cmd));
@@ -1688,6 +1691,23 @@
     // The specification assumes block editing hosts: an inline host gets
     // line breaks instead of paragraphs, as in other browsers.
     if (getComputedStyle(t.host).display.startsWith('inline')) return false;
+    // Removing formatting keeps links and the selection, and a link typed
+    // inside a link splits it; lists inside table cells and sublists keep
+    // their boundaries: the implementation above does these as browsers do.
+    if (cmd === 'removeformat' || (cmd === 'createlink' && t.range.collapsed)) return false;
+    if (listCommands.has(cmd)) {
+      const el = n => n.nodeType === 1 ? n : n.parentElement;
+      const inCell = n => el(n)?.closest('td,th,caption');
+      const nested = n => el(n)?.closest('li')?.parentElement?.closest('li') || el(n)?.closest('li')?.querySelector('ol,ul');
+      if (inCell(t.range.startContainer) || inCell(t.range.endContainer) || nested(t.range.startContainer)) return false;
+    }
+    // Spaces typed before text that preserves white-space end in a
+    // nonbreaking space, as the implementation above does.
+    if (cmd === 'inserttext' && /^[ \u00a0]+$/.test(value) && t.range.collapsed) {
+      const n = t.range.startContainer, o = t.range.startOffset;
+      const next = n.nodeType === 3 ? (o === n.length ? n.nextSibling : null) : n.childNodes[o];
+      if (next?.nodeType === 1 && getComputedStyle(next).whiteSpace !== 'normal' && getComputedStyle(next).whiteSpace !== 'nowrap') return false;
+    }
     // A deletion from a line into a child block keeps the block's first line
     // in it (as in other browsers), which the implementation above does.
     if ((cmd === 'delete' || cmd === 'forwarddelete' || cmd === 'inserttext') && endsInChildBlock(t)) return false;
@@ -1796,6 +1816,7 @@
     const typing = typingStyle(state, t.range);
     state.typing = null;
     if (cmd === 'forwarddelete' && atEndOfEditableContent(t)) return true;
+    const backward = t.sel.direction === 'backward';
     if (typing?.size) spec.run(doc, state, () => spec.setOverrides(typingToOverrides(typing)));
     // A deletion from inside a link to outside it leaves the caret outside.
     const linkOf = n => (n.nodeType === 1 ? n : n.parentElement)?.closest('a[href]');
@@ -1817,6 +1838,13 @@
       observer.disconnect();
     }
     if (result) spec.run(doc, state, () => placeCaret(doc, cmd, links));
+    // The algorithms reset the selection while moving nodes; like other
+    // browsers, keep its direction.
+    const sel = doc.getSelection();
+    if (backward && sel?.rangeCount && !sel.isCollapsed && sel.direction !== 'backward') {
+      const r = sel.getRangeAt(0);
+      sel.setBaseAndExtent(r.endContainer, r.endOffset, r.startContainer, r.startOffset);
+    }
     if (result && changed) input(t.host, specInputTypes.get(cmd), specInputData(cmd, value));
     return result;
   }
