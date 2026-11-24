@@ -1219,6 +1219,12 @@ fn choose_height(evs: &[Ev], a: usize, b: usize, y0: f32, phys: f32, total: f32,
         _ => m,
     });
     let cap = cap.unwrap_or(f32::INFINITY);
+    // (Content overflowing its boxes counts in the flow's extent.)
+    let bottom = evs[a..b].iter().fold(f32::MIN, |m, e| match *e {
+        Ev::Leaf { bottom, .. } | Ev::End { bottom, .. } => m.max(bottom),
+        _ => m,
+    });
+    let total = total.max(bottom + off - y0);
     let mut h = (total / n as f32).max(tallest).max(0.0).min(cap);
     let mut plan = paginate(evs, a, b, &geom(h), off);
     let mut rounds = 0;
