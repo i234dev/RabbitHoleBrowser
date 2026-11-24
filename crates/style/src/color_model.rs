@@ -198,6 +198,25 @@ fn srgb_to_hsl(c: V3) -> V3 {
     [h, s * 100.0, l * 100.0]
 }
 
+/// The hue of sRGB as HWB uses it: out-of-gamut colors keep the hue that
+/// converts back to them (no rotation for negative saturation).
+fn srgb_hue(c: V3) -> f64 {
+    let max = c[0].max(c[1]).max(c[2]);
+    let min = c[0].min(c[1]).min(c[2]);
+    let d = max - min;
+    if d.abs() <= 1e-12 {
+        return f64::NAN;
+    }
+    let h = if max == c[0] {
+        (c[1] - c[2]) / d + if c[1] < c[2] { 6.0 } else { 0.0 }
+    } else if max == c[1] {
+        (c[2] - c[0]) / d + 2.0
+    } else {
+        (c[0] - c[1]) / d + 4.0
+    } * 60.0;
+    h.rem_euclid(360.0)
+}
+
 fn to_polar(lab: V3) -> V3 {
     let c = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
     let h = lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0);
@@ -243,10 +262,9 @@ pub fn from_linear(space: Space, lin: V3) -> V3 {
         Space::Hsl => srgb_to_hsl(lin.map(cs::gamma_encode)),
         Space::Hwb => {
             let rgb = lin.map(cs::gamma_encode);
-            let hsl = srgb_to_hsl(rgb);
             let w = rgb[0].min(rgb[1]).min(rgb[2]);
             let b = 1.0 - rgb[0].max(rgb[1]).max(rgb[2]);
-            [hsl[0], w * 100.0, b * 100.0]
+            [srgb_hue(rgb), w * 100.0, b * 100.0]
         }
         Space::Lab => cs::linear_to_lab(lin),
         Space::Lch => to_polar(cs::linear_to_lab(lin)),
@@ -321,15 +339,34 @@ impl Abs {
         match self.space {
             Space::Lab | Space::Oklab if !self.has(1) && !self.has(2) => carried.extend([Cat::Colorful, Cat::Hue]),
             Space::Hwb if !self.has(1) && !self.has(2) => carried.extend([Cat::Light, Cat::Colorful]),
+            Space::Lch | Space::Oklch if !self.has(1) && !self.has(2) => carried.extend([Cat::OppA, Cat::OppB]),
             _ => {}
         }
+        // A color with no components at all has none in any space.
+        let all_missing = self.missing & 7 == 7;
+        // A powerless hue is missing in the destination, and the color
+        // converts as the achromatic color it is.
+        let mut source = self.values();
         if let Some(h) = self.space.hue_index() {
             if self.has(h) && powerless(self.space, self.c) {
                 carried.push(Cat::Hue);
+                match self.space {
+                    Space::Hsl | Space::Lch | Space::Oklch => source[1] = 0.0,
+                    _ => {
+                        let sum = source[1] + source[2];
+                        if sum > 0.0 && sum < 100.0 {
+                            source[1] *= 100.0 / sum;
+                            source[2] *= 100.0 / sum;
+                        }
+                    }
+                }
             }
         }
-        let mut c = from_linear(to, self.linear());
+        let mut c = from_linear(to, to_linear(self.space, source));
         let mut missing = self.missing & ALPHA_MISSING;
+        if all_missing || (to == Space::Hwb && carried.contains(&Cat::Light) && carried.contains(&Cat::Colorful)) {
+            missing |= if all_missing { 7 } else { 0b110 };
+        }
         for cat in carried {
             if let Some(j) = index_of(to, cat) {
                 missing |= 1 << j;
@@ -338,6 +375,10 @@ impl Abs {
         if let Some(h) = to.hue_index() {
             if powerless(to, c) {
                 missing |= 1 << h;
+                // Achromatic within precision: no colorfulness either.
+                if matches!(to, Space::Hsl | Space::Lch | Space::Oklch) {
+                    c[1] = 0.0;
+                }
             }
         }
         for (i, v) in c.iter_mut().enumerate() {
@@ -522,8 +563,8 @@ fn channels(func: Func, space: Space) -> [Channel; 3] {
     let hue = ch(true, 0.0, NO_CLAMP);
     match func {
         Func::Rgb => [ch(false, 255.0, (0.0, 255.0)); 3],
-        Func::Hsl => [hue, ch(false, 100.0, (0.0, 100.0)), ch(false, 100.0, (0.0, 100.0))],
-        Func::Hwb => [hue, ch(false, 100.0, (0.0, f64::INFINITY)), ch(false, 100.0, (0.0, f64::INFINITY))],
+        Func::Hsl => [hue, ch(false, 100.0, (0.0, f64::INFINITY)), ch(false, 100.0, NO_CLAMP)],
+        Func::Hwb => [hue, ch(false, 100.0, NO_CLAMP), ch(false, 100.0, NO_CLAMP)],
         Func::Lab => [ch(false, 100.0, (0.0, 100.0)), ch(false, 125.0, NO_CLAMP), ch(false, 125.0, NO_CLAMP)],
         Func::Lch => [ch(false, 100.0, (0.0, 100.0)), ch(false, 150.0, (0.0, f64::INFINITY)), hue],
         Func::Oklab => [ch(false, 1.0, (0.0, 1.0)), ch(false, 0.4, NO_CLAMP), ch(false, 0.4, NO_CLAMP)],
@@ -1261,17 +1302,15 @@ pub fn mix(colors: &[(Abs, Option<f64>)], space: Space, hue: cs::HueMethod) -> O
     let omitted = colors.iter().filter(|(_, p)| p.is_none()).count();
     let fill = if omitted == 0 { 0.0 } else { ((100.0 - given) / omitted as f64).max(0.0) };
     let weights: Vec<f64> = colors.iter().map(|(_, p)| p.unwrap_or(fill).max(0.0)).collect();
+    // Percentages summing to zero mix evenly into a transparent color.
     let total: f64 = weights.iter().sum();
-    if total <= 0.0 {
-        return None;
-    }
     let alpha_mult = if total < 100.0 { total / 100.0 } else { 1.0 };
     let converted: Vec<Abs> = colors.iter().map(|(c, _)| c.convert(space)).collect();
     let mut acc = converted[0];
     let mut acc_w = weights[0];
     for (c, w) in converted.iter().zip(&weights).skip(1) {
         let sum = acc_w + w;
-        let t = if sum > 0.0 { w / sum } else { 0.0 };
+        let t = if sum > 0.0 { w / sum } else { 0.5 };
         acc = interpolate(&acc, c, t, hue);
         acc_w = sum;
     }
@@ -1358,6 +1397,65 @@ pub fn interpolate(a: &Abs, b: &Abs, t: f64, method: cs::HueMethod) -> Abs {
     Abs { space, c: out, alpha: if missing & ALPHA_MISSING != 0 { 0.0 } else { alpha.clamp(0.0, 1.0) }, missing, legacy: false }
 }
 
+/// sRGB (gamma-encoded, in [0, 1]) of a color by the CSS gamut mapping
+/// algorithm (CSS Color 4 §13.2): chroma reduction in Oklch at constant
+/// lightness and hue until the clipped color is within a just-noticeable
+/// difference.
+pub fn gamut_map_srgb(c: &Abs) -> V3 {
+    // (Missing components are zero for painting: no carrying forward.)
+    let srgb = from_linear(Space::Srgb, c.linear());
+    let inside = |v: &V3| v.iter().all(|x| (-1e-6..=1.0 + 1e-6).contains(x));
+    if inside(&srgb) {
+        return srgb.map(|v| v.clamp(0.0, 1.0));
+    }
+    let lch = from_linear(Space::Oklch, c.linear());
+    let lch = [lch[0], lch[1], if lch[2].is_nan() { 0.0 } else { lch[2] }];
+    if lch[0] >= 1.0 {
+        return [1.0; 3];
+    }
+    if lch[0] <= 0.0 {
+        return [0.0; 3];
+    }
+    const JND: f64 = 0.02;
+    const EPSILON: f64 = 0.0001;
+    let clip = |v: V3| v.map(|x| x.clamp(0.0, 1.0));
+    let to_srgb = |l: V3| from_linear(Space::Srgb, to_linear(Space::Oklch, l));
+    let delta_eok = |a: V3, b: V3| {
+        let (x, y) = (cs::linear_to_oklab(decode(a)), cs::linear_to_oklab(decode(b)));
+        ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt()
+    };
+    let clipped = clip(srgb);
+    if delta_eok(clipped, srgb) < JND {
+        return clipped;
+    }
+    let (mut min, mut max) = (0.0, lch[1]);
+    let mut min_in_gamut = true;
+    let mut current = lch;
+    let mut result = clipped;
+    while max - min > EPSILON {
+        let chroma = (min + max) / 2.0;
+        current[1] = chroma;
+        let candidate = to_srgb(current);
+        if min_in_gamut && inside(&candidate) {
+            min = chroma;
+            continue;
+        }
+        let clipped = clip(candidate);
+        let e = delta_eok(clipped, candidate);
+        if e < JND {
+            if JND - e < EPSILON {
+                return clipped;
+            }
+            min_in_gamut = false;
+            min = chroma;
+        } else {
+            max = chroma;
+        }
+        result = clipped;
+    }
+    result
+}
+
 /// An `<alpha-value>` (`<number> | <percentage>`, math functions included)
 /// as a number, not clamped.
 pub fn alpha_value(c: &[Token]) -> Option<f64> {
@@ -1396,9 +1494,25 @@ pub fn alpha_specified(c: &[Token]) -> Option<String> {
 }
 
 /// Parse and resolve a color component with the thread's current color.
+thread_local! {
+    /// The full-precision current color, when it is not an 8-bit color.
+    static CURRENT: std::cell::Cell<Option<Abs>> = const { std::cell::Cell::new(None) };
+}
+
+/// Set the full-precision current color for `currentcolor` (with the
+/// 8-bit one set by `values::set_current_color`).
+pub fn set_current(c: Option<Abs>) {
+    CURRENT.with(|v| v.set(c));
+}
+
 pub fn resolve_tokens(c: &[Token]) -> Option<(Spec, Abs)> {
     let spec = Spec::parse(c)?;
-    let current = if spec.uses_current() { crate::values::current_color().map(Abs::from_gfx) } else { None };
+    let current = if spec.uses_current() {
+        let gfx = crate::values::current_color()?;
+        Some(CURRENT.with(|v| v.get()).filter(|a| a.to_gfx() == gfx).unwrap_or_else(|| Abs::from_gfx(gfx)))
+    } else {
+        None
+    };
     let abs = spec.resolve(current.as_ref())?;
     Some((spec, abs))
 }

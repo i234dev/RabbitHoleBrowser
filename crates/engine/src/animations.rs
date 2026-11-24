@@ -253,6 +253,8 @@ enum Val {
     ItemAlignment(ItemAlign, AlignFlags),
     F(f32),
     C(Color),
+    /// A color that is not a legacy sRGB color (CSS Color 4 §12.1).
+    Cw(rabbithole_style::color_model::Abs),
     L(Length),
     T(Vec<TransformOp>),
     V(Visibility),
@@ -264,8 +266,8 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
     use Prop::*;
     match p {
         Opacity => Val::F(s.opacity),
-        Color => Val::C(s.color),
-        BackgroundColor => Val::C(s.background_color),
+        Color => s.color_components.as_ref().filter(|c| !c.0.legacy).map_or(Val::C(s.color), |c| Val::Cw(c.0)),
+        BackgroundColor => s.background_color_components.as_ref().filter(|c| !c.0.legacy).map_or(Val::C(s.background_color), |c| Val::Cw(c.0)),
         BorderTopColor => Val::C(s.border_color.top),
         BorderRightColor => Val::C(s.border_color.right),
         BorderBottomColor => Val::C(s.border_color.bottom),
@@ -345,6 +347,18 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
             s.background_color = *c;
             s.background_color_components = None;
         }
+        (Color, Val::Cw(c)) => {
+            s.color = c.to_gfx();
+            s.color_components = Some(std::rc::Rc::new(rabbithole_style::ComputedColor(*c)));
+        }
+        (BackgroundColor, Val::Cw(c)) => {
+            s.background_color = c.to_gfx();
+            s.background_color_components = Some(std::rc::Rc::new(rabbithole_style::ComputedColor(*c)));
+        }
+        (BorderTopColor, Val::Cw(c)) => s.border_color.top = c.to_gfx(),
+        (BorderRightColor, Val::Cw(c)) => s.border_color.right = c.to_gfx(),
+        (BorderBottomColor, Val::Cw(c)) => s.border_color.bottom = c.to_gfx(),
+        (BorderLeftColor, Val::Cw(c)) => s.border_color.left = c.to_gfx(),
         (BorderTopColor, Val::C(c)) => s.border_color.top = *c,
         (BorderRightColor, Val::C(c)) => s.border_color.right = *c,
         (BorderBottomColor, Val::C(c)) => s.border_color.bottom = *c,
@@ -962,6 +976,33 @@ fn lerp_matrix(a: [f32; 6], b: [f32; 6], t: f32) -> [f32; 6] {
     [(r0x * sc[0]) as f32, (r0y * sc[0]) as f32, (r1x * sc[1]) as f32, (r1y * sc[1]) as f32, tr[0] as f32, tr[1] as f32]
 }
 
+/// CSS Color 4 §12.1: legacy sRGB colors interpolate in premultiplied
+/// sRGB; once either is not legacy, in Oklab, and the result keeps its
+/// Oklab components.
+fn interpolate_colors(a: &Val, b: &Val, t: f32) -> Val {
+    use rabbithole_style::color_model::{interpolate, Abs, Space};
+    let abs = |v: &Val| match v {
+        Val::Cw(c) => (*c, true),
+        Val::C(c) => (Abs::from_gfx(*c), false),
+        _ => (Abs::from_gfx(Color::TRANSPARENT), false),
+    };
+    if let (Val::C(p), Val::C(q)) = (a, b) {
+        // Premultiplied, in byte units as engines do.
+        let (pa, qa) = (f32::from(p.a) / 255.0, f32::from(q.a) / 255.0);
+        let alpha = lerp(pa, qa, t).clamp(0.0, 1.0);
+        let ch = |x: u8, y: u8| {
+            let v = lerp(f32::from(x) * pa, f32::from(y) * qa, t);
+            (if alpha > 0.0 { v / alpha } else { 0.0 }).round().clamp(0.0, 255.0) as u8
+        };
+        return Val::C(Color { r: ch(p.r, q.r), g: ch(p.g, q.g), b: ch(p.b, q.b), a: (alpha * 255.0).round() as u8 });
+    }
+    let ((x, _), (y, _)) = (abs(a), abs(b));
+    let t = f64::from(t);
+    let mut mixed = interpolate(&x.convert(Space::Oklab), &y.convert(Space::Oklab), t, rabbithole_style::HueMethod::Shorter);
+    mixed.c[0] = mixed.c[0].clamp(0.0, 1.0);
+    Val::Cw(mixed)
+}
+
 fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
@@ -971,10 +1012,7 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
         (Val::MotionRotation(a), Val::MotionRotation(b)) if a.follows_path == b.follows_path =>
             Val::MotionRotation(MotionRotation { follows_path: a.follows_path, degrees: lerp(a.degrees,b.degrees,t) }),
         (Val::F(x), Val::F(y)) => Val::F(lerp(*x, *y, t)),
-        (Val::C(x), Val::C(y)) => {
-            let ch = |p: u8, q: u8| lerp(p as f32, q as f32, t).round().clamp(0.0, 255.0) as u8;
-            Val::C(Color { r: ch(x.r, y.r), g: ch(x.g, y.g), b: ch(x.b, y.b), a: ch(x.a, y.a) })
-        }
+        (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) => interpolate_colors(a, b, t),
         (Val::L(x), Val::L(y)) => lerp_lp(x, y, t).map(Val::L).unwrap_or_else(discrete),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, t).map(Val::T).unwrap_or_else(discrete),
         (Val::Fl(x), Val::Fl(y)) => {
@@ -2041,7 +2079,9 @@ fn add_values(under: &Val, v: &Val) -> Val {
         (Val::F(a), Val::F(b)) => Val::F(a + b),
         (Val::L(a), Val::L(b)) => add_lp(*a, *b).map(Val::L).unwrap_or_else(|| v.clone()),
         (Val::T(a), Val::T(b)) => Val::T(a.iter().chain(b.iter()).cloned().collect()),
-        (Val::C(a), Val::C(b)) => {
+        (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) => {
+            let gfx = |v: &Val| match v { Val::Cw(c) => c.to_gfx(), Val::C(c) => *c, _ => Color::TRANSPARENT };
+            let (a, b) = (gfx(under), gfx(v));
             let ch = |p: u8, q: u8| (p as u16 + q as u16).min(255) as u8;
             Val::C(Color { r: ch(a.r, b.r), g: ch(a.g, b.g), b: ch(a.b, b.b), a: ch(a.a, b.a) })
         }
@@ -2126,7 +2166,7 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
 /// Can `a` and `b` be interpolated (not just swapped at 50%)?
 fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
-        (Val::F(_), Val::F(_)) | (Val::C(_), Val::C(_)) | (Val::V(_), Val::V(_)) => true,
+        (Val::F(_), Val::F(_)) | (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) | (Val::V(_), Val::V(_)) => true,
         (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
             lerp_pair(&(*x,*y),&(*u,*v),0.5).is_some(),
         (Val::MotionRotation(a), Val::MotionRotation(b)) => a.follows_path == b.follows_path,

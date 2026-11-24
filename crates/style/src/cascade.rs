@@ -1179,6 +1179,7 @@ fn apply_declarations(
     // backgrounds, shadows...) is the element's final color, whatever the
     // declaration order. (In `color` itself it is the parent's.)
     crate::values::set_current_color(Some(parent.color));
+    crate::color_model::set_current(parent.color_components.as_ref().map(|c| c.0));
     crate::color_model::set_font_size(len.font_size);
     for (name, value, base) in &resolved {
         if matches!(*name, "color" | "writing-mode" | "-webkit-writing-mode" | "direction") {
@@ -1187,6 +1188,7 @@ fn apply_declarations(
         }
     }
     crate::values::set_current_color(Some(style.color));
+    crate::color_model::set_current(style.color_components.as_ref().map(|c| c.0));
     // `border-*-color` is not inherited; its initial value is currentcolor.
     // `border-*-width` starts as `medium`; the computed width is zero
     // where the style is none/hidden (resolved after all declarations).
@@ -1224,6 +1226,7 @@ fn apply_declarations(
         }
     }
     crate::values::set_current_color(None);
+    crate::color_model::set_current(None);
     // `text-align: match-parent` on the root computes to `start`.
     if is_root && style.text_align != TextAlign::Start && resolved.iter().any(|(n, v, _)| *n == "text-align" && values::components(v).first().is_some_and(|c| values::is_ident(c, "match-parent"))) {
         style.text_align = TextAlign::Start;

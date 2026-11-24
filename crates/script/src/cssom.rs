@@ -1282,6 +1282,22 @@ pub(crate) fn editing_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsRe
     })
 }
 
+/// A canvas color: `[r, g, b, a]` with sRGB bytes, colors outside sRGB
+/// gamut mapped (CSS Color 4 §13.2); null when invalid.
+pub(crate) fn canvas_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    use rabbithole_style::color_model::{gamut_map_srgb, Spec};
+    let text = arg_str(realm, args, 0)?;
+    let tokens = rabbithole_css::Tokenizer::tokenize(&text);
+    let parts = rabbithole_style::values::components(&tokens);
+    let [c] = parts.as_slice() else { return Ok(Value::Null) };
+    let Some(spec) = Spec::parse(c) else { return Ok(Value::Null) };
+    let current = rabbithole_style::color_model::Abs::from_gfx(rabbithole_gfx::Color::BLACK);
+    let Some(abs) = spec.resolve(Some(&current)) else { return Ok(Value::Null) };
+    let rgb = if abs.legacy { let g = abs.to_gfx(); [g.r, g.g, g.b].map(|v| f64::from(v) / 255.0) } else { gamut_map_srgb(&abs) };
+    let byte = |v: f64| Value::Number((v * 255.0).round().clamp(0.0, 255.0));
+    Ok(realm.new_array_value(vec![byte(rgb[0]), byte(rgb[1]), byte(rgb[2]), Value::Number(abs.alpha_value().clamp(0.0, 1.0))]))
+}
+
 fn css_supports(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     if args.is_empty() { return Err(realm.throw_type_error("CSS.supports requires an argument")); }
     let first = arg_str(realm, args, 0)?;

@@ -501,6 +501,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "cssomExpandPlace", 2, crate::cssom::cssom_expand_place);
     realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
+    realm.define_method(o, "canvasColor", 1, crate::cssom::canvas_color);
     realm.define_method(o, "setSheetsPending", 1, set_sheets_pending);
     realm.define_method(o, "setSheetText", 2, set_sheet_text);
     realm.define_method(o, "fetchText", 1, fetch_text);
