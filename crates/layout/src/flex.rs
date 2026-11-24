@@ -582,12 +582,19 @@ impl<'a> Layouter<'a> {
         // first / last item.
         // (Only the items are recorded: their baselines are looked up when
         // asked for, which most containers never are.)
+        // (Start- and endmost in the container's writing mode: a reversed
+        // main axis takes the first baseline from its last item.)
         let line_baseline = |line: &[usize], last: bool| -> Option<u32> {
-            let shared = line.iter().find(|&&i| participates_in_baseline(&items[i], axis) && items[i].last_baseline == last);
-            let &i = shared.or(if last { line.last() } else { line.first() })?;
+            // (Items aligned by the other baseline still share one.)
+            let shared = line.iter().find(|&&i| participates_in_baseline(&items[i], axis) && items[i].last_baseline == last)
+                .or_else(|| line.iter().find(|&&i| participates_in_baseline(&items[i], axis)));
+            let &i = shared.or(if last != dir_reverse { line.last() } else { line.first() })?;
             Some(items[i].idx as u32)
         };
-        let baselines = (lines.first().and_then(|r| line_baseline(&ids[r.clone()], false)), lines.last().and_then(|r| line_baseline(&ids[r.clone()], true)));
+        // (Lines likewise: `wrap-reverse` stacks the first line last.)
+        let wrap_reverse = style.flex_wrap == FlexWrap::WrapReverse;
+        let (first_line, last_line) = if wrap_reverse { (lines.last(), lines.first()) } else { (lines.first(), lines.last()) };
+        let baselines = (first_line.and_then(|r| line_baseline(&ids[r.clone()], false)), last_line.and_then(|r| line_baseline(&ids[r.clone()], true)));
         let none = crate::tree::FLEX_BASELINE_NONE;
         b.flex_baselines = [baselines.0.unwrap_or(none), baselines.1.unwrap_or(none)];
 

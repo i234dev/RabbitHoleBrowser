@@ -25,6 +25,7 @@ mod estimate;
 mod pass;
 mod item_measure;
 mod traversal;
+mod baseline;
 pub(crate) mod subgrid;
 #[cfg(test)]
 mod tests;
@@ -1409,18 +1410,9 @@ impl<'a> Layouter<'a> {
                 it.justify=justify;it.align=align;it.edges.auto=auto;
             });
         }
-        // Baseline self-alignment (§10.6): items aligned `baseline` that
-        // start in the same row line up their first baselines.
-        let mut rows_seen: Vec<i32> = items.iter().filter(|it| it.align == ItemAlign::Baseline).map(|it| it.area.row.0).collect();
-        rows_seen.sort_unstable();
-        rows_seen.dedup();
-        for row in rows_seen {
-            let group: Vec<usize> = items.iter().filter(|it| it.align == ItemAlign::Baseline && it.area.row.0 == row).map(|it| it.idx).collect();
-            let bls: Vec<f32> = group.iter().map(|&i| Self::item_baseline(&b.children[i])).collect();
-            let max = bls.iter().cloned().fold(f32::MIN, f32::max);
-            for (k, &i) in group.iter().enumerate() {
-                b.children[i].translate(0.0, max - bls[k]);
-            }
+        // Baseline self-alignment (§10.6).
+        if items.iter().any(|it| baseline::participates(it, true) || baseline::participates(it, false)) {
+            self.align_item_baselines(b, &items, (&cols.tracks, &col_pos), (&rows.tracks, &row_pos), (content_x, content_y), mirror);
         }
 
         // Absolutely positioned children: with a positioned grid container
@@ -1901,7 +1893,9 @@ impl<'a> Layouter<'a> {
 
     /// Column contributions: min-/max-content widths incl. margins/padding/border.
     fn column_contributions(&mut self,b:&mut LayoutBox,items:&[GridItem],cbw:f32,cols:Option<(&TrackList,f32)>,rows:Option<(&TrackList,f32)>)->Vec<Contribution> {
-        items.iter().map(|it|self.column_contribution(&mut b.children[it.idx],it,cbw,ItemBases::new(it,cols,rows))).collect()
+        let mut out:Vec<Contribution>=items.iter().map(|it|self.column_contribution(&mut b.children[it.idx],it,cbw,ItemBases::new(it,cols,rows))).collect();
+        self.column_baseline_shims(b,items,&mut out,cbw,cols.map(|c|c.0),rows);
+        out
     }
 
     /// Shared-axis items are empty for this sizing pass: their descendants
@@ -1944,6 +1938,8 @@ impl<'a> Layouter<'a> {
                 out.extend(self.column_contributions(b,std::slice::from_ref(it),cbw,Some((cols,col_gap)),rows.map(|r|(r,row_gap))));
             }
         }
+        // (Only when every item contributed exactly once.)
+        self.column_baseline_shims(b,items,&mut out,cbw,Some(cols),rows.map(|r|(r,row_gap)));
         out
     }
 
@@ -2023,15 +2019,16 @@ impl<'a> Layouter<'a> {
     fn row_contributions(&mut self, b: &mut LayoutBox, items: &[GridItem], cols: &TrackList, col_pos: &[f32], col_gap: f32, cbw: f32, rows: &TrackList, row_gap: f32) -> Vec<Contribution> {
         let _probe = self.grid_publication.probe_grid();
         let mut out = Vec::with_capacity(items.len());
-        // (contribution, row, baseline offset) of baseline-aligned items.
-        let mut baselines: Vec<(usize, i32, f32)> = Vec::new();
+        // (contribution, baseline) of baseline-aligned items.
+        let mut baselines: Vec<(usize, baseline::ItemBaseline)> = Vec::new();
+        let container = b.style.clone();
         for it in items {
             let (_, aw) = span_size(&cols.tracks, col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
             let item=if subgrid::requests(&b.children[it.idx])!=(false,false)||percent_edges(&b.children[it.idx].style) {subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw)} else {*it};let it=&item;
             let child = &mut b.children[it.idx];
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
             let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column);
-            let baseline = it.align == ItemAlign::Baseline;
+            let baseline = baseline::eligible(child, it, &rows.tracks, true);
             // Percentages of the block size resolve against the grid area
             // only when its rows have fixed sizes; otherwise they are cyclic.
             let cbh = if rows.sized() { fixed_span(&rows.tracks, it.area.row.0, it.area.row.1, row_gap) } else { None };
@@ -2050,7 +2047,7 @@ impl<'a> Layouter<'a> {
                 }
             };
             if baseline {
-                baselines.push((out.len(), it.area.row.0, Self::item_baseline(child)));
+                baselines.push((out.len(), baseline::measure(&container, child, it, true)));
             }
             // The automatic minimum fits an area of fixed maximum tracks.
             let min = match fixed_max_span(&rows.tracks, it.area.row.0, it.area.row.1, row_gap).filter(|_| rows.sized()) {
@@ -2074,12 +2071,8 @@ impl<'a> Layouter<'a> {
             });
         }
         // Baseline-aligned items of a row are shifted to share a baseline:
-        // their contributions include the shift (§11.5 step 2).
-        for &(k, row, bl) in &baselines {
-            let max = baselines.iter().filter(|b| b.1 == row).map(|b| b.2).fold(f32::MIN, f32::max);
-            out[k].min += max - bl;
-            out[k].max += max - bl;
-        }
+        // their contributions include the shift (§11.5 step 1).
+        baseline::add_shims(&baselines, &mut out);
         out
     }
 
