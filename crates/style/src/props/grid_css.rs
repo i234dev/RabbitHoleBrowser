@@ -449,9 +449,11 @@ fn grid_line(comps: &[&[Token]]) -> Option<(String, bool)> {
     let mut span = false;
     let mut num: Option<String> = None;
     let mut name: Option<String> = None;
-    for c in comps {
+    for (i, c) in comps.iter().enumerate() {
         if crate::values::is_ident(c, "span") {
-            if span {
+            // `span && [ <integer> || <custom-ident> ]`: the group after
+            // or before `span` stays together.
+            if span || (i != 0 && i + 1 != comps.len()) {
                 return None;
             }
             span = true;
@@ -579,13 +581,28 @@ fn lanes(comps: &[&[Token]]) -> Option<Vec<(&'static str, String)>> {
             ]);
         }
     }
+    // The direction is one run of its keywords anywhere among the other
+    // two components.
     let is_dir = |c: &&[Token]| ident(c).is_some_and(|k| LANES_DIRECTION_WORDS.contains(&k.as_str()));
-    let lead = comps.iter().take_while(|c| is_dir(c)).count();
-    let trail = comps[lead..].iter().rev().take_while(|c| is_dir(c)).count();
-    if lead > 0 && trail > 0 {
-        return None;
-    }
-    let (dir, rest) = if lead > 0 { (&comps[..lead], &comps[lead..]) } else { (&comps[comps.len() - trail..], &comps[..comps.len() - trail]) };
+    let first = comps.iter().position(|c| is_dir(c));
+    let (dir, rest): (Vec<&[Token]>, Vec<&[Token]>) = match first {
+        None => (Vec::new(), comps.to_vec()),
+        Some(f) => {
+            let len = comps[f..].iter().take_while(|c| is_dir(c)).count();
+            if comps[f + len..].iter().any(|c| is_dir(c)) {
+                return None;
+            }
+            // The rest must not have the direction inside the track list.
+            let before = &comps[..f];
+            let after = &comps[f + len..];
+            let string_only = |p: &[&[Token]]| p.is_empty() || matches!(p, [[Token::String(_)]]);
+            if !string_only(before) && !string_only(after) {
+                return None;
+            }
+            (comps[f..f + len].to_vec(), before.iter().chain(after.iter()).copied().collect())
+        }
+    };
+    let (dir, rest) = (dir.as_slice(), rest.as_slice());
     let direction = if dir.is_empty() { "column".to_string() } else { lanes_direction(dir)? };
     let strings: Vec<usize> = rest.iter().enumerate().filter(|(_, c)| matches!(c, [Token::String(_)])).map(|(i, _)| i).collect();
     let (area, tracks): (Option<&str>, Vec<&[Token]>) = match strings.as_slice() {

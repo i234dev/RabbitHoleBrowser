@@ -330,11 +330,18 @@ fn parse_grid_line(comps: &[&[Token]]) -> Option<GridLine> {
                 return None;
             }
             num = Some(*n as i32);
+        } else if let Some(n) = matches!(c, [Token::Function(_), ..]).then(|| values::number(c)).flatten() {
+            // A math function rounds to the nearest integer.
+            if num.is_some() || !n.is_finite() {
+                return None;
+            }
+            num = Some((n.round() as i32).max(if span { 1 } else { i32::MIN }));
         } else {
             return None;
         }
     }
     if span && num.is_some_and(|n| n < 0) { return None; }
+    let num = if span { num.map(|n| n.max(1)) } else { num };
     Some(match (span, num, name) {
         (s, Some(n), Some(name)) => GridLine::NamedNth(name, n, s),
         (true, Some(n), None) => GridLine::Span(n as u32),
@@ -558,8 +565,12 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                     Some(_) => {}
                     None => {
                         if let Some(l) = values::parse_length(c).map(|v| v.resolve(ctx)) {
-                            if !matches!(l, Length::Px(v) | Length::Percent(v) if v < 0.0) {
-                                style.fit_tolerance = Some(l);
+                            let math = matches!(c, [Token::Function(_), ..]);
+                            match l {
+                                // Math functions clamp to the allowed range.
+                                Length::Px(v) if v < 0.0 && math => style.fit_tolerance = Some(Length::Px(0.0)),
+                                Length::Px(v) | Length::Percent(v) if v < 0.0 => {}
+                                l => style.fit_tolerance = Some(l),
                             }
                         }
                     }

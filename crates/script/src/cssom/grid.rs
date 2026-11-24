@@ -46,6 +46,9 @@ pub(super) fn used(value: &UsedGridTrackList) -> String {
 
 fn size(value: &TrackSize) -> String {
     match value {
+        // Track sizes are non-negative: computed calc() results clamp.
+        TrackSize::Length(rabbithole_style::Length::Px(v)) if *v < 0.0 => "0px".into(),
+        TrackSize::FitContent(rabbithole_style::Length::Px(v)) if *v < 0.0 => "fit-content(0px)".into(),
         TrackSize::Length(l) => super::position_css(l),
         TrackSize::Fr(f) => format!("{}fr", super::fmt_num(*f)),
         TrackSize::MinMax(min, max) => format!("minmax({}, {})", size(min), size(max)),

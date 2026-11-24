@@ -903,7 +903,7 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
             Some(rabbithole_style::Length::Px(v)) if v.is_infinite() => "infinite".into(),
             Some(l) => position_css(&l),
         },
-        "grid-row" | "grid-column" | "grid-area" | "grid-lanes" => {
+        "grid-row" | "grid-column" | "grid-area" | "grid-lanes" | "grid-template" | "grid" => {
             let get = |l: &str| Some(computed_from_style(s, l, r, cb));
             rabbithole_style::props::grid_css::shorthand(prop, &get).unwrap_or_default()
         }
