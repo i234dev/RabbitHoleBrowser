@@ -1177,6 +1177,17 @@ fn read_computed_value(realm: &mut Realm, node: NodeRef, property: &str) -> JsRe
     Ok(Value::str(&computed_value(node, property).unwrap_or_default()))
 }
 
+/// `computedValue(element, property)`: one computed style value, as
+/// `getComputedStyle(element).getPropertyValue(property)` (for the editing
+/// algorithms, which read many).
+pub(crate) fn computed_value_native(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &arg(args, 0)) else {
+        return Err(realm.throw_type_error("computedValue: parameter 1 is not of type 'Element'."));
+    };
+    let prop = arg_str(realm, args, 1)?;
+    read_computed_value(realm, n, &prop)
+}
+
 fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = style_target(realm, args)?;
     let Some(key) = key_of(realm, args) else { return Ok(Value::Undefined) };

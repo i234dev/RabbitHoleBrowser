@@ -1701,8 +1701,28 @@
       changed = observer.takeRecords().length > 0;
       observer.disconnect();
     }
+    if (result) placeCaret(doc, cmd);
     if (result && changed) input(t.host, specInputTypes.get(cmd), specInputData(cmd, value));
     return result;
+  }
+  // Like other browsers, a caret left between elements by a deletion goes
+  // to the end of the inline content before it, so typing and queries use
+  // that formatting; one left in a list goes into the list item.
+  const inlineContainers = new Set(['abbr','b','bdi','bdo','cite','code','del','dfn','em','font','i','ins','kbd','mark','q','s','samp','small','span','strike','strong','sub','sup','u','var']);
+  function placeCaret(doc, cmd) {
+    const sel = doc.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return;
+    const node = sel.focusNode, offset = sel.focusOffset;
+    if (node.nodeType !== 1) return;
+    if (listCommands.has(cmd) && (node.localName === 'ol' || node.localName === 'ul')) {
+      const item = node.childNodes[offset] || node.childNodes[offset - 1];
+      if (item?.localName === 'li') sel.collapse(item, item === node.childNodes[offset] ? 0 : item.childNodes.length);
+      return;
+    }
+    if ((cmd !== 'delete' && cmd !== 'forwarddelete') || !offset) return;
+    let before = node.childNodes[offset - 1];
+    while (before?.nodeType === 1 && inlineContainers.has(before.localName) && before.isContentEditable && before.lastChild) before = before.lastChild;
+    if (before?.nodeType === 3 && before !== node.childNodes[offset - 1] && before.length) sel.collapse(before, before.length);
   }
   function specQuery(doc, state, method, name) {
     const t = target(doc);

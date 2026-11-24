@@ -41,6 +41,11 @@
 (function (native) {
 "use strict";
 
+// RabbitHole: a computed style value without creating a declaration object.
+function computedStyle(element, property) {
+    return native.computedValue(element, property);
+}
+
 // RabbitHole: the document whose command runs (see run() at the end).
 var document = null;
 function getSelection() {
@@ -732,7 +737,7 @@ function isProhibitedParagraphChild(node) {
 // Document, or a DocumentFragment."
 function isBlockNode(node) {
     return node
-        && ((node.nodeType == Node.ELEMENT_NODE && ["inline", "inline-block", "inline-table", "none"].indexOf(getComputedStyle(node).display) == -1)
+        && ((node.nodeType == Node.ELEMENT_NODE && ["inline", "inline-block", "inline-table", "none"].indexOf(computedStyle(node, "display")) == -1)
         || node.nodeType == Node.DOCUMENT_NODE
         || node.nodeType == Node.DOCUMENT_FRAGMENT_NODE);
 }
@@ -822,7 +827,7 @@ function isCollapsedLineBreak(br) {
     var node = nextNode(br);
     while (node && node != stop) {
         if (node.nodeType == Node.ELEMENT_NODE) {
-            var display = getComputedStyle(node).display;
+            var display = computedStyle(node, "display");
             if (display == "none") {
                 node = nextNodeDescendants(node);
                 continue;
@@ -843,7 +848,7 @@ function isCollapsedLineBreak(br) {
 
 function getLineBreakBlock(br) {
     var ref = br.parentNode;
-    while (ref.parentNode && ref.nodeType == Node.ELEMENT_NODE && getComputedStyle(ref).display == "inline") {
+    while (ref.parentNode && ref.nodeType == Node.ELEMENT_NODE && computedStyle(ref, "display") == "inline") {
         ref = ref.parentNode;
     }
     return ref;
@@ -886,7 +891,7 @@ function isExtraneousLineBreak(br) {
         if (node.nodeType == Node.ELEMENT_NODE) {
             if (getAncestors(node).concat(node).some(function(n) {
                 return n.nodeType == Node.ELEMENT_NODE && n != block && isDescendant(n, block)
-                    && getComputedStyle(n).display == "none";
+                    && computedStyle(n, "display") == "none";
             })) {
                 node = previousNode(node);
                 continue;
@@ -894,7 +899,7 @@ function isExtraneousLineBreak(br) {
             if (isBlockNode(node) || isHtmlElement(node, "br")) {
                 return false;
             }
-            if (takesUpLine(node, getComputedStyle(node).display)) {
+            if (takesUpLine(node, computedStyle(node, "display"))) {
                 return true;
             }
         } else if (node.nodeType == Node.TEXT_NODE && !isWhitespaceNode(node)) {
@@ -920,12 +925,12 @@ function isWhitespaceNode(node) {
             /^[\t\n\r ]+$/.test(node.data)
             && node.parentNode
             && node.parentNode.nodeType == Node.ELEMENT_NODE
-            && ["normal", "nowrap"].indexOf(getComputedStyle(node.parentNode).whiteSpace) != -1
+            && ["normal", "nowrap"].indexOf(computedStyle(node.parentNode, "white-space")) != -1
         ) || (
             /^[\t\r ]+$/.test(node.data)
             && node.parentNode
             && node.parentNode.nodeType == Node.ELEMENT_NODE
-            && getComputedStyle(node.parentNode).whiteSpace == "pre-line"
+            && computedStyle(node.parentNode, "white-space") == "pre-line"
         ));
 }
 
@@ -954,7 +959,7 @@ function isCollapsedWhitespaceNode(node) {
     // "none", return true."
     if (getAncestors(node).some(function(ancestor) {
         return ancestor.nodeType == Node.ELEMENT_NODE
-            && getComputedStyle(ancestor).display == "none";
+            && computedStyle(ancestor, "display") == "none";
     })) {
         return true;
     }
@@ -1028,7 +1033,7 @@ function isVisible(node) {
 
     if (getAncestors(node).concat(node)
     .filter(function(node) { return node.nodeType == Node.ELEMENT_NODE })
-    .some(function(node) { return getComputedStyle(node).display == "none" })) {
+    .some(function(node) { return computedStyle(node, "display") == "none" })) {
         return false;
     }
 
@@ -2125,16 +2130,16 @@ function getEffectiveCommandValue(node, command) {
         // node to its parent."
         //
         // Another lame hack to avoid flawed APIs.
-        while ((getComputedStyle(node).backgroundColor == "rgba(0, 0, 0, 0)"
-        || getComputedStyle(node).backgroundColor === ""
-        || getComputedStyle(node).backgroundColor == "transparent")
+        while ((computedStyle(node, "background-color") == "rgba(0, 0, 0, 0)"
+        || computedStyle(node, "background-color") === ""
+        || computedStyle(node, "background-color") == "transparent")
         && node.parentNode
         && node.parentNode.nodeType == Node.ELEMENT_NODE) {
             node = node.parentNode;
         }
 
         // "Return the resolved value of "background-color" for node."
-        return getComputedStyle(node).backgroundColor;
+        return computedStyle(node, "background-color");
     }
 
     // "If command is "subscript" or "superscript":"
@@ -2146,7 +2151,7 @@ function getEffectiveCommandValue(node, command) {
 
         // "While node is an inline node:"
         while (isInlineNode(node)) {
-            var verticalAlign = getComputedStyle(node).verticalAlign;
+            var verticalAlign = computedStyle(node, "vertical-align");
 
             // "If node is a sub, set affected by subscript to true."
             if (isHtmlElement(node, "sub")) {
@@ -2186,7 +2191,7 @@ function getEffectiveCommandValue(node, command) {
     // "line-through", return "line-through". Otherwise, return null."
     if (command == "strikethrough") {
         do {
-            if (getComputedStyle(node).textDecoration.indexOf("line-through") != -1) {
+            if (computedStyle(node, "text-decoration").indexOf("line-through") != -1) {
                 return "line-through";
             }
             node = node.parentNode;
@@ -2199,7 +2204,7 @@ function getEffectiveCommandValue(node, command) {
     // return "underline". Otherwise, return null."
     if (command == "underline") {
         do {
-            if (getComputedStyle(node).textDecoration.indexOf("underline") != -1) {
+            if (computedStyle(node, "text-decoration").indexOf("underline") != -1) {
                 return "underline";
             }
             node = node.parentNode;
@@ -2213,14 +2218,14 @@ function getEffectiveCommandValue(node, command) {
 
     // "Return the resolved value for node of the relevant CSS property for
     // command."
-    return getComputedStyle(node)[commands[command].relevantCssProperty];
+    return computedStyle(node, commands[command].relevantCssProperty.replace(/[A-Z]/g, function(c) { return "-" + c.toLowerCase(); }));
 }
 
 function getSpecifiedCommandValue(element, command) {
     // "If command is "backColor" or "hiliteColor" and element's display
     // property does not have resolved value "inline", return null."
     if ((command == "backcolor" || command == "hilitecolor")
-    && getComputedStyle(element).display != "inline") {
+    && computedStyle(element, "display") != "inline") {
         return null;
     }
 
@@ -4050,7 +4055,7 @@ function getAlignmentValue(node) {
     // its parent."
     while ((node && node.nodeType != Node.ELEMENT_NODE)
     || (node.nodeType == Node.ELEMENT_NODE
-    && ["inline", "none"].indexOf(getComputedStyle(node).display) != -1)) {
+    && ["inline", "none"].indexOf(computedStyle(node, "display")) != -1)) {
         node = node.parentNode;
     }
 
@@ -4059,7 +4064,7 @@ function getAlignmentValue(node) {
         return "left";
     }
 
-    var resolvedValue = getComputedStyle(node).textAlign
+    var resolvedValue = computedStyle(node, "text-align")
         // Hack around browser non-standardness
         .replace(/^-(moz|webkit)-/, "")
         .replace(/^auto$/, "start");
@@ -5281,7 +5286,7 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
         // node's data is a space (0x0020) or non-breaking space (0x00A0),
         // subtract one from start offset."
         } else if (startNode.nodeType == Node.TEXT_NODE
-        && ["pre", "pre-wrap"].indexOf(getComputedStyle(startNode.parentNode).whiteSpace) == -1
+        && ["pre", "pre-wrap"].indexOf(computedStyle(startNode.parentNode, "white-space")) == -1
         && startOffset != 0
         && /[ \xa0]/.test(startNode.data[startOffset - 1])) {
             startOffset--;
@@ -5327,7 +5332,7 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
         // offset is not end node's length and the end offsetth element of
         // end node's data is a space (0x0020) or non-breaking space (0x00A0):"
         } else if (endNode.nodeType == Node.TEXT_NODE
-        && ["pre", "pre-wrap"].indexOf(getComputedStyle(endNode.parentNode).whiteSpace) == -1
+        && ["pre", "pre-wrap"].indexOf(computedStyle(endNode.parentNode, "white-space")) == -1
         && endOffset != getNodeLength(endNode)
         && /[ \xa0]/.test(endNode.data[endOffset])) {
             // "If fix collapsed space is true, and collapse spaces is true,
@@ -5383,7 +5388,7 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
             // offset is end node's length and the last code unit of end node's
             // data is a space (0x0020) and end node precedes a line break:"
             } else if (endNode.nodeType == Node.TEXT_NODE
-            && ["pre", "pre-wrap"].indexOf(getComputedStyle(endNode.parentNode).whiteSpace) == -1
+            && ["pre", "pre-wrap"].indexOf(computedStyle(endNode.parentNode, "white-space")) == -1
             && endOffset == getNodeLength(endNode)
             && endNode.data[endNode.data.length - 1] == " "
             && precedesLineBreak(endNode)) {
@@ -5408,9 +5413,32 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
     // node follows a line break, and false otherwise. non-breaking end is true
     // if end offset is end node's length and end node precedes a line break,
     // and false otherwise."
+    var nonBreakingStart = startOffset == 0 && followsLineBreak(startNode);
+    var nonBreakingEnd = endOffset == getNodeLength(endNode) && precedesLineBreak(endNode);
     var replacementWhitespace = canonicalSpaceSequence(length,
-        startOffset == 0 && followsLineBreak(startNode),
-        endOffset == getNodeLength(endNode) && precedesLineBreak(endNode));
+        nonBreakingStart, nonBreakingEnd);
+
+    // RabbitHole: like other browsers, leave a sequence that already shows
+    // every space alone unless the edit point is in it, e.g. one across an
+    // inline boundary from a deletion.
+    if (length) {
+        var sequenceRange = document.createRange();
+        sequenceRange.setStart(startNode, startOffset);
+        sequenceRange.setEnd(endNode, endOffset);
+        var current = sequenceRange.toString();
+        var texts = getAllContainedNodes(sequenceRange, function(n) { return n.nodeType == Node.TEXT_NODE })
+            .concat([startNode, endNode].filter(function(n) { return n.nodeType == Node.TEXT_NODE }));
+        var editPointInSequence = node.nodeType == Node.TEXT_NODE
+            && texts.indexOf(node) != -1
+            && texts.every(function(n) { return n == node });
+        if (!editPointInSequence
+        && current.length == length
+        && !/  /.test(current)
+        && !((nonBreakingStart || length == 1 && nonBreakingEnd) && current[0] == " ")
+        && !(nonBreakingEnd && current[current.length - 1] == " ")) {
+            return;
+        }
+    }
 
     // "While (start node, start offset) is before (end node, end offset):"
     while (getPosition(startNode, startOffset, endNode, endOffset) == "before") {
@@ -7460,6 +7488,24 @@ commands.insertorderedlist = {
 //@}
 ///// The insertParagraph command /////
 //@{
+// RabbitHole: like other browsers, an emptied line keeps its inline
+// formatting: its placeholder br goes into the innermost empty inline element
+// at its end (as in <b><br></b>).
+var voidElementNames = ["area", "base", "br", "col", "embed", "hr", "img",
+    "input", "link", "meta", "source", "track", "wbr"];
+function appendPlaceholderBreak(container) {
+    var parent = container;
+    while (parent.lastChild
+    && isHtmlElement(parent.lastChild)
+    && voidElementNames.indexOf(parent.lastChild.localName) == -1
+    && isInlineNode(parent.lastChild)
+    && isEditable(parent.lastChild)
+    && ![].some.call(parent.lastChild.childNodes, isVisible)) {
+        parent = parent.lastChild;
+    }
+    parent.appendChild(document.createElement("br"));
+}
+
 commands.insertparagraph = {
     preservesOverrides: true,
     action: function() {
@@ -7782,15 +7828,20 @@ commands.insertparagraph = {
         // the context object, and append the result as the last child of
         // container."
         if (![].some.call(container.childNodes, isVisible)) {
-            container.appendChild(document.createElement("br"));
+            appendPlaceholderBreak(container);
         }
 
         // "If new container has no visible children, call createElement("br")
         // on the context object, and append the result as the last child of
         // new container."
         if (![].some.call(newContainer.childNodes, isVisible)) {
-            newContainer.appendChild(document.createElement("br"));
+            appendPlaceholderBreak(newContainer);
         }
+
+        // RabbitHole: the split may leave whitespace at the end of container
+        // and at the start of new container, where it must not collapse.
+        canonicalizeWhitespace(container, getNodeLength(container));
+        canonicalizeWhitespace(newContainer, 0);
 
         // "Call collapse(new container, 0) on the context object's Selection."
         getSelection().collapse(newContainer, 0);
