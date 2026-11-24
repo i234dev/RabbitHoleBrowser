@@ -1423,6 +1423,7 @@ impl<'a> Layouter<'a> {
         if items.iter().any(|it| baseline::participates(it, true) || baseline::participates(it, false)) {
             self.align_item_baselines(b, &items, (&cols.tracks, &col_pos), (&rows.tracks, &row_pos), (content_x, content_y), mirror, &[true, false]);
         }
+        b.flex_baselines = baseline::container_baselines(&style, &items, &b.children);
 
         // Absolutely positioned children: with a positioned grid container
         // the grid area of their line placement is the containing block

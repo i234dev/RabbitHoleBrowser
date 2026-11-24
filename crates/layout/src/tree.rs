@@ -273,8 +273,9 @@ pub struct LayoutBox {
     pub marker_text: Option<Rc<str>>,
     /// Baseline offset from `rect.y` (for inline-block alignment), if known.
     pub baseline: Option<f32>,
-    /// The children whose baselines are a flex container's (first, last)
-    /// baselines, set by its layout (CSS Flexbox §8.5).
+    /// The children whose baselines are a flex or grid container's (first,
+    /// last) baselines, set by its layout (CSS Flexbox §8.5, CSS Grid 2
+    /// §10.7).
     /// ([`FLEX_BASELINE_UNSET`] until then, [`FLEX_BASELINE_NONE`] for
     /// none.)
     pub(crate) flex_baselines: [u32; 2],
@@ -764,7 +765,7 @@ impl LayoutBox {
             // lines are in its own, logical, space): one is synthesized.
             return None;
         }
-        if self.formatting == Formatting::Flex && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
+        if matches!(self.formatting, Formatting::Flex | Formatting::Grid) && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
             // An item without a baseline has one synthesized from its
             // border box's bottom edge.
             return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(self.synthesized_baseline_of(c)));
@@ -806,7 +807,7 @@ impl LayoutBox {
         if self.wm_wrapper {
             return None;
         }
-        if self.formatting == Formatting::Flex && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
+        if matches!(self.formatting, Formatting::Flex | Formatting::Grid) && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
             return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(self.synthesized_baseline_of(c)));
         }
         if let Some(l) = self.lines.last() {

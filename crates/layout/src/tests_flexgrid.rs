@@ -795,6 +795,28 @@ fn grid_items_share_a_baseline() {
 }
 
 #[test]
+fn grid_last_baseline_groups_align_at_the_row_end() {
+    let html = "<div id=g><div id=a style='font-size: 10px'>a</div><div id=b style='font-size: 30px'>b</div></div>";
+    let css = "#g { display: grid; grid-template-columns: 100px 100px; grid-template-rows: 100px; align-items: last baseline }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    let (a, b, g) = (fx.by_id(&t, "a"), fx.by_id(&t, "b"), fx.by_id(&t, "g"));
+    assert_near!(a.last_baseline().unwrap(), b.last_baseline().unwrap());
+    // The group sits at the end of the row: its deepest item ends there.
+    assert_near!(a.rect.bottom().max(b.rect.bottom()), g.content_rect.bottom());
+}
+
+#[test]
+fn reversed_flex_row_takes_its_first_baseline_from_its_physically_first_item() {
+    let html = "<div id=f><div id=a style='font-size: 10px'>a</div><div id=b style='font-size: 30px; padding-top: 20px'>b</div></div>";
+    let css = "#f { display: flex; flex-direction: row-reverse; align-items: flex-start }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    let (f, b) = (fx.by_id(&t, "f"), fx.by_id(&t, "b"));
+    assert_near!(f.first_baseline().unwrap(), b.first_baseline().unwrap());
+}
+
+#[test]
 fn flex_column_min_height_flexes_items() {
     // `min-height` sizes an indefinite column container; its items flex in it.
     let html = "<div id=c><div id=a></div><div id=b></div></div>";

@@ -244,3 +244,26 @@ impl<'a> Layouter<'a> {
         }
     }
 }
+
+/// The items whose baselines are the grid container's first and last
+/// baselines (§10.7): an item of the first (last) row aligned by its
+/// first (last) baseline, else the first (last) item of that row in grid
+/// order. (Indices into the container's children.)
+pub(super) fn container_baselines(container: &ComputedStyle, items: &[GridItem], children: &[LayoutBox]) -> [u32; 2] {
+    let none = crate::tree::FLEX_BASELINE_NONE;
+    let in_flow: Vec<&GridItem> = items.iter().filter(|it| children[it.idx].is_in_flow()).collect();
+    let (Some(first_row), Some(last_row)) = (in_flow.iter().map(|it| it.area.row.0).min(), in_flow.iter().map(|it| it.area.row.1).max()) else {
+        return [none, none];
+    };
+    let pick = |last: bool| -> u32 {
+        let row: Vec<&&GridItem> = in_flow.iter().filter(|it| if last { it.area.row.1 == last_row } else { it.area.row.0 == first_row }).collect();
+        let aligned = row.iter().find(|it| participates(it, true) && last_preference(container, &children[it.idx].style, true) == last);
+        let ordered = if last {
+            row.iter().max_by_key(|it| (it.area.row.0, it.area.col.0, it.idx))
+        } else {
+            row.iter().min_by_key(|it| (it.area.row.0, it.area.col.0, it.idx))
+        };
+        aligned.or(ordered).map_or(none, |it| it.idx as u32)
+    };
+    [pick(false), pick(true)]
+}
