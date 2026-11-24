@@ -104,6 +104,12 @@ enum Prop {
     ColumnSpan,
     ColumnHeight,
     ColumnWrap,
+    ColumnGap,
+    Orphans,
+    Widows,
+    BreakBefore,
+    BreakAfter,
+    BreakInside,
 }
 
 const ALL: &[Prop] = &[
@@ -180,6 +186,12 @@ const ALL: &[Prop] = &[
     Prop::ColumnSpan,
     Prop::ColumnHeight,
     Prop::ColumnWrap,
+    Prop::ColumnGap,
+    Prop::Orphans,
+    Prop::Widows,
+    Prop::BreakBefore,
+    Prop::BreakAfter,
+    Prop::BreakInside,
 ];
 
 impl Prop {
@@ -258,6 +270,12 @@ impl Prop {
             Prop::ColumnSpan => "column-span",
             Prop::ColumnHeight => "column-height",
             Prop::ColumnWrap => "column-wrap",
+            Prop::ColumnGap => "column-gap",
+            Prop::Orphans => "orphans",
+            Prop::Widows => "widows",
+            Prop::BreakBefore => "break-before",
+            Prop::BreakAfter => "break-after",
+            Prop::BreakInside => "break-inside",
         }
     }
 
@@ -294,6 +312,10 @@ impl Prop {
             "background" => self == BackgroundColor,
             "font" => self == FontSize,
             "columns" => matches!(self, ColumnCount | ColumnWidth | ColumnHeight | ColumnWrap),
+            "gap" | "grid-gap" | "grid-column-gap" => self == ColumnGap,
+            "page-break-before" => self == BreakBefore,
+            "page-break-after" => self == BreakAfter,
+            "page-break-inside" => self == BreakInside,
             "column-rule" => matches!(self, ColumnRuleWidth | ColumnRuleColor | ColumnRuleStyle),
             _ => false,
         }
@@ -410,6 +432,12 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         ColumnSpan => Val::Keyword(s.column_span_all as u8),
         ColumnHeight => Val::OptPx(s.column_height),
         ColumnWrap => Val::Keyword(s.column_wrap),
+        ColumnGap => Val::Tolerance((!s.column_gap_normal).then_some(s.column_gap)),
+        Orphans => Val::Count(Some(s.orphans as u32)),
+        Widows => Val::Count(Some(s.widows as u32)),
+        BreakBefore => Val::Keyword(s.break_before),
+        BreakAfter => Val::Keyword(s.break_after),
+        BreakInside => Val::Keyword(s.break_inside),
         JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
     }
 }
@@ -461,6 +489,19 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
             s.multicol = s.column_count.is_some() || s.column_width.is_some() || s.column_height.is_some();
         }
         (ColumnWrap, Val::Keyword(k)) => s.column_wrap = *k,
+        (ColumnGap, Val::Tolerance(l)) => {
+            s.column_gap_normal = l.is_none();
+            s.column_gap = match l.unwrap_or(Length::ZERO) {
+                Length::Px(v) => Length::Px(v.max(0.0)),
+                Length::Percent(v) => Length::Percent(v.max(0.0)),
+                other => other,
+            };
+        }
+        (Orphans, Val::Count(Some(n))) => s.orphans = (*n).clamp(1, u16::MAX as u32) as u16,
+        (Widows, Val::Count(Some(n))) => s.widows = (*n).clamp(1, u16::MAX as u32) as u16,
+        (BreakBefore, Val::Keyword(k)) => s.break_before = *k,
+        (BreakAfter, Val::Keyword(k)) => s.break_after = *k,
+        (BreakInside, Val::Keyword(k)) => s.break_inside = *k,
         (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
         (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),
         (AlignSelf, Val::ItemAlignment(value, flags)) => (s.align_self, s.align_self_flags) = (*value, *flags),
@@ -2219,6 +2260,7 @@ fn add_values(under: &Val, v: &Val) -> Val {
         (Val::Tracks(a), Val::Tracks(b)) => GridOperation::Add.tracks(a, b).map(Val::Tracks).unwrap_or_else(|| v.clone()),
         (Val::F(a), Val::F(b)) => Val::F(a + b),
         (Val::Count(Some(a)), Val::Count(Some(b))) => Val::Count(Some(a + b)),
+        (Val::Tolerance(Some(a)), Val::Tolerance(Some(b))) => add_lp(*a, *b).map(|l| Val::Tolerance(Some(l))).unwrap_or_else(|| v.clone()),
         (Val::OptPx(Some(a)), Val::OptPx(Some(b))) => Val::OptPx(Some(a + b)),
         (Val::L(a), Val::L(b)) => add_lp(*a, *b).map(Val::L).unwrap_or_else(|| v.clone()),
         (Val::T(a), Val::T(b)) => Val::T(a.iter().chain(b.iter()).cloned().collect()),

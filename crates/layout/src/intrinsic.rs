@@ -79,8 +79,10 @@ impl<'a> Layouter<'a> {
         {
             let w = style.contain_intrinsic_width.unwrap_or(0.0);
             if style.multicol {
-                // (Columns and gaps still count.)
-                crate::multicol::intrinsic(&style, (w, w))
+                // (The gaps between columns still count.)
+                let n = style.column_count.unwrap_or(1).max(1) as f32;
+                let w = w + crate::multicol::used_gap(&style, 0.0) * (n - 1.0);
+                (w, w)
             } else {
                 (w, w)
             }
