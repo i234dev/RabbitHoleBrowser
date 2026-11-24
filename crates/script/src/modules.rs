@@ -286,7 +286,11 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
     let url = match resolve_from(referrer, specifier) {
         Ok(u) => u,
         Err(msg) => {
-            host::log("error", &format!("Failed to load module \"{specifier}\" imported from {referrer}: TypeError: {msg}"));
+            // A dynamic import() rejects its promise: the page sees (or
+            // catches) the error, as with an unhandled rejection.
+            if !realm.is_dynamic_module_load() {
+                host::log("error", &format!("Failed to load module \"{specifier}\" imported from {referrer}: TypeError: {msg}"));
+            }
             return Err(realm.throw_type_error(&msg));
         }
     };
@@ -312,7 +316,9 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
                 Err(e) => e,
             };
             let msg = if realm.is_dynamic_module_load() { format!("Failed to fetch dynamically imported module: {key}") } else { format!("Failed to load module script: {key}") };
-            host::log("error", &format!("Failed to load module \"{specifier}\" ({key}) imported from {referrer}: {reason}"));
+            if !realm.is_dynamic_module_load() {
+                host::log("error", &format!("Failed to load module \"{specifier}\" ({key}) imported from {referrer}: {reason}"));
+            }
             return Err(realm.throw_type_error(&msg));
         }
     };

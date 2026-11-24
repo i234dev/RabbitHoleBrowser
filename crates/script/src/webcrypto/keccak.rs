@@ -226,8 +226,8 @@ mod tests {
         // RFC 9861 KT128(M=empty, C=empty), 32 bytes.
         assert_eq!(hex(&kangaroo(128, b"", b"", 32)),
             "1ac2d450fc3b4205d19da7bfca1b37513c0803577ac7167f06fe2ce1f0ef39e5");
-        // RFC 9861 KT128(M=ptn(17^3)), 32 bytes: more than one chunk.
-        let m: Vec<u8> = (0..17usize.pow(3)).map(|i| (i % 251) as u8).collect();
+        // RFC 9861 KT128(M=ptn(17^4)), 32 bytes: more than one chunk.
+        let m: Vec<u8> = (0..17usize.pow(4)).map(|i| (i % 251) as u8).collect();
         assert_eq!(hex(&kangaroo(128, &m, b"", 32)),
             "8701045e22205345ff4dda05555cbb5c3af1a771c2b89baef37db43d9998b9fe");
     }

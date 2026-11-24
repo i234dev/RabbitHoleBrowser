@@ -82,6 +82,19 @@ fn node_list_from_values(realm: &mut Realm, values: Vec<Value>) -> Value {
     Value::Object(arr)
 }
 
+/// `length` of NodeList / HTMLCollection. Collections are arrays whose own
+/// `length` shadows this accessor; the accessor exists on the prototypes
+/// so scripts can read its descriptor (and call it on a collection).
+fn collection_length(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    match this.v() {
+        V::Object(o) => match realm.obj(o).kind {
+            rabbithole_js::ObjectKind::Array { length, .. } => Ok(Value::Number(length as f64)),
+            _ => Err(realm.throw_type_error("Illegal invocation")),
+        },
+        _ => Err(realm.throw_type_error("Illegal invocation")),
+    }
+}
+
 pub(crate) fn html_collection(realm: &mut Realm, nodes: Vec<NodeRef>) -> Value {
     let values: Vec<Value> = nodes.iter().map(|n| wrap(realm, *n)).collect();
     let arr = realm.new_array(values.clone());
@@ -1856,6 +1869,7 @@ pub(crate) fn install(realm: &mut Realm) {
     let ap = realm.intrinsics.array_proto;
     let nl = realm.new_object_with_proto(Some(ap));
     realm.define_method(nl, "item", 1, define_hidden_method_item);
+    realm.define_accessor(nl, "length", Some(collection_length), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_property(nl, rabbithole_js::realm::SYM_TO_STRING_TAG, Value::str("NodeList"), rabbithole_js::CONFIGURABLE);
     let nl_ctor = realm.new_native_constructor("NodeList", 0, illegal_ctor, nl);
     realm.define_global("NodeList", Value::Object(nl_ctor));
@@ -1863,6 +1877,7 @@ pub(crate) fn install(realm: &mut Realm) {
     let hc = realm.new_object_with_proto(Some(ap));
     realm.define_method(hc, "item", 1, define_hidden_method_item);
     realm.define_method(hc, "namedItem", 1, collection_named_item);
+    realm.define_accessor(hc, "length", Some(collection_length), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_property(hc, rabbithole_js::realm::SYM_TO_STRING_TAG, Value::str("HTMLCollection"), rabbithole_js::CONFIGURABLE);
     let hc_ctor = realm.new_native_constructor("HTMLCollection", 0, illegal_ctor, hc);
     realm.define_global("HTMLCollection", Value::Object(hc_ctor));
