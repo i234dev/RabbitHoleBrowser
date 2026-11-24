@@ -773,6 +773,18 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
             .map(|tracks| grid::used(&tracks))
             .unwrap_or_else(|| grid::computed(if rows { &s.grid_template_rows } else { &s.grid_template_columns })));
     }
+    // Percentage margins and paddings resolve to their used values (of
+    // grid items, against the grid area).
+    let edge = match prop {
+        "margin-top" => Some((true, 0)), "margin-right" => Some((true, 1)), "margin-bottom" => Some((true, 2)), "margin-left" => Some((true, 3)),
+        "padding-top" => Some((false, 0)), "padding-right" => Some((false, 1)), "padding-bottom" => Some((false, 2)), "padding-left" => Some((false, 3)),
+        _ => None,
+    };
+    if let Some((margin, i)) = edge.filter(|_| needs_box) {
+        if let Some((m, p)) = with_env(|env| env.used_box_edges(n.node)) {
+            return Some(px(if margin { m[i] } else { p[i] }));
+        }
+    }
     let r = if needs_box { with_env(|env| env.node_rect(n.node)).unwrap_or_default() } else { Default::default() };
     let pct_padding = [&s.padding.top, &s.padding.right, &s.padding.bottom, &s.padding.left].into_iter().any(|l| pct(l));
     let cb = if needs_box && prop != "transform" && (!matches!(prop, "width" | "height" | "inline-size" | "block-size") || pct_padding) {
@@ -884,7 +896,14 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         "grid-row-end" => rabbithole_style::props::grid_css::line_css(&s.grid_row_end),
         "grid-column-start" => rabbithole_style::props::grid_css::line_css(&s.grid_column_start),
         "grid-column-end" => rabbithole_style::props::grid_css::line_css(&s.grid_column_end),
-        "grid-row" | "grid-column" | "grid-area" => {
+        "grid-lanes-direction" => rabbithole_style::props::grid_css::lanes_direction_css(&s.grid_lanes_direction),
+        "grid-lanes-pack" => if s.grid_lanes_dense { "dense" } else { "normal" }.into(),
+        "fit-tolerance" | "flow-tolerance" => match s.fit_tolerance {
+            None => "normal".into(),
+            Some(rabbithole_style::Length::Px(v)) if v.is_infinite() => "infinite".into(),
+            Some(l) => position_css(&l),
+        },
+        "grid-row" | "grid-column" | "grid-area" | "grid-lanes" => {
             let get = |l: &str| Some(computed_from_style(s, l, r, cb));
             rabbithole_style::props::grid_css::shorthand(prop, &get).unwrap_or_default()
         }

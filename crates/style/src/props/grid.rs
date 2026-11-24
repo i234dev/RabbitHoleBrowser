@@ -567,6 +567,19 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             }
         }
         "grid-lanes" => {
+            // The longhands of the shorthand, areas included.
+            if let Some(longhands) = super::grid_css::expand("grid-lanes", value) {
+                for (name, text) in longhands {
+                    let toks = rabbithole_css::Tokenizer::tokenize(&text);
+                    let parts = values::components(&toks);
+                    if name == "grid-template-areas" {
+                        style.grid_template_areas = parse_areas(&parts).unwrap_or_default();
+                    } else {
+                        apply(name, &parts, &toks, style, ctx);
+                    }
+                }
+                return true;
+            }
             // `grid-lanes: <direction>? <track-list>` (the track list goes
             // to the template of the grid axis).
             let mut n = 0;

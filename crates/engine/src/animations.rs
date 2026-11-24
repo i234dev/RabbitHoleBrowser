@@ -94,6 +94,7 @@ enum Prop {
     GridRowEnd,
     GridColumnStart,
     GridColumnEnd,
+    FitTolerance,
 }
 
 const ALL: &[Prop] = &[
@@ -160,6 +161,7 @@ const ALL: &[Prop] = &[
     Prop::GridRowEnd,
     Prop::GridColumnStart,
     Prop::GridColumnEnd,
+    Prop::FitTolerance,
 ];
 
 impl Prop {
@@ -228,6 +230,7 @@ impl Prop {
             Prop::GridRowEnd => "grid-row-end",
             Prop::GridColumnStart => "grid-column-start",
             Prop::GridColumnEnd => "grid-column-end",
+            Prop::FitTolerance => "fit-tolerance",
         }
     }
 
@@ -282,6 +285,8 @@ enum Val {
     AutoFlow(rabbithole_style::GridAutoFlow),
     Line(rabbithole_style::GridLine),
     Areas(Vec<Vec<String>>),
+    /// `fit-tolerance`: `normal` (None) or a length-percentage.
+    Tolerance(Option<Length>),
     Distribution(ContentDistribution, AlignFlags),
     ItemAlignment(ItemAlign, AlignFlags),
     F(f32),
@@ -360,6 +365,7 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         GridRowEnd => Val::Line(s.grid_row_end.clone()),
         GridColumnStart => Val::Line(s.grid_column_start.clone()),
         GridColumnEnd => Val::Line(s.grid_column_end.clone()),
+        FitTolerance => Val::Tolerance(s.fit_tolerance),
         JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
     }
 }
@@ -381,6 +387,7 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         (GridRowEnd, Val::Line(l)) => s.grid_row_end.clone_from(l),
         (GridColumnStart, Val::Line(l)) => s.grid_column_start.clone_from(l),
         (GridColumnEnd, Val::Line(l)) => s.grid_column_end.clone_from(l),
+        (FitTolerance, Val::Tolerance(l)) => s.fit_tolerance = *l,
         (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
         (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),
         (AlignSelf, Val::ItemAlignment(value, flags)) => (s.align_self, s.align_self_flags) = (*value, *flags),
@@ -1056,6 +1063,15 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
         (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(t).tracks(x, y).map(Val::Tracks).unwrap_or_else(discrete),
+        // Finite tolerances interpolate as non-negative lengths.
+        (Val::Tolerance(Some(x)), Val::Tolerance(Some(y))) if !matches!(x, Length::Px(v) if v.is_infinite()) && !matches!(y, Length::Px(v) if v.is_infinite()) => {
+            match lerp_lp(x, y, t) {
+                Some(Length::Px(v)) => Val::Tolerance(Some(Length::Px(v.max(0.0)))),
+                Some(Length::Percent(v)) => Val::Tolerance(Some(Length::Percent(v.max(0.0)))),
+                Some(l) => Val::Tolerance(Some(l)),
+                None => discrete(),
+            }
+        }
         (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
             lerp_pair(&(*x,*y),&(*u,*v),t).map(|(x,y)| Val::MotionPosition(MotionPosition::Coordinates(x,y))).unwrap_or_else(discrete),
         (Val::MotionRotation(a), Val::MotionRotation(b)) if a.follows_path == b.follows_path =>
@@ -2220,6 +2236,7 @@ fn interpolable(a: &Val, b: &Val) -> bool {
             lerp_pair(&(*x,*y),&(*u,*v),0.5).is_some(),
         (Val::MotionRotation(a), Val::MotionRotation(b)) => a.follows_path == b.follows_path,
         (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(0.5).tracks(x, y).is_some(),
+        (Val::Tolerance(Some(x)), Val::Tolerance(Some(y))) => lerp_lp(x, y, 0.5).is_some() && !matches!(x, Length::Px(v) if v.is_infinite()) && !matches!(y, Length::Px(v) if v.is_infinite()),
         (Val::L(x), Val::L(y)) => lerp_lp(x, y, 0.5).is_some(),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),
         (Val::Cp(Some(x), _), Val::Cp(Some(y), _)) => lerp_clip(x, y, 0.5).is_some(),

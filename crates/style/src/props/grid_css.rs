@@ -16,6 +16,7 @@ pub fn longhands(name: &str) -> Option<&'static [&'static str]> {
         "grid-area" => &["grid-row-start", "grid-column-start", "grid-row-end", "grid-column-end"],
         "grid-template" => &["grid-template-rows", "grid-template-columns", "grid-template-areas"],
         "grid" => &["grid-template-rows", "grid-template-columns", "grid-template-areas", "grid-auto-rows", "grid-auto-columns", "grid-auto-flow"],
+        "grid-lanes" => &["grid-template-columns", "grid-template-rows", "grid-template-areas", "grid-lanes-direction"],
         _ => return None,
     })
 }
@@ -24,7 +25,8 @@ pub fn is_longhand(name: &str) -> bool {
     matches!(
         name,
         "grid-row-start" | "grid-row-end" | "grid-column-start" | "grid-column-end" | "grid-template-rows" | "grid-template-columns"
-            | "grid-template-areas" | "grid-auto-rows" | "grid-auto-columns" | "grid-auto-flow"
+            | "grid-template-areas" | "grid-auto-rows" | "grid-auto-columns" | "grid-auto-flow" | "grid-lanes-direction" | "grid-lanes-pack"
+            | "fit-tolerance" | "flow-tolerance"
     )
 }
 
@@ -527,8 +529,140 @@ pub fn specified(name: &str, tokens: &[Token]) -> Option<String> {
         "grid-auto-rows" | "grid-auto-columns" => auto_tracks(&comps),
         "grid-auto-flow" => auto_flow(&comps),
         "grid-row-start" | "grid-row-end" | "grid-column-start" | "grid-column-end" => grid_line(&comps).map(|(s, _)| s),
+        "grid-lanes-direction" => lanes_direction(&comps),
+        "grid-lanes-pack" => match comps.as_slice() {
+            [c] => ident(c).filter(|k| matches!(k.as_str(), "normal" | "dense")),
+            _ => None,
+        },
+        "fit-tolerance" | "flow-tolerance" => match comps.as_slice() {
+            [c] => ident(c).filter(|k| matches!(k.as_str(), "normal" | "infinite")).or_else(|| length_percentage(c)),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// `normal | [ row | column ] [ fill-reverse || track-reverse ]?`, as
+/// written.
+fn lanes_direction(comps: &[&[Token]]) -> Option<String> {
+    let words: Vec<String> = comps.iter().map(|c| ident(c)).collect::<Option<_>>()?;
+    match words.as_slice() {
+        [w] if w == "normal" => return Some("normal".into()),
+        [] => return None,
+        _ => {}
+    }
+    if !matches!(words[0].as_str(), "row" | "column") {
+        return None;
+    }
+    let mut seen = Vec::new();
+    for w in &words[1..] {
+        if !matches!(w.as_str(), "fill-reverse" | "track-reverse") || seen.contains(&w) {
+            return None;
+        }
+        seen.push(w);
+    }
+    Some(words.join(" "))
+}
+
+const LANES_DIRECTION_WORDS: [&str; 5] = ["normal", "row", "column", "fill-reverse", "track-reverse"];
+
+/// `grid-lanes`: <'grid-lanes-direction'>? around a group of an optional
+/// area string and a track list, in either order.
+fn lanes(comps: &[&[Token]]) -> Option<Vec<(&'static str, String)>> {
+    if let [c] = comps {
+        if crate::values::is_ident(c, "none") {
+            return Some(vec![
+                ("grid-template-columns", "none".into()),
+                ("grid-template-rows", "none".into()),
+                ("grid-template-areas", "none".into()),
+                ("grid-lanes-direction", "column".into()),
+            ]);
+        }
+    }
+    let is_dir = |c: &&[Token]| ident(c).is_some_and(|k| LANES_DIRECTION_WORDS.contains(&k.as_str()));
+    let lead = comps.iter().take_while(|c| is_dir(c)).count();
+    let trail = comps[lead..].iter().rev().take_while(|c| is_dir(c)).count();
+    if lead > 0 && trail > 0 {
+        return None;
+    }
+    let (dir, rest) = if lead > 0 { (&comps[..lead], &comps[lead..]) } else { (&comps[comps.len() - trail..], &comps[..comps.len() - trail]) };
+    let direction = if dir.is_empty() { "column".to_string() } else { lanes_direction(dir)? };
+    let strings: Vec<usize> = rest.iter().enumerate().filter(|(_, c)| matches!(c, [Token::String(_)])).map(|(i, _)| i).collect();
+    let (area, tracks): (Option<&str>, Vec<&[Token]>) = match strings.as_slice() {
+        [] => (None, rest.to_vec()),
+        [i] if *i == 0 || *i + 1 == rest.len() => {
+            let [Token::String(s)] = rest[*i] else { return None };
+            let mut t = rest.to_vec();
+            t.remove(*i);
+            (Some(s.as_str()), t)
+        }
+        _ => return None,
+    };
+    let tracks = if tracks.is_empty() { "none".to_string() } else { track_list(&tracks)? };
+    if tracks == "none" && area.is_none() && dir.is_empty() {
+        return None;
+    }
+    let rows_axis = direction.starts_with("row");
+    let areas = match area {
+        Some(s) => {
+            let cells = area_row(s)?;
+            if !areas_valid(&[cells.clone()]) {
+                return None;
+            }
+            if rows_axis { areas_css(&cells.into_iter().map(|c| vec![c]).collect::<Vec<_>>()) } else { areas_css(&[cells]) }
+        }
+        None => "none".into(),
+    };
+    let (cols, rows) = if rows_axis { ("none".to_string(), tracks) } else { (tracks, "none".to_string()) };
+    Some(vec![("grid-template-columns", cols), ("grid-template-rows", rows), ("grid-template-areas", areas), ("grid-lanes-direction", direction)])
+}
+
+/// `grid-lanes` from its longhands: the areas along the grid axis, that
+/// axis's tracks and the direction.
+fn lanes_shorthand(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let direction = get("grid-lanes-direction")?;
+    let rows_axis = direction.starts_with("row");
+    let tracks = get(if rows_axis { "grid-template-rows" } else { "grid-template-columns" })?;
+    let areas = get("grid-template-areas")?;
+    let mut parts = Vec::new();
+    if areas != "none" {
+        let tokens = rabbithole_css::Tokenizer::tokenize(&areas);
+        let rows: Vec<Vec<String>> = components(&tokens).iter().map(|c| match c {
+            [Token::String(s)] => area_row(s),
+            _ => None,
+        }).collect::<Option<_>>()?;
+        let cells: Vec<String> = if rows_axis {
+            if rows.iter().any(|r| r.len() != 1) {
+                return None;
+            }
+            rows.into_iter().flatten().collect()
+        } else {
+            let [row] = rows.as_slice() else { return None };
+            row.clone()
+        };
+        parts.push(format!("\"{}\"", cells.join(" ")));
+    }
+    if tracks != "none" {
+        parts.push(tracks);
+    }
+    parts.push(direction);
+    Some(parts.join(" "))
+}
+
+/// Computed `grid-lanes-direction` (`fill-reverse` first).
+pub fn lanes_direction_css(d: &crate::computed::GridLanesDirection) -> String {
+    let mut s = match d.rows {
+        None => return "normal".into(),
+        Some(true) => "row".to_string(),
+        Some(false) => "column".to_string(),
+    };
+    if d.fill_reverse {
+        s.push_str(" fill-reverse");
+    }
+    if d.track_reverse {
+        s.push_str(" track-reverse");
+    }
+    s
 }
 
 /// The longhand values of a shorthand; `None` when invalid.
@@ -561,6 +695,7 @@ pub fn expand(name: &str, tokens: &[Token]) -> Option<Vec<(&'static str, String)
             let ce = lines.get(3).map(|l| l.0.clone()).unwrap_or_else(|| default(&cs));
             Some(vec![("grid-row-start", rs.0), ("grid-column-start", cs.0), ("grid-row-end", re), ("grid-column-end", ce)])
         }
+        "grid-lanes" => lanes(&comps),
         "grid-template" => {
             let (rows, cols, areas) = template(&comps)?;
             Some(vec![("grid-template-rows", rows), ("grid-template-columns", cols), ("grid-template-areas", areas)])
@@ -727,6 +862,7 @@ pub fn shorthand(name: &str, get: &dyn Fn(&str) -> Option<String>) -> Option<Str
             Some(parts.join(" / "))
         }
         "grid-template" => template_shorthand(&get("grid-template-rows")?, &get("grid-template-columns")?, &get("grid-template-areas")?),
+        "grid-lanes" => lanes_shorthand(get),
         "grid" => {
             let (rows, cols, areas) = (get("grid-template-rows")?, get("grid-template-columns")?, get("grid-template-areas")?);
             let (auto_rows, auto_cols, flow) = (get("grid-auto-rows")?, get("grid-auto-columns")?, get("grid-auto-flow")?);

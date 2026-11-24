@@ -64,6 +64,9 @@ pub trait HostEnv {
     /// date. None for no box, a stacking axis or an unsupported completion.
     fn anchor_style(&mut self, _frame: Option<u64>, _node: NodeId) -> Option<Rc<ComputedStyle>> { None }
     fn used_grid_tracks(&mut self, _node: NodeId, _rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> { None }
+    /// Used margins and paddings (top, right, bottom, left) of a node's
+    /// box after layout, for resolved values of percentages.
+    fn used_box_edges(&mut self, _node: NodeId) -> Option<([f32; 4], [f32; 4])> { None }
     /// Scroll state of an element's box (after layout): (scroll offset,
     /// scroll size). `None` = no box / not supported.
     fn element_scroll(&mut self, _node: NodeId) -> Option<((f32, f32), (f32, f32))> {

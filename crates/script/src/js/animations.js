@@ -211,7 +211,8 @@
     'font-width hanging-punctuation ime-mode initial-letter mask-position-x mask-position-y math-depth math-shift math-style path-length ' +
     'position-anchor position-try-fallbacks position-try-order position-visibility ruby-align ruby-position stroke-color text-autospace ' +
     'text-box text-box-edge text-box-trim text-decoration-skip text-group-align text-spacing-trim view-transition-class view-transition-name ' +
-    'white-space-collapse position-area position-try inset-area overlay content-visibility scroll-timeline view-timeline timeline-scope'
+    'white-space-collapse position-area position-try inset-area overlay content-visibility scroll-timeline view-timeline timeline-scope ' +
+    'fit-tolerance flow-tolerance grid-lanes grid-lanes-direction grid-lanes-pack'
   ).split(' '));
   // IDL attribute name -> CSS property name, or null when not animatable.
   function cssName(idl) {

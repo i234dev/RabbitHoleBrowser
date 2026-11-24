@@ -251,8 +251,13 @@ impl<'a> Layouter<'a> {
             let explicit = |v: ItemAlign| matches!(v, ItemAlign::FlexStart | ItemAlign::FlexEnd | ItemAlign::Center);
             let fx = if end.0 && !explicit(justify.0) { 1.0 } else { static_align_factor(justify.0, justify.1, justify.0, justify.1, rtl, s.direction == rabbithole_style::Direction::Rtl) };
             let fy = if end.1 && !explicit(align.0) { 1.0 } else { static_align_factor(align.0, align.1, align.0, align.1, false, false) };
-            let (s0, s1) = (lo.unwrap_or(0.0), hi.unwrap_or(extent));
-            let (rect_x, rect_y) = if rows { ((0.0, size.0), (s0, s1)) } else { ((s0, s1), (0.0, size.1)) };
+            // With the container as containing block, auto lines are its
+            // padding edges, as in grid layout (Grid2 §9.1).
+            let (px, py) = if positioned { ((pad.left, pad.right), (pad.top, pad.bottom)) } else { ((0.0, 0.0), (0.0, 0.0)) };
+            let (grid_pad, other_pad, other_size) = if rows { (py, px, size.0) } else { (px, py, size.1) };
+            let (s0, s1) = (lo.unwrap_or(-grid_pad.0), hi.unwrap_or(extent + grid_pad.1));
+            let other = (-other_pad.0, other_size + other_pad.1);
+            let (rect_x, rect_y) = if rows { (other, (s0, s1)) } else { ((s0, s1), other) };
             c.static_pos = (cx + rect_x.0, cy + rect_y.0);
             c.static_align = Some(crate::tree::StaticAlign { size: ((rect_x.1 - rect_x.0).max(0.0), (rect_y.1 - rect_y.0).max(0.0)), factor: (fx, fy) });
             if positioned && (lo.is_some() || hi.is_some()) {
@@ -536,7 +541,7 @@ impl<'a> Layouter<'a> {
                     let end=s+it.span.min(tl.tracks.len());
                     // The automatic minimum fits an area of fixed maximum tracks.
                     let min=match fixed_max_span(&tl.tracks,s as i32,end as i32,gap) {Some(limit) if auto_min=>h.min(limit.max(extras)),_=>h};
-                    contribs.push(Contribution{start:s,end,min,max:h});
+                    contribs.push(Contribution{start:s,end,min,max:h,auto_min});
                 }
                 continue;
             }
@@ -555,7 +560,7 @@ impl<'a> Layouter<'a> {
                 let rows=rows.then(||subgrid::item_layer_source(subgrid::sizing_section_aligned(tl,s,s+it.span,gap,it.fixed.is_some(),row_available,align),&item,&child.style,true,cbw));
                 let mut nested=self.with_subgrid(child,columns,rows,cbw,|this,child| {
                     if subgrid::shared(child,true).is_some() {this.subgrid_axis_contributions(child,true,Some(w),phase)}
-                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h}]}
+                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h,auto_min:false}]}
                 });
                 if it.fixed.is_none() {nested=subgrid::automatic_contributions(&mut self.grid_work,nested,it.span);}
                 for c in &mut nested {c.start+=s;c.end+=s;}
@@ -673,6 +678,23 @@ impl<'a> Layouter<'a> {
         if avail.is_none() && tl.inherited.is_none() {
             row_avail = resize_rows_to_limits(&mut tl.tracks, &contribs, &style, cbw, row_gap, stretch);
         }
+        // Percentage rows of an indefinite height resolve against the
+        // height they sized as `auto` (as in grid layout, Grid2 §7.2.1).
+        let mut content_height = None;
+        if avail.is_none() && row_avail.is_none() && tl.inherited.is_none() && tl.tracks.iter().any(|t| t.deferred.is_some()) {
+            let height = subgrid::positions(&tl, row_gap, row_avail, style.align_content).1;
+            for t in tl.tracks.iter_mut() {
+                if let Some(size) = t.deferred.take() {
+                    (t.min, t.max) = super::sizing_of(&size, Some(height));
+                }
+                t.base = 0.0;
+                t.limit = None;
+                t.infinitely_growable = false;
+            }
+            super::size_tracks_with_space(&mut tl.tracks, &contribs, GridSpace::Definite(height), row_gap, stretch);
+            row_avail = Some(height);
+            content_height = Some(height);
+        }
         if items.iter().any(|it|subgrid::requests(&b.children[it.idx]).1) {
             let adjusted=self.row_lane_widths(b,&tl,&items,row_gap,avail,cbw,Some(cbw),MeasurePhase::Adjusted);
             if adjusted!=widths {
@@ -682,6 +704,7 @@ impl<'a> Layouter<'a> {
             }
         }
         let (mut row_pos, rows_extent) = subgrid::positions(&tl, row_gap, row_avail, style.align_content);
+        let rows_extent = content_height.unwrap_or(rows_extent);
         // A percentage row gap of an indefinite height is zero for sizing,
         // then resolves against the resulting height (CSS Align 3 §8.1).
         let row_gap = if avail.is_none() && tl.inherited.is_none() && !style.row_gap_normal && matches!(style.row_gap, Length::Percent(_) | Length::Calc(..) | Length::Math(_)) {

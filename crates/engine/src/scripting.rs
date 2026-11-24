@@ -371,6 +371,14 @@ impl HostEnv for EngineEnv<'_> {
         self.ensure_layout();
         self.page.layout.used_grid_tracks(&self.page.doc, node, rows)
     }
+    fn used_box_edges(&mut self, node: NodeId) -> Option<([f32; 4], [f32; 4])> {
+        self.ensure_layout();
+        let (b, _) = self.page.layout.box_in_document(&self.page.doc, node)?;
+        let (r, c, bw) = (b.rect, b.content_rect, b.style.border_width);
+        let m = b.margin;
+        let padding = [c.y - r.y - bw.top, r.x + r.w - (c.x + c.w) - bw.right, r.y + r.h - (c.y + c.h) - bw.bottom, c.x - r.x - bw.left];
+        Some(([m.top, m.right, m.bottom, m.left], padding.map(|v| v.max(0.0))))
+    }
     fn element_scroll(&mut self, node: NodeId) -> Option<((f32, f32), (f32, f32))> {
         self.ensure_layout();
         self.engine.element_scroll(self.page, node)
