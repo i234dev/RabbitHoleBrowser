@@ -541,7 +541,10 @@ impl<'a> Layouter<'a> {
                     let end=s+it.span.min(tl.tracks.len());
                     // The automatic minimum fits an area of fixed maximum tracks.
                     let min=match fixed_max_span(&tl.tracks,s as i32,end as i32,gap) {Some(limit) if auto_min=>h.min(limit.max(extras)),_=>h};
-                    contribs.push(Contribution{start:s,end,min,max:h,auto_min});
+                    // An explicit minimum height with an automatic height is
+                    // the minimum contribution (Grid2 §6.6).
+                    let minimum=match st.min_height {Length::Px(m) if st.height.is_auto()=>{let bb=st.box_sizing==BoxSizing::BorderBox;let m=if bb {(m-it.edges.pb_v).max(0.)} else {m};(m+extras).min(min)},_=>min};
+                    contribs.push(Contribution{start:s,end,min,max:h,auto_min,minimum});
                 }
                 continue;
             }
@@ -560,7 +563,7 @@ impl<'a> Layouter<'a> {
                 let rows=rows.then(||subgrid::item_layer_source(subgrid::sizing_section_aligned(tl,s,s+it.span,gap,it.fixed.is_some(),row_available,align),&item,&child.style,true,cbw));
                 let mut nested=self.with_subgrid(child,columns,rows,cbw,|this,child| {
                     if subgrid::shared(child,true).is_some() {this.subgrid_axis_contributions(child,true,Some(w),phase)}
-                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h,auto_min:false}]}
+                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h,auto_min:false,minimum:h}]}
                 });
                 if it.fixed.is_none() {nested=subgrid::automatic_contributions(&mut self.grid_work,nested,it.span);}
                 for c in &mut nested {c.start+=s;c.end+=s;}

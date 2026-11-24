@@ -158,6 +158,8 @@ struct Contribution {
     /// `min` is a content-based automatic minimum, which is zero for an
     /// item spanning flexible tracks among others (§6.6).
     auto_min: bool,
+    /// The minimum contribution (§6.6), when it differs from `min`.
+    minimum: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -888,7 +890,7 @@ fn resolve_intrinsic_tracks(tracks: &mut [Track], contribs: &[Contribution], gap
                     continue;
                 }
                 let gaps = gap * ((c.end - c.start) as f32 - 1.0);
-                let contribution = if max_content { c.max } else if c.auto_min { 0.0 } else { c.min };
+                let contribution = if max_content { c.max } else if c.auto_min { 0.0 } else { c.minimum.min(c.min) };
                 let space = contribution - (c.start..c.end).map(|i| tracks[i].base).sum::<f32>() - gaps;
                 if space <= 0.0 {
                     continue;
@@ -1968,7 +1970,7 @@ impl<'a> Layouter<'a> {
             _=>min,
         };
         let auto_min=child.kind!=BoxKind::Image&&child.style.min_width.is_auto()&&(child.style.width.is_auto()||pct(child.style.width))&&ratio_width.is_none();
-        Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras,auto_min}
+        Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras,auto_min,minimum:min+extras}
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2041,12 +2043,20 @@ impl<'a> Layouter<'a> {
                 Some(limit) if child.style.height.is_auto() && child.style.min_height.is_auto() && !crate::flex::is_scroll_container(&child.style) => h.min(limit.max(extras_v)),
                 _ => h,
             };
+            // With an automatic preferred height, an explicit minimum height
+            // is the minimum contribution (Grid2 §6.6), which items spanning
+            // flexible tracks contribute.
+            let minimum = match resolve_size(child.style.min_height, cbh, bb, it.edges.pb_v) {
+                Some(m) if child.style.height.is_auto() && !child.style.min_height.is_auto() && !baseline => (m + extras_v).min(min),
+                _ => min,
+            };
             out.push(Contribution {
                 start: it.area.row.0.max(0) as usize,
                 end: it.area.row.1.max(1) as usize,
                 min,
                 max: h,
                 auto_min: child.style.height.is_auto() && child.style.min_height.is_auto(),
+                minimum,
             });
         }
         // Baseline-aligned items of a row are shifted to share a baseline:

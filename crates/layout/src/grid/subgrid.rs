@@ -425,6 +425,8 @@ pub(super) fn compact_contributions(items:&mut Vec<Contribution>) {
         if write>0&&items[write-1].start==item.start&&items[write-1].end==item.end {
             items[write-1].min=items[write-1].min.max(item.min);
             items[write-1].max=items[write-1].max.max(item.max);
+            items[write-1].minimum=items[write-1].minimum.max(item.minimum);
+            items[write-1].auto_min&=item.auto_min;
         } else {items[write]=item;write+=1;}
     }
     items.truncate(write);
@@ -439,7 +441,7 @@ pub(super) fn automatic_contributions(budget:&mut WorkBudget,items:Vec<Contribut
     for item in items {
         let span=item.end.saturating_sub(item.start).max(1).min(count);
         let positions=count-span+1;budget.charge(positions);
-        for start in 0..positions {out.push(Contribution{start,end:start+span,min:item.min,max:item.max,auto_min:false});}
+        for start in 0..positions {out.push(Contribution{start,end:start+span,..item});}
     }
     compact_contributions(&mut out);out
 }
@@ -455,7 +457,7 @@ pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,gap:f32,items:&mut
     let Some(first)=items.iter().map(|c|c.start).min() else {
         let size=(axis.inset_start+axis.inset_end).max(0.);
         if !axis.sizes.is_empty()&&size>0. {
-            items.push(Contribution{start:0,end:axis.sizes.len(),min:size,max:size,auto_min:false});
+            items.push(Contribution{start:0,end:axis.sizes.len(),min:size,max:size,auto_min:false,minimum:size});
         }
         return;
     };
@@ -466,11 +468,11 @@ pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,gap:f32,items:&mut
         let item=items[i];
         if first>0&&item.start==first {
             let delta=axis.inset_start-axis.edge_before[item.start]-internal;
-            items.push(Contribution{start:0,end:item.end,min:item.min+delta,max:item.max+delta,auto_min:false});
+            items.push(Contribution{start:0,end:item.end,min:item.min+delta,max:item.max+delta,auto_min:false,minimum:item.min+delta});
         }
         if last<axis.sizes.len()&&item.end==last {
             let delta=axis.inset_end-axis.edge_after[item.end-1]-internal;
-            items.push(Contribution{start:item.start,end:axis.sizes.len(),min:item.min+delta,max:item.max+delta,auto_min:false});
+            items.push(Contribution{start:item.start,end:axis.sizes.len(),min:item.min+delta,max:item.max+delta,auto_min:false,minimum:item.min+delta});
         }
     }
     compact_contributions(items);
@@ -798,23 +800,23 @@ mod tests {
         let parent=parent();let mut b=child();let mut saved=Vec::new();
         install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
         let mut items=vec![];empty_edge_contributions(&b,false,50.,&mut items);
-        assert_eq!(items,[Contribution{start:0,end:2,min:20.,max:20.,auto_min:false}]);
+        assert_eq!(items,[Contribution{start:0,end:2,min:20.,max:20.,auto_min:false,minimum:20.}]);
     }
 
     #[test]
     fn hypothetical_edge_items_cover_empty_tracks_without_moving_the_real_item() {
         let parent=parent();let mut b=child();let mut saved=Vec::new();
         install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
-        let real=Contribution{start:1,end:2,min:30.,max:50.,auto_min:false};let mut items=vec![real];
+        let real=Contribution{start:1,end:2,min:30.,max:50.,auto_min:false,minimum:30.};let mut items=vec![real];
         empty_edge_contributions(&b,false,50.,&mut items);
-        assert_eq!(items,[Contribution{start:0,end:2,min:40.,max:60.,auto_min:false},real]);
+        assert_eq!(items,[Contribution{start:0,end:2,min:40.,max:60.,auto_min:false,minimum:40.},real]);
     }
 
     #[test]
     fn virtual_items_with_the_same_span_keep_both_independent_maxima() {
-        let mut items=vec![Contribution{start:1,end:3,min:10.,max:100.,auto_min:false},Contribution{start:0,end:1,min:5.,max:5.,auto_min:false},Contribution{start:1,end:3,min:20.,max:50.,auto_min:false}];
+        let mut items=vec![Contribution{start:1,end:3,min:10.,max:100.,auto_min:false,minimum:10.},Contribution{start:0,end:1,min:5.,max:5.,auto_min:false,minimum:5.},Contribution{start:1,end:3,min:20.,max:50.,auto_min:false,minimum:20.}];
         compact_contributions(&mut items);
-        assert_eq!(items,[Contribution{start:0,end:1,min:5.,max:5.,auto_min:false},Contribution{start:1,end:3,min:20.,max:100.,auto_min:false}]);
+        assert_eq!(items,[Contribution{start:0,end:1,min:5.,max:5.,auto_min:false,minimum:5.},Contribution{start:1,end:3,min:20.,max:100.,auto_min:false,minimum:20.}]);
     }
 
     #[test]
@@ -854,8 +856,8 @@ mod tests {
     #[test]
     fn automatic_parent_positions_ignore_the_subitems_local_placement() {
         let mut budget=WorkBudget::default();
-        let out=automatic_contributions(&mut budget,vec![Contribution{start:1,end:2,min:40.,max:40.,auto_min:false}],2);
-        assert_eq!(out,[Contribution{start:0,end:1,min:40.,max:40.,auto_min:false},Contribution{start:1,end:2,min:40.,max:40.,auto_min:false}]);
+        let out=automatic_contributions(&mut budget,vec![Contribution{start:1,end:2,min:40.,max:40.,auto_min:false,minimum:40.}],2);
+        assert_eq!(out,[Contribution{start:0,end:1,min:40.,max:40.,auto_min:false,minimum:40.},Contribution{start:1,end:2,min:40.,max:40.,auto_min:false,minimum:40.}]);
     }
 
     #[test]

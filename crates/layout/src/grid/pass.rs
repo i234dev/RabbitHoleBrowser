@@ -183,7 +183,7 @@ mod tests {
         result
     }
     fn column_contributions()->[Contribution;2] {
-        [Contribution{start:0,end:1,min:100.,max:100.,auto_min:false},Contribution{start:1,end:2,min:10.,max:48.,auto_min:false}]
+        [Contribution{start:0,end:1,min:100.,max:100.,auto_min:false,minimum:100.},Contribution{start:1,end:2,min:10.,max:48.,auto_min:false,minimum:10.}]
     }
     fn used_sizes(result:&PassResult)->Vec<f32> {result.completion.as_ref().unwrap().tracks().tracks.iter().map(|track|track.base).collect()}
     fn panic_text(error:&(dyn std::any::Any+Send))->&str {
@@ -200,7 +200,7 @@ mod tests {
             let first=layouter.grid_axis_pass(&mut operation,MeasurePoint::Columns,inputs.clone(),Target::shared(shared()),automatic(2),|this,_,frame,_| {
                 assert_eq!(frame.axis,GridAxis::Rows);assert_eq!(frame.opposite.origin,OppositeOrigin::InitialEstimate);
                 assert!(frame.opposite.span(0,2,true,&mut this.grid_work).is_infinite());
-                sample(this,&[Contribution{start:0,end:1,min:20.,max:20.,auto_min:false}],&[20.])
+                sample(this,&[Contribution{start:0,end:1,min:20.,max:20.,auto_min:false,minimum:20.}],&[20.])
             });
             assert!(first.completion.is_none());
             let columns=layouter.grid_axis_pass(&mut operation,MeasurePoint::Rows,inputs.clone(),Target::standalone(automatic(2),GridSpace::Definite(130.),false),inherited(20.),|this,_,frame,_| {
@@ -213,7 +213,7 @@ mod tests {
                 let geometry=frame.opposite.span(0,2,true,&mut this.grid_work);
                 let Some(AxisInheritance::Tracks(axis))=geometry.definite_geometry() else {panic!("missing used columns")};
                 assert_eq!(axis.extent(),130.);assert_eq!(axis.sizes,[100.,30.]);
-                sample(this,&[Contribution{start:0,end:1,min:25.,max:25.,auto_min:false}],&[25.])
+                sample(this,&[Contribution{start:0,end:1,min:25.,max:25.,auto_min:false,minimum:25.}],&[25.])
             });
             assert!(rows.min_content_changed);assert!(rows.completion.is_none());
             let unchanged=layouter.grid_axis_pass(&mut operation,MeasurePoint::AdjustRows,inputs,Target::standalone(automatic(2),GridSpace::Definite(130.),false),inherited(25.),|this,_,_,_| {
@@ -265,7 +265,7 @@ mod tests {
                 assert_eq!(frame.opposite.origin,OppositeOrigin::CurrentInherited);
                 let geometry=frame.opposite.span(0,1,true,&mut this.grid_work);
                 let Some(AxisInheritance::Tracks(axis))=geometry.definite_geometry() else {panic!("missing inherited size")};
-                assert_eq!(axis.extent(),90.);sample(this,&[Contribution{start:0,end:1,min:10.,max:10.,auto_min:false}],&[10.])
+                assert_eq!(axis.extent(),90.);sample(this,&[Contribution{start:0,end:1,min:10.,max:10.,auto_min:false,minimum:10.}],&[10.])
             });
             assert_eq!(used_sizes(&result),[10.]);
         });
@@ -294,7 +294,7 @@ mod tests {
     fn a_new_virtual_slot_can_first_complete_at_the_current_parent_adjustment_point() {
         with_layouter(|layouter| {
             let mut operation=GridOperation::new(OperationKind::Layout,&mut layouter.grid_work);
-            let result=layouter.grid_axis_pass(&mut operation,MeasurePoint::AdjustColumns,inputs([AvailableSpace::MaxContent,AvailableSpace::Indefinite]),Target::standalone(automatic(1),GridSpace::MaxContent,false),automatic(1),|this,_,_,_|sample(this,&[Contribution{start:0,end:1,min:10.,max:40.,auto_min:false}],&[10.]));
+            let result=layouter.grid_axis_pass(&mut operation,MeasurePoint::AdjustColumns,inputs([AvailableSpace::MaxContent,AvailableSpace::Indefinite]),Target::standalone(automatic(1),GridSpace::MaxContent,false),automatic(1),|this,_,_,_|sample(this,&[Contribution{start:0,end:1,min:10.,max:40.,auto_min:false,minimum:10.}],&[10.]));
             assert_eq!(used_sizes(&result),[40.]);
             assert_eq!(operation.result(&result.id).unwrap().completion_origin().unwrap().point,MeasurePoint::AdjustColumns);
         });
@@ -321,7 +321,7 @@ mod tests {
                     assert_eq!(frame.opposite.origin,OppositeOrigin::Recorded{point:MeasurePoint::Rows,axis:first,role:PassRole::Prerequisite});
                     let geometry=frame.opposite.span(0,2,true,&mut this.grid_work);
                     let Some(AxisInheritance::Tracks(axis))=geometry.definite_geometry() else {panic!("missing prerequisite result")};
-                    assert_eq!(axis.extent(),130.);sample(this,&[Contribution{start:0,end:1,min:20.,max:20.,auto_min:false}],&[20.])
+                    assert_eq!(axis.extent(),130.);sample(this,&[Contribution{start:0,end:1,min:20.,max:20.,auto_min:false,minimum:20.}],&[20.])
                 });
                 assert!(requested.completion.is_none());
             }
@@ -350,9 +350,9 @@ mod tests {
         with_layouter(|layouter| {
             let mut operation=GridOperation::new(OperationKind::Layout,&mut layouter.grid_work);
             let input=inputs([AvailableSpace::MaxContent,AvailableSpace::MaxContent]);
-            layouter.grid_axis_prerequisite(&mut operation,MeasurePoint::Rows,GridAxis::Columns,input.clone(),Target::standalone(automatic(1),GridSpace::MaxContent,false),shared(),|this,_,_,_|sample(this,&[Contribution{start:0,end:1,min:10.,max:40.,auto_min:false}],&[10.]));
+            layouter.grid_axis_prerequisite(&mut operation,MeasurePoint::Rows,GridAxis::Columns,input.clone(),Target::standalone(automatic(1),GridSpace::MaxContent,false),shared(),|this,_,_,_|sample(this,&[Contribution{start:0,end:1,min:10.,max:40.,auto_min:false,minimum:10.}],&[10.]));
             let failure=catch_unwind(AssertUnwindSafe(|| {
-                layouter.grid_axis_prerequisite(&mut operation,MeasurePoint::Rows,GridAxis::Columns,input,Target::standalone(automatic(1),GridSpace::MaxContent,false),shared(),|this,_,_,_|sample(this,&[Contribution{start:0,end:1,min:10.,max:80.,auto_min:false}],&[10.]))
+                layouter.grid_axis_prerequisite(&mut operation,MeasurePoint::Rows,GridAxis::Columns,input,Target::standalone(automatic(1),GridSpace::MaxContent,false),shared(),|this,_,_,_|sample(this,&[Contribution{start:0,end:1,min:10.,max:80.,auto_min:false,minimum:10.}],&[10.]))
             }));
             let Err(error)=failure else {panic!("completed Grid axis was resized through prerequisite")};
             assert!(panic_text(error.as_ref()).contains("cannot re-size a completed axis"));
@@ -372,7 +372,7 @@ mod tests {
         });
     }
     fn equal_contributions(max:f32)->[Contribution;2] {
-        [Contribution{start:0,end:1,min:10.,max,auto_min:false},Contribution{start:1,end:2,min:10.,max,auto_min:false}]
+        [Contribution{start:0,end:1,min:10.,max,auto_min:false,minimum:10.},Contribution{start:1,end:2,min:10.,max,auto_min:false,minimum:10.}]
     }
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
                 // newly completed column axis at this row entry.
                 let origin=operation.opposite_history(&frame.id).unwrap().completion_origin().unwrap();
                 assert_eq!(origin.id,&before.id);assert_eq!(origin.point,MeasurePoint::Columns);
-                sample(this,&[Contribution{start:0,end:1,min:15.,max:15.,auto_min:false}],&[15.])
+                sample(this,&[Contribution{start:0,end:1,min:15.,max:15.,auto_min:false,minimum:15.}],&[15.])
             });
             let after=layouter.grid_axis_pass(&mut operation,MeasurePoint::AdjustColumns,changed.clone(),Target::standalone(automatic(2),GridSpace::Definite(200.),false),row(),|this,_,frame,_| {
                 assert_eq!(frame.point,MeasurePoint::AdjustColumns);assert_eq!(frame.role,PassRole::Requested);
@@ -470,7 +470,7 @@ mod tests {
             // once, while unchanged row conditions retain its earlier result.
             let last=layouter.grid_axis_pass(&mut operation,MeasurePoint::AdjustRows,changed,Target::standalone(row(),GridSpace::Definite(30.),false),automatic(2),|this,_,frame,_| {
                 assert_eq!(frame.opposite.origin,OppositeOrigin::Recorded{point:MeasurePoint::AdjustColumns,axis:GridAxis::Columns,role:PassRole::Requested});
-                sample(this,&[Contribution{start:0,end:1,min:15.,max:15.,auto_min:false}],&[15.])
+                sample(this,&[Contribution{start:0,end:1,min:15.,max:15.,auto_min:false,minimum:15.}],&[15.])
             });
             assert!(!last.own_conditions_changed);assert!(!last.min_content_changed);
             assert_eq!(operation.result(&last.id).unwrap().completion_origin().unwrap().point,MeasurePoint::Rows);
