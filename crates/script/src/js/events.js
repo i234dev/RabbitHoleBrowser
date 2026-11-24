@@ -155,7 +155,61 @@
     ['BeforeUnloadEvent', g.Event, {}],
     ['DragEvent', g.MouseEvent, { dataTransfer: null }],
   ];
-  for (const [name, , members] of EVENTS) defaults(g[name], members);
+  // HTML's event interfaces with init dictionaries: JS classes whose
+  // members live in an internal slot read by brand-checked prototype
+  // getters (internal dispatch code that defines own members still works).
+  // Natives creating these events use the new prototypes.
+  const SLOT = Symbol('eventInit');
+  const convert = (d, v) => (typeof d === 'string' ? String(v) : typeof d === 'number' ? Number(v) >>> 0 : typeof d === 'boolean' ? !!v : v);
+  const SLOTTED = {
+    ErrorEvent: [1, { message: '', filename: '', lineno: 0, colno: 0, error: undefined }],
+    MessageEvent: [1, { data: null, origin: '', lastEventId: '', source: null, ports: () => Object.freeze([]) }],
+    StorageEvent: [1, { key: null, oldValue: null, newValue: null, url: '', storageArea: null }],
+    PopStateEvent: [1, { state: null, hasUAVisualTransition: false }],
+    HashChangeEvent: [1, { oldURL: '', newURL: '' }],
+    PageTransitionEvent: [1, { persisted: false }],
+    PromiseRejectionEvent: [2, { promise: undefined, reason: undefined }],
+    SubmitEvent: [1, { submitter: null }],
+  };
+  const NULLABLE_STRINGS = new Set(['key', 'oldValue', 'newValue']);
+  for (const [name, [length, members]] of Object.entries(SLOTTED)) {
+    const C = {
+      [name]: class extends g.Event {
+        constructor(type, init) {
+          if (arguments.length < length) throw new TypeError(`Failed to construct '${name}': ${length} argument${length === 1 ? '' : 's'} required, but only ${arguments.length} present.`);
+          if (name === 'PromiseRejectionEvent' && (init === null || typeof init !== 'object' || !('promise' in init))) throw new TypeError("Failed to construct 'PromiseRejectionEvent': required member promise is undefined.");
+          super(type, init);
+          const slot = {};
+          for (const [k, d] of Object.entries(members)) {
+            const v = init != null ? init[k] : undefined;
+            if (v === undefined) continue;
+            if (k === 'ports') slot[k] = Object.freeze(Array.from(v));
+            else if (NULLABLE_STRINGS.has(k)) slot[k] = v === null ? null : String(v);
+            else slot[k] = convert(d, v);
+          }
+          Object.defineProperty(this, SLOT, { value: slot });
+        }
+      },
+    }[name];
+    tag(C, name);
+    Object.defineProperty(C, 'length', { value: length, configurable: true });
+    for (const [k, d] of Object.entries(members)) {
+      Object.defineProperty(C.prototype, k, {
+        get: { [`get ${k}`]() {
+          if (!(this instanceof C)) throw new TypeError('Illegal invocation');
+          const slot = this[SLOT];
+          if (slot && Object.prototype.hasOwnProperty.call(slot, k)) return slot[k];
+          const v = typeof d === 'function' ? d.call(this) : d;
+          if (slot) slot[k] = v;
+          return v;
+        } }[`get ${k}`],
+        configurable: true, enumerable: true,
+      });
+    }
+    N.registerProto(name, C.prototype);
+    define(name, C);
+  }
+  for (const [name, , members] of EVENTS) if (!SLOTTED[name]) defaults(g[name], members);
   const NEW_EVENTS = [
     ['CommandEvent', g.Event, { source: null, command: '' }],
     ['FormDataEvent', g.Event, { formData: null }],
@@ -177,14 +231,19 @@
     if (g[name]) { defaults(g[name], members); continue; }
     define(name, eventClass(name, Parent, members));
   }
+  const setSlot = (ev, k, v) => {
+    let slot = ev[SLOT];
+    if (!slot) { slot = {}; Object.defineProperty(ev, SLOT, { value: slot }); }
+    slot[k] = v;
+  };
   method(g.MessageEvent, 'initMessageEvent', function (type, bubbles, cancelable, data, origin, lastEventId, source, ports) {
     this.initEvent(type, bubbles, cancelable);
-    const set = (k, v) => Object.defineProperty(this, k, { value: v, configurable: true, enumerable: true });
+    const set = (k, v) => setSlot(this, k, v);
     set('data', data ?? null); set('origin', String(origin ?? '')); set('lastEventId', String(lastEventId ?? '')); set('source', source ?? null); set('ports', Object.freeze(Array.from(ports || [])));
   });
   method(g.StorageEvent, 'initStorageEvent', function (type, bubbles, cancelable, key, oldValue, newValue, url, storageArea) {
     this.initEvent(type, bubbles, cancelable);
-    const set = (k, v) => Object.defineProperty(this, k, { value: v, configurable: true, enumerable: true });
+    const set = (k, v) => setSlot(this, k, v);
     set('key', key ?? null); set('oldValue', oldValue ?? null); set('newValue', newValue ?? null); set('url', String(url ?? '')); set('storageArea', storageArea ?? null);
   });
   // Native constructors that copy the whole dictionary keep the class's
