@@ -6,85 +6,12 @@ use crate::host::*;
 use crate::node::{self, children_of, inner_text, insert_node, remove_node, set_inner_html, set_text_content};
 use rabbithole_dom::{ControlDirection, Document, NodeData, NodeId};
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, ALL, CONFIGURABLE, ENUMERABLE};
-use std::rc::Rc;
 
 const ACC: u8 = CONFIGURABLE | ENUMERABLE;
 
 // ------------------------------------------------------- attribute reflection
 
-#[derive(Clone, Copy, PartialEq)]
-#[allow(dead_code)]
-pub(crate) enum Reflect {
-    Str,
-    NullableStr,
-    Popover,
-    Bool,
-    /// Number (`NaN`-free: 0 when missing)
-    Num,
-    /// Integer with a default
-    Int(i32),
-    /// URL resolved against the base
-    Url,
-    /// Enumerated string with a default
-    Default(&'static str),
-}
-
-pub(crate) struct AttrSpec {
-    pub attr: &'static str,
-    pub kind: Reflect,
-}
-
-fn reflect_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let spec = native_data::<AttrSpec>(realm).expect("attr spec");
-    let n = this_node(realm, &this, spec.attr)?;
-    let raw = with_doc(n.doc, |doc| doc.attr(n.node, spec.attr).map(|s| s.to_string()));
-    Ok(match spec.kind {
-        Reflect::Str => Value::str(raw.as_deref().unwrap_or("")),
-        Reflect::Popover => raw.as_deref().map(Document::popover_mode).map(Value::str).unwrap_or(Value::Null),
-        Reflect::NullableStr => raw.as_deref().map(Value::str).unwrap_or(Value::Null),
-        Reflect::Bool => Value::Bool(raw.is_some()),
-        Reflect::Num => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0)),
-        Reflect::Int(d) => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(d as f64)),
-        Reflect::Url => match raw {
-            Some(r) => Value::str(&resolve_url(&r).map(|u| u.to_string()).unwrap_or(r)),
-            None => Value::str(""),
-        },
-        Reflect::Default(d) => Value::str(raw.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or(d)),
-    })
-}
-
-fn reflect_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let spec = native_data::<AttrSpec>(realm).expect("attr spec");
-    let n = this_node(realm, &this, spec.attr)?;
-    let v = arg(args, 0);
-    match spec.kind {
-        Reflect::Bool => {
-            let b = realm.to_boolean(&v);
-            set_attribute(n, spec.attr, if b { Some("") } else { None });
-        }
-        Reflect::NullableStr | Reflect::Popover if v.is_nullish() => {
-            if get_attribute(n, spec.attr).is_some() { set_attribute(n, spec.attr, None); }
-        }
-        Reflect::Num | Reflect::Int(_) => {
-            let num = realm.to_number(v)?;
-            let s = rabbithole_js::value::number_to_string(num);
-            set_attribute(n, spec.attr, Some(&s));
-        }
-        _ => {
-            let s = realm.to_rust_string(v)?;
-            set_attribute(n, spec.attr, Some(&s));
-        }
-    }
-    Ok(Value::Undefined)
-}
-
-/// Define `prop` on `proto` as an accessor reflecting attribute `attr`.
-pub(crate) fn reflect(realm: &mut Realm, proto: ObjectId, prop: &str, attr: &'static str, kind: Reflect) {
-    let data: Rc<dyn std::any::Any> = Rc::new(AttrSpec { attr, kind });
-    let g = realm.new_native_function_full(&format!("get {prop}"), 0, reflect_get, Some(data.clone()), vec![], false);
-    let s = realm.new_native_function_full(&format!("set {prop}"), 1, reflect_set, Some(data), vec![], false);
-    realm.define_accessor_values(proto, prop, Some(Value::Object(g)), Some(Value::Object(s)), ACC);
-}
+pub(crate) use crate::reflect::{reflect, Reflect};
 
 /// Set/remove an attribute with mutation records and dirtiness.
 /// The attribute name to use on `n`: lower-cased for HTML elements in
@@ -1840,8 +1767,16 @@ fn input_type_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
     let n = this_node(realm, &this, "type")?;
     let tag = tag_of(n).unwrap_or_default();
     Ok(Value::str(&match tag.as_str() {
-        "input" => get_attribute(n, "type").map(|t| t.to_ascii_lowercase()).filter(|t| !t.is_empty()).unwrap_or_else(|| "text".into()),
-        "button" => get_attribute(n, "type").map(|t| t.to_ascii_lowercase()).filter(|t| !t.is_empty()).unwrap_or_else(|| "submit".into()),
+        // Enumerated, limited to known values: unknown types are text
+        // (input) and submit (button) controls.
+        "input" => {
+            let t = get_attribute(n, "type").unwrap_or_default();
+            crate::reflect::INPUT_TYPES.iter().find(|k| k.eq_ignore_ascii_case(&t)).unwrap_or(&"text").to_string()
+        }
+        "button" => {
+            let t = get_attribute(n, "type").unwrap_or_default();
+            ["submit", "reset", "button"].iter().find(|k| k.eq_ignore_ascii_case(&t)).unwrap_or(&"submit").to_string()
+        }
         "select" => if get_attribute(n, "multiple").is_some() { "select-multiple".into() } else { "select-one".into() },
         "textarea" => "textarea".into(),
         _ => get_attribute(n, "type").unwrap_or_default(),
@@ -2094,6 +2029,23 @@ fn option_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     let n = this_node(realm, &this, "text")?;
     let v = arg_str(realm, args, 0)?;
     set_text_content(n, &v);
+    Ok(Value::Undefined)
+}
+
+/// `option.label`: the label content attribute when present, else the
+/// option's text; setting writes the attribute.
+fn option_label_get(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "label")?;
+    match get_attribute(n, "label") {
+        Some(l) => Ok(Value::str(&l)),
+        None => option_text_get(realm, this, args),
+    }
+}
+
+fn option_label_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "label")?;
+    let v = arg_str(realm, args, 0)?;
+    set_attribute(n, "label", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -2693,18 +2645,11 @@ pub(crate) fn install(realm: &mut Realm) {
     let data = proto("HTMLDataElement");
     reflect(realm, data, "value", "value", Reflect::Str);
     let cell = proto("HTMLTableCellElement");
-    reflect(realm, cell, "colSpan", "colspan", Reflect::Int(1));
-    reflect(realm, cell, "rowSpan", "rowspan", Reflect::Int(1));
     reflect(realm, cell, "headers", "headers", Reflect::Str);
     let ol = proto("HTMLOListElement");
-    reflect(realm, ol, "start", "start", Reflect::Int(1));
     reflect(realm, ol, "reversed", "reversed", Reflect::Bool);
-    let li = proto("HTMLLIElement");
-    reflect(realm, li, "value", "value", Reflect::Int(0));
     let quote = proto("HTMLQuoteElement");
     reflect(realm, quote, "cite", "cite", Reflect::Url);
-    let progress = proto("HTMLProgressElement");
-    reflect(realm, progress, "max", "max", Reflect::Num);
     let details = proto("HTMLDetailsElement");
     reflect(realm, details, "open", "open", Reflect::Bool);
     let dialog = proto("HTMLDialogElement");
@@ -2731,11 +2676,8 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, source, "media", "media", Reflect::Str);
     let time = proto("HTMLTimeElement");
     reflect(realm, time, "dateTime", "datetime", Reflect::Str);
-    let quote = proto("HTMLQuoteElement");
-    reflect(realm, quote, "cite", "cite", Reflect::Str);
     let progress = proto("HTMLProgressElement");
-    reflect(realm, progress, "value", "value", Reflect::Num);
-    reflect(realm, progress, "max", "max", Reflect::Int(1));
+    reflect(realm, progress, "value", "value", Reflect::Double(0.0));
     let area = proto("HTMLAreaElement");
     realm.define_accessor(area, "href", Some(a_href_get), Some(a_href_set), ACC);
 
@@ -2780,15 +2722,12 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(input, "stepUp", 0, e_noop);
     realm.define_method(input, "stepDown", 0, e_noop);
     realm.define_method(input, "showPicker", 0, e_noop);
-    for (p, at) in [("name", "name"), ("placeholder", "placeholder"), ("min", "min"), ("max", "max"), ("step", "step"), ("pattern", "pattern"), ("accept", "accept"), ("autocomplete", "autocomplete"), ("alt", "alt"), ("src", "src"), ("dirName", "dirname")] {
+    for (p, at) in [("name", "name"), ("placeholder", "placeholder"), ("min", "min"), ("max", "max"), ("step", "step"), ("pattern", "pattern"), ("accept", "accept"), ("autocomplete", "autocomplete"), ("alt", "alt"), ("dirName", "dirname")] {
         reflect(realm, input, p, at, Reflect::Str);
     }
     for (p, at) in [("disabled", "disabled"), ("required", "required"), ("readOnly", "readonly"), ("multiple", "multiple"), ("autofocus", "autofocus"), ("indeterminate", "data-rh-indeterminate")] {
         reflect(realm, input, p, at, Reflect::Bool);
     }
-    reflect(realm, input, "maxLength", "maxlength", Reflect::Int(-1));
-    reflect(realm, input, "minLength", "minlength", Reflect::Int(-1));
-    reflect(realm, input, "size", "size", Reflect::Int(20));
 
     // --- HTMLTextAreaElement
     let ta = define_class(realm, "HTMLTextAreaElement", Some("HTMLElement"), crate::host::html_element_ctor);
@@ -2813,9 +2752,6 @@ pub(crate) fn install(realm: &mut Realm) {
     for (p, at) in [("disabled", "disabled"), ("required", "required"), ("readOnly", "readonly"), ("autofocus", "autofocus")] {
         reflect(realm, ta, p, at, Reflect::Bool);
     }
-    reflect(realm, ta, "rows", "rows", Reflect::Int(2));
-    reflect(realm, ta, "cols", "cols", Reflect::Int(20));
-    reflect(realm, ta, "maxLength", "maxlength", Reflect::Int(-1));
 
     // --- HTMLSelectElement / HTMLOptionElement
     let sel = define_class(realm, "HTMLSelectElement", Some("HTMLElement"), crate::host::html_element_ctor);
@@ -2841,11 +2777,10 @@ pub(crate) fn install(realm: &mut Realm) {
     for (p, at) in [("disabled", "disabled"), ("required", "required"), ("multiple", "multiple"), ("autofocus", "autofocus")] {
         reflect(realm, sel, p, at, Reflect::Bool);
     }
-    reflect(realm, sel, "size", "size", Reflect::Int(0));
     let opt = define_class(realm, "HTMLOptionElement", Some("HTMLElement"), option_ctor);
     realm.define_accessor(opt, "value", Some(option_value_get), Some(input_value_set), ACC);
     realm.define_accessor(opt, "text", Some(option_text_get), Some(option_text_set), ACC);
-    realm.define_accessor(opt, "label", Some(option_text_get), Some(e_noop), ACC);
+    realm.define_accessor(opt, "label", Some(option_label_get), Some(option_label_set), ACC);
     realm.define_accessor(opt, "selected", Some(option_selected_get), Some(option_selected_set), ACC);
     realm.define_accessor(opt, "defaultSelected", Some(option_default_selected_get), Some(option_default_selected_set), ACC);
     realm.define_accessor(opt, "index", Some(option_index), None, ACC);
@@ -2864,11 +2799,9 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(form, "reset", 0, form_reset);
     realm.define_method(form, "checkValidity", 0, form_check_validity);
     realm.define_method(form, "reportValidity", 0, form_check_validity);
-    for (p, at) in [("name", "name"), ("target", "target"), ("autocomplete", "autocomplete"), ("acceptCharset", "accept-charset")] {
+    for (p, at) in [("name", "name"), ("target", "target"), ("acceptCharset", "accept-charset")] {
         reflect(realm, form, p, at, Reflect::Str);
     }
-    reflect(realm, form, "method", "method", Reflect::Default("get"));
-    reflect(realm, form, "enctype", "enctype", Reflect::Default("application/x-www-form-urlencoded"));
     reflect(realm, form, "noValidate", "novalidate", Reflect::Bool);
 
     // --- HTMLImageElement
@@ -2944,8 +2877,6 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(canvas, "toDataURL", 0, canvas_to_data_url);
     realm.define_method(canvas, "toBlob", 1, e_noop);
     realm.define_method(canvas, "captureStream", 0, node_null);
-    reflect(realm, canvas, "width", "width", Reflect::Int(300));
-    reflect(realm, canvas, "height", "height", Reflect::Int(150));
     // --- HTMLButtonElement
     let button = define_class(realm, "HTMLButtonElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(button, "popoverTargetElement", Some(popover_target_get), Some(popover_target_set), ACC);
@@ -2957,7 +2888,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(button, "checkValidity", 0, node_true);
     realm.define_method(button, "reportValidity", 0, node_true);
     realm.define_method(button, "setCustomValidity", 1, e_noop);
-    for (p, at) in [("name", "name"), ("formAction", "formaction"), ("formMethod", "formmethod"), ("formTarget", "formtarget"), ("formEnctype", "formenctype")] {
+    for (p, at) in [("name", "name"), ("formTarget", "formtarget")] {
         reflect(realm, button, p, at, Reflect::Str);
     }
     for (p, at) in [("disabled", "disabled"), ("autofocus", "autofocus"), ("formNoValidate", "formnovalidate")] {
@@ -2982,9 +2913,6 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, media, "src", "src", Reflect::Url);
     reflect(realm, media, "currentSrc", "src", Reflect::Url);
     reflect(realm, media, "poster", "poster", Reflect::Url);
-    for (p, at) in [("preload", "preload")] {
-        reflect(realm, media, p, at, Reflect::Str);
-    }
     for (p, at) in [("autoplay", "autoplay"), ("controls", "controls"), ("loop", "loop"), ("muted", "muted"), ("playsInline", "playsinline")] {
         reflect(realm, media, p, at, Reflect::Bool);
     }

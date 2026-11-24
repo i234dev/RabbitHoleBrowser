@@ -77,6 +77,8 @@
       if (!C) continue;
       for (const [prop, attr, kind, dflt] of entries) {
         if (prop in C.prototype) continue;
+        // The native reflection algorithms cover every kind but token lists.
+        if (kind !== 't' && N.reflect(C.prototype, prop, attr, kind, dflt)) continue;
         const [get, set] = reflector(attr, kind, dflt);
         acc(C, prop, get, set);
       }
