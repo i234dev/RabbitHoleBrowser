@@ -918,8 +918,34 @@ impl<'a> Layouter<'a> {
                 c.final_hit = !clamped;
             }
         }
+        if b.style.writing_mode == rabbithole_style::WritingMode::VerticalLr && b.style.layout_transposed {
+            mirror_reflected_lines(&mut lines, &mut b.children);
+        }
         b.lines = lines;
         return height;
+        }
+    }
+}
+
+/// A `vertical-lr` subtree is laid out reflected about the diagonal, which
+/// puts the line-over side of its lines at the block start: each line's
+/// contents are mirrored across the line (the glyphs themselves are flipped
+/// back when painted), so that the line-over side ends up on the right and
+/// the baselines of all its contents coincide again. A line's baseline is
+/// the mirrored one; fragments keep their own (painted) baselines.
+fn mirror_reflected_lines(lines: &mut [crate::tree::LineBox], children: &mut [LayoutBox]) {
+    for line in lines {
+        let sum = 2.0 * line.rect.y + line.rect.h;
+        line.baseline = sum - line.baseline;
+        for f in &mut line.fragments {
+            let dy = sum - 2.0 * f.rect.y - f.rect.h;
+            f.rect.y += dy;
+            f.baseline += dy;
+            if let crate::tree::FragmentKind::Box(i) = f.kind {
+                if let Some(c) = children.get_mut(i) {
+                    c.translate(0.0, dy);
+                }
+            }
         }
     }
 }
@@ -2636,7 +2662,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         // halfway between the ascent and descent: each text run's
         // alphabetic baseline sits below it, each atomic inline is centred.
         let central = self.cstyle.central_baseline();
-        let line_over_bottom = self.cstyle.writing_mode == rabbithole_style::WritingMode::VerticalLr;
+        // (A reflected line is mirrored as a whole once laid out.)
+        let line_over_bottom = self.cstyle.writing_mode == rabbithole_style::WritingMode::VerticalLr && !self.cstyle.layout_transposed;
         let central_shift = |tm: &TextMetrics| if central { (tm.asc - tm.desc) / 2.0 } else { 0.0 };
         let mut fms: Vec<FM> = Vec::with_capacity(self.cur.frags.len());
         // Inline boxes aligned by `top` / `bottom` / `text-*` / `middle`
@@ -2682,7 +2709,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     if let Some(e) = emphasis_of(&style) {
                         let m = self.lay.ctx.fonts.metrics(tm.font, tm.size / 2.0);
                         let mh = m.ascent + m.descent;
-                        if e.over {
+                        // (A reflected line is mirrored once laid out: its
+                        // room goes on the other side first.)
+                        let reflected = self.cstyle.writing_mode == rabbithole_style::WritingMode::VerticalLr && self.cstyle.layout_transposed;
+                        if e.over != reflected {
                             above = above.max(tm.asc + shift + mh);
                         } else {
                             below = below.max(tm.desc - shift + mh);
@@ -2710,7 +2740,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     let h = mr.h;
                     // (Without a baseline of its own, a box's central
                     // baseline is synthesized halfway across its margin box.)
-                    let base = child.baseline.map(|bo| child.margin.top + bo).unwrap_or(if central { h / 2.0 } else { h });
+                    // (In a reflected `vertical-lr` line, which is mirrored
+                    // once laid out, a box's baseline counts from its end.)
+                    let reflected = self.cstyle.writing_mode == rabbithole_style::WritingMode::VerticalLr && self.cstyle.layout_transposed;
+                    let base = child.baseline.map(|bo| if reflected { child.margin.bottom + child.rect.h - bo } else { child.margin.top + bo }).unwrap_or(if central { h / 2.0 } else { h });
                     let fs = self
                         .cur
                         .open

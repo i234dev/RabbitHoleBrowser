@@ -663,6 +663,12 @@ impl<'a> Layouter<'a> {
                     child.translate(2.0 * cx + cbw - 2.0 * x - w - m.right + m.left, 0.0);
                 }
             }
+            // Baseline self-alignment in the lanes (the grid axis); reversed
+            // lanes keep the start fallback.
+            if !mirror && !dir.fill_reverse && !dir.track_reverse && items.iter().any(|it| it.justify == ItemAlign::Baseline) {
+                let lane_items: Vec<GridItem> = items.iter().enumerate().map(|(i, it)| { let mut gi = Self::lane_grid_item(it, pl.start[i], false); subgrid::item_edges(b, &mut gi, col_gap, row_gap); gi }).collect();
+                self.align_item_baselines(b, &lane_items, (&tl.tracks, &col_pos), (&[], &[]), (cx, cy), false, &[false]);
+            }
             if self.grid_publication.enabled() {
                 b.used_grid_tracks[0] = resolved::capture(b, false, &tl, GridSpace::Definite(cbw), &mut self.grid_work);
             }
@@ -786,6 +792,11 @@ impl<'a> Layouter<'a> {
             let child = &mut b.children[it.idx];
             let (nx, ny) = (cx + x + child.margin.left, cy + y);
             child.translate(nx - child.rect.x, ny - child.rect.y);
+        }
+        // Baseline self-alignment in the lanes (the grid axis).
+        if !dir.fill_reverse && !dir.track_reverse && items.iter().any(|it| it.align == ItemAlign::Baseline) {
+            let lane_items: Vec<GridItem> = items.iter().enumerate().map(|(i, it)| { let mut gi = Self::lane_grid_item(it, pl.start[i], true); subgrid::item_edges(b, &mut gi, col_gap, row_gap); gi }).collect();
+            self.align_item_baselines(b, &lane_items, (&[], &[]), (&tl.tracks, &row_pos), (cx, cy), false, &[true]);
         }
         if self.grid_publication.enabled() {
             b.used_grid_tracks[1] = resolved::capture(b, true, &tl, subgrid::standalone_space(b, true, avail), &mut self.grid_work);

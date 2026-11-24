@@ -48,12 +48,16 @@ pub(super) fn participates(it: &GridItem, rows: bool) -> bool {
     (if rows { it.align } else { it.justify }) == ItemAlign::Baseline && !auto
 }
 
-/// Whether `child`, baseline-aligned in the axis, is sized against the
-/// intrinsic or flexible tracks it spans (a percentage size): the cyclic
-/// dependency excludes it from baseline alignment, and it uses its
-/// fallback alignment (§10.6).
+/// Whether `child`, baseline-aligned in the column axis, is sized against
+/// the intrinsic or flexible columns it spans (a percentage width): the
+/// cyclic dependency excludes it from baseline alignment, and it uses its
+/// fallback alignment (§10.6). (Rows are sized before such percentages
+/// resolve against them: a percentage height takes part.)
 fn cyclic(child: &LayoutBox, it: &GridItem, tracks: &[Track], rows: bool) -> bool {
-    let size = if rows { child.style.height } else { child.style.width };
+    if rows {
+        return false;
+    }
+    let size = child.style.width;
     if !matches!(size, rabbithole_style::Length::Percent(_) | rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_)) {
         return false;
     }
@@ -78,12 +82,9 @@ fn baseline_glyphs(b: &LayoutBox, baseline: f32) -> Option<Rect> {
     b.children.iter().filter(|c| !c.wm_wrapper && c.is_in_flow()).find_map(|c| baseline_glyphs(c, baseline))
 }
 
-/// The first (last) baseline of `b` in its own coordinate space, where
-/// its glyphs are drawn. Vertical text keeps its central baseline; text
-/// of a `vertical-lr` subtree is laid out reflected and its glyphs are
-/// flipped back about their glyph box when painted, which moves their
-/// alphabetic baseline to the other side of that box.
-fn line_baseline(b: &LayoutBox, last: bool, space: WritingMode) -> Option<f32> {
+/// The first (last) baseline of `b` in its own coordinate space. Vertical
+/// text keeps its central baseline.
+fn line_baseline(b: &LayoutBox, last: bool) -> Option<f32> {
     let baseline = if last { b.last_baseline() } else { b.first_baseline() }?;
     let style = &b.style;
     if !style.writing_mode.is_vertical() {
@@ -91,13 +92,7 @@ fn line_baseline(b: &LayoutBox, last: bool, space: WritingMode) -> Option<f32> {
     }
     let Some(glyphs) = baseline_glyphs(b, baseline) else { return Some(baseline) };
     let center = glyphs.y + glyphs.h / 2.0;
-    Some(if style.central_baseline() {
-        center
-    } else if space == WritingMode::VerticalLr {
-        2.0 * center - baseline
-    } else {
-        baseline
-    })
+    Some(if style.central_baseline() { center } else { baseline })
 }
 
 /// The baseline of a laid-out item in the axis, measured from the
@@ -117,7 +112,7 @@ pub(super) fn measure(container: &ComputedStyle, child: &LayoutBox, it: &GridIte
         // lines in reverse order: its first line is the last one there.
         let rightward = |m: WritingMode| matches!(m, WritingMode::VerticalLr | WritingMode::SidewaysLr);
         let reversed = !child.wm_wrapper && container.writing_mode.is_vertical() && child.style.writing_mode.is_vertical() && rightward(container.writing_mode) != rightward(child.style.writing_mode);
-        let pos = if child.wm_wrapper { under } else { line_baseline(child, last != reversed, container.writing_mode).unwrap_or(under) };
+        let pos = if child.wm_wrapper { under } else { line_baseline(child, last != reversed).unwrap_or(under) };
         (r.y - m.top, r.h + m.top + m.bottom, pos, !reversed)
     } else {
         // Items parallel to the container synthesize their baseline from
@@ -129,7 +124,7 @@ pub(super) fn measure(container: &ComputedStyle, child: &LayoutBox, it: &GridIte
             (true, Some(mtx), Some(inner)) => {
                 // The inner box is in its logical space; its block axis
                 // maps onto x.
-                (line_baseline(inner, last, inner.style.writing_mode).map_or(under, |y| mtx[2] * y + mtx[4]), mtx[2] > 0.0)
+                (line_baseline(inner, last).map_or(under, |y| mtx[2] * y + mtx[4]), mtx[2] > 0.0)
             }
             _ => (under, true),
         };
@@ -223,9 +218,9 @@ impl<'a> Layouter<'a> {
     /// in both axes (§10.6): first-baseline groups at the start of their
     /// track, last-baseline groups at its end.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn align_item_baselines(&mut self, b: &mut LayoutBox, items: &[GridItem], cols: (&[Track], &[f32]), rows: (&[Track], &[f32]), origin: (f32, f32), mirror: bool) {
+    pub(super) fn align_item_baselines(&mut self, b: &mut LayoutBox, items: &[GridItem], cols: (&[Track], &[f32]), rows: (&[Track], &[f32]), origin: (f32, f32), mirror: bool, axes: &[bool]) {
         let style = b.style.clone();
-        for axis_rows in [true, false] {
+        for &axis_rows in axes {
             if !axis_rows && (mirror || style.direction == rabbithole_style::Direction::Rtl) {
                 continue;
             }

@@ -1412,7 +1412,7 @@ impl<'a> Layouter<'a> {
         }
         // Baseline self-alignment (§10.6).
         if items.iter().any(|it| baseline::participates(it, true) || baseline::participates(it, false)) {
-            self.align_item_baselines(b, &items, (&cols.tracks, &col_pos), (&rows.tracks, &row_pos), (content_x, content_y), mirror);
+            self.align_item_baselines(b, &items, (&cols.tracks, &col_pos), (&rows.tracks, &row_pos), (content_x, content_y), mirror, &[true, false]);
         }
 
         // Absolutely positioned children: with a positioned grid container
@@ -1842,20 +1842,26 @@ impl<'a> Layouter<'a> {
             // physical axis: its inline or block start, by writing mode.
             // (Containers with a vertical writing mode are laid out in their
             // own logical coordinates, where only the direction counts.)
+            // An orthogonal item's own mode is that of the box its
+            // writing-mode wrapper holds.
             use rabbithole_style::WritingMode as Wm;
-            let item_rtl = cs.direction == rabbithole_style::Direction::Rtl;
-            let horizontal = style.writing_mode == Wm::HorizontalTb;
-            let start_right = match cs.writing_mode {
-                _ if !horizontal => item_rtl,
-                Wm::HorizontalTb => item_rtl,
-                Wm::VerticalRl => true,
-                Wm::VerticalLr | Wm::SidewaysLr => false,
+            let own = b.children[p.idx].children.first().filter(|_| b.children[p.idx].wm_wrapper).map_or(&cs, |inner| &inner.style);
+            let item_rtl = own.direction == rabbithole_style::Direction::Rtl;
+            // The item's start sides, physically: (right, bottom).
+            let (x_right, y_bottom) = match own.writing_mode {
+                Wm::HorizontalTb => (item_rtl, false),
+                Wm::VerticalRl => (true, item_rtl),
+                Wm::VerticalLr => (false, item_rtl),
+                Wm::SidewaysLr => (false, !item_rtl),
             };
-            let start_bottom = match cs.writing_mode {
-                _ if !horizontal => false,
-                Wm::HorizontalTb => false,
-                Wm::VerticalRl | Wm::VerticalLr => item_rtl,
-                Wm::SidewaysLr => !item_rtl,
+            // ... at the logical ends of the container's axes: its inline
+            // axis runs down a vertical container, its block axis right
+            // (`vertical-lr`, `sideways-lr`) or left (`vertical-rl`).
+            let (start_right, start_bottom) = match style.writing_mode {
+                Wm::HorizontalTb => (x_right, y_bottom),
+                Wm::VerticalLr => (y_bottom, x_right),
+                Wm::VerticalRl => (y_bottom, !x_right),
+                Wm::SidewaysLr => (!y_bottom, x_right),
             };
             let justify = match cs.justify_self {
                 ItemAlign::Auto => justify_for_pass(style.justify_items, style.justify_items_flags, start_right, mirror),
