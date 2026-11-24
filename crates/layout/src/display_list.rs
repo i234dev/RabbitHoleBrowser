@@ -583,6 +583,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     }
 
     fn push_clip(&mut self, b: &LayoutBox) -> Option<u32> {
+        if let Some(p) = b.col_pieces.as_deref() {
+            return self.push_piece_clip(b, p);
+        }
         let pr = self.overflow_clip_rect(b);
         let radii = Self::overflow_clip_edge(b).1;
         // CSS Overflow 3: a clip/visible pair does not round the content clip.
@@ -592,6 +595,44 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.push(DisplayItem::PushClip(pr));
         }
         self.push_scope(HitScope::Clip(pr))
+    }
+
+    /// The overflow clip of a box broken across columns: its clip edge
+    /// sliced by each fragment, in the fragment's column.
+    fn push_piece_clip(&mut self, b: &LayoutBox, p: &crate::multicol::ColPieces) -> Option<u32> {
+        use rabbithole_style::{BoxArea, Overflow};
+        let s = &b.style;
+        let scrolls = |o: Overflow| matches!(o, Overflow::Hidden | Overflow::Scroll | Overflow::Auto);
+        let clip_kind = !scrolls(s.overflow_x) && !scrolls(s.overflow_y) && (s.contain_paint || s.overflow_x == Overflow::Clip || s.overflow_y == Overflow::Clip);
+        let (area, margin) = if clip_kind { s.overflow_clip_margin } else { (BoxArea::PaddingBox, 0.0) };
+        let edge = match area {
+            BoxArea::BorderBox => p.border,
+            BoxArea::PaddingBox => p.padding,
+            BoxArea::ContentBox => p.content,
+        };
+        let edge = Rect::new(edge.x - margin, edge.y - margin, edge.w + 2.0 * margin, edge.h + 2.0 * margin);
+        let (clip_x, clip_y) = b.overflow_clip_axes();
+        let mut path = Vec::new();
+        let mut bounds: Option<Rect> = None;
+        for piece in &p.pieces {
+            // The fragment's slice of the flow, unbounded across.
+            let (lo, hi) = (piece.rect.y - piece.dy, piece.rect.bottom() - piece.dy);
+            let (y0, y1) = if clip_y { (edge.y.max(lo), edge.bottom().min(hi)) } else { (lo, hi) };
+            let (x0, x1) = if clip_x { (edge.x, edge.right()) } else { (self.bounds.x - piece.dx, self.bounds.right() - piece.dx) };
+            if y1 <= y0 || x1 <= x0 {
+                continue;
+            }
+            let r = Rect::new(x0 + piece.dx, y0 + piece.dy, x1 - x0, y1 - y0);
+            bounds = Some(bounds.map_or(r, |u| u.union(&r)));
+            path.push(PathSeg::MoveTo(Point::new(r.x, r.y)));
+            path.push(PathSeg::LineTo(Point::new(r.right(), r.y)));
+            path.push(PathSeg::LineTo(Point::new(r.right(), r.bottom())));
+            path.push(PathSeg::LineTo(Point::new(r.x, r.bottom())));
+            path.push(PathSeg::Close);
+        }
+        let bounds = bounds.unwrap_or_default();
+        self.list.push(DisplayItem::PushClipPath { bounds, path: Arc::new(path), evenodd: false, anchor: Point::new(bounds.x, bounds.y), rounded: None });
+        self.push_scope(HitScope::Clip(bounds))
     }
 
     fn pop_clip(&mut self, saved: Option<u32>) {

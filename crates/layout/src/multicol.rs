@@ -26,7 +26,7 @@ use crate::float::Bfc;
 use crate::tree::{BoxKind, Flow, Formatting, FragmentKind, LayoutBox};
 use rabbithole_gfx::Rect;
 use rabbithole_style::props::multicol as mc;
-use rabbithole_style::ComputedStyle;
+use rabbithole_style::{ComputedStyle, Overflow};
 
 /// A fragment of a box broken across columns.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,12 +109,14 @@ fn fragmentable(c: &LayoutBox) -> bool {
 fn fragmentable_box(c: &LayoutBox) -> bool {
     matches!(c.kind, BoxKind::Block | BoxKind::AnonymousBlock)
         && matches!(c.formatting, Formatting::Block | Formatting::Inline)
-        && !c.clips
+        // (Scroll containers are monolithic; `overflow: clip` boxes are
+        // not, CSS Overflow 3 §3.1.)
+        && !(c.clips && [c.style.overflow_x, c.style.overflow_y].iter().any(|o| matches!(o, Overflow::Hidden | Overflow::Auto | Overflow::Scroll)))
         && !c.wm_wrapper
         && !c.style.multicol
-        && !c.style.has_transform()
-        && c.style.line_clamp.is_none()
-        && !(c.style.contain_size || c.style.contain_paint || c.style.contain_layout)
+        && !c.style.establishes_fixed_containing_block()
+        // (Size containment makes a box monolithic, CSS Contain 2 §3.)
+        && !c.style.contain_size
 }
 
 const NONE: u32 = u32::MAX;
@@ -194,9 +196,22 @@ impl Collector {
                 });
                 idx += 1;
             } else {
-                let r = b.children[i].margin_rect();
-                self.evs.push(Ev::Leaf { top: r.y, bottom: r.bottom(), forced: false, avoid_before: false, prev: NONE, mt: 0.0, line: None });
+                self.float(&b.children[i]);
             }
+        }
+    }
+
+    /// A float: fragmented like a block when it is a block container.
+    fn float(&mut self, c: &LayoutBox) {
+        if fragmentable_box(c) {
+            let edge = c.style.border_width.top > 0.0 || c.content_rect.y > c.rect.y + 0.01;
+            let avoid_inside = mc::avoids_column_break(c.style.break_inside);
+            self.evs.push(Ev::Start { top: c.rect.y, h: c.rect.h, edge, forced: false, avoid_before: false, avoid_inside, prev: NONE, mt: 0.0 });
+            self.contents(c);
+            self.evs.push(Ev::End);
+        } else {
+            let r = c.margin_rect();
+            self.evs.push(Ev::Leaf { top: r.y, bottom: r.bottom(), forced: false, avoid_before: false, prev: NONE, mt: 0.0, line: None });
         }
     }
 
@@ -216,10 +231,7 @@ impl Collector {
             }
             match c.flow {
                 Flow::Absolute => {}
-                Flow::FloatLeft | Flow::FloatRight => {
-                    let r = c.margin_rect();
-                    self.evs.push(Ev::Leaf { top: r.y, bottom: r.bottom(), forced: false, avoid_before: false, prev: NONE, mt: 0.0, line: None });
-                }
+                Flow::FloatLeft | Flow::FloatRight => self.float(c),
                 Flow::InFlow if is_spanner(c) => {
                     let delta = self.deltas.pop_front().unwrap_or(0.0);
                     self.evs.push(Ev::Span { top: c.rect.y, h: c.rect.h, mt: c.margin.top, mb: c.margin.bottom, delta });
@@ -269,6 +281,8 @@ struct Plan {
     shortfall: f32,
     /// The flow offset after the set.
     off: f32,
+    /// A break was taken where `break-*: avoid` asked for none.
+    violated: bool,
 }
 
 /// The columns of a column set: flow position `y0` (strip coordinates
@@ -319,6 +333,7 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
     let mut shortfall = f32::INFINITY;
     let mut budget = 4 * (b - a) + 64;
     let mut used = 0usize;
+    let mut violated = false;
     let mut i = a;
     // Push event `i` (at flow position `t`) so that it starts at `target`;
     // the strut goes before the outermost container starting right there
@@ -364,12 +379,18 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                         backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at);
                         continue;
                     }
+                    violated |= avoid_before;
                     push(i, t, g.end(k), &mut off, &mut struts, &mut pushes);
                 }
                 if force_at == i {
                     force_at = usize::MAX;
                 }
                 pos[i] = top + off;
+                if avoid_before && !forced && at_column_start(g, pos[i]) {
+                    // A break against `avoid` fell right before it.
+                    violated = true;
+                    shortfall = shortfall.min(h.max(EPS));
+                }
                 placed |= edge;
             }
             Ev::Leaf { top, bottom, forced, avoid_before, prev, mt, line } => {
@@ -389,6 +410,7 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                         backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at);
                         continue;
                     }
+                    violated |= avoid_before || inside_avoid(evs, a, i);
                     push(i, t, g.end(k), &mut off, &mut struts, &mut pushes);
                 }
                 if force_at == i {
@@ -396,6 +418,10 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                 }
                 let (t, bt) = (top + off, bottom + off);
                 pos[i] = t;
+                if avoid_before && !forced && at_column_start(g, t) {
+                    violated = true;
+                    shortfall = shortfall.min((bt - t).max(EPS));
+                }
                 let k = g.col(t);
                 if bt > t {
                     placed = true;
@@ -418,7 +444,31 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
         i += 1;
     }
     struts.truncate(n);
-    Plan { struts, used, shortfall, off }
+    Plan { struts, used, shortfall, off, violated }
+}
+
+/// Does flow position `t` start a column other than the first?
+fn at_column_start(g: &Geometry, t: f32) -> bool {
+    let k = g.col(t);
+    k > 0 && (t - g.start(k)).abs() < EPS
+}
+
+/// Is event `i` inside a container with `break-inside: avoid`?
+fn inside_avoid(evs: &[Ev], a: usize, i: usize) -> bool {
+    let mut depth = 0i32;
+    for e in evs[a..i].iter().rev() {
+        match e {
+            Ev::End => depth += 1,
+            Ev::Start { avoid_inside, .. } => {
+                if depth == 0 && *avoid_inside {
+                    return true;
+                }
+                depth = (depth - 1).max(0);
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -613,8 +663,7 @@ impl Mover<'_> {
                     }
                 }
             } else {
-                let (dx, dy) = self.shift(b.children[i].margin_rect().y);
-                self.move_leaf(&mut b.children[i], dx, dy);
+                self.float(&mut b.children[i]);
             }
         }
         for c in &mut b.children {
@@ -644,11 +693,7 @@ impl Mover<'_> {
             }
             match c.flow {
                 Flow::Absolute => self.move_abs(c),
-                Flow::FloatLeft | Flow::FloatRight => {
-                    self.next();
-                    let (dx, dy) = self.shift(c.margin_rect().y);
-                    self.move_leaf(c, dx, dy);
-                }
+                Flow::FloatLeft | Flow::FloatRight => self.float(c),
                 Flow::InFlow if is_spanner(c) => {
                     let at = self.i;
                     self.next();
@@ -656,25 +701,41 @@ impl Mover<'_> {
                         c.translate(0.0, dy);
                     }
                 }
-                Flow::InFlow if fragmentable(c) => {
-                    self.next();
-                    let start = c.rect.y + self.off;
-                    let outer_first = self.first.take();
-                    let positioned = crate::block::contains_positioned(&c.style);
-                    self.positioned += positioned as u32;
-                    self.contents(c);
-                    self.positioned -= positioned as u32;
-                    self.next();
-                    let end = (c.rect.bottom() + self.off).max(start);
-                    self.fragment(c, start, end);
-                    self.first = outer_first.or(self.first);
-                }
+                Flow::InFlow if fragmentable(c) => self.container(c),
                 Flow::InFlow => {
                     self.next();
                     let (dx, dy) = self.shift(c.rect.y);
                     self.move_leaf(c, dx, dy);
                 }
             }
+        }
+    }
+
+    /// A fragmentable container: its contents, then its fragments.
+    fn container(&mut self, c: &mut LayoutBox) {
+        self.next();
+        let start = c.rect.y + self.off;
+        let outer_first = self.first.take();
+        let positioned = crate::block::contains_positioned(&c.style);
+        self.positioned += positioned as u32;
+        self.contents(c);
+        self.positioned -= positioned as u32;
+        self.next();
+        let end = (c.rect.bottom() + self.off).max(start);
+        self.fragment(c, start, end);
+        self.first = outer_first.or(self.first);
+    }
+
+    fn float(&mut self, c: &mut LayoutBox) {
+        if fragmentable_box(c) {
+            let first = self.first;
+            self.container(c);
+            // (A float's marker position is not the container's.)
+            self.first = first.or(self.first);
+        } else {
+            self.next();
+            let (dx, dy) = self.shift(c.margin_rect().y);
+            self.move_leaf(c, dx, dy);
         }
     }
 
@@ -808,7 +869,7 @@ impl Layouter<'_> {
         if has_spanner(b) {
             spanner_widths(self, b, &Cb { x: cb.x, width: avail_w, height: None }, &mut deltas);
         }
-        let (rows, end) = fragment_flow(b, deltas, FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step });
+        let (rows, end) = fragment_flow(b, deltas, FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step, trim: style.margin_trim });
         let mut rules = Vec::new();
         for r in &rows {
             // The rules of a last row (after the last spanner) reach the
@@ -831,6 +892,8 @@ struct FlowParams {
     fill_auto: bool,
     avail: Option<f32>,
     step: f32,
+    /// The container's `margin-trim`.
+    trim: u8,
 }
 
 /// Choose the column heights of a laid out flow (the contents of `root`)
@@ -849,6 +912,9 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
     // Document position where the next row (or spanner) goes, and the
     // strip position where the next set's content starts.
     let mut phys = p.y0;
+    // The bottom margin of the last spanner, collapsing with the top
+    // margin of a following spanner.
+    let mut pending_mb = 0.0f32;
     let mut strip_start = p.y0;
     let mut a = 0;
     loop {
@@ -863,6 +929,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
         let total = (strip_end - strip_start).max(0.0);
         let has_content = evs[a..b].iter().any(|e| !matches!(e, Ev::End));
         if has_content {
+            phys += std::mem::take(&mut pending_mb);
             // The height left for the last row of a container with a
             // height limit.
             let room = p.avail.map(|h| (p.y0 + h - phys).max(0.0));
@@ -878,11 +945,20 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
             rows.push(RowOut { top: phys, height: colh, used: plan.used.max(1) });
             phys += colh;
         }
-        let Some(Ev::Span { top, h, mt, mb, delta }) = evs.get(b).copied() else { break };
+        let Some(Ev::Span { top, h, mut mt, mut mb, delta }) = evs.get(b).copied() else { break };
+        // `margin-trim` on the container trims a spanner's margins at its
+        // block start / end (CSS Box 4 §3.3).
+        if p.trim & rabbithole_style::MARGIN_TRIM_BLOCK_START != 0 && spans.is_empty() && rows.iter().all(|r| r.height <= 0.0) {
+            mt = 0.0;
+        }
+        if p.trim & rabbithole_style::MARGIN_TRIM_BLOCK_END != 0 && !evs[b + 1..].iter().any(|e| matches!(e, Ev::Leaf { .. } | Ev::Span { .. })) {
+            mb = 0.0;
+        }
         // The spanner, across the container below the row.
-        let sp_top = phys + mt.max(0.0);
+        let sp_top = phys + std::mem::take(&mut pending_mb).max(mt.max(0.0));
         spans.push((b, sp_top - top));
-        phys = sp_top + h + mb.max(0.0);
+        phys = sp_top + h;
+        pending_mb = mb.max(0.0);
         // The flow after it moves by its change of height.
         if b + 1 < evs.len() {
             struts[b + 1] += delta;
@@ -891,7 +967,11 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
         strip_start = top - delta + h + mb.max(0.0);
         a = b + 1;
     }
+    phys += pending_mb;
     if sets.is_empty() {
+        // (Spanners only.)
+        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g: Geometry { y0: p.y0, colh: 1.0, lift: 0.0 }, step: p.step, positioned: 0, first: None };
+        mover.contents(root);
         return (rows, phys);
     }
     let g = sets[0].g;
@@ -920,7 +1000,9 @@ fn choose_height(evs: &[Ev], a: usize, b: usize, y0: f32, phys: f32, total: f32,
     let mut h = (total / n as f32).max(tallest).max(0.0).min(cap);
     let mut plan = paginate(evs, a, b, &geom(h), off);
     let mut rounds = 0;
-    while plan.used > n && plan.shortfall.is_finite() && h < cap && rounds < 64 {
+    // (A break against `break-*: avoid` is also avoided when a taller
+    // column can.)
+    while (plan.used > n || (plan.violated && h < total)) && plan.shortfall.is_finite() && h < cap && rounds < 64 {
         rounds += 1;
         h = (h + plan.shortfall.max(0.05)).min(cap);
         plan = paginate(evs, a, b, &geom(h), off);
