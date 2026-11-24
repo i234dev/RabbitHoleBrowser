@@ -894,12 +894,28 @@ fn date_locale_formatting() {
     eq("new Intl.DateTimeFormat('en-US', {timeZone: 'UTC'}).resolvedOptions().timeZone", "UTC");
     eq("new Intl.DateTimeFormat('en-US', {timeZone: 'UTC', year: 'numeric', month: '2-digit'}).formatToParts(new Date(Date.UTC(2026, 10, 9))).map(p => p.type).join()", "month,literal,year");
     throws("new Date().toLocaleString('en-US', {timeZone: 'Mars/Olympus'})", "RangeError");
-    if std::path::Path::new("/usr/share/zoneinfo/America/New_York").exists() {
-        eq("new Date(Date.UTC(2026, 6, 4, 16, 0)).toLocaleString('en-US', {timeZone: 'America/New_York'})", "7/4/2026, 12:00:00 PM");
-        eq("new Date(Date.UTC(2026, 0, 4, 16, 0)).toLocaleString('en-US', {timeZone: 'America/New_York', timeZoneName: 'short'})", "1/4/2026, 11:00:00 AM EST");
-        eq("new Date(Date.UTC(2026, 0, 4, 16, 0)).toLocaleTimeString('ja-JP', {timeZone: 'Asia/Tokyo'})", "1:00:00");
-        eq("new Intl.DateTimeFormat('en-US', {timeZone: 'Europe/Madrid'}).resolvedOptions().timeZone", "Europe/Madrid");
-    }
+    // IANA zones resolve with or without a system zoneinfo database (the
+    // embedded copy covers Windows).
+    eq("new Date(Date.UTC(2026, 6, 4, 16, 0)).toLocaleString('en-US', {timeZone: 'America/New_York'})", "7/4/2026, 12:00:00 PM");
+    eq("new Date(Date.UTC(2026, 0, 4, 16, 0)).toLocaleString('en-US', {timeZone: 'America/New_York', timeZoneName: 'short'})", "1/4/2026, 11:00:00 AM EST");
+    eq("new Date(Date.UTC(2026, 0, 4, 16, 0)).toLocaleTimeString('ja-JP', {timeZone: 'Asia/Tokyo'})", "1:00:00");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'Europe/Madrid'}).resolvedOptions().timeZone", "Europe/Madrid");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', hour: 'numeric'}).format(new Date(0))", "7 PM");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'america/new_york'}).resolvedOptions().timeZone", "America/New_York");
+    // Links and the Etc zones (POSIX sign: Etc/GMT+5 is five hours west).
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'US/Eastern'}).resolvedOptions().timeZone", "US/Eastern");
+    eq("new Date(Date.UTC(2026, 6, 4, 16, 0)).toLocaleTimeString('en-US', {timeZone: 'US/Eastern'})", "12:00:00 PM");
+    eq("new Date(Date.UTC(2026, 6, 4, 16, 0)).toLocaleTimeString('en-US', {timeZone: 'Etc/GMT+5', timeZoneName: 'short'})", "11:00:00 AM GMT-5");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'Etc/GMT'}).resolvedOptions().timeZone", "Etc/GMT");
+    // DST boundaries by date: 2026-03-08 07:00 UTC starts EDT; in 2006 the
+    // old rule started it on the first Sunday of April.
+    eq("var f = new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', timeZoneName: 'short'}); [Date.UTC(2026, 2, 8, 6, 59), Date.UTC(2026, 2, 8, 7, 0), Date.UTC(2006, 2, 26, 12), Date.UTC(2006, 3, 2, 12)].map(t => f.format(t)).join('|')",
+       "1:59 AM EST|3:00 AM EDT|7:00 AM EST|8:00 AM EDT");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'Australia/Sydney', hour: 'numeric', hourCycle: 'h23'}).formatToParts(Date.UTC(2026, 0, 1)).find(p => p.type === 'hour').value", "11");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'Asia/Kolkata', timeZoneName: 'shortOffset'}).formatToParts(0).find(p => p.type === 'timeZoneName').value", "GMT+5:30");
+    throws("new Intl.DateTimeFormat('en-US', {timeZone: 'America/Nowhere'})", "RangeError");
+    throws("new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York/'})", "RangeError");
+    eq("Intl.supportedValuesOf('timeZone').includes('America/New_York')", "true");
 }
 
 // ----------------------------------------------------------- Collections

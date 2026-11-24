@@ -1,6 +1,6 @@
 //! `Date`: ECMAScript time values, local time zone support (TZif + POSIX
-//! rules on Unix, `GetTimeZoneInformation` on Windows), parsing and
-//! formatting.
+//! rules from the system zoneinfo on Unix; the embedded tz database through
+//! the CLDR Windows zone mapping on Windows), parsing and formatting.
 
 use super::*;
 use crate::value::V;
@@ -517,7 +517,14 @@ fn load_tz() -> TzInfo {
             if tz.starts_with('/') {
                 candidates.push((std::path::PathBuf::from(&tz), tz.clone()));
             } else {
-                candidates.push((std::path::PathBuf::from("/usr/share/zoneinfo").join(&tz), tz.clone()));
+                let path = std::path::PathBuf::from("/usr/share/zoneinfo").join(&tz);
+                if !path.exists() {
+                    // An IANA name without a system database.
+                    if let Some(info) = tzdb::load(&tz) {
+                        return info;
+                    }
+                }
+                candidates.push((path, tz.clone()));
             }
         }
         let name_from_link = std::fs::read_link("/etc/localtime")
@@ -576,7 +583,7 @@ mod win {
     }
 
     #[repr(C)]
-    struct TimeZoneInformation {
+    struct DynamicTimeZoneInformation {
         bias: i32,
         standard_name: [u16; 32],
         standard_date: SystemTime,
@@ -584,15 +591,25 @@ mod win {
         daylight_name: [u16; 32],
         daylight_date: SystemTime,
         daylight_bias: i32,
+        time_zone_key_name: [u16; 128],
+        dynamic_daylight_time_disabled: u8,
     }
 
     #[link(name = "kernel32")]
     extern "system" {
-        fn GetTimeZoneInformation(info: *mut TimeZoneInformation) -> u32;
+        fn GetDynamicTimeZoneInformation(info: *mut DynamicTimeZoneInformation) -> u32;
     }
 
+    fn wide(s: &[u16]) -> String {
+        let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
+        String::from_utf16_lossy(&s[..end])
+    }
+
+    /// The host zone: its IANA rules (through the CLDR Windows mapping and
+    /// the embedded database) unless the user turned daylight saving
+    /// adjustment off; otherwise the current fixed offset.
     pub fn load() -> Option<TzInfo> {
-        let mut info = TimeZoneInformation {
+        let mut info = DynamicTimeZoneInformation {
             bias: 0,
             standard_name: [0; 32],
             standard_date: SystemTime::default(),
@@ -600,22 +617,192 @@ mod win {
             daylight_name: [0; 32],
             daylight_date: SystemTime::default(),
             daylight_bias: 0,
+            time_zone_key_name: [0; 128],
+            dynamic_daylight_time_disabled: 0,
         };
-        // SAFETY: the struct layout matches TIME_ZONE_INFORMATION and the
-        // pointer is valid for the call's duration.
-        let id = unsafe { GetTimeZoneInformation(&mut info) };
+        // SAFETY: the struct layout matches DYNAMIC_TIME_ZONE_INFORMATION
+        // and the pointer is valid for the call's duration.
+        let id = unsafe { GetDynamicTimeZoneInformation(&mut info) };
         if id == u32::MAX {
             return None;
+        }
+        if info.dynamic_daylight_time_disabled == 0 {
+            let key = wide(&info.time_zone_key_name);
+            if let Some(iana) = super::tzdb::windows_to_iana(&key) {
+                if let Some(tz) = super::tzdb::load(iana) {
+                    return Some(tz);
+                }
+            }
         }
         let (bias, name, dst) = if id == 2 {
             (info.bias + info.daylight_bias, &info.daylight_name, true)
         } else {
             (info.bias + info.standard_bias, &info.standard_name, false)
         };
-        let end = name.iter().position(|&c| c == 0).unwrap_or(32);
-        let name = String::from_utf16_lossy(&name[..end]);
+        let name = wide(name);
         let off = -bias * 60;
         Some(TzInfo { transitions: vec![], initial: (off, name.clone(), dst), footer: None, name })
+    }
+}
+
+/// The embedded IANA time zone database (`crates/js/data/tzdb.bin`, made by
+/// `scripts/gen-tzdb.py`): the fallback for hosts without a zoneinfo
+/// directory, such as Windows. About 125 KB for every zone since its LMT.
+pub mod tzdb {
+    use super::{parse_posix_tz, TzInfo};
+    use std::sync::OnceLock;
+
+    static DATA: &[u8] = include_bytes!("../../data/tzdb.bin");
+
+    struct Index {
+        version: &'static str,
+        abbrs: Vec<&'static str>,
+        /// (name, byte offset of the zone record), sorted by name.
+        zones: Vec<(&'static str, usize)>,
+        /// (link name, zone index), sorted by name.
+        links: Vec<(&'static str, usize)>,
+        /// (Windows key name, IANA name), sorted by key.
+        windows: Vec<(&'static str, &'static str)>,
+    }
+
+    struct Reader {
+        p: usize,
+    }
+
+    impl Reader {
+        fn byte(&mut self) -> Option<u8> {
+            let b = *DATA.get(self.p)?;
+            self.p += 1;
+            Some(b)
+        }
+        fn uvar(&mut self) -> Option<u64> {
+            let mut n = 0u64;
+            let mut shift = 0;
+            loop {
+                let b = self.byte()?;
+                if shift >= 64 {
+                    return None;
+                }
+                n |= ((b & 0x7f) as u64) << shift;
+                if b & 0x80 == 0 {
+                    return Some(n);
+                }
+                shift += 7;
+            }
+        }
+        fn svar(&mut self) -> Option<i64> {
+            let n = self.uvar()?;
+            Some(((n >> 1) as i64) ^ -((n & 1) as i64))
+        }
+        fn str(&mut self) -> Option<&'static str> {
+            let len = self.uvar()? as usize;
+            let s = std::str::from_utf8(DATA.get(self.p..self.p + len)?).ok()?;
+            self.p += len;
+            Some(s)
+        }
+        /// Skip a zone record, returning its name.
+        fn zone(&mut self, abbrs: &[&'static str]) -> Option<(&'static str, TzInfo)> {
+            let name = self.str()?;
+            let ntypes = self.byte()? as usize;
+            let mut types = Vec::with_capacity(ntypes);
+            for _ in 0..ntypes {
+                let off = self.svar()? as i32;
+                let abbr = *abbrs.get(self.uvar()? as usize)?;
+                let dst = self.byte()? != 0;
+                types.push((off, abbr, dst));
+            }
+            let initial = *types.get(self.byte()? as usize)?;
+            let n = self.uvar()? as usize;
+            let mut times = Vec::with_capacity(n);
+            let mut t = 0i64;
+            for i in 0..n {
+                t = if i == 0 { self.svar()? } else { t.checked_add(self.uvar()? as i64)? };
+                times.push(t);
+            }
+            let mut info = TzInfo { initial: (initial.0, initial.1.to_string(), initial.2), name: name.to_string(), ..TzInfo::default() };
+            info.transitions.reserve(n);
+            for t in times {
+                let ty = types.get(self.byte()? as usize)?;
+                info.transitions.push((t, ty.0, ty.1.to_string(), ty.2));
+            }
+            let footer = self.str()?;
+            if !footer.is_empty() {
+                info.footer = parse_posix_tz(footer);
+            }
+            Some((name, info))
+        }
+    }
+
+    fn index() -> Option<&'static Index> {
+        static INDEX: OnceLock<Option<Index>> = OnceLock::new();
+        INDEX
+            .get_or_init(|| {
+                if DATA.get(..5)? != b"RHTZ\x01" {
+                    return None;
+                }
+                let mut r = Reader { p: 5 };
+                let version = r.str()?;
+                let mut abbrs = Vec::new();
+                for _ in 0..r.uvar()? {
+                    abbrs.push(r.str()?);
+                }
+                let mut zones = Vec::new();
+                for _ in 0..r.uvar()? {
+                    let at = r.p;
+                    let (name, _) = r.zone(&abbrs)?;
+                    zones.push((name, at));
+                }
+                let mut links = Vec::new();
+                for _ in 0..r.uvar()? {
+                    let name = r.str()?;
+                    let zone = r.uvar()? as usize;
+                    if zone >= zones.len() {
+                        return None;
+                    }
+                    links.push((name, zone));
+                }
+                let mut windows = Vec::new();
+                for _ in 0..r.uvar()? {
+                    windows.push((r.str()?, r.str()?));
+                }
+                Some(Index { version, abbrs, zones, links, windows })
+            })
+            .as_ref()
+    }
+
+    /// The tz database release embedded (e.g. `2026e`).
+    pub fn version() -> &'static str {
+        index().map_or("", |i| i.version)
+    }
+
+    /// Every zone and link name: (name, is a Zone rather than a Link).
+    pub fn names() -> Vec<(&'static str, bool)> {
+        let Some(ix) = index() else { return Vec::new() };
+        ix.zones.iter().map(|z| (z.0, true)).chain(ix.links.iter().map(|l| (l.0, false))).collect()
+    }
+
+    /// The rules of zone or link `name` (ASCII case-insensitive), named
+    /// as requested in the database's capitalisation.
+    pub fn load(name: &str) -> Option<TzInfo> {
+        let ix = index()?;
+        let find = |list: &[(&'static str, usize)]| list.iter().find(|e| e.0.eq_ignore_ascii_case(name)).copied();
+        let (canon, at) = match find(&ix.zones) {
+            Some(z) => z,
+            None => {
+                let (link, zone) = find(&ix.links)?;
+                (link, ix.zones[zone].1)
+            }
+        };
+        let (_, mut info) = Reader { p: at }.zone(&ix.abbrs)?;
+        info.name = canon.to_string();
+        Some(info)
+    }
+
+    /// The IANA identifier of a Windows time zone key name
+    /// (`Romance Standard Time` → `Europe/Paris`), per CLDR windowsZones.
+    pub fn windows_to_iana(key: &str) -> Option<&'static str> {
+        let ix = index()?;
+        ix.windows.binary_search_by(|e| e.0.cmp(key)).ok().map(|i| ix.windows[i].1)
     }
 }
 
@@ -625,10 +812,22 @@ pub fn tz() -> &'static TzInfo {
     TZ.get_or_init(load_tz)
 }
 
+/// Directories that may hold the system zoneinfo database. Empty when
+/// `RABBITHOLE_TZDB=embedded` asks for the embedded copy only (the data
+/// Windows hosts use), so both sources can be tested on one machine.
+pub fn system_zoneinfo_dirs() -> &'static [&'static str] {
+    static EMBEDDED_ONLY: OnceLock<bool> = OnceLock::new();
+    if *EMBEDDED_ONLY.get_or_init(|| std::env::var("RABBITHOLE_TZDB").is_ok_and(|v| v == "embedded")) {
+        return &[];
+    }
+    &["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/usr/share/lib/zoneinfo", "/etc/zoneinfo"]
+}
+
 static NAMED_TZ: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<&'static TzInfo>>>> = OnceLock::new();
 
-/// Load an IANA zone (`Europe/Madrid`) from the system zoneinfo database;
-/// None when the name is unknown or no database exists.
+/// Load an IANA zone (`Europe/Madrid`) from the system zoneinfo database,
+/// or from the embedded copy when the system has none (Windows); None when
+/// the name is unknown.
 pub fn tz_named(name: &str) -> Option<&'static TzInfo> {
     if name.is_empty() || name.len() > 64 || name.contains("..") || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+')) {
         return None;
@@ -642,7 +841,7 @@ pub fn tz_named(name: &str) -> Option<&'static TzInfo> {
         return *v;
     }
     let mut found: Option<&'static TzInfo> = None;
-    for dir in ["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/usr/share/lib/zoneinfo", "/etc/zoneinfo"] {
+    for dir in system_zoneinfo_dirs() {
         let path = std::path::Path::new(dir).join(name);
         if let Ok(data) = std::fs::read(&path) {
             if let Some(mut info) = parse_tzif(&data) {
@@ -652,6 +851,9 @@ pub fn tz_named(name: &str) -> Option<&'static TzInfo> {
                 break;
             }
         }
+    }
+    if found.is_none() {
+        found = tzdb::load(name).map(|info| &*Box::leak(Box::new(info)));
     }
     guard.insert(name.to_string(), found);
     found
@@ -1556,4 +1758,85 @@ fn to_locale_date_string(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
 fn to_locale_time_string(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (_, t) = this_time(realm, &this, "toLocaleTimeString")?;
     super::intl::date_to_locale(realm, t, args, super::intl::DateDefaults::Time)
+}
+
+#[cfg(test)]
+mod tzdb_tests {
+    use super::*;
+
+    fn off(zone: &TzInfo, y: f64, m: f64, d: f64, h: f64, mi: f64) -> (i32, String) {
+        let t = make_date(make_day(y, m, d), make_time(h, mi, 0.0, 0.0));
+        let (o, n, _) = zone.offset_at((t / 1000.0) as i64);
+        (o, n)
+    }
+
+    #[test]
+    fn embedded_zones_follow_their_rules_by_date() {
+        assert!(!tzdb::version().is_empty());
+        let ny = tzdb::load("America/New_York").expect("America/New_York");
+        assert_eq!(off(&ny, 1970.0, 0.0, 1.0, 0.0, 0.0), (-5 * 3600, "EST".into()));
+        assert_eq!(off(&ny, 2026.0, 2.0, 8.0, 6.0, 59.0), (-5 * 3600, "EST".into()));
+        assert_eq!(off(&ny, 2026.0, 2.0, 8.0, 7.0, 0.0), (-4 * 3600, "EDT".into()));
+        assert_eq!(off(&ny, 2026.0, 10.0, 1.0, 5.0, 59.0), (-4 * 3600, "EDT".into()));
+        assert_eq!(off(&ny, 2026.0, 10.0, 1.0, 6.0, 0.0), (-5 * 3600, "EST".into()));
+        // The pre-2007 rule: first Sunday of April.
+        assert_eq!(off(&ny, 2006.0, 2.0, 26.0, 12.0, 0.0).0, -5 * 3600);
+        assert_eq!(off(&ny, 2006.0, 3.0, 2.0, 12.0, 0.0).0, -4 * 3600);
+        // Far future: the POSIX footer.
+        assert_eq!(off(&ny, 2100.0, 6.0, 1.0, 0.0, 0.0).0, -4 * 3600);
+        let syd = tzdb::load("australia/sydney").expect("case-insensitive lookup");
+        assert_eq!(syd.name, "Australia/Sydney");
+        assert_eq!(off(&syd, 2026.0, 0.0, 1.0, 0.0, 0.0).0, 11 * 3600);
+        assert_eq!(off(&syd, 2026.0, 6.0, 1.0, 0.0, 0.0).0, 10 * 3600);
+        let kolkata = tzdb::load("Asia/Kolkata").unwrap();
+        assert_eq!(off(&kolkata, 2026.0, 0.0, 1.0, 0.0, 0.0).0, 5 * 3600 + 1800);
+    }
+
+    #[test]
+    fn embedded_links_and_windows_names_resolve() {
+        let e = tzdb::load("US/Eastern").expect("link");
+        assert_eq!(e.name, "US/Eastern");
+        assert_eq!(off(&e, 2026.0, 6.0, 1.0, 0.0, 0.0).0, -4 * 3600);
+        assert_eq!(off(&tzdb::load("Etc/GMT+5").unwrap(), 2026.0, 6.0, 1.0, 0.0, 0.0).0, -5 * 3600);
+        assert_eq!(off(&tzdb::load("UTC").unwrap(), 2026.0, 6.0, 1.0, 0.0, 0.0), (0, "UTC".into()));
+        assert!(tzdb::load("Mars/Olympus").is_none());
+        assert!(tzdb::load("").is_none());
+        let names = tzdb::names();
+        assert!(names.len() > 500);
+        assert!(names.contains(&("Asia/Calcutta", false)));
+        assert_eq!(tzdb::windows_to_iana("Eastern Standard Time"), Some("America/New_York"));
+        assert_eq!(tzdb::windows_to_iana("Romance Standard Time"), Some("Europe/Paris"));
+        assert_eq!(tzdb::windows_to_iana("Not A Zone"), None);
+        for (_, iana) in ["Eastern Standard Time", "Pacific Standard Time", "W. Europe Standard Time", "Tokyo Standard Time", "India Standard Time", "UTC"].iter().map(|k| (k, tzdb::windows_to_iana(k).unwrap())) {
+            assert!(tzdb::load(iana).is_some(), "{iana}");
+        }
+    }
+
+    /// When the host's zoneinfo is the same tz release, every embedded zone
+    /// gives the host's offsets and abbreviations (sampled every ten days,
+    /// 1900-2060).
+    #[test]
+    fn embedded_zones_match_the_system_database() {
+        let Ok(zi) = std::fs::read_to_string("/usr/share/zoneinfo/tzdata.zi") else { return };
+        if zi.lines().next() != Some(&format!("# version {}", tzdb::version())) {
+            return;
+        }
+        let mut checked = 0;
+        for (name, zone) in tzdb::names() {
+            if !zone {
+                continue;
+            }
+            let Ok(data) = std::fs::read(format!("/usr/share/zoneinfo/{name}")) else { continue };
+            let sys = parse_tzif(&data).unwrap();
+            let emb = tzdb::load(name).unwrap();
+            let mut s = -2_208_988_800i64;
+            while s < 2_871_763_200 {
+                let (a, b) = (sys.offset_at(s), emb.offset_at(s));
+                assert_eq!((a.0, &a.1), (b.0, &b.1), "{name} at {s}");
+                s += 864_000;
+            }
+            checked += 1;
+        }
+        assert!(checked > 300);
+    }
 }
