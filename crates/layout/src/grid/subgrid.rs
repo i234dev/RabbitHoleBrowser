@@ -446,35 +446,31 @@ pub(super) fn automatic_contributions(budget:&mut WorkBudget,items:Vec<Contribut
     compact_contributions(&mut out);out
 }
 
-/// Grid2 §9 accounts for an edge with empty adjacent tracks using a
-/// hypothetical item spanning those tracks. An entirely empty subgrid is a
-/// hypothetical empty item spanning all of its tracks, so its accumulated
-/// margin, border and padding still size them. Real items touching the edge
-/// already carry its layer.
-pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,gap:f32,items:&mut Vec<Contribution>) {
+/// Grid2 §9 edge placeholders: real items spanning an edge track already
+/// carry the subgrid's margin/border/padding layer at that edge. When that
+/// edge track is empty, a hypothetical empty item occupies it alone and
+/// contributes only that layer, so empty interior tracks stay collapsed.
+/// An entirely empty subgrid is a hypothetical empty item spanning all of
+/// its tracks, so its accumulated layers still size them.
+pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,_gap:f32,items:&mut Vec<Contribution>) {
     compact_contributions(items);
     let Some(axis)=shared(b,rows) else {return;};
+    let count=axis.sizes.len();
+    if count==0 {return;}
     let Some(first)=items.iter().map(|c|c.start).min() else {
         let size=(axis.inset_start+axis.inset_end).max(0.);
-        if !axis.sizes.is_empty()&&size>0. {
-            items.push(Contribution{start:0,end:axis.sizes.len(),min:size,max:size,auto_min:false,minimum:size});
+        if size>0. {
+            items.push(Contribution{start:0,end:count,min:size,max:size,auto_min:false,minimum:size});
         }
         return;
     };
     let last=items.iter().map(|c|c.end).max().unwrap();
-    let count=items.len();
-    let internal=(gap-axis.gap)*0.5;
-    for i in 0..count {
-        let item=items[i];
-        if first>0&&item.start==first {
-            let delta=axis.inset_start-axis.edge_before[item.start]-internal;
-            items.push(Contribution{start:0,end:item.end,min:item.min+delta,max:item.max+delta,auto_min:false,minimum:item.min+delta});
-        }
-        if last<axis.sizes.len()&&item.end==last {
-            let delta=axis.inset_end-axis.edge_after[item.end-1]-internal;
-            items.push(Contribution{start:item.start,end:axis.sizes.len(),min:item.min+delta,max:item.max+delta,auto_min:false,minimum:item.min+delta});
-        }
-    }
+    let mut placeholder=|start:usize,size:f32| {
+        let size=size.max(0.);
+        if size>0. {items.push(Contribution{start,end:start+1,min:size,max:size,auto_min:false,minimum:size});}
+    };
+    if first>0 {placeholder(0,axis.inset_start);}
+    if last<count {placeholder(count-1,axis.inset_end);}
     compact_contributions(items);
 }
 
@@ -804,12 +800,12 @@ mod tests {
     }
 
     #[test]
-    fn hypothetical_edge_items_cover_empty_tracks_without_moving_the_real_item() {
+    fn an_empty_edge_track_gets_a_placeholder_with_only_the_edge_layer() {
         let parent=parent();let mut b=child();let mut saved=Vec::new();
         install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
         let real=Contribution{start:1,end:2,min:30.,max:50.,auto_min:false,minimum:30.};let mut items=vec![real];
         empty_edge_contributions(&b,false,50.,&mut items);
-        assert_eq!(items,[Contribution{start:0,end:2,min:40.,max:60.,auto_min:false,minimum:40.},real]);
+        assert_eq!(items,[Contribution{start:0,end:1,min:10.,max:10.,auto_min:false,minimum:10.},real]);
     }
 
     #[test]
