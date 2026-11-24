@@ -1959,7 +1959,9 @@ impl<'a> Layouter<'a> {
             Some(w) if !pct(child.style.width)=>(w,w),
             _ if ratio_width.is_some()=>{let w=ratio_width.unwrap_or(0.);(w,w)},
             // A percentage of the (still indefinite) grid area behaves as auto.
-            _ if child.kind==BoxKind::Image=>{let cyclic=pct(child.style.width);let(w,_)=self.replaced_size(child,(!cyclic).then_some(cbw),bases.row_basis,it.edges.pb_h);(w,w)},
+            // A compressible replaced item with a cyclic percentage width has
+            // a zero min-content contribution (CSS Sizing 3 §5.2.2).
+            _ if child.kind==BoxKind::Image=>{let cyclic=pct(child.style.width);let(w,_)=self.replaced_size(child,(!cyclic).then_some(cbw),bases.row_basis,it.edges.pb_h);(if cyclic {0.} else {w},w)},
             _=>{let(min,max)=self.intrinsic(child);match child.style.width {Length::MinContent=>(min,min),Length::MaxContent=>(max,max),_=>(min,max)}}
         };
         let min=match child.style.min_width {
