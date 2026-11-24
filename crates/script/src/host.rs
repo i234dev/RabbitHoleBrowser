@@ -560,6 +560,12 @@ pub(crate) fn define_class(realm: &mut Realm, name: &'static str, parent: Option
     };
     let p = realm.new_object_with_proto(parent_proto);
     let c = realm.new_native_constructor(name, 0, ctor, p);
+    // The interface object inherits from its parent interface's object.
+    if let Some(pp) = parent.map(proto) {
+        if let Some(parent_ctor) = realm.obj(pp).props.get(&PropertyKey::str("constructor")).and_then(|d| d.value.as_object()) {
+            realm.obj_mut(c).set_proto(Some(parent_ctor));
+        }
+    }
     realm.define_global(name, Value::Object(c));
     realm.define_property(p, rabbithole_js::realm::SYM_TO_STRING_TAG, Value::str(name), rabbithole_js::CONFIGURABLE);
     state().borrow_mut().protos.insert(name, p);

@@ -11,7 +11,7 @@
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const named = g.__rhNative.named;
-  const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get: get && named(get, 'get ' + name), set: set && named(set, 'set ' + name), configurable: true, enumerable: true }); };
+  const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get: get && globalThis.__rhNative.branded(C, get, 'get', name), set: set && globalThis.__rhNative.branded(C, set, 'set', name), configurable: true, enumerable: true }); };
   const method = (C, name, fn) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) hidden(C.prototype, name, named(fn, name)); };
   // Enumerated attribute limited to known values.
   const {getAttribute, setAttribute, removeAttribute} = Element.prototype;

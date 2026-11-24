@@ -748,6 +748,49 @@
   clone.receiveCanvas = size => new OffscreenCanvas(size[0], size[1]);
   tag(OffscreenCanvas, 'OffscreenCanvas');
   N.installHandlers(OffscreenCanvas.prototype, ['contextlost', 'contextrestored']);
+  // WebIDL shape of the 2D context, Path2D and friends: operation lengths
+  // (required argument counts), TypeErrors for missing arguments and
+  // foreign receivers, and accessor names.
+  {
+    const named = N.named;
+    // name: [length, required]
+    const PATH_IDL = { closePath: 0, moveTo: 2, lineTo: 2, quadraticCurveTo: 4, bezierCurveTo: 6, arcTo: 5, rect: 4, roundRect: 4, arc: 5, ellipse: 7 };
+    const CTX_IDL = Object.assign({
+      scale: 2, rotate: 1, translate: 2, transform: 6, setTransform: 0, createLinearGradient: 4, createRadialGradient: 6, createConicGradient: 3,
+      createPattern: 2, clearRect: 4, fillRect: 4, strokeRect: 4, fill: 0, stroke: 0, clip: 0, isPointInPath: 2, isPointInStroke: 2,
+      drawFocusIfNeeded: 1, fillText: 3, strokeText: 3, measureText: 1, drawImage: 3, createImageData: 1, getImageData: 4, putImageData: 3,
+      setLineDash: 1, isContextLost: 0, getTransform: 0, resetTransform: 0, beginPath: 0, save: 0, restore: 0, reset: 0, getLineDash: 0,
+      getContextAttributes: 0,
+    }, PATH_IDL);
+    const idl = (P0, table, iface) => {
+      for (const [name, n] of Object.entries(table)) {
+        const d = Object.getOwnPropertyDescriptor(P0, name);
+        if (!d || typeof d.value !== 'function') continue;
+        const f = d.value;
+        const w = { [name](...a) {
+          if (this == null || !Object.prototype.hasOwnProperty.call(Object(this), S)) throw new TypeError('Illegal invocation');
+          if (a.length < n) throw new TypeError(`Failed to execute '${name}' on '${iface}': ${n} argument${n === 1 ? '' : 's'} required, but only ${a.length} present.`);
+          return f.apply(this, a);
+        } }[name];
+        Object.defineProperty(w, 'length', { value: n, configurable: true });
+        d.value = w;
+        Object.defineProperty(P0, name, d);
+      }
+    };
+    idl(CanvasRenderingContext2D.prototype, CTX_IDL, 'CanvasRenderingContext2D');
+    idl(Path2D.prototype, Object.assign({ addPath: 1 }, PATH_IDL), 'Path2D');
+    idl(CanvasGradient.prototype, { addColorStop: 2 }, 'CanvasGradient');
+    idl(CanvasPattern.prototype, { setTransform: 0 }, 'CanvasPattern');
+    Object.defineProperty(Path2D, 'length', { value: 0, configurable: true });
+    Object.defineProperty(ImageData, 'length', { value: 2, configurable: true });
+    for (const P0 of [CanvasRenderingContext2D.prototype, TextMetrics.prototype]) {
+      for (const k of Object.getOwnPropertyNames(P0)) {
+        const d = Object.getOwnPropertyDescriptor(P0, k);
+        if (d.get) named(d.get, 'get ' + k);
+        if (d.set) named(d.set, 'set ' + k);
+      }
+    }
+  }
   class OffscreenCanvasRenderingContext2D { constructor() { ILLEGAL(); } }
   for (const k of Reflect.ownKeys(CanvasRenderingContext2D.prototype)) {
     if (k === 'constructor' || k === Symbol.toStringTag || k === 'drawFocusIfNeeded' || k === 'scrollPathIntoView') continue;

@@ -21,7 +21,7 @@
   const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, named(fn, name)); };
   const acc = (C, name, get, set, force) => {
     if (!C || (!force && Object.prototype.hasOwnProperty.call(C.prototype, name))) return;
-    Object.defineProperty(C.prototype, name, { get: get && named(get, 'get ' + name), set: set && named(set, 'set ' + name), configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, name, { get: get && globalThis.__rhNative.branded(C, get, 'get', name), set: set && globalThis.__rhNative.branded(C, set, 'set', name), configurable: true, enumerable: true });
   };
   const consts = (C, map) => { for (const [k, v] of Object.entries(map)) { if (!Object.prototype.hasOwnProperty.call(C, k)) Object.defineProperty(C, k, { value: v, enumerable: true }); if (!Object.prototype.hasOwnProperty.call(C.prototype, k)) Object.defineProperty(C.prototype, k, { value: v, enumerable: true }); } };
 

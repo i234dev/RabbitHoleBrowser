@@ -17,7 +17,7 @@
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
   const named = globalThis.__rhNative.named;
-  const acc = (C, name, get, set) => Object.defineProperty(C.prototype, name, { get: get && named(get, 'get ' + name), set: set && named(set, 'set ' + name), configurable: true, enumerable: true });
+  const acc = (C, name, get, set) => Object.defineProperty(C.prototype, name, { get: get && globalThis.__rhNative.branded(C, get, 'get', name), set: set && globalThis.__rhNative.branded(C, set, 'set', name), configurable: true, enumerable: true });
   const method = (C, name, fn) => Object.defineProperty(C.prototype, name, { value: named(fn, name), writable: true, configurable: true });
   const resolveURL = (v) => { try { return new URL(v, document.baseURI).href; } catch (e) { return null; } };
   const debug = (m) => N.mediaDebug(m);

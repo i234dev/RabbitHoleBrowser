@@ -21,7 +21,7 @@
   const named = N.named;
   const acc = (C, name, get, set) => {
     if (!C || Object.prototype.hasOwnProperty.call(C.prototype, name)) return;
-    Object.defineProperty(C.prototype, name, { get: get && named(get, 'get ' + name), set: set && named(set, 'set ' + name), configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, name, { get: get && globalThis.__rhNative.branded(C, get, 'get', name), set: set && globalThis.__rhNative.branded(C, set, 'set', name), configurable: true, enumerable: true });
   };
   const method = (C, name, fn, force) => {
     if (!C || (!force && Object.prototype.hasOwnProperty.call(C.prototype, name))) return;
@@ -132,7 +132,7 @@
     for (const C of [g.HTMLBodyElement, g.HTMLFrameSetElement].filter(Boolean)) {
       for (const n of WINDOW_HANDLERS.concat(['blur', 'error', 'focus', 'load', 'resize', 'scroll'])) {
         if (Object.prototype.hasOwnProperty.call(C.prototype, 'on' + n)) continue;
-        Object.defineProperty(C.prototype, 'on' + n, { get() { return g['on' + n]; }, set(v) { g['on' + n] = v; }, configurable: true, enumerable: true });
+        Object.defineProperty(C.prototype, 'on' + n, { get: N.branded(C, function () { return g['on' + n]; }, 'get', 'on' + n), set: N.branded(C, function (v) { g['on' + n] = v; }, 'set', 'on' + n), configurable: true, enumerable: true });
       }
     }
   }
