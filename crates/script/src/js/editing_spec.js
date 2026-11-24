@@ -8591,6 +8591,25 @@ function run(doc, state, callback, command) {
 return {
     run: run,
     moveCaret: moveCaretKeepingOverrides,
+    // The typing style (state and value overrides) at the caret, as
+    // [command, boolean or string] pairs, and setting it.
+    overrides: function() {
+        globalRange = null;
+        return getActiveRange() ? recordCurrentOverrides() : [];
+    },
+    setOverrides: function(list) {
+        globalRange = null;
+        if (!getActiveRange()) {
+            return;
+        }
+        list.forEach(function(pair) {
+            if (typeof pair[1] == "boolean") {
+                setStateOverride(pair[0], pair[1]);
+            } else {
+                setValueOverride(pair[0], pair[1]);
+            }
+        });
+    },
     unsetOverrides: function(command) {
         unsetStateOverride(command);
         unsetValueOverride(command);

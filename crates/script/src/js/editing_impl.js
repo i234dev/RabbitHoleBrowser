@@ -1594,6 +1594,11 @@
       if (!range.collapsed && deleteSelection(t,'delete')) input(host,'insertText','');
       return true;
     }
+    if (range.collapsed && !typingStyle(state, range) && host.contentEditable !== 'plaintext-only' &&
+        ['inserttext','insertlinebreak','insertparagraph'].includes(cmd)) {
+      const typing = overridesToTyping(spec.run(doc, state, () => spec.overrides()));
+      if (typing.size) state.typing = { node: range.startContainer, offset: range.startOffset, formats: typing };
+    }
     const toggles = range.collapsed && ['inserttext','insertlinebreak','insertparagraph'].includes(cmd) ? typingStyle(state, range) : null;
     state.typing = null;
     range.deleteContents();
@@ -1688,6 +1693,27 @@
     }
     return true;
   }
+  // The typing style moves between the two implementations when the caret
+  // stays put: ours keeps a map of formats, the spec algorithms overrides.
+  function typingToOverrides(formats) {
+    const list = [];
+    for (const [name, value] of formats) {
+      if (typeof value === 'boolean') list.push([name, value]);
+      else if (name === 'fontsize') { if (sizes[Number(value) - 1]) list.push([name, sizes[Number(value) - 1]]); }
+      else if (typeof value === 'string') list.push([name === 'backcolor' ? 'hilitecolor' : name, value]);
+    }
+    return list;
+  }
+  function overridesToTyping(list) {
+    const formats = new Map();
+    for (const [name, value] of list) {
+      if (typeof value === 'boolean') { if (formats.has(name) || formatsKnown(name)) formats.set(name, value); }
+      else if (name === 'fontsize') { const i = sizes.indexOf(value); if (i >= 0) formats.set(name, String(i + 1)); }
+      else formats.set(name === 'hilitecolor' ? 'backcolor' : name, value);
+    }
+    return formats;
+  }
+  const formatsKnown = name => formats.has(name);
   function specInputData(cmd, value) {
     if (cmd === 'inserttext' || cmd === 'createlink') return value;
     if (valueFormats.has(cmd)) return normalizeFormat(cmd, value);
@@ -1698,12 +1724,24 @@
     const observer = new Observer(() => {});
     observer.observe(doc, { childList: true, subtree: true, characterData: true, attributes: true });
     let result, changed = false;
+    const typing = typingStyle(state, t.range);
     state.typing = null;
+    if (typing?.size) spec.run(doc, state, () => spec.setOverrides(typingToOverrides(typing)));
     // A deletion from inside a link to outside it leaves the caret outside.
     const linkOf = n => (n.nodeType === 1 ? n : n.parentElement)?.closest('a[href]');
     const links = t.range.collapsed ? null : [linkOf(t.range.startContainer), linkOf(t.range.endContainer)];
     try {
-      result = spec.run(doc, state, () => spec.execCommand(name, false, value), name);
+      result = spec.run(doc, state, () => {
+        if (cmd === 'inserttext' && value) {
+          // Typing over a selection that leaves a link types outside it.
+          if (links && links[0] !== links[1]) {
+            spec.execCommand('delete', false, '');
+            placeCaret(doc, 'delete', links);
+          }
+          removeCaretBreak(doc);
+        }
+        return spec.execCommand(name, false, value);
+      }, name);
     } finally {
       changed = observer.takeRecords().length > 0;
       observer.disconnect();
@@ -1716,6 +1754,15 @@
   // to the end of the inline content before it, so typing and queries use
   // that formatting; one left in a list goes into the list item.
   const inlineContainers = new Set(['abbr','b','bdi','bdo','cite','code','del','dfn','em','font','i','ins','kbd','mark','q','s','samp','small','span','strike','strong','sub','sup','u','var']);
+  // Typing replaces the line break that only held the caret on an empty line
+  // created by insertParagraph or insertLineBreak above.
+  function removeCaretBreak(doc) {
+    const sel = doc.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return;
+    const point = sel.focusNode, offset = sel.focusOffset;
+    const following = point.nodeType === 3 ? (offset === point.length ? point.nextSibling : null) : point.childNodes[offset];
+    if (following && caretBreaks.has(following)) following.remove();
+  }
   function nextTextIn(root, text) {
     const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     walker.currentNode = text;
@@ -1729,13 +1776,19 @@
     if (links && links[0] !== links[1] && (cmd === 'delete' || cmd === 'forwarddelete')) {
       const link = (node.nodeType === 1 ? node : node.parentElement).closest('a[href]');
       if (link && link.isContentEditable) {
-        const atEnd = link.textContent === '' || (node === link && offset === link.childNodes.length) ||
-          (node.nodeType === 3 && offset === node.length && !nextTextIn(link, node));
+        const atEnd = link.textContent !== '' && ((node === link && offset === link.childNodes.length) ||
+          (node.nodeType === 3 && offset === node.length && !nextTextIn(link, node)));
         if (atEnd) {
           spec.moveCaret(link.parentNode, Array.prototype.indexOf.call(link.parentNode.childNodes, link) + 1);
+          // Nor does the link's own styling carry over.
+          const style = getComputedStyle(link);
+          for (const [name, value] of spec.overrides()) {
+            if (name === 'createlink' || (name === 'forecolor' && N.editingColor(value) === style.color) ||
+                (name === 'underline' && value === true && style.textDecorationLine.includes('underline')))
+              spec.unsetOverrides(name);
+          }
         }
       }
-      spec.unsetOverrides('createlink');
       return;
     }
     if (node.nodeType !== 1) return;
