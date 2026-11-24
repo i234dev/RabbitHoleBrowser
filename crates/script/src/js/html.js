@@ -557,9 +557,9 @@
   for (const name of ['HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'HTMLFieldSetElement', 'HTMLOutputElement', 'HTMLObjectElement']) {
     const C = g[name];
     if (!C) continue;
-    Object.defineProperty(C.prototype, 'validity', { get() { const el = this; return makeValidity(() => validityFlags(el)); }, configurable: true, enumerable: true });
-    Object.defineProperty(C.prototype, 'willValidate', { get() { return !barred(this); }, configurable: true, enumerable: true });
-    Object.defineProperty(C.prototype, 'validationMessage', { get() { return this.willValidate ? message(this, validityFlags(this)) : ''; }, configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, 'validity', { get: N.branded(C, function () { const el = this; return makeValidity(() => validityFlags(el)); }, 'get', 'validity'), configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, 'willValidate', { get: N.branded(C, function () { return !barred(this); }, 'get', 'willValidate'), configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, 'validationMessage', { get: N.branded(C, function () { return this.willValidate ? message(this, validityFlags(this)) : ''; }, 'get', 'validationMessage'), configurable: true, enumerable: true });
     method(C, 'setCustomValidity', function (m) { m = String(m); if (m) customMessages.set(this, m); else customMessages.delete(this); }, true);
     method(C, 'checkValidity', function () { return checkValidityOf(this, null, false); }, true);
     method(C, 'reportValidity', function () { return checkValidityOf(this, null, true); }, true);
@@ -1014,7 +1014,7 @@
       // Native getters without a setter (the anchor's) get this one:
       // `a.hash = '#x'` must update the href, not throw in strict code.
       const d = Object.getOwnPropertyDescriptor(C.prototype, k);
-      if (d && d.get && !d.set && set) { Object.defineProperty(C.prototype, k, { get: d.get, set, configurable: true, enumerable: true }); continue; }
+      if (d && d.get && !d.set && set) { Object.defineProperty(C.prototype, k, { get: d.get, set: N.branded(C, set, 'set', k), configurable: true, enumerable: true }); continue; }
       acc(C, k, function () {
         const u = hyperlinkURL(this);
         if (!u) return k === 'protocol' ? ':' : '';
@@ -1024,7 +1024,7 @@
   }
   if (g.HTMLAreaElement) {
     acc(g.HTMLAreaElement, 'relList', function () { let m = tokenLists.get(this); if (!m) { m = {}; tokenLists.set(this, m); } return m.rel || (m.rel = makeTokenList(this, 'rel')); });
-    method(g.HTMLAreaElement, 'toString', function () { return this.href; });
+    method(g.HTMLAreaElement, 'toString', N.branded(g.HTMLAreaElement, function () { return this.href; }, 'method', 'toString'));
   }
   if (g.HTMLMapElement) acc(g.HTMLMapElement, 'areas', function () { return Object.setPrototypeOf(Array.from(this.querySelectorAll('area')), g.HTMLCollection.prototype); });
   if (g.HTMLDataListElement) acc(g.HTMLDataListElement, 'options', function () { return Object.setPrototypeOf(Array.from(this.querySelectorAll('option')), g.HTMLCollection.prototype); });

@@ -94,8 +94,20 @@ fn d_url(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::str(&crate::window::current_href()))
 }
 
-fn d_referrer(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+fn d_referrer(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let _ = this_doc(realm, &this)?;
     Ok(Value::str(""))
+}
+
+/// `document.hidden`: documents of this host are always visible.
+fn d_hidden(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let _ = this_doc(realm, &this)?;
+    Ok(Value::Bool(false))
+}
+
+fn d_visibility_state(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let _ = this_doc(realm, &this)?;
+    Ok(Value::str("visible"))
 }
 
 fn d_domain(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -735,15 +747,6 @@ fn impl_create_html_document(realm: &mut Realm, _this: Value, args: &[Value]) ->
     Ok(new_aux_document(realm, &html))
 }
 
-fn d_constant_str(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    let v = native_data::<String>(realm).map(|s| s.to_string()).unwrap_or_default();
-    Ok(Value::str(&v))
-}
-
-fn d_false(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(false))
-}
-
 fn d_null(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Null)
 }
@@ -872,7 +875,7 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "plugins", d_embeds, None);
     acc(realm, "styleSheets", d_style_sheets, None);
     acc(realm, "implementation", d_implementation, None);
-    acc(realm, "hidden", d_false, None);
+    acc(realm, "hidden", d_hidden, None);
     acc(realm, "fullscreenElement", d_null, None);
     acc(realm, "pointerLockElement", d_null, None);
     acc(realm, "pictureInPictureElement", d_null, None);
@@ -886,11 +889,7 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "contentType", d_content_type, None);
     acc(realm, "designMode", d_design_mode, Some(d_design_mode_set));
     acc(realm, "dir", d_dir_get, Some(d_dir_set));
-    for (name, val) in [("visibilityState", "visible")] {
-        let data: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(val.to_string());
-        let g = realm.new_native_function_full(&format!("get {name}"), 0, d_constant_str, Some(data), vec![], false);
-        realm.define_accessor_values(d, name, Some(Value::Object(g)), None, ACC);
-    }
+    acc(realm, "visibilityState", d_visibility_state, None);
     let m = |realm: &mut Realm, name: &str, arity: u32, f: rabbithole_js::NativeFn| {
         realm.define_method(d, name, arity, f);
     };

@@ -30,7 +30,8 @@
   const domError = (msg, name) => new g.DOMException(msg, name);
   const make = (C, state) => { const o = Object.create(C.prototype); hidden(o, S, state || {}); return o; };
   const nav = g.navigator;
-  const setNav = (name, value) => { try { delete nav[name]; } catch (e) {} Object.defineProperty(g.Navigator.prototype, name, { get() { return value; }, configurable: true, enumerable: true }); };
+  const brandNav = (get, name) => g.__rhNative.branded(g.Navigator, get, 'get', name);
+  const setNav = (name, value) => { try { delete nav[name]; } catch (e) {} Object.defineProperty(g.Navigator.prototype, name, { get: brandNav(function () { return value; }, name), configurable: true, enumerable: true }); };
   const named = g.__rhNative.named;
   const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, named(fn, name)); };
   const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get: get && globalThis.__rhNative.branded(C, get, 'get', name), set: set && globalThis.__rhNative.branded(C, set, 'set', name), configurable: true, enumerable: true }); };
@@ -43,9 +44,9 @@
     if (!d || !d.configurable) continue;
     if (!Object.prototype.hasOwnProperty.call(g.Navigator.prototype, k)) {
       let nd;
-      if (d.get || d.set) nd = { get: d.get, set: d.set, configurable: true, enumerable: true };
+      if (d.get || d.set) nd = { get: d.get && brandNav(d.get, k), set: d.set, configurable: true, enumerable: true };
       else if (typeof d.value === 'function') nd = { value: d.value, writable: true, configurable: true, enumerable: true };
-      else { const v = d.value; nd = { get: Object.getOwnPropertyDescriptor({ get [k]() { return v; } }, k).get, configurable: true, enumerable: true }; }
+      else { const v = d.value; nd = { get: brandNav(function () { return v; }, k), configurable: true, enumerable: true }; }
       Object.defineProperty(g.Navigator.prototype, k, nd);
     }
     delete nav[k];

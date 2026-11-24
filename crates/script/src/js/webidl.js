@@ -46,7 +46,31 @@
     CustomElementRegistry: { define: 2, get: 1, getName: 1, upgrade: 1 },
     XMLSerializer: { serializeToString: 1 },
     CanvasGradient: { addColorStop: 2 },
+    Document: { getElementsByName: 1, execCommand: 1, queryCommandEnabled: 1, queryCommandIndeterm: 1, queryCommandState: 1, queryCommandSupported: 1, queryCommandValue: 1, hasFocus: 0, write: 0, writeln: 0 },
+    MessagePort: { postMessage: 1 },
+    Worker: { postMessage: 1 },
+    ElementInternals: { setFormValue: 1 },
+    DataTransfer: { setDragImage: 3, clearData: 0 },
+    DataTransferItemList: { add: 1 },
+    Navigation: { updateCurrentEntry: 1 },
+    Sanitizer: { allowProcessingInstruction: 1, removeProcessingInstruction: 1, setJavascriptURLs: 1, setComments: 1, setDataAttributes: 1 },
+    Origin: { isSameOrigin: 1, isSameSite: 1 },
+    Element: { insertAdjacentHTML: 2, beforeHTML: 1, afterHTML: 1, replaceWithHTML: 1, beforeHTMLUnsafe: 1, afterHTMLUnsafe: 1, replaceWithHTMLUnsafe: 1 },
+    CharacterData: { beforeHTML: 1, afterHTML: 1, replaceWithHTML: 1, beforeHTMLUnsafe: 1, afterHTMLUnsafe: 1, replaceWithHTMLUnsafe: 1 },
+    HTMLOptionsCollection: { add: 1 },
+    HTMLElement: { togglePopover: 0 },
+    HTMLTableElement: { deleteRow: 1, insertRow: 0 },
+    HTMLTableSectionElement: { deleteRow: 1, insertRow: 0 },
+    HTMLTableRowElement: { deleteCell: 1, insertCell: 0 },
+    HTMLFormElement: { requestSubmit: 0 },
+    HTMLDialogElement: { close: 0, requestClose: 0 },
+    HTMLCanvasElement: { toDataURL: 0, toBlob: 1, transferControlToOffscreen: 0 },
+    Window: { postMessage: 1 },
   };
+  for (const name of ['HTMLInputElement', 'HTMLButtonElement', 'HTMLSelectElement', 'HTMLTextAreaElement', 'HTMLOutputElement', 'HTMLFieldSetElement']) {
+    REQUIRED[name] = Object.assign(REQUIRED[name] || {}, { checkValidity: 0, reportValidity: 0 });
+  }
+  REQUIRED.HTMLSelectElement.remove = 0;
   const statics = { HTMLScriptElement: { supports: 1 }, Document: { parseHTML: 1, parseHTMLUnsafe: 1 } };
   const globalChain = new Set();
   for (let o = Object.getPrototypeOf(g); o; o = Object.getPrototypeOf(o)) globalChain.add(o);
@@ -77,7 +101,7 @@
   }
   const fix = (o) => {
     for (const k of Object.getOwnPropertyNames(o)) {
-      if (k === 'constructor' || k === 'prototype' || k === 'length' || k === 'name' || k.startsWith('__')) continue;
+      if (k === 'constructor' || k === 'prototype' || ((k === 'length' || k === 'name') && typeof o === 'function') || k.startsWith('__')) continue;
       const d = Object.getOwnPropertyDescriptor(o, k);
       if (!d || d.enumerable || !d.configurable) continue;
       if (typeof d.value === 'function' || d.get || d.set) {
@@ -86,6 +110,11 @@
       }
     }
   };
+  // Regular operations of Window are own properties of the window.
+  for (const k of ['close', 'stop', 'focus', 'blur', 'open', 'alert', 'confirm', 'prompt', 'print', 'postMessage', 'captureEvents', 'releaseEvents']) {
+    const d = Object.getOwnPropertyDescriptor(g, k);
+    if (d && d.configurable && !d.enumerable && typeof d.value === 'function' && typeof g.Window === 'function') { d.enumerable = true; Object.defineProperty(g, k, d); }
+  }
   const N = g.__rhNative;
   if (!(N && N.webidlEnumerable && N.webidlEnumerable([...ES]))) for (const name of Object.getOwnPropertyNames(g)) {
     if (ES.has(name) || name.startsWith('__') || !/^[A-Z]/.test(name)) continue;

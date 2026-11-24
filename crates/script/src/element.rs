@@ -2488,7 +2488,7 @@ fn media_can_play_type(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResul
 }
 
 fn iframe_content_window(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Some(n) = node_of(realm, &this) else { return Ok(Value::Null) };
+    let n = this_node(realm, &this, "contentWindow")?;
     let id = with_env(|env| if n.doc == 0 { env.ensure_frame(n.node) }
         else if n.doc & FRAME_DOC != 0 { env.ensure_frame_in((n.doc & !FRAME_DOC) as u64, n.node) }
         else { None });
@@ -2497,7 +2497,7 @@ fn iframe_content_window(realm: &mut Realm, this: Value, _: &[Value]) -> JsResul
 
 /// The frame's document, when it is same-origin (null otherwise).
 fn iframe_content_document(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Some(n) = node_of(realm, &this) else { return Ok(Value::Null) };
+    let n = this_node(realm, &this, "contentDocument")?;
     let Some(id) = with_env(|env| if n.doc == 0 { env.ensure_frame(n.node) }
         else if n.doc & FRAME_DOC != 0 { env.ensure_frame_in((n.doc & !FRAME_DOC) as u64, n.node) }
         else { None }) else { return Ok(Value::Null) };

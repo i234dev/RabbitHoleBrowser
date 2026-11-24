@@ -88,7 +88,7 @@
   }
   if (g.SVGSVGElement) {
     for (const n of ['afterprint', 'beforeprint', 'beforeunload', 'hashchange', 'languagechange', 'message', 'messageerror', 'offline', 'online', 'pagehide', 'pagereveal', 'pageshow', 'pageswap', 'popstate', 'rejectionhandled', 'storage', 'unhandledrejection', 'unload']) {
-      if (!Object.prototype.hasOwnProperty.call(g.SVGSVGElement.prototype, 'on' + n)) Object.defineProperty(g.SVGSVGElement.prototype, 'on' + n, { get() { return g['on' + n]; }, set(v) { g['on' + n] = v; }, configurable: true, enumerable: true });
+      if (!Object.prototype.hasOwnProperty.call(g.SVGSVGElement.prototype, 'on' + n)) Object.defineProperty(g.SVGSVGElement.prototype, 'on' + n, { get: g.__rhNative.branded(g.SVGSVGElement, function () { return g['on' + n]; }, 'get', 'on' + n), set: g.__rhNative.branded(g.SVGSVGElement, function (v) { g['on' + n] = v; }, 'set', 'on' + n), configurable: true, enumerable: true });
     }
   }
 

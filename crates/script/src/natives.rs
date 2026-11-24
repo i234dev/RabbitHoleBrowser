@@ -443,9 +443,11 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
         targets.push(cid);
     }
     for o in targets {
+        // (`length` and `name` of an interface object are the function's.)
+        let callable = realm.is_callable(&Value::Object(o));
         for key in realm.own_keys(o)? {
             let PropertyKey::String(k) = &key else { continue };
-            if k.eq_str("constructor") || k.eq_str("prototype") || k.eq_str("length") || k.eq_str("name") || k.as_units().starts_with(&[95, 95]) {
+            if k.eq_str("constructor") || k.eq_str("prototype") || (callable && (k.eq_str("length") || k.eq_str("name"))) || k.as_units().starts_with(&[95, 95]) {
                 continue;
             }
             let Some(d) = realm.get_own_property(o, &key) else { continue };
