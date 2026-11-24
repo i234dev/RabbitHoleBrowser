@@ -1985,6 +1985,9 @@ impl<'a> Layouter<'a> {
             _ if child.kind==BoxKind::Image=>{let cyclic=pct(child.style.width);let(w,_)=self.replaced_size(child,(!cyclic).then_some(cbw),bases.row_basis,it.edges.pb_h);(if cyclic {0.} else {w},w)},
             // Percentage heights inside resolve against fixed rows of the
             // area (Grid2 §12.3, contributions with the rows' sizes).
+            // An orthogonal item takes the definite height of its rows as
+            // its available inline size (CSS Writing Modes 3 §7.3).
+            _ if child.wm_wrapper&&bases.row_basis.is_some()=>self.wm_wrapper_intrinsic_in(child,bases.row_basis),
             _=>{let(min,max)=if bases.row_basis.is_some() {self.intrinsic_in(child,bases.row_basis)} else {self.intrinsic(child)};match child.style.width {Length::MinContent=>(min,min),Length::MaxContent=>(max,max),_=>(min,max)}}
         };
         let min=match child.style.min_width {

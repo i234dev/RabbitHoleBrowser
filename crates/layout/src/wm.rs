@@ -486,10 +486,16 @@ impl<'a> Layouter<'a> {
     /// Intrinsic widths of a vertical subtree's wrapper: its block size
     /// when laid out in the viewport height.
     pub(crate) fn wm_wrapper_intrinsic(&mut self, w: &mut LayoutBox) -> (f32, f32) {
+        self.wm_wrapper_intrinsic_in(w, None)
+    }
+
+    /// The same in a containing block of definite height `cb_h`.
+    pub(crate) fn wm_wrapper_intrinsic_in(&mut self, w: &mut LayoutBox, cb_h: Option<f32>) -> (f32, f32) {
         let _probe = self.grid_publication.probe();
+        let margins = w.style.margin.top.resolve_or_zero(0.0) + w.style.margin.bottom.resolve_or_zero(0.0);
         let Some(r) = w.children.first_mut() else { return (0.0, 0.0) };
-        let vp_h = icb_inline_size(self.ctx, &r.style);
-        let lcb = Cb { x: 0.0, width: vp_h, height: None };
+        let avail = cb_h.map(|h| (h - margins).max(0.0)).unwrap_or_else(|| icb_inline_size(self.ctx, &r.style));
+        let lcb = Cb { x: 0.0, width: avail, height: None };
         let mut bfc = Bfc::new();
         self.forced_content_height = None;
         let mode = if r.style.width.is_auto() { WidthMode::ShrinkToFit } else { WidthMode::Fill };
