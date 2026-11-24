@@ -182,6 +182,9 @@ fn inline_order(b: &LayoutBox) -> Vec<(f32, bool, usize)> {
 #[derive(Default)]
 struct Collector {
     evs: Vec<Ev>,
+    /// Whether each event is inside a box that clips its overflow.
+    clipped: Vec<bool>,
+    clip_depth: u32,
     /// Inside a nested formatting context (no spanners there).
     nested: u32,
     /// Height changes of the spanners, in tree order.
@@ -189,13 +192,18 @@ struct Collector {
 }
 
 impl Collector {
+    fn push(&mut self, e: Ev) {
+        self.evs.push(e);
+        self.clipped.push(self.clip_depth > 0);
+    }
+
     fn inline(&mut self, b: &LayoutBox) {
         let count = b.lines.len() as u32;
         let mut idx = 0;
         for (_, line, i) in inline_order(b) {
             if line {
                 let r = b.lines[i].rect;
-                self.evs.push(Ev::Leaf {
+                self.push(Ev::Leaf {
                     top: r.y,
                     bottom: r.bottom(),
                     forced: false,
@@ -218,7 +226,7 @@ impl Collector {
         let s = &c.style;
         let edge = s.border_width.top > 0.0 || c.content_rect.y > c.rect.y + 0.01;
         let at = self.evs.len();
-        self.evs.push(Ev::Start {
+        self.push(Ev::Start {
             top: c.rect.y,
             h: c.rect.h,
             edge,
@@ -231,7 +239,9 @@ impl Collector {
         });
         let barrier = spanner_barrier(c) as u32;
         self.nested += barrier;
+        self.clip_depth += c.clips as u32;
         self.contents(c);
+        self.clip_depth -= c.clips as u32;
         self.nested -= barrier;
         let empty = self.evs.len() == at + 1;
         if empty && c.content_rect.h <= 0.01 {
@@ -240,28 +250,14 @@ impl Collector {
                 *solid = true;
             }
         }
-        // The last child: the last event at this depth.
-        let mut last = NONE;
-        let mut depth = 0;
-        for j in (at + 1..self.evs.len()).rev() {
-            match self.evs[j] {
-                Ev::End { .. } => depth += 1,
-                Ev::Start { .. } if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
-                        last = j as u32;
-                        break;
-                    }
-                }
-                Ev::Start { .. } | Ev::Leaf { .. } if depth == 0 => {
-                    last = j as u32;
-                    break;
-                }
-                _ => {}
-            }
-        }
+        // The last unbreakable piece inside (the block-end padding goes
+        // with it).
+        let last = (at + 1..self.evs.len())
+            .rev()
+            .find(|&j| matches!(self.evs[j], Ev::Leaf { .. } | Ev::Start { solid: true, .. }))
+            .map_or(NONE, |j| j as u32);
         let bottom_edge = s.border_width.bottom > 0.0 || c.rect.bottom() > c.content_rect.bottom() + 0.01;
-        self.evs.push(Ev::End { bottom: c.rect.bottom(), edge: bottom_edge, last });
+        self.push(Ev::End { bottom: c.rect.bottom(), edge: bottom_edge, last });
     }
 
     /// A float: fragmented like a block when it is a block container.
@@ -270,7 +266,7 @@ impl Collector {
             self.container(c, false, false, NONE);
         } else {
             let r = c.margin_rect();
-            self.evs.push(Ev::Leaf { top: r.y, bottom: r.bottom(), forced: false, avoid_before: false, prev: NONE, mt: 0.0, line: None });
+            self.push(Ev::Leaf { top: r.y, bottom: r.bottom(), forced: false, avoid_before: false, prev: NONE, mt: 0.0, line: None });
         }
     }
 
@@ -293,7 +289,7 @@ impl Collector {
                 Flow::FloatLeft | Flow::FloatRight => self.float(c),
                 Flow::InFlow if is_spanner(c) && self.nested == 0 => {
                     let delta = self.deltas.pop_front().unwrap_or(0.0);
-                    self.evs.push(Ev::Span { top: c.rect.y, h: c.rect.h, mt: c.margin.top, mb: c.margin.bottom, delta });
+                    self.push(Ev::Span { top: c.rect.y, h: c.rect.h, mt: c.margin.top, mb: c.margin.bottom, delta });
                     prev = NONE;
                     forced_after = false;
                     avoid_after = false;
@@ -306,7 +302,7 @@ impl Collector {
                     if fragmentable(c) {
                         self.container(c, forced, avoid_before, prev);
                     } else {
-                        self.evs.push(Ev::Leaf { top: c.rect.y, bottom: c.rect.bottom(), forced, avoid_before, prev, mt: c.margin.top, line: None });
+                        self.push(Ev::Leaf { top: c.rect.y, bottom: c.rect.bottom(), forced, avoid_before, prev, mt: c.margin.top, line: None });
                     }
                     prev = here;
                     forced_after = mc::is_forced_break(s.break_after);
@@ -380,7 +376,7 @@ impl Geometry {
 const EPS: f32 = 0.01;
 
 /// Paginate events `a..b` (one column set) starting at flow offset `off0`.
-fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
+fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
     let n = evs.len();
     let mut struts = vec![0.0f32; n + 1];
     // (origin event, strut index, amount)
@@ -566,7 +562,7 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                 }
             }
         }
-        if let Ev::End { bottom, .. } = evs[i] {
+        if let (Ev::End { bottom, .. }, false) = (evs[i], clipped.get(i).copied().unwrap_or(false)) {
             // (A container's own extent uses columns too.)
             let bt = bottom + off;
             if bt > g.y0 + EPS {
@@ -1115,9 +1111,10 @@ struct FlowParams {
 /// Choose the column heights of a laid out flow (the contents of `root`)
 /// and move its pieces into columns; returns the rows of columns.
 fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, p: FlowParams) -> (Vec<RowOut>, f32) {
-    let mut collector = Collector { evs: Vec::new(), deltas, nested: 0 };
+    let mut collector = Collector { evs: Vec::new(), clipped: Vec::new(), clip_depth: 0, deltas, nested: 0 };
     collector.contents(root);
     let evs = collector.evs;
+    let clipped = collector.clipped;
     let n = p.n.max(1) as usize;
     let floor = |h: f32| h.max(1.0);
     let mut struts = vec![0.0f32; evs.len()];
@@ -1154,7 +1151,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
             // container.)
             let fixed = if p.column_height.is_some() { p.column_height } else if last && (p.fill_auto || p.wrap) { room } else { None };
             let cap = if last { room } else { None };
-            let (colh, plan) = choose_height(&evs, a, b, y0, phys, total, n, fixed, cap, off);
+            let (colh, plan) = choose_height(&evs, &clipped, a, b, y0, phys, total, n, fixed, cap, off);
             let colh = if fixed.is_some() { floor(colh) } else { colh };
             let per_row = if p.wrap { n } else { usize::MAX };
             let g = Geometry { y0, colh: floor(colh), lift: y0 - phys, step: p.step, per_row, row_gap: p.row_gap };
@@ -1185,7 +1182,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                     }
                     let off_j = off + plan.struts[a..j].iter().sum::<f32>();
                     let rest = (strip_end + plan.off - f).max(0.0);
-                    let (h2, plan2) = choose_height(&evs, j, b, f, phys, rest, n, None, Some(colh), off_j);
+                    let (h2, plan2) = choose_height(&evs, &clipped, j, b, f, phys, rest, n, None, Some(colh), off_j);
                     for i in j..b {
                         struts[i] += plan2.struts[i];
                         locked[i] |= plan2.locked[i];
@@ -1249,10 +1246,10 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
 /// The column height of one column set (events `a..b`, flow from `y0`,
 /// `total` tall, the row at document position `phys`), with its plan.
 #[allow(clippy::too_many_arguments)]
-fn choose_height(evs: &[Ev], a: usize, b: usize, y0: f32, phys: f32, total: f32, n: usize, fixed: Option<f32>, cap: Option<f32>, off: f32) -> (f32, Plan) {
+fn choose_height(evs: &[Ev], clipped: &[bool], a: usize, b: usize, y0: f32, phys: f32, total: f32, n: usize, fixed: Option<f32>, cap: Option<f32>, off: f32) -> (f32, Plan) {
     let geom = |h: f32| Geometry { y0, colh: h.max(1.0), lift: y0 - phys, step: 0.0, per_row: usize::MAX, row_gap: 0.0 };
     if let Some(h) = fixed {
-        return (h.max(0.0), paginate(evs, a, b, &geom(h), off));
+        return (h.max(0.0), paginate(evs, clipped, a, b, &geom(h), off));
     }
     // Balance: the smallest height that fits the set in `n` columns,
     // starting from the average (never shorter than an unbreakable piece)
@@ -1264,24 +1261,25 @@ fn choose_height(evs: &[Ev], a: usize, b: usize, y0: f32, phys: f32, total: f32,
     });
     let cap = cap.unwrap_or(f32::INFINITY);
     // (Content overflowing its boxes counts in the flow's extent.)
-    let bottom = evs[a..b].iter().fold(f32::MIN, |m, e| match *e {
+    // (Not what a clipping box hides.)
+    let bottom = (a..b).filter(|&i| !clipped.get(i).copied().unwrap_or(false)).fold(f32::MIN, |m, i| match evs[i] {
         Ev::Leaf { bottom, .. } | Ev::End { bottom, .. } => m.max(bottom),
         _ => m,
     });
     let total = total.max(bottom + off - y0);
     let mut h = (total / n as f32).max(tallest).max(0.0).min(cap);
-    let mut plan = paginate(evs, a, b, &geom(h), off);
+    let mut plan = paginate(evs, clipped, a, b, &geom(h), off);
     let mut rounds = 0;
     // (A break against `break-*: avoid` is also avoided when a taller
     // column can.)
     while (plan.used > n || (plan.violated && h < total)) && plan.shortfall.is_finite() && h < cap && rounds < 64 {
         rounds += 1;
         h = (h + plan.shortfall.max(0.05)).min(cap);
-        plan = paginate(evs, a, b, &geom(h), off);
+        plan = paginate(evs, clipped, a, b, &geom(h), off);
     }
     if plan.used > n && h < total && h < cap && rounds >= 64 {
         h = total.min(cap);
-        plan = paginate(evs, a, b, &geom(h), off);
+        plan = paginate(evs, clipped, a, b, &geom(h), off);
     }
     (h, plan)
 }
@@ -1322,7 +1320,7 @@ mod tests {
     #[test]
     fn pieces_crossing_a_column_end_move_to_the_next_column() {
         let evs = [leaf(0.0, 40.0), leaf(40.0, 80.0), leaf(80.0, 120.0)];
-        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
+        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts, vec![0.0, 0.0, 20.0]);
         assert_eq!(plan.used, 2);
         assert_eq!(plan.shortfall, 20.0);
@@ -1342,7 +1340,7 @@ mod tests {
         let evs: Vec<Ev> = (0..5).map(|i| line(i, i as f32 * 20.0)).collect();
         // Four lines fit in a 90px column; the last one alone would be a
         // widow: the fourth line moves on too.
-        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 90.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
+        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { y0: 0.0, colh: 90.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts[3], 30.0);
         assert_eq!(plan.used, 2);
     }
@@ -1353,7 +1351,7 @@ mod tests {
         if let Ev::Leaf { forced, .. } = &mut evs[1] {
             *forced = true;
         }
-        let plan = paginate(&evs, 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
+        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts[1], 90.0);
         assert_eq!(plan.used, 2);
     }
