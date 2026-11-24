@@ -162,7 +162,7 @@
   const SLOT = Symbol('eventInit');
   const convert = (d, v) => (typeof d === 'string' ? String(v) : typeof d === 'number' ? Number(v) >>> 0 : typeof d === 'boolean' ? !!v : v);
   const SLOTTED = {
-    ErrorEvent: [1, { message: '', filename: '', lineno: 0, colno: 0, error: undefined }],
+    ErrorEvent: [1, { message: '', filename: '', lineno: 0, colno: 0, error: null }],
     MessageEvent: [1, { data: null, origin: '', lastEventId: '', source: null, ports: () => Object.freeze([]) }],
     StorageEvent: [1, { key: null, oldValue: null, newValue: null, url: '', storageArea: null }],
     PopStateEvent: [1, { state: null, hasUAVisualTransition: false }],

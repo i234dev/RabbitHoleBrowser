@@ -1585,8 +1585,10 @@ impl Document {
 
     pub fn title(&self) -> Option<String> {
         self.find_element("title").map(|t| {
+            // Strip and collapse ASCII whitespace (not other spaces).
             self.text_content(t)
-                .split_whitespace()
+                .split(|c: char| matches!(c, '\t' | '\n' | '\x0c' | '\r' | ' '))
+                .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ")
         })

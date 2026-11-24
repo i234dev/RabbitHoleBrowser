@@ -665,7 +665,7 @@
 
   // Legacy document colors / misc.
   for (const [k, attr] of [['fgColor', 'text'], ['linkColor', 'link'], ['vlinkColor', 'vlink'], ['alinkColor', 'alink'], ['bgColor', 'bgcolor']]) {
-    acc(g.Document, k, function () { return (this.body && this.body.getAttribute(attr)) || ''; }, function (v) { if (this.body) this.body.setAttribute(attr, v); });
+    acc(g.Document, k, function () { return (this.body && this.body.getAttribute(attr)) || ''; }, function (v) { if (this.body) this.body.setAttribute(attr, v === null ? '' : v); });
   }
   acc(g.Document, 'applets', function () { return Object.setPrototypeOf([], g.HTMLCollection.prototype); });
   acc(g.Document, 'lastModified', function () { const d = new Date(); const p = (n) => String(n).padStart(2, '0'); return `${p(d.getMonth() + 1)}/${p(d.getDate())}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; });

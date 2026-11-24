@@ -514,21 +514,31 @@ fn camel_to_data(name: &str) -> String {
     out
 }
 
-fn data_to_camel(attr: &str) -> String {
-    let rest = &attr[5..];
+/// The DOMStringMap name of a `data-*` attribute: "-" followed by an ASCII
+/// lowercase letter becomes that letter uppercased; None for attributes
+/// that have no name (not `data-*`, or with ASCII uppercase letters).
+fn data_to_camel(attr: &str) -> Option<String> {
+    let rest = attr.strip_prefix("data-")?;
+    if rest.bytes().any(|b| b.is_ascii_uppercase()) {
+        return None;
+    }
     let mut out = String::new();
-    let mut upper = false;
-    for c in rest.chars() {
-        if c == '-' {
-            upper = true;
-        } else if upper {
-            out.push(c.to_ascii_uppercase());
-            upper = false;
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '-' && chars.peek().is_some_and(|n| n.is_ascii_lowercase()) {
+            out.push(chars.next().unwrap().to_ascii_uppercase());
         } else {
             out.push(c);
         }
     }
-    out
+    Some(out)
+}
+
+/// The value of the `data-*` attribute whose DOMStringMap name is `name`.
+fn dataset_lookup(n: NodeRef, name: &str) -> Option<String> {
+    with_doc(n.doc, |doc| {
+        doc.element(n.node)?.attrs.iter().find(|(k, _)| data_to_camel(k).as_deref() == Some(name)).map(|(_, v)| v.clone())
+    })
 }
 
 fn proxy_target_node(realm: &mut Realm, args: &[Value]) -> JsResult<NodeRef> {
@@ -542,7 +552,7 @@ fn dataset_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let n = proxy_target_node(realm, args)?;
     let key = arg(args, 1);
     if let V::String(k) = key.v() {
-        if let Some(v) = get_attribute(n, &camel_to_data(&k.to_rust_string())) {
+        if let Some(v) = dataset_lookup(n, &k.to_rust_string()) {
             return Ok(Value::str(&v));
         }
     }
@@ -555,15 +565,22 @@ fn dataset_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 fn dataset_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let k = realm.to_rust_string(arg(args, 1))?;
+    if k.as_bytes().windows(2).any(|w| w[0] == b'-' && w[1].is_ascii_lowercase()) {
+        return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to set a named property on 'DOMStringMap': '{k}' is not a valid property name.")));
+    }
     let v = realm.to_rust_string(arg(args, 2))?;
-    set_attribute(n, &camel_to_data(&k), Some(&v));
+    let attr = camel_to_data(&k);
+    if !crate::document::valid_attribute_local_name(&attr) {
+        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("Failed to set a named property on 'DOMStringMap': '{attr}' is not a valid attribute name.")));
+    }
+    set_attribute(n, &attr, Some(&v));
     Ok(Value::Bool(true))
 }
 
 fn dataset_has(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let k = realm.to_rust_string(arg(args, 1))?;
-    Ok(Value::Bool(get_attribute(n, &camel_to_data(&k)).is_some()))
+    Ok(Value::Bool(dataset_lookup(n, &k).is_some()))
 }
 
 fn dataset_delete(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -577,7 +594,7 @@ fn dataset_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     let n = proxy_target_node(realm, args)?;
     let keys: Vec<Value> = with_doc(n.doc, |doc| {
         doc.element(n.node)
-            .map(|e| e.attrs.iter().filter(|(k, _)| k.starts_with("data-")).map(|(k, _)| Value::str(&data_to_camel(k))).collect())
+            .map(|e| e.attrs.iter().filter_map(|(k, _)| data_to_camel(k)).map(|k| Value::str(&k)).collect())
             .unwrap_or_default()
     });
     Ok(array(realm, keys))
@@ -586,7 +603,7 @@ fn dataset_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 fn dataset_gopd(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let k = realm.to_rust_string(arg(args, 1))?;
-    match get_attribute(n, &camel_to_data(&k)) {
+    match dataset_lookup(n, &k) {
         Some(v) => Ok(object_from(realm, vec![("value", Value::str(&v)), ("writable", Value::Bool(true)), ("enumerable", Value::Bool(true)), ("configurable", Value::Bool(true))])),
         None => Ok(Value::Undefined),
     }
@@ -2364,11 +2381,10 @@ fn img_src_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 fn img_src_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "src")?;
-    let raw = get_attribute(n, "src").unwrap_or_default();
-    if raw.is_empty() {
-        return Ok(Value::str(""));
-    }
-    Ok(Value::str(&resolve_url(&raw).map(|u| u.to_string()).unwrap_or(raw)))
+    // A reflected URL: absent is "", anything else parses against the base
+    // ("" being the document's base URL itself).
+    let Some(raw) = get_attribute(n, "src") else { return Ok(Value::str("")) };
+    Ok(Value::str(&base_url().join(raw.trim_matches(|c: char| c <= ' ')).map(|u| u.to_string()).unwrap_or(raw)))
 }
 
 // script / style / link / template / canvas / media ---------------------------------
@@ -2767,7 +2783,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(input, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(input, "defaultValue", Some(input_default_value_get), Some(input_default_value_set), ACC);
     realm.define_accessor(input, "checked", Some(input_checked_get), Some(input_checked_set), ACC);
-    realm.define_accessor(input, "defaultChecked", Some(input_checked_get), Some(input_checked_set), ACC);
+    reflect(realm, input, "defaultChecked", "checked", Reflect::Bool);
     realm.define_accessor(input, "type", Some(input_type_get), Some(input_type_set), ACC);
     realm.define_accessor(input, "form", Some(input_form), None, ACC);
     realm.define_accessor(input, "labels", Some(input_labels), None, ACC);
@@ -2948,7 +2964,7 @@ pub(crate) fn install(realm: &mut Realm) {
     let button = define_class(realm, "HTMLButtonElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(button, "popoverTargetElement", Some(popover_target_get), Some(popover_target_set), ACC);
     realm.define_accessor(button, "type", Some(input_type_get), Some(input_type_set), ACC);
-    realm.define_accessor(button, "value", Some(input_value_get), Some(input_value_set), ACC);
+    reflect(realm, button, "value", "value", Reflect::Str);
     realm.define_accessor(button, "form", Some(input_form), None, ACC);
     realm.define_accessor(button, "labels", Some(input_labels), None, ACC);
     realm.define_accessor(button, "validity", Some(input_validity), None, ACC);
@@ -3390,15 +3406,17 @@ fn form_action_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
 
 fn img_width_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "width")?;
-    let v = realm.to_number(arg(args, 0))?;
-    set_attribute(n, "width", Some(&format!("{}", v as i64)));
+    // unsigned long: out-of-range values set the default, 0.
+    let v = realm.to_uint32(arg(args, 0))?;
+    set_attribute(n, "width", Some(&(if v > 2147483647 { 0 } else { v }).to_string()));
     Ok(Value::Undefined)
 }
 
 fn img_height_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "height")?;
-    let v = realm.to_number(arg(args, 0))?;
-    set_attribute(n, "height", Some(&format!("{}", v as i64)));
+    // unsigned long: out-of-range values set the default, 0.
+    let v = realm.to_uint32(arg(args, 0))?;
+    set_attribute(n, "height", Some(&(if v > 2147483647 { 0 } else { v }).to_string()));
     Ok(Value::Undefined)
 }
 

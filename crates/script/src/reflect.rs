@@ -41,6 +41,8 @@ impl EnumSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Reflect {
     Str,
+    /// `[LegacyNullToEmptyString] DOMString`: null sets "".
+    StrNullEmpty,
     NullableStr,
     Popover,
     Bool,
@@ -181,7 +183,7 @@ fn reflect_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, &spec.attr)?;
     let raw = crate::element::get_attribute(n, &spec.attr);
     Ok(match &spec.kind {
-        Reflect::Str => Value::str(raw.as_deref().unwrap_or("")),
+        Reflect::Str | Reflect::StrNullEmpty => Value::str(raw.as_deref().unwrap_or("")),
         Reflect::Popover => raw.as_deref().map(rabbithole_dom::Document::popover_mode).map(Value::str).unwrap_or(Value::Null),
         Reflect::NullableStr => raw.as_deref().map(Value::str).unwrap_or(Value::Null),
         Reflect::Bool => Value::Bool(raw.is_some()),
@@ -239,6 +241,7 @@ fn reflect_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
                 crate::element::set_attribute(n, &spec.attr, None);
             }
         }
+        Reflect::StrNullEmpty if matches!(v.v(), rabbithole_js::V::Null) => set(""),
         Reflect::Enum(e) if e.nullable && v.is_nullish() => {
             if crate::element::get_attribute(n, &spec.attr).is_some() {
                 crate::element::set_attribute(n, &spec.attr, None);
@@ -492,6 +495,22 @@ pub(crate) fn install(realm: &mut Realm) {
     ];
     for (prop, attr, keywords, invalid) in aria {
         def("Element", prop, attr, Reflect::Enum(Rc::new(EnumSpec { keywords: keywords.to_vec(), missing: None, invalid, nullable: true })));
+    }
+    // [LegacyNullToEmptyString] presentational attributes.
+    for (iface, props) in [
+        ("HTMLBodyElement", &[("text", "text"), ("link", "link"), ("vLink", "vlink"), ("aLink", "alink"), ("bgColor", "bgcolor")][..]),
+        ("HTMLTableElement", &[("bgColor", "bgcolor"), ("cellPadding", "cellpadding"), ("cellSpacing", "cellspacing")][..]),
+        ("HTMLTableRowElement", &[("bgColor", "bgcolor")][..]),
+        ("HTMLTableCellElement", &[("bgColor", "bgcolor")][..]),
+        ("HTMLImageElement", &[("border", "border")][..]),
+        ("HTMLObjectElement", &[("border", "border")][..]),
+        ("HTMLIFrameElement", &[("marginHeight", "marginheight"), ("marginWidth", "marginwidth")][..]),
+        ("HTMLFrameElement", &[("marginHeight", "marginheight"), ("marginWidth", "marginwidth")][..]),
+        ("HTMLFontElement", &[("color", "color")][..]),
+    ] {
+        for (prop, attr) in props {
+            def(iface, prop, attr, Reflect::StrNullEmpty);
+        }
     }
     // Obsolete.
     def("HTMLMarqueeElement", "behavior", "behavior", enumerated(&["scroll", "slide", "alternate"], Some("scroll"), Some("scroll")));

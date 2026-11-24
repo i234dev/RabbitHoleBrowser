@@ -108,7 +108,12 @@
     try { if (!delete g[k]) Object.defineProperty(g, k, { value: undefined, configurable: true }); } catch (e) { /* non-configurable: keep */ }
   }
   Object.defineProperty(g, 'self', { get: { 'get self'() { return g; } }['get self'], set: { 'set self'(v) { Object.defineProperty(g, 'self', { value: v, writable: true, configurable: true }); } }['set self'], configurable: true });
-  Object.defineProperty(g, 'name', { get: { 'get name'() { return info.name; } }['get name'], configurable: true, enumerable: true });
+  // [Replaceable] readonly attribute name.
+  Object.defineProperty(g, 'name', {
+    get: { 'get name'() { return info.name; } }['get name'],
+    set: { 'set name'(v) { Object.defineProperty(g, 'name', { value: v, writable: true, configurable: true, enumerable: true }); } }['set name'],
+    configurable: true, enumerable: true,
+  });
   Object.defineProperty(g, 'isSecureContext', { get: { 'get isSecureContext'() { return true; } }['get isSecureContext'], configurable: true });
 
   // ---- message routing (ids: see workers.rs)
