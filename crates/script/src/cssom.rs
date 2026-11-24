@@ -1177,6 +1177,13 @@ fn read_computed_value(realm: &mut Realm, node: NodeRef, property: &str) -> JsRe
     Ok(Value::str(&computed_value(node, property).unwrap_or_default()))
 }
 
+/// `domEpoch(node)`: the mutation counter of the node's document, which
+/// changes whenever its tree, an attribute or text changes.
+pub(crate) fn dom_epoch_native(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &arg(args, 0)) else { return Ok(Value::Number(-1.0)) };
+    Ok(Value::Number(crate::host::with_doc(n.doc, |doc| doc.epoch()) as f64))
+}
+
 /// `computedValue(element, property)`: one computed style value, as
 /// `getComputedStyle(element).getPropertyValue(property)` (for the editing
 /// algorithms, which read many).

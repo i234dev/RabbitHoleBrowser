@@ -514,6 +514,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
     realm.define_method(o, "editingImpl", 1, editing_impl);
     realm.define_method(o, "computedValue", 2, crate::cssom::computed_value_native);
+    realm.define_method(o, "domEpoch", 1, crate::cssom::dom_epoch_native);
     realm.define_method(o, "setSheetsPending", 1, set_sheets_pending);
     realm.define_method(o, "setSheetText", 2, set_sheet_text);
     realm.define_method(o, "fetchText", 1, fetch_text);

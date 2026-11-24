@@ -41,9 +41,49 @@
 (function (native) {
 "use strict";
 
+// RabbitHole: while a command runs (see run()), computed style values and
+// the predicates below that depend only on the tree and its style are
+// remembered until the document changes.
+var memoEpoch = -1;
+var memoTables = null;
+function memoTable(name, node) {
+    var epoch = native.domEpoch(node);
+    if (epoch !== memoEpoch) {
+        memoEpoch = epoch;
+        memoTables = Object.create(null);
+    }
+    return memoTables[name] || (memoTables[name] = new Map());
+}
+function memoize(name, f) {
+    return function(node) {
+        if (!memoActive || !node || typeof node != "object") {
+            return f(node);
+        }
+        var table = memoTable(name, node);
+        if (table.has(node)) {
+            return table.get(node);
+        }
+        var value = f(node);
+        table.set(node, value);
+        return value;
+    };
+}
+var memoActive = false;
+
 // RabbitHole: a computed style value without creating a declaration object.
 function computedStyle(element, property) {
-    return native.computedValue(element, property);
+    if (!memoActive) {
+        return native.computedValue(element, property);
+    }
+    var table = memoTable("style", element);
+    var entry = table.get(element);
+    if (!entry) {
+        table.set(element, entry = Object.create(null));
+    }
+    if (!(property in entry)) {
+        entry[property] = native.computedValue(element, property);
+    }
+    return entry[property];
 }
 
 // RabbitHole: the document whose command runs (see run() at the end).
@@ -699,16 +739,25 @@ function myQueryCommandValue(command, range) {
 // particular HTML element, like isHtmlElement(node, "OL").  It accepts arrays
 // too, like isHtmlElement(node, ["OL", "UL"]) to check if it's an ol or ul.
 function isHtmlElement(node, tags) {
+    // RabbitHole: compares names without building upper-cased arrays.
+    if (!node
+    || node.nodeType != Node.ELEMENT_NODE
+    || !isHtmlNamespace(node.namespaceURI)) {
+        return false;
+    }
+    if (typeof tags == "undefined") {
+        return true;
+    }
+    var name = node.tagName;
     if (typeof tags == "string") {
-        tags = [tags];
+        return tags.toUpperCase() == name;
     }
-    if (typeof tags == "object") {
-        tags = tags.map(function(tag) { return tag.toUpperCase() });
+    for (var i = 0; i < tags.length; i++) {
+        if (tags[i].toUpperCase() == name) {
+            return true;
+        }
     }
-    return node
-        && node.nodeType == Node.ELEMENT_NODE
-        && isHtmlNamespace(node.namespaceURI)
-        && (typeof tags == "undefined" || tags.indexOf(node.tagName) != -1);
+    return false;
 }
 
 // "A prohibited paragraph child name is "address", "article", "aside",
@@ -8571,8 +8620,18 @@ commandNames.forEach(function(command) {
 // RabbitHole: run(doc, state, callback) binds the algorithms to a document and
 // its editing state (the CSS styling flag and the default single-line
 // container name) while callback runs.
+isEditable = memoize("isEditable", isEditable);
+isEditingHost = memoize("isEditingHost", isEditingHost);
+isBlockNode = memoize("isBlockNode", isBlockNode);
+isVisible = memoize("isVisible", isVisible);
+isCollapsedWhitespaceNode = memoize("isCollapsedWhitespaceNode", isCollapsedWhitespaceNode);
+isCollapsedLineBreak = memoize("isCollapsedLineBreak", isCollapsedLineBreak);
+isExtraneousLineBreak = memoize("isExtraneousLineBreak", isExtraneousLineBreak);
+
 function run(doc, state, callback, command) {
-    var saved = [document, cssStylingFlag, defaultSingleLineContainerName];
+    var saved = [document, cssStylingFlag, defaultSingleLineContainerName, memoActive];
+    memoActive = true;
+    memoEpoch = -1;
     rewriteEditedWhitespace = !command || ["delete", "forwarddelete", "inserttext"].indexOf(command) != -1;
     document = doc;
     cssStylingFlag = state.css;
@@ -8585,6 +8644,11 @@ function run(doc, state, callback, command) {
         document = saved[0];
         cssStylingFlag = saved[1];
         defaultSingleLineContainerName = saved[2];
+        memoActive = saved[3];
+        if (!memoActive) {
+            memoTables = null;
+            memoEpoch = -1;
+        }
     }
 }
 

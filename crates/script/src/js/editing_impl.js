@@ -1685,6 +1685,9 @@
     // The specification assumes block editing hosts: an inline host gets
     // line breaks instead of paragraphs, as in other browsers.
     if (getComputedStyle(t.host).display.startsWith('inline')) return false;
+    // A deletion from a line into a child block keeps the block's first line
+    // in it (as in other browsers), which the implementation above does.
+    if ((cmd === 'delete' || cmd === 'forwarddelete' || cmd === 'inserttext') && endsInChildBlock(t)) return false;
     // Where white-space is not normal, line breaks follow it (newlines where
     // it preserves them) as in other browsers.
     if (cmd === 'insertparagraph' || cmd === 'insertlinebreak' || (cmd === 'inserttext' && /[\r\n]/.test(value))) {
@@ -1714,6 +1717,46 @@
     return formats;
   }
   const formatsKnown = name => formats.has(name);
+  function endsInChildBlock({ range, host }) {
+    if (range.collapsed) return false;
+    const blockOf = node => {
+      let el = node.nodeType === 1 ? node : node.parentElement;
+      while (el && el !== host && !isBlock(el)) el = el.parentElement;
+      return el;
+    };
+    const start = blockOf(range.startContainer), end = blockOf(range.endContainer);
+    if (!start || !end || start === end || !start.contains(end)) return false;
+    // Only when the range starts at the start of a line and selects whole
+    // lines before the child block; otherwise the lines are joined.
+    const doc = host.ownerDocument;
+    let top = end;
+    while (top.parentElement !== start) top = top.parentElement;
+    const before = doc.createRange();
+    before.setStart(start, 0);
+    before.setEnd(range.startContainer, range.startOffset);
+    let content = false;
+    const newlines = ['pre', 'pre-wrap', 'pre-line', 'break-spaces'].includes(getComputedStyle(start).whiteSpace);
+    const scan = (node) => {
+      for (let c = node.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 3) {
+          const tail = c.data.slice(c.data.lastIndexOf('\n') + 1);
+          if (c.data.includes('\n') && newlines) content = /[^\t\r ]/.test(tail);
+          else if (/[^\t\n\r ]/.test(c.data)) content = true;
+        } else if (c.nodeType === 1) {
+          if (c.localName === 'br') content = false;
+          else if (c.localName === 'img') content = true;
+          else scan(c);
+        }
+      }
+    };
+    scan(before.cloneContents());
+    if (content) return false;
+    const lines = doc.createRange();
+    lines.setStart(range.startContainer, range.startOffset);
+    lines.setEndBefore(top);
+    const selected = lines.cloneContents();
+    return /[^\t\r ]/.test(lines.toString()) || !!selected.querySelector('br');
+  }
   function specInputData(cmd, value) {
     if (cmd === 'inserttext' || cmd === 'createlink') return value;
     if (valueFormats.has(cmd)) return normalizeFormat(cmd, value);
