@@ -928,6 +928,8 @@ impl Loader {
             }
         }
         let mut picked: Vec<(FontFace, Url)> = Vec::new();
+        let mut credentialed: HashSet<String> = HashSet::new();
+        let mut integrity: HashMap<String, String> = HashMap::new();
         for face in &styles.font_faces {
             let family = face.family.to_ascii_lowercase();
             let forced = also.is_some_and(|a| a.contains(&family));
@@ -962,6 +964,12 @@ impl Loader {
             }
             if let Some((_, url)) = best {
                 if let Some(u) = Url::parse_absolute(url) {
+                    if face.sources.iter().any(|s| s.url == url && s.credentials) {
+                        credentialed.insert(u.to_string());
+                    }
+                    if let Some(meta) = face.sources.iter().find(|s| s.url == url).and_then(|s| s.integrity.clone()) {
+                        integrity.insert(u.to_string(), meta);
+                    }
                     picked.push((face.clone(), u));
                 }
             }
@@ -979,9 +987,26 @@ impl Loader {
             fetcher.max_body = 8 * 1024 * 1024;
             let results = fetcher.fetch_many_for(&to_fetch, 6, Destination::Font, self.initiator.as_ref());
             let mut caches = self.caches.lock().unwrap();
+            // Fonts are fetched in CORS mode (CSS Fonts 4 §4.9): a
+            // cross-origin font needs the server's permission.
+            let origin = self.initiator.as_ref().map(|u| u.origin());
+            let cors_ok = |u: &Url, resp: &rabbithole_net::Response| -> bool {
+                let Some(origin) = &origin else { return true };
+                if u.origin() == *origin || u.scheme == "data" {
+                    return true;
+                }
+                let header = |name: &str| resp.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string());
+                let allowed = header("access-control-allow-origin");
+                if credentialed.contains(&u.to_string()) {
+                    allowed.as_deref() == Some(origin.as_str()) && header("access-control-allow-credentials").as_deref() == Some("true")
+                } else {
+                    matches!(allowed.as_deref(), Some(a) if a == "*" || a == origin)
+                }
+            };
             for (u, r) in to_fetch.iter().zip(results) {
                 let data = match r {
-                    Ok(resp) if resp.status < 400 && !resp.body.is_empty() => Some(Arc::new(resp.body)),
+                    Ok(resp) if resp.status < 400 && !resp.body.is_empty() && cors_ok(u, &resp)
+                        && integrity.get(&u.to_string()).is_none_or(|meta| rabbithole_script::integrity_matches(meta, &resp.body)) => Some(Arc::new(resp.body)),
                     _ => None,
                 };
                 caches.fonts.insert(u.to_string(), data);
@@ -1358,7 +1383,12 @@ impl Engine {
         let current: HashSet<String> = page.styles.font_faces.iter().map(|f| f.family.to_ascii_lowercase()).collect();
         let fresh_families: HashSet<String> = current.difference(&previous).cloned().collect();
         page.incr.set_known_families(current);
-        let loaded = if first { Vec::new() } else { self.loader.load_fonts_for(&page.doc, &page.styles, Some(&fresh_families)) };
+        let loaded = if first {
+            Vec::new()
+        } else {
+            let bound = Loader { initiator: Some(page.url.clone()), ..self.loader.clone() };
+            bound.load_fonts_for(&page.doc, &page.styles, Some(&fresh_families))
+        };
         let mut added = false;
         for f in &loaded {
             let key = format!("{:?}", (f.face.family.to_ascii_lowercase(), f.face.weight, f.face.italic, f.face.stretch, &f.face.unicode_range, f.data.len()));

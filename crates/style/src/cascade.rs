@@ -1438,8 +1438,15 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
                     let mut url = None;
                     let mut format = None;
                     let mut local = false;
+                    let mut credentials = false;
+                    let mut integrity = None;
                     for c in &item {
                         if let Some(u) = url_of(c) {
+                            credentials = c.windows(2).any(|w| matches!(w, [Token::Function(f), Token::Ident(k)] if f.eq_ignore_ascii_case("cross-origin") && k.eq_ignore_ascii_case("use-credentials")));
+                            integrity = c.windows(2).find_map(|w| match w {
+                                [Token::Function(f), Token::String(v)] if f.eq_ignore_ascii_case("integrity") => Some(v.clone()),
+                                _ => None,
+                            });
                             url = Some(u);
                         } else if let Some(f) = props::fn_name(c) {
                             match f.as_str() {
@@ -1461,7 +1468,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
                     }
                     if let Some(u) = url {
                         let abs = (opts.resolve_url)(base, &u).unwrap_or(u);
-                        sources.push(FontSource { url: abs, format });
+                        sources.push(FontSource { url: abs, format, credentials, integrity });
                     }
                 }
             }

@@ -1962,7 +1962,9 @@ impl<'a> Layouter<'a> {
             // A compressible replaced item with a cyclic percentage width has
             // a zero min-content contribution (CSS Sizing 3 §5.2.2).
             _ if child.kind==BoxKind::Image=>{let cyclic=pct(child.style.width);let(w,_)=self.replaced_size(child,(!cyclic).then_some(cbw),bases.row_basis,it.edges.pb_h);(if cyclic {0.} else {w},w)},
-            _=>{let(min,max)=self.intrinsic(child);match child.style.width {Length::MinContent=>(min,min),Length::MaxContent=>(max,max),_=>(min,max)}}
+            // Percentage heights inside resolve against fixed rows of the
+            // area (Grid2 §12.3, contributions with the rows' sizes).
+            _=>{let(min,max)=if bases.row_basis.is_some() {self.intrinsic_in(child,bases.row_basis)} else {self.intrinsic(child)};match child.style.width {Length::MinContent=>(min,min),Length::MaxContent=>(max,max),_=>(min,max)}}
         };
         let min=match child.style.min_width {
             Length::Px(m) if child.kind!=BoxKind::Image=>if bb {(m-it.edges.pb_h).max(0.).min(min)} else {m.min(min)},

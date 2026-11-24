@@ -22,6 +22,7 @@ mod media;
 mod node;
 mod canvas2d;
 mod webcrypto;
+pub use webcrypto::integrity_matches;
 mod webgl;
 mod natives;
 mod webanim;

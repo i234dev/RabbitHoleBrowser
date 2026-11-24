@@ -44,6 +44,10 @@ pub struct FontSource {
     pub url: String,
     /// `format("woff2")` hint, lower-cased.
     pub format: Option<String>,
+    /// `cross-origin(use-credentials)` request modifier (CSS Values 5).
+    pub credentials: bool,
+    /// `integrity("…")` request modifier.
+    pub integrity: Option<String>,
 }
 
 /// A collected `@font-face` rule.

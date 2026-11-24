@@ -393,6 +393,24 @@ impl FontContext {
                 feats.push(rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), *value, ..));
             }
         }
+        // CJK text kerns only with proportional alternates ('palt' or
+        // 'vpal'), as in other engines: 'kern' tables of CJK fonts assume
+        // proportional glyphs.
+        let cjk = matches!(buf.script(), s if s == rustybuzz::script::HAN || s == rustybuzz::script::HIRAGANA || s == rustybuzz::script::KATAKANA || s == rustybuzz::script::HANGUL || s == rustybuzz::script::BOPOMOFO);
+        if cjk {
+            let tag = |t: &[u8; 4]| rustybuzz::ttf_parser::Tag::from_bytes(t);
+            let setting = |t: &[u8; 4]| feats.iter().rev().find(|f| f.tag == tag(t)).map(|f| f.value);
+            let palt = setting(b"palt").or(setting(b"vpal"));
+            if setting(b"kern").is_some_and(|v| v != 0) && !features.no_kerning {
+                // `font-kerning: normal` kerns CJK with its proportional
+                // alternates unless they are turned off.
+                if palt.is_none() {
+                    feats.push(rustybuzz::Feature::new(tag(b"palt"), 1, ..));
+                }
+            } else if !palt.is_some_and(|v| v != 0) {
+                feats.insert(0, rustybuzz::Feature::new(tag(b"kern"), 0, ..));
+            }
+        }
         if features.no_ligatures {
             for tag in [b"liga", b"clig", b"dlig", b"hlig", b"calt"] {
                 feats.push(rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..));
