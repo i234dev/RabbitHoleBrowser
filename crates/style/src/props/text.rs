@@ -18,6 +18,7 @@ pub fn family_names(comps: &[&[Token]]) -> Vec<String> {
     let mut out = Vec::new();
     for fam in values::split_commas(comps) {
         let mut name = String::new();
+        let quoted = matches!(fam.as_slice(), [[Token::String(_)]]);
         for c in fam {
             match c {
                 [Token::Ident(s)] | [Token::String(s)] => {
@@ -34,6 +35,12 @@ pub fn family_names(comps: &[&[Token]]) -> Vec<String> {
             continue;
         }
         let lower = n.to_ascii_lowercase();
+        // A quoted generic keyword is a family name, not the generic
+        // family: it keeps its quotes so selection does not interpret it.
+        if quoted && generic_keyword(&lower) {
+            out.push(format!("\"{n}\""));
+            continue;
+        }
         if matches!(
             lower.as_str(),
             "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui" | "ui-serif" | "ui-sans-serif"
@@ -44,6 +51,14 @@ pub fn family_names(comps: &[&[Token]]) -> Vec<String> {
         out.push(n);
     }
     out
+}
+
+fn generic_keyword(lower: &str) -> bool {
+    matches!(
+        lower,
+        "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui" | "ui-serif" | "ui-sans-serif" | "ui-monospace"
+            | "ui-rounded" | "emoji" | "math" | "fangsong"
+    ) || lower.starts_with("generic(")
 }
 
 fn decoration_style(kw: &str) -> Option<TextDecorationStyle> {

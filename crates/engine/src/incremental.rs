@@ -52,6 +52,16 @@ pub struct IncrementalState {
     has_containers: bool,
     /// Revision of this document view and the shared host catalog.
     fonts_seen: Option<(u64, u64)>,
+    /// `@font-face` rules seen by the styles (count, hash), to load fonts
+    /// for rules added after the page loaded.
+    font_faces_seen: Option<u64>,
+    /// Web fonts registered in the page's font context.
+    web_fonts: HashSet<String>,
+    /// Families of `@font-face` rules whose fonts are not loaded (no text
+    /// used them yet): a restyled element using one loads them.
+    unloaded_families: HashSet<String>,
+    uses_unloaded_family: bool,
+    known_families: HashSet<String>,
     /// (DOM epoch, visited history size, base URL) the `:visited` link set
     /// was computed for.
     pub(crate) visited_key: Option<(u64, usize, String)>,
@@ -94,6 +104,38 @@ pub struct IncrementalState {
     /// The display list the canvas shows when it is out of date.
     painted_dl: Option<rabbithole_layout::DisplayList>,
     pub stats: IncrementalStats,
+}
+
+impl IncrementalState {
+    pub(crate) fn font_faces_seen(&self) -> Option<u64> {
+        self.font_faces_seen
+    }
+
+    pub(crate) fn set_font_faces_seen(&mut self, sig: u64) {
+        self.font_faces_seen = Some(sig);
+    }
+
+    /// Whether `key` is a web font not registered yet (and register it).
+    pub(crate) fn register_web_font(&mut self, key: String) -> bool {
+        self.web_fonts.insert(key)
+    }
+
+    pub(crate) fn known_families(&self) -> HashSet<String> {
+        self.known_families.clone()
+    }
+
+    pub(crate) fn set_known_families(&mut self, families: HashSet<String>) {
+        self.known_families = families;
+    }
+
+    pub(crate) fn set_unloaded_families(&mut self, families: HashSet<String>) {
+        self.unloaded_families = families;
+    }
+
+    pub(crate) fn mark_layout_full(&mut self) {
+        self.layout_full = true;
+        self.layout_dirty = true;
+    }
 }
 
 impl IncrementalState {
@@ -368,6 +410,10 @@ impl Engine {
                 if !incr.filtered_svgs.is_empty() {
                     restyled.extend(out.changes.iter().map(|c| c.node));
                 }
+                if !incr.unloaded_families.is_empty() {
+                    let unloaded = &incr.unloaded_families;
+                    incr.uses_unloaded_family |= out.changes.iter().any(|c| c.new.as_ref().is_some_and(|s| s.font_family_list.iter().any(|f| unloaded.contains(&f.trim_matches('"').to_ascii_lowercase()))));
+                }
                 for c in &out.changes {
                     if c.old.as_ref().is_none_or(|s| s.display.is_none()) {
                         newly_styled.push(c.node);
@@ -401,6 +447,8 @@ impl Engine {
         }
         incr.layout_dirty = true;
         incr.dl_dirty = true;
+        let uses_unloaded = std::mem::take(&mut page.incr.uses_unloaded_family);
+        self.load_added_fonts(page, uses_unloaded);
         page.background = canvas_background(&page.doc, &page.styles);
         if fresh || log.overflow || anim_full {
             rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, None, &mut page.incr.filtered_svgs);

@@ -311,6 +311,13 @@ fn set_script_font_faces(realm: &mut Realm, _this: Value, args: &[Value]) -> JsR
 
 /// `cssFontFaces()`: the document's CSS-connected font faces as
 /// `{family, style, weight, stretch, unicodeRange, display, url, status}`.
+/// Bring styles and layout up to date (style sheets added by scripts load
+/// their `@font-face` fonts then).
+fn flush_styles(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+    with_env(|env| env.ensure_layout());
+    Ok(Value::Undefined)
+}
+
 fn css_font_faces(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
     let faces = with_doc(0, |doc| doc.css_font_faces.clone());
     let mut out = Vec::with_capacity(faces.len());
@@ -480,6 +487,7 @@ pub(crate) fn install(realm: &mut Realm) {
     crate::webanim::install(realm, o);
     realm.define_method(o, "setScriptFontFaces", 1, set_script_font_faces);
     realm.define_method(o, "cssFontFaces", 0, css_font_faces);
+    realm.define_method(o, "flushStyles", 0, flush_styles);
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
     realm.define_method(o, "imagePixels", 1, image_pixels);
     realm.define_method(o, "installHandlers", 2, install_handlers);

@@ -1426,7 +1426,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
         match d.name.as_str() {
             "font-family" => {
                 let names = props::text::family_names(&comps);
-                family = names.into_iter().next().or_else(|| {
+                family = names.into_iter().next().map(|n| n.trim_matches('"').to_string()).or_else(|| {
                     comps.first().and_then(|c| match c {
                         [Token::String(s)] | [Token::Ident(s)] => Some(s.clone()),
                         _ => None,
@@ -2987,7 +2987,7 @@ pub(crate) fn family_of(comps: &[&[Token]]) -> Option<Family> {
         if matches!(
             n.as_str(),
             "sans-serif" | "system-ui" | "ui-sans-serif" | "arial" | "helvetica" | "verdana" | "tahoma" | "roboto" | "inter"
-                | "segoe ui" | "-apple-system" | "blinkmacsystemfont" | "helvetica neue" | "open sans" | "lato"
+                | "segoe ui" | "-apple-system" | "helvetica neue" | "open sans" | "lato"
                 | "ubuntu" | "noto sans" | "dejavu sans" | "cursive" | "fantasy" | "emoji"
         ) || n.contains("sans")
         {

@@ -182,7 +182,9 @@ enum Extent {
 fn is_punct(c: char) -> bool {
     matches!(
         c.general_category(),
-        GeneralCategory::OpenPunctuation
+        GeneralCategory::ConnectorPunctuation
+            | GeneralCategory::DashPunctuation
+            | GeneralCategory::OpenPunctuation
             | GeneralCategory::ClosePunctuation
             | GeneralCategory::InitialPunctuation
             | GeneralCategory::FinalPunctuation
@@ -245,6 +247,10 @@ fn letter_range(text: &str, ws: WhiteSpace) -> Extent {
     // Combining marks of the letter, then following punctuation.
     let rest = &text[end..];
     let mut in_marks = true;
+    // Typographic spaces (Zs other than word separators) between the
+    // letter and following punctuation belong to it (CSS Pseudo 4 §2.3).
+    let typographic_space = |c: char| c.general_category() == GeneralCategory::SpaceSeparator && !matches!(c, ' ' | '\u{a0}' | '\u{1361}');
+    let mut pending = 0;
     for c in rest.chars() {
         if in_marks && is_mark(c) {
             end += c.len_utf8();
@@ -252,7 +258,10 @@ fn letter_range(text: &str, ws: WhiteSpace) -> Extent {
         }
         in_marks = false;
         if is_punct(c) {
-            end += c.len_utf8();
+            end += pending + c.len_utf8();
+            pending = 0;
+        } else if typographic_space(c) {
+            pending += c.len_utf8();
         } else {
             break;
         }

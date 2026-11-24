@@ -52,7 +52,7 @@ pub fn script_fallback_families(ch: char) -> &'static [&'static str] {
 /// Platform default candidates for the generic families.
 fn generic_candidates(name: &str) -> Option<&'static [&'static str]> {
     Some(match name {
-        "sans-serif" | "system-ui" | "ui-sans-serif" | "-apple-system" | "blinkmacsystemfont" | "cursive" | "fantasy" => {
+        "sans-serif" | "system-ui" | "ui-sans-serif" | "-apple-system" | "cursive" | "fantasy" => {
             &["Segoe UI", "Helvetica Neue", "Helvetica", "Arial", "Noto Sans", "Liberation Sans", "DejaVu Sans", "Cantarell", "Ubuntu", "Roboto"]
         }
         "serif" | "ui-serif" => &["Times New Roman", "Georgia", "Times", "Noto Serif", "Liberation Serif", "DejaVu Serif"],
@@ -296,6 +296,10 @@ impl FontContext {
 
     /// The face one entry of a `font-family` list selects, if any.
     fn select_one_family(&self, fam: &str, generic: Family, weight: u16, italic: bool, stretch: u16) -> Option<FontId> {
+        // A quoted generic keyword names a family literally.
+        if let Some(quoted) = fam.trim().strip_prefix('"').and_then(|f| f.strip_suffix('"')) {
+            return self.select_exact_family_stretch(&quoted.to_ascii_lowercase(), weight, italic, stretch);
+        }
         let name = fam.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase();
         if name.is_empty() {
             return None;

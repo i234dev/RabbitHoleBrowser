@@ -522,7 +522,11 @@ impl<'a> Builder<'a> {
         // Form controls get synthesized text content. Generated content
         // (`::before` / `::after`) wraps the element's children; counters
         // created by the children live in this element's scope.
-        self.counters.borrow_mut().enter();
+        if style.contain_style || style.container_size || style.container_inline {
+            self.counters.borrow_mut().enter_contained();
+        } else {
+            self.counters.borrow_mut().enter();
+        }
         // Text fields, text areas and menus show no generated content (like
         // Blink: only buttons, checkboxes and radios render it).
         let no_generated = match tag {

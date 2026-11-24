@@ -107,6 +107,8 @@
     load(font, text = ' ') {
       const families = parseFontFamilies(font);
       if (!families) return Promise.reject(new SyntaxError(`Failed to execute 'load' on 'FontFaceSet': Could not resolve '${font}' as a font.`));
+      // Rules inserted since the last style update take part.
+      if (N.flushStyles) N.flushStyles();
       const matches = matching(this, families, text);
       return Promise.all(matches.map((f) => f.load())).then(() => matches);
     }
