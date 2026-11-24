@@ -314,7 +314,9 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn node_rect(&mut self, node: NodeId) -> Option<Rect> {
         self.ensure_layout();
-        self.page.layout_rect_of(node)
+        let r = self.page.layout_rect_of(node);
+        // A box broken across columns has its unfragmented size here.
+        r.map(|r| self.page.layout.unfragmented_rect(&self.page.doc, node).unwrap_or(r))
     }
     fn node_client_rects(&mut self, node: NodeId) -> Vec<Rect> {
         self.ensure_layout();

@@ -413,7 +413,11 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                 let tj = pos[j];
                 if tj.is_finite() {
                     let k = g.col(tj);
-                    if bt > g.end(k) + EPS && tj > g.start(k) + EPS {
+                    if bt > g.end(k) + EPS && tj <= g.start(k) + EPS {
+                        // (It cannot move: the break falls in the padding.)
+                        violated = true;
+                        shortfall = shortfall.min(bt - g.end(k));
+                    } else if bt > g.end(k) + EPS {
                         shortfall = shortfall.min(bt - g.end(k));
                         backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at, &mut pos);
                         continue;
@@ -468,7 +472,10 @@ fn paginate(evs: &[Ev], a: usize, b: usize, g: &Geometry, off0: f32) -> Plan {
                         backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at, &mut pos);
                         continue;
                     }
-                    violated |= avoid_before || inside_avoid(evs, a, i);
+                    // (A first child that cannot take its container's start
+                    // along breaks inside the container's padding.)
+                    let glue = i > a && matches!(evs[i - 1], Ev::Start { edge: true, .. }) && at_column_top(g, pos[i - 1]);
+                    violated |= avoid_before || glue || inside_avoid(evs, a, i);
                     push(i, t, g.end(k), &mut off, &mut struts, &mut pushes, &mut pos);
                 }
                 if force_at == i {

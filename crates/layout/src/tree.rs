@@ -967,6 +967,8 @@ pub struct LayoutTree {
     /// Box construction used CSS counters or quotes (document-order
     /// state), so boxes cannot be rebuilt piecemeal.
     pub(crate) uses_counters: bool,
+    /// Some box is broken across columns (computed when first asked).
+    pub(crate) fragmented: std::cell::OnceCell<bool>,
 }
 
 impl LayoutTree {
@@ -985,6 +987,7 @@ impl LayoutTree {
             viewport: (0.0, 0.0),
             uses_counters: true,
             resolved_anchor_styles: Default::default(),
+            fragmented: Default::default(),
         }
     }
 
@@ -1191,9 +1194,33 @@ impl LayoutTree {
     /// The border boxes of the fragments of `node`'s box when it is broken
     /// across columns, in document coordinates (`None` when unbroken).
     pub fn fragment_rects(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<Vec<Rect>> {
+        if !self.has_fragments() {
+            return None;
+        }
         let (b, coordinates) = self.box_and_coordinates(doc, node)?;
         let p = b.col_pieces.as_deref()?;
         Some(p.pieces.iter().map(|p| physical_rect(coordinates, p.rect)).collect())
+    }
+
+    /// Is some box broken across columns?
+    pub fn has_fragments(&self) -> bool {
+        fn any(b: &LayoutBox) -> bool {
+            b.col_pieces.is_some() || b.children.iter().any(any)
+        }
+        *self.fragmented.get_or_init(|| any(&self.root))
+    }
+
+    /// The border box of `node`'s box broken across columns as if it were
+    /// not (its unfragmented size, at its first fragment), which CSSOM
+    /// offset, client and scroll sizes report; `None` when unbroken.
+    pub fn unfragmented_rect(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<Rect> {
+        if !self.has_fragments() {
+            return None;
+        }
+        let (b, coordinates) = self.box_and_coordinates(doc, node)?;
+        let p = b.col_pieces.as_deref()?;
+        let first = p.pieces.first()?.rect;
+        Some(physical_rect(coordinates, Rect::new(first.x, first.y, p.border.w, p.border.h)))
     }
 
     /// The used motion-path transform, including the element's other CSS

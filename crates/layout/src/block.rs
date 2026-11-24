@@ -583,6 +583,7 @@ impl<'a> Layouter<'a> {
             viewport: (vp_w, vp_h),
             uses_counters,
             resolved_anchor_styles: Default::default(),
+            fragmented: Default::default(),
         }
     }
 
