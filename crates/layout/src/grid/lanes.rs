@@ -531,7 +531,42 @@ impl<'a> Layouter<'a> {
         let _probe = self.grid_publication.probe_grid();
         let align=b.style.align_content;
         let mut contribs = Vec::new();
+        // Baseline-aligned items' contributions include their shims; those
+        // of subgrid items share the groups too (Grid2 §11.5 step 1).
+        let dir=b.style.grid_lanes_direction;
+        let baselines_apply=!dir.fill_reverse&&!dir.track_reverse;
+        let container=b.style.clone();
+        let mut baselines:Vec<(usize,baseline::ItemBaseline)>=Vec::new();
         for (it, &w) in items.iter().zip(widths) {
+            if !subgrid::requests(&b.children[it.idx]).1&&baselines_apply&&it.align==ItemAlign::Baseline {
+                // Laid out once: positions differ only in the edge layers.
+                let mut inner:Option<f32>=None;
+                for s in Self::lane_positions(it,&tl.tracks) {
+                    let mut gi=Self::lane_grid_item(it,s,true);
+                    subgrid::item_edges(b,&mut gi,0.,gap);
+                    let child=&mut b.children[it.idx];
+                    if !baseline::eligible(child,&gi,&tl.tracks,true) {break;}
+                    let mv=gi.edges.margin_sum(Axis::Column);
+                    let h=match inner {
+                        Some(inner)=>inner+mv,
+                        None=>{
+                            let mut lane=*it;lane.edges=gi.edges;
+                            let h=self.lane_item_height(child,&lane,w,cbw);
+                            if resolve_size(child.style.height,None,child.style.box_sizing==BoxSizing::BorderBox,it.edges.pb_v).is_some() {
+                                let cb=Cb{x:0.0,width:cbw,height:None};
+                                let mut bfc=Bfc::new();
+                                self.forced_content_height=None;
+                                self.layout_block(child,&cb,0.0,&mut bfc,WidthMode::Fixed(w));
+                            }
+                            inner=Some(h-mv);
+                            h
+                        }
+                    };
+                    baselines.push((contribs.len(),baseline::measure(&container,child,&gi,true)));
+                    contribs.push(Contribution{start:s,end:s+it.span.min(tl.tracks.len()),min:h,max:h,auto_min:false,minimum:h,baseline:None});
+                }
+                if inner.is_some() {continue;}
+            }
             if tl.inherited.is_none()&&subgrid::requests(&b.children[it.idx])==(false,false) {
                 let h=self.lane_item_height(&mut b.children[it.idx],it,w,cbw);
                 let st=&b.children[it.idx].style;
@@ -544,7 +579,7 @@ impl<'a> Layouter<'a> {
                     // An explicit minimum height with an automatic height is
                     // the minimum contribution (Grid2 §6.6).
                     let minimum=match st.min_height {Length::Px(m) if st.height.is_auto()=>{let bb=st.box_sizing==BoxSizing::BorderBox;let m=if bb {(m-it.edges.pb_v).max(0.)} else {m};(m+extras).min(min)},_=>min};
-                    contribs.push(Contribution{start:s,end,min,max:h,auto_min,minimum});
+                    contribs.push(Contribution{start:s,end,min,max:h,auto_min,minimum,baseline:None});
                 }
                 continue;
             }
@@ -563,14 +598,19 @@ impl<'a> Layouter<'a> {
                 let rows=rows.then(||subgrid::item_layer_source(subgrid::sizing_section_aligned(tl,s,s+it.span,gap,it.fixed.is_some(),row_available,align),&item,&child.style,true,cbw));
                 let mut nested=self.with_subgrid(child,columns,rows,cbw,|this,child| {
                     if subgrid::shared(child,true).is_some() {this.subgrid_axis_contributions(child,true,Some(w),phase)}
-                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h,auto_min:false,minimum:h}]}
+                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h,auto_min:false,minimum:h,baseline:None}]}
                 });
                 if it.fixed.is_none() {nested=subgrid::automatic_contributions(&mut self.grid_work,nested,it.span);}
-                for c in &mut nested {c.start+=s;c.end+=s;}
+                for c in &mut nested {
+                    c.start+=s;c.end+=s;
+                    if let Some(tag)=&mut c.baseline {if baselines_apply {*tag=tag.shifted(s);} else {c.baseline=None;}}
+                }
                 self.grid_work.charge(nested.len());
                 contribs.extend(nested);
             }
         }
+        baseline::add_shims(&baselines,&mut contribs);
+        baseline::reshare(&mut contribs);
         contribs
     }
 
@@ -794,7 +834,7 @@ impl<'a> Layouter<'a> {
             child.translate(nx - child.rect.x, ny - child.rect.y);
         }
         // Baseline self-alignment in the lanes (the grid axis).
-        if !dir.fill_reverse && !dir.track_reverse && items.iter().any(|it| it.align == ItemAlign::Baseline) {
+        if !dir.fill_reverse && !dir.track_reverse && items.iter().any(|it| it.align == ItemAlign::Baseline || b.children[it.idx].subgrid_baselines.is_some()) {
             let lane_items: Vec<GridItem> = items.iter().enumerate().map(|(i, it)| { let mut gi = Self::lane_grid_item(it, pl.start[i], true); subgrid::item_edges(b, &mut gi, col_gap, row_gap); gi }).collect();
             self.align_item_baselines(b, &lane_items, (&[], &[]), (&tl.tracks, &row_pos), (cx, cy), false, &[true]);
         }

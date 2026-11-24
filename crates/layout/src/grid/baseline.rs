@@ -106,7 +106,15 @@ pub(super) fn measure(container: &ComputedStyle, child: &LayoutBox, it: &GridIte
         // An orthogonal item has no baseline in this axis: one is
         // synthesized from the line-under edge of the container's mode,
         // the logical top of a reflected (`vertical-lr`) container.
-        let under = if container.writing_mode == WritingMode::VerticalLr { r.y } else { r.bottom() };
+        // A central dominant baseline (vertical typographic mode) is
+        // synthesized halfway between the edges (CSS Align 3 §9.1).
+        let under = if container.central_baseline() {
+            r.y + r.h / 2.0
+        } else if container.writing_mode == WritingMode::VerticalLr {
+            r.y
+        } else {
+            r.bottom()
+        };
         // A vertical item whose block flow runs against its vertical
         // container's is laid out in the container's logical space, its
         // lines in reverse order: its first line is the last one there.
@@ -137,6 +145,21 @@ pub(super) fn measure(container: &ComputedStyle, child: &LayoutBox, it: &GridIte
     ItemBaseline { track, end, ascent }
 }
 
+/// A contribution's baseline-sharing group and the shim it includes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct BaselineTag {
+    group: ItemBaseline,
+    shim: f32,
+}
+
+impl BaselineTag {
+    /// The tag in the lines of a grid whose track `by` is this one's first.
+    pub(super) fn shifted(mut self, by: usize) -> Self {
+        self.group.track += by;
+        self
+    }
+}
+
 /// The largest ascent of each group, by (track, end).
 fn group_maxima(list: &[ItemBaseline]) -> Vec<((usize, bool), f32)> {
     let mut groups: Vec<((usize, bool), f32)> = Vec::new();
@@ -159,11 +182,33 @@ fn shims(list: &[ItemBaseline]) -> Vec<f32> {
 /// Add the baseline shims of `items` to their contributions (one per item).
 pub(super) fn add_shims(list: &[(usize, ItemBaseline)], out: &mut [Contribution]) {
     let only: Vec<ItemBaseline> = list.iter().map(|x| x.1).collect();
-    for (&(k, _), shim) in list.iter().zip(shims(&only)) {
+    for (&(k, group), shim) in list.iter().zip(shims(&only)) {
         if let Some(c) = out.get_mut(k) {
             c.min += shim;
             c.max += shim;
             c.minimum += shim;
+            c.baseline = Some(BaselineTag { group, shim });
+        }
+    }
+}
+
+/// Share the baseline groups of all tagged contributions, those of subgrid
+/// items included, replacing the shims of their own grids' groups.
+pub(super) fn reshare(out: &mut [Contribution]) {
+    let list: Vec<ItemBaseline> = out.iter().filter_map(|c| c.baseline.map(|t| t.group)).collect();
+    if list.is_empty() {
+        return;
+    }
+    let groups = group_maxima(&list);
+    for c in out.iter_mut() {
+        let Some(tag) = &mut c.baseline else { continue };
+        let shim = groups.iter().find(|g| g.0 == (tag.group.track, tag.group.end)).map_or(0.0, |g| g.1 - tag.group.ascent);
+        let d = shim - tag.shim;
+        if d != 0.0 {
+            c.min += d;
+            c.max += d;
+            c.minimum += d;
+            tag.shim = shim;
         }
     }
 }
@@ -225,13 +270,36 @@ impl<'a> Layouter<'a> {
                 continue;
             }
             let tracks = if axis_rows { rows.0 } else { cols.0 };
-            let members: Vec<&GridItem> = items.iter().filter(|it| eligible(&b.children[it.idx], it, tracks, axis_rows) && b.children[it.idx].flow != crate::tree::Flow::Absolute).collect();
-            if members.is_empty() {
+            // Items of row subgrids share this grid's row groups (Grid2 §9);
+            // the subgrids themselves are stretched in that axis.
+            let share = axis_rows;
+            let row_subgrid = |c: &LayoutBox| share && !c.wm_wrapper && super::subgrid::requests(c).1;
+            let members: Vec<&GridItem> = items.iter().filter(|it| eligible(&b.children[it.idx], it, tracks, axis_rows) && b.children[it.idx].flow != crate::tree::Flow::Absolute && !row_subgrid(&b.children[it.idx])).collect();
+            let mut nested: Vec<(Vec<u32>, ItemBaseline, f32)> = Vec::new();
+            if share {
+                for it in items {
+                    let child = &b.children[it.idx];
+                    if !row_subgrid(child) {
+                        continue;
+                    }
+                    let Some(list) = child.subgrid_baselines.as_deref() else { continue };
+                    for m in list {
+                        let mut path = Vec::with_capacity(m.path.len() + 1);
+                        path.push(it.idx as u32);
+                        path.extend_from_slice(&m.path);
+                        let group = ItemBaseline { track: m.track + it.area.row.0.max(0) as usize, end: m.end, ascent: m.ascent };
+                        nested.push((path, group, m.shim));
+                    }
+                }
+            }
+            if members.is_empty() && nested.is_empty() {
                 continue;
             }
-            let list: Vec<ItemBaseline> = members.iter().map(|it| measure(&style, &b.children[it.idx], it, axis_rows)).collect();
+            let mut list: Vec<ItemBaseline> = members.iter().map(|it| measure(&style, &b.children[it.idx], it, axis_rows)).collect();
+            list.extend(nested.iter().map(|n| n.1));
             let shim = shims(&list);
-            for ((it, bl), shim) in members.iter().zip(&list).zip(shim) {
+            for ((it, bl), shim) in members.iter().zip(&list).zip(&shim) {
+                let shim = *shim;
                 let (tracks, pos, span, o) = if axis_rows { (rows.0, rows.1, it.area.row, origin.1) } else { (cols.0, cols.1, it.area.col, origin.0) };
                 let (a, size) = span_size(tracks, pos, span.0.max(0) as usize, span.1.max(0) as usize);
                 let child = &mut b.children[it.idx];
@@ -240,6 +308,22 @@ impl<'a> Layouter<'a> {
                 let target = if bl.end { o + a + size - shim - outer } else { o + a + shim };
                 let d = target - cur;
                 if axis_rows { child.translate(0.0, d) } else { child.translate(d, 0.0) }
+            }
+            let nested_shims = &shim[members.len()..];
+            for ((path, group, old), new) in nested.iter().zip(nested_shims) {
+                let d = new - old;
+                if d != 0.0 {
+                    let mut node = &mut *b;
+                    for &k in path {
+                        node = &mut node.children[k as usize];
+                    }
+                    node.translate(0.0, if group.end { -d } else { d });
+                }
+            }
+            if axis_rows && super::subgrid::shared(b, true).is_some() {
+                let mut export: Vec<super::subgrid::SharedBaseline> = members.iter().zip(&list).zip(&shim).map(|((it, bl), s)| super::subgrid::SharedBaseline { path: vec![it.idx as u32], track: bl.track, end: bl.end, ascent: bl.ascent, shim: *s }).collect();
+                export.extend(nested.into_iter().zip(nested_shims).map(|((path, group, _), s)| super::subgrid::SharedBaseline { path, track: group.track, end: group.end, ascent: group.ascent, shim: *s }));
+                b.subgrid_baselines = Some(Box::new(export));
             }
         }
     }

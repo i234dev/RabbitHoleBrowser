@@ -179,6 +179,10 @@ struct Contribution {
     auto_min: bool,
     /// The minimum contribution (§6.6), when it differs from `min`.
     minimum: f32,
+    /// The baseline-sharing group of a baseline-aligned item and the shim
+    /// already included in `min`, `max` and `minimum` (§11.5 step 1).
+    /// Subgrid items keep it so their parent can share its groups.
+    baseline: Option<baseline::BaselineTag>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1290,6 +1294,7 @@ impl<'a> Layouter<'a> {
     pub(crate) fn layout_grid(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
         self.grid_layouts += 1;
         if self.grid_publication.enabled() { b.used_grid_tracks = [None, None]; }
+        b.subgrid_baselines = None;
         if b.style.grid_lanes || subgrid::inherits_stacking(b) {
             return self.layout_grid_lanes(b, cb);
         }
@@ -1420,7 +1425,7 @@ impl<'a> Layouter<'a> {
             });
         }
         // Baseline self-alignment (§10.6).
-        if items.iter().any(|it| baseline::participates(it, true) || baseline::participates(it, false)) {
+        if items.iter().any(|it| baseline::participates(it, true) || baseline::participates(it, false) || b.children[it.idx].subgrid_baselines.is_some()) {
             self.align_item_baselines(b, &items, (&cols.tracks, &col_pos), (&rows.tracks, &row_pos), (content_x, content_y), mirror, &[true, false]);
         }
         b.flex_baselines = baseline::container_baselines(&style, &items, &b.children);
@@ -1999,7 +2004,7 @@ impl<'a> Layouter<'a> {
             _=>min,
         };
         let auto_min=child.kind!=BoxKind::Image&&child.style.min_width.is_auto()&&(child.style.width.is_auto()||pct(child.style.width))&&ratio_width.is_none();
-        Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras,auto_min,minimum:min+extras}
+        Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras,auto_min,minimum:min+extras,baseline:None}
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2026,10 +2031,16 @@ impl<'a> Layouter<'a> {
                 let inner_w=this.grid_item_width(child,&item,aw,cbw);
                 this.subgrid_axis_contributions(child,true,Some(inner_w),phase)
             });
-            for c in &mut nested {c.start+=it.area.row.0 as usize;c.end+=it.area.row.0 as usize;}
+            for c in &mut nested {
+                c.start+=it.area.row.0 as usize;c.end+=it.area.row.0 as usize;
+                if let Some(tag)=&mut c.baseline {*tag=tag.shifted(it.area.row.0 as usize);}
+            }
             self.grid_work.charge(nested.len());
             out.extend(nested);
         }
+        // Items of row subgrids take part in this grid's baseline-sharing
+        // groups (Grid2 §9, §11.5 step 1).
+        baseline::reshare(&mut out);
         out
     }
 
@@ -2088,6 +2099,7 @@ impl<'a> Layouter<'a> {
                 max: h,
                 auto_min: child.style.height.is_auto() && child.style.min_height.is_auto(),
                 minimum,
+                baseline: None,
             });
         }
         // Baseline-aligned items of a row are shifted to share a baseline:

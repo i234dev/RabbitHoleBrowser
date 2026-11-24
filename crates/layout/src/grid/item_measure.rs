@@ -77,7 +77,7 @@ impl<'a> Layouter<'a> {
             }
         };
         assert!(minimum.is_finite()&&maximum.is_finite()&&true_min_content.is_finite(),"Non-finite ordinary Grid contribution");
-        OrdinaryItemMeasurement{contribution:Contribution{start:start as usize,end:end as usize,min:minimum,max:maximum,auto_min:false,minimum},true_min_content,baseline}
+        OrdinaryItemMeasurement{contribution:Contribution{start:start as usize,end:end as usize,min:minimum,max:maximum,auto_min:false,minimum,baseline:None},true_min_content,baseline}
     }
 }
 
@@ -130,7 +130,7 @@ mod tests {
         with_item("<span></span><span></span>","",|layouter,node,item| {
             let original=node.style.clone();
             let value=layouter.measure_ordinary_item(node,item,GridAxis::Columns,OperationKind::Layout,area(AvailableSpace::Definite(100.),AvailableSpace::Indefinite),800.);
-            assert_eq!(value.contribution,Contribution{start:0,end:1,min:0.,max:80.,auto_min:false,minimum:0.});
+            assert_eq!(value.contribution,Contribution{start:0,end:1,min:0.,max:80.,auto_min:false,minimum:0.,baseline:None});
             assert_eq!(value.true_min_content,40.);assert!(value.baseline.is_none());
             assert!(Rc::ptr_eq(&node.style,&original));assert!(node.intrinsic_cache.is_none());
         });

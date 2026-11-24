@@ -343,6 +343,10 @@ pub struct LayoutBox {
     /// Used per-axis subgrid inputs. Computed styles retain the CSS request.
     pub(crate) grid_columns: Option<crate::grid::subgrid::AxisInheritance>,
     pub(crate) grid_rows: Option<crate::grid::subgrid::AxisInheritance>,
+    /// The row baseline-sharing group members of a row subgrid, its own
+    /// items' and its nested row subgrids', for its parent to share its
+    /// groups with them (Grid2 §9). Set by the subgrid's layout.
+    pub(crate) subgrid_baselines: Option<Box<Vec<crate::grid::subgrid::SharedBaseline>>>,
     /// CSSOM data from final layout, in this Grid box's own logical axes.
     pub(crate) used_grid_tracks: [Option<Rc<rabbithole_style::UsedGridTrackList>>; 2],
     /// `position: relative` offset currently applied to the box.
@@ -451,6 +455,7 @@ impl LayoutBox {
             contents_fp: std::cell::Cell::new(None),
             grid_columns: None,
             grid_rows: None,
+            subgrid_baselines: None,
             used_grid_tracks: [None, None],
             rel_applied: (0.0, 0.0),
             reused_layout: false,

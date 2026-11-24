@@ -62,7 +62,7 @@ fn intrinsic_constraints_keep_fixed_minimum_and_maximum_distinct() {
 
 #[test]
 fn max_content_constraint_maximizes_intrinsic_growth_limits() {
-    let contributions=[Contribution{start:0,end:1,min:40.,max:120.,auto_min:false,minimum:40.}];
+    let contributions=[Contribution{start:0,end:1,min:40.,max:120.,auto_min:false,minimum:40.,baseline:None}];
     let (min,max)=intrinsic_sizes(&[Track::new(Sizing::Auto,Sizing::Auto)],&contributions);
     assert_eq!(min,[40.]);assert_eq!(max,[120.]);
     let (min,max)=intrinsic_sizes(&[Track::new(Sizing::Fixed(0.),Sizing::MaxContent)],&contributions);
@@ -71,7 +71,7 @@ fn max_content_constraint_maximizes_intrinsic_growth_limits() {
 
 #[test]
 fn min_content_constraint_preserves_max_content_track_minimum() {
-    let contributions=[Contribution{start:0,end:1,min:40.,max:120.,auto_min:false,minimum:40.}];
+    let contributions=[Contribution{start:0,end:1,min:40.,max:120.,auto_min:false,minimum:40.,baseline:None}];
     let (min,max)=intrinsic_sizes(&[Track::new(Sizing::MaxContent,Sizing::MaxContent)],&contributions);
     assert_eq!(min,[120.]);assert_eq!(max,[120.]);
 }
@@ -80,7 +80,7 @@ fn min_content_constraint_preserves_max_content_track_minimum() {
 fn min_content_constraint_does_not_expand_spanning_flexible_tracks() {
     // A content-based minimum of an item spanning a flexible track is zero.
     let tracks=[Track::new(Sizing::Auto,Sizing::Flex(1.)),Track::new(Sizing::Fixed(30.),Sizing::Fixed(30.))];
-    let contributions=[Contribution{start:0,end:2,min:300.,max:300.,auto_min:true,minimum:300.}];
+    let contributions=[Contribution{start:0,end:2,min:300.,max:300.,auto_min:true,minimum:300.,baseline:None}];
     let (min,max)=intrinsic_sizes(&tracks,&contributions);
     assert_eq!(min,[0.,30.]);assert_eq!(max,[270.,30.]);
 }
@@ -89,7 +89,7 @@ fn min_content_constraint_does_not_expand_spanning_flexible_tracks() {
 fn max_content_constraint_respects_fit_content_and_collapsed_tracks() {
     let mut collapsed=Track::new(Sizing::Fixed(40.),Sizing::Fixed(100.));collapsed.collapsed=true;
     let tracks=[Track::new(Sizing::Auto,Sizing::FitContent(80.)),collapsed];
-    let contributions=[Contribution{start:0,end:1,min:40.,max:120.,auto_min:false,minimum:40.}];
+    let contributions=[Contribution{start:0,end:1,min:40.,max:120.,auto_min:false,minimum:40.,baseline:None}];
     let (min,max)=intrinsic_sizes(&tracks,&contributions);
     assert_eq!(min,[40.,0.]);assert_eq!(max,[80.,0.]);
 }
@@ -146,7 +146,7 @@ fn auto_repeat_floors_a_definite_maximum_by_the_definite_minimum() {
 #[test]
 fn staged_intrinsic_resolution_preserves_bases_and_limits_for_later_available_space() {
     let original=[Track::new(Sizing::Auto,Sizing::Auto),Track::new(Sizing::Auto,Sizing::Auto)];
-    let contributions=[Contribution{start:0,end:1,min:100.,max:100.,auto_min:false,minimum:100.},Contribution{start:1,end:2,min:10.,max:48.,auto_min:false,minimum:10.}];
+    let contributions=[Contribution{start:0,end:1,min:100.,max:100.,auto_min:false,minimum:100.,baseline:None},Contribution{start:1,end:2,min:10.,max:48.,auto_min:false,minimum:10.,baseline:None}];
     let mut initial=original;
     resolve_intrinsic_tracks(&mut initial,&contributions,0.);
     assert_eq!([initial[0].base,initial[1].base],[100.,10.]);
@@ -161,7 +161,7 @@ fn staged_intrinsic_resolution_preserves_bases_and_limits_for_later_available_sp
 #[test]
 fn completing_staged_tracks_still_expands_flexible_tracks_from_spanning_content() {
     let mut tracks=[Track::new(Sizing::Auto,Sizing::Flex(1.)),Track::new(Sizing::Fixed(30.),Sizing::Fixed(30.))];
-    let contributions=[Contribution{start:0,end:2,min:300.,max:300.,auto_min:true,minimum:300.}];
+    let contributions=[Contribution{start:0,end:2,min:300.,max:300.,auto_min:true,minimum:300.,baseline:None}];
     resolve_intrinsic_tracks(&mut tracks,&contributions,0.);
     assert_eq!([tracks[0].base,tracks[1].base],[0.,30.]);
     complete_track_sizing(&mut tracks,&contributions,GridSpace::MaxContent,0.,false);
@@ -171,7 +171,7 @@ fn completing_staged_tracks_still_expands_flexible_tracks_from_spanning_content(
 #[test]
 fn legacy_indefinite_completion_keeps_flexible_track_expansion() {
     let original=[Track::new(Sizing::Auto,Sizing::Auto),Track::new(Sizing::Fixed(0.),Sizing::Flex(1.))];
-    let contributions=[Contribution{start:0,end:1,min:10.,max:40.,auto_min:false,minimum:10.},Contribution{start:1,end:2,min:0.,max:90.,auto_min:false,minimum:0.}];
+    let contributions=[Contribution{start:0,end:1,min:10.,max:40.,auto_min:false,minimum:10.,baseline:None},Contribution{start:1,end:2,min:0.,max:90.,auto_min:false,minimum:0.,baseline:None}];
     for (space,expected) in [
         (GridSpace::LegacyIndefinite,[10.,90.]),
         (GridSpace::MinContent,[10.,0.]),
@@ -193,11 +193,11 @@ fn explicit_minimums_of_items_spanning_flexible_tracks_grow_them_by_flex_factor(
     // over `1fr 3fr` by the flex factors; fixed-minimum tracks get nothing.
     for (sizes,expected) in [([0.,0.],[50.,50.]),([1.,3.],[25.,75.])] {
         let mut tracks=[Track::new(Sizing::Auto,Sizing::Flex(sizes[0])),Track::new(Sizing::Auto,Sizing::Flex(sizes[1]))];
-        let contributions=[Contribution{start:0,end:2,min:100.,max:100.,auto_min:false,minimum:100.}];
+        let contributions=[Contribution{start:0,end:2,min:100.,max:100.,auto_min:false,minimum:100.,baseline:None}];
         resolve_intrinsic_tracks(&mut tracks,&contributions,0.);
         assert_eq!([tracks[0].base,tracks[1].base],expected);
     }
     let mut tracks=[Track::new(Sizing::Auto,Sizing::Flex(0.)),Track::new(Sizing::Fixed(0.),Sizing::Flex(1.))];
-    resolve_intrinsic_tracks(&mut tracks,&[Contribution{start:0,end:2,min:100.,max:100.,auto_min:false,minimum:100.}],0.);
+    resolve_intrinsic_tracks(&mut tracks,&[Contribution{start:0,end:2,min:100.,max:100.,auto_min:false,minimum:100.,baseline:None}],0.);
     assert_eq!([tracks[0].base,tracks[1].base],[100.,0.]);
 }

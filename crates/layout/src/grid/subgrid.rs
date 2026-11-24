@@ -96,6 +96,19 @@ pub(crate) struct SharedTracks {
     pub(super) flipped: bool,
 }
 
+/// A baseline-aligned item of a row subgrid: its path of child indices from
+/// the subgrid, its group (first track of a first-baseline group, last
+/// track of a last-baseline one, in the subgrid's lines), its ascent from
+/// the group's aligned edge, and the shim it is currently placed with.
+#[derive(Clone, Debug)]
+pub(crate) struct SharedBaseline {
+    pub(super) path: Vec<u32>,
+    pub(super) track: usize,
+    pub(super) end: bool,
+    pub(super) ascent: f32,
+    pub(super) shim: f32,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum AxisInheritance {
     Tracks(Arc<SharedTracks>),
@@ -418,11 +431,12 @@ pub(super) fn stretch_item(b:&LayoutBox,it:&mut GridItem) {
 /// of each intrinsic contribution. Compact in place before walking another
 /// subgrid level; hypothetical edge items must not duplicate exponentially.
 pub(super) fn compact_contributions(items:&mut Vec<Contribution>) {
-    items.sort_unstable_by_key(|c|(c.start,c.end));
+    items.sort_unstable_by_key(|c|(c.start,c.end,c.baseline.is_some()));
     let mut write=0;
     for read in 0..items.len() {
         let item=items[read];
-        if write>0&&items[write-1].start==item.start&&items[write-1].end==item.end {
+        // Baseline-aligned items keep their own groups and shims.
+        if write>0&&items[write-1].start==item.start&&items[write-1].end==item.end&&item.baseline.is_none()&&items[write-1].baseline.is_none() {
             items[write-1].min=items[write-1].min.max(item.min);
             items[write-1].max=items[write-1].max.max(item.max);
             items[write-1].minimum=items[write-1].minimum.max(item.minimum);
@@ -460,14 +474,14 @@ pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,_gap:f32,items:&mu
     let Some(first)=items.iter().map(|c|c.start).min() else {
         let size=(axis.inset_start+axis.inset_end).max(0.);
         if size>0. {
-            items.push(Contribution{start:0,end:count,min:size,max:size,auto_min:false,minimum:size});
+            items.push(Contribution{start:0,end:count,min:size,max:size,auto_min:false,minimum:size,baseline:None});
         }
         return;
     };
     let last=items.iter().map(|c|c.end).max().unwrap();
     let mut placeholder=|start:usize,size:f32| {
         let size=size.max(0.);
-        if size>0. {items.push(Contribution{start,end:start+1,min:size,max:size,auto_min:false,minimum:size});}
+        if size>0. {items.push(Contribution{start,end:start+1,min:size,max:size,auto_min:false,minimum:size,baseline:None});}
     };
     if first>0 {placeholder(0,axis.inset_start);}
     if last<count {placeholder(count-1,axis.inset_end);}
@@ -564,6 +578,8 @@ impl<'a> Layouter<'a> {
             let Some(inner)=b.children.first_mut() else {return Vec::new();};
             let inner_inline=shared(inner,false).filter(|axis|axis.definite).map(|axis|(axis.extent()-axis.inset_start-axis.inset_end).max(0.));
             let mut result=self.subgrid_axis_contributions(inner,!rows,inner_inline,phase);
+            // Orthogonal items do not share the parent's baseline groups.
+            for c in &mut result {c.baseline=None;}
             if reverse {for c in &mut result {let start=c.start;c.start=count.saturating_sub(c.end);c.end=count.saturating_sub(start);}}
             return result;
         }
@@ -796,23 +812,23 @@ mod tests {
         let parent=parent();let mut b=child();let mut saved=Vec::new();
         install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
         let mut items=vec![];empty_edge_contributions(&b,false,50.,&mut items);
-        assert_eq!(items,[Contribution{start:0,end:2,min:20.,max:20.,auto_min:false,minimum:20.}]);
+        assert_eq!(items,[Contribution{start:0,end:2,min:20.,max:20.,auto_min:false,minimum:20.,baseline:None}]);
     }
 
     #[test]
     fn an_empty_edge_track_gets_a_placeholder_with_only_the_edge_layer() {
         let parent=parent();let mut b=child();let mut saved=Vec::new();
         install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
-        let real=Contribution{start:1,end:2,min:30.,max:50.,auto_min:false,minimum:30.};let mut items=vec![real];
+        let real=Contribution{start:1,end:2,min:30.,max:50.,auto_min:false,minimum:30.,baseline:None};let mut items=vec![real];
         empty_edge_contributions(&b,false,50.,&mut items);
-        assert_eq!(items,[Contribution{start:0,end:1,min:10.,max:10.,auto_min:false,minimum:10.},real]);
+        assert_eq!(items,[Contribution{start:0,end:1,min:10.,max:10.,auto_min:false,minimum:10.,baseline:None},real]);
     }
 
     #[test]
     fn virtual_items_with_the_same_span_keep_both_independent_maxima() {
-        let mut items=vec![Contribution{start:1,end:3,min:10.,max:100.,auto_min:false,minimum:10.},Contribution{start:0,end:1,min:5.,max:5.,auto_min:false,minimum:5.},Contribution{start:1,end:3,min:20.,max:50.,auto_min:false,minimum:20.}];
+        let mut items=vec![Contribution{start:1,end:3,min:10.,max:100.,auto_min:false,minimum:10.,baseline:None},Contribution{start:0,end:1,min:5.,max:5.,auto_min:false,minimum:5.,baseline:None},Contribution{start:1,end:3,min:20.,max:50.,auto_min:false,minimum:20.,baseline:None}];
         compact_contributions(&mut items);
-        assert_eq!(items,[Contribution{start:0,end:1,min:5.,max:5.,auto_min:false,minimum:5.},Contribution{start:1,end:3,min:20.,max:100.,auto_min:false,minimum:20.}]);
+        assert_eq!(items,[Contribution{start:0,end:1,min:5.,max:5.,auto_min:false,minimum:5.,baseline:None},Contribution{start:1,end:3,min:20.,max:100.,auto_min:false,minimum:20.,baseline:None}]);
     }
 
     #[test]
@@ -852,8 +868,8 @@ mod tests {
     #[test]
     fn automatic_parent_positions_ignore_the_subitems_local_placement() {
         let mut budget=WorkBudget::default();
-        let out=automatic_contributions(&mut budget,vec![Contribution{start:1,end:2,min:40.,max:40.,auto_min:false,minimum:40.}],2);
-        assert_eq!(out,[Contribution{start:0,end:1,min:40.,max:40.,auto_min:false,minimum:40.},Contribution{start:1,end:2,min:40.,max:40.,auto_min:false,minimum:40.}]);
+        let out=automatic_contributions(&mut budget,vec![Contribution{start:1,end:2,min:40.,max:40.,auto_min:false,minimum:40.,baseline:None}],2);
+        assert_eq!(out,[Contribution{start:0,end:1,min:40.,max:40.,auto_min:false,minimum:40.,baseline:None},Contribution{start:1,end:2,min:40.,max:40.,auto_min:false,minimum:40.,baseline:None}]);
     }
 
     #[test]

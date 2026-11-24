@@ -420,7 +420,7 @@ mod tests {
         CompletedAxis::standalone(list(&[(Sizing::Auto,Sizing::Auto)]),contributions,GridSpace::MaxContent,0.,false,budget)
     }
 
-    fn contribution(min:f32,max:f32)->Contribution {Contribution{start:0,end:1,min,max,auto_min:false,minimum:min}}
+    fn contribution(min:f32,max:f32)->Contribution {Contribution{start:0,end:1,min,max,auto_min:false,minimum:min,baseline:None}}
 
     fn key(column:i32)->SlotKey {
         SlotKey{item:7,columns:(column,column+1),rows:(0,1),names:(true,true),automatic:true}
