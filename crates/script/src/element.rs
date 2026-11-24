@@ -3,7 +3,7 @@
 use crate::env::with_env;
 use rabbithole_js::V;
 use crate::host::*;
-use crate::node::{self, children_of, inner_text, insert_node, remove_node, set_inner_html, set_text_content};
+use crate::node::{self, children_of, insert_node, remove_node, set_inner_html, set_text_content};
 use rabbithole_dom::{ControlDirection, Document, NodeData, NodeId};
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, ALL, CONFIGURABLE, ENUMERABLE};
 
@@ -746,35 +746,103 @@ fn e_outer_html_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 
 fn e_inner_text_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "innerText")?;
-    Ok(Value::str(&inner_text(n)))
+    Ok(Value::str(&crate::inner_text::inner_text(n)))
+}
+
+/// `a.text`: the descendant text content.
+fn a_text_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "text")?;
+    Ok(Value::str(&with_doc(n.doc, |doc| doc.text_content(n.node))))
+}
+
+/// The rendered text fragment of `text`: text runs and a `<br>` for each
+/// line break (CR LF, CR or LF), as new detached nodes.
+fn rendered_text_fragment(doc: u32, text: &str) -> Vec<NodeRef> {
+    with_doc(doc, |d| {
+        let mut out = Vec::new();
+        let mut run = String::new();
+        let mut chars = text.chars().peekable();
+        let flush = |run: &mut String, d: &mut Document, out: &mut Vec<NodeRef>| {
+            if !run.is_empty() {
+                let t = d.create_text(run);
+                out.push(NodeRef { doc, node: t });
+                run.clear();
+            }
+        };
+        while let Some(c) = chars.next() {
+            if c == '\r' || c == '\n' {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                flush(&mut run, d, &mut out);
+                let br = d.create_element("br", vec![]);
+                out.push(NodeRef { doc, node: br });
+            } else {
+                run.push(c);
+            }
+        }
+        flush(&mut run, d, &mut out);
+        out
+    })
 }
 
 fn e_inner_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "innerText")?;
-    let text = arg_str(realm, args, 0)?;
-    // Newlines become <br>.
-    let parts: Vec<&str> = text.split('\n').collect();
+    let text = arg_null_to_empty(realm, args, 0)?;
     let old = children_of(n);
-    let added = with_doc(n.doc, |doc| {
+    let added = rendered_text_fragment(n.doc, &text);
+    with_doc(n.doc, |doc| {
         doc.clear_children(n.node);
-        let mut added = Vec::new();
-        for (i, part) in parts.iter().enumerate() {
-            if i > 0 {
-                let br = doc.create_element("br", vec![]);
-                doc.append_child(n.node, br);
-                added.push(NodeRef { doc: n.doc, node: br });
-            }
-            if !part.is_empty() {
-                let t = doc.create_text(part);
-                doc.append_child(n.node, t);
-                added.push(NodeRef { doc: n.doc, node: t });
-            }
+        for a in &added {
+            doc.append_child(n.node, a.node);
         }
-        added
     });
     node::record_child_list(n, added, old);
     if n.doc == 0 {
         mark_dirty();
+    }
+    Ok(Value::Undefined)
+}
+
+/// Merge `text` with its next sibling when both are Text nodes.
+fn merge_with_next_text(n: NodeRef) {
+    let next = with_doc(n.doc, |doc| {
+        let next = doc.next_sibling(n.node)?;
+        match (&doc.node(n.node).data, &doc.node(next).data) {
+            (NodeData::Text(a), NodeData::Text(b)) if !doc.is_cdata(n.node) && !doc.is_cdata(next) => Some((next, format!("{a}{b}"))),
+            _ => None,
+        }
+    });
+    if let Some((next, data)) = next {
+        node::set_character_data(n, &data);
+        remove_node(NodeRef { doc: n.doc, node: next });
+    }
+}
+
+fn e_outer_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "outerText")?;
+    let text = arg_null_to_empty(realm, args, 0)?;
+    let parent = with_doc(n.doc, |doc| doc.parent(n.node));
+    let Some(p) = parent else {
+        return Err(crate::misc::dom_exception(realm, "NoModificationAllowedError", "Failed to set the 'outerText' property on 'HTMLElement': The element has no parent."));
+    };
+    let (next, previous) = with_doc(n.doc, |doc| (doc.next_sibling(n.node), doc.prev_sibling(n.node)));
+    let mut nodes = rendered_text_fragment(n.doc, &text);
+    if nodes.is_empty() {
+        nodes.push(with_doc(n.doc, |d| NodeRef { doc: n.doc, node: d.create_text("") }));
+    }
+    let pref = NodeRef { doc: n.doc, node: p };
+    for nn in nodes {
+        insert_node(realm, pref, nn, Some(n.node))?;
+    }
+    remove_node(n);
+    if let Some(next) = next {
+        if let Some(prev_of_next) = with_doc(n.doc, |doc| doc.prev_sibling(next)) {
+            merge_with_next_text(NodeRef { doc: n.doc, node: prev_of_next });
+        }
+    }
+    if let Some(previous) = previous {
+        merge_with_next_text(NodeRef { doc: n.doc, node: previous });
     }
     Ok(Value::Undefined)
 }
@@ -2580,12 +2648,11 @@ pub(crate) fn install(realm: &mut Realm) {
     ] {
         reflect(realm, el, prop, attr, Reflect::NullableStr);
     }
-    crate::events::install_handler_props(realm, el, EVENT_HANDLER_NAMES);
 
     let html = define_class(realm, "HTMLElement", Some("Element"), crate::host::html_element_ctor);
     let hacc = |realm: &mut Realm, name: &str, g: rabbithole_js::NativeFn, s: Option<rabbithole_js::NativeFn>| realm.define_accessor(html, name, Some(g), s, ACC);
     hacc(realm, "innerText", e_inner_text_get, Some(e_inner_text_set));
-    hacc(realm, "outerText", e_inner_text_get, Some(e_inner_text_set));
+    hacc(realm, "outerText", e_inner_text_get, Some(e_outer_text_set));
     hacc(realm, "dataset", e_dataset, None);
     hacc(realm, "style", e_style, Some(e_style_set));
     hacc(realm, "hidden", e_hidden_get, Some(e_hidden_set));
@@ -2597,7 +2664,7 @@ pub(crate) fn install(realm: &mut Realm) {
     hacc(realm, "offsetTop", e_offset_top, None);
     hacc(realm, "offsetLeft", e_offset_left, None);
     hacc(realm, "offsetParent", e_offset_parent, None);
-    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize"), ("nonce", "nonce")] {
+    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize")] {
         reflect(realm, html, prop, attr, Reflect::Str);
     }
     reflect(realm, html, "popover", "popover", Reflect::Popover);
@@ -2692,7 +2759,7 @@ pub(crate) fn install(realm: &mut Realm) {
         reflect(realm, a, p, at, Reflect::Str);
     }
     realm.define_accessor(a, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
-    realm.define_accessor(a, "text", Some(e_inner_text_get), Some(n_text_set_alias), ACC);
+    realm.define_accessor(a, "text", Some(a_text_get), Some(n_text_set_alias), ACC);
 
     // --- HTMLInputElement
     let input = define_class(realm, "HTMLInputElement", Some("HTMLElement"), crate::host::html_element_ctor);
@@ -2825,7 +2892,7 @@ pub(crate) fn install(realm: &mut Realm) {
     // --- HTMLScriptElement
     let script = define_class(realm, "HTMLScriptElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(script, "text", Some(script_text_get), Some(script_text_set), ACC);
-    for (p, at) in [("type", "type"), ("charset", "charset"), ("integrity", "integrity"), ("nonce", "nonce")] {
+    for (p, at) in [("type", "type"), ("charset", "charset"), ("integrity", "integrity")] {
         reflect(realm, script, p, at, Reflect::Str);
     }
     reflect(realm, script, "src", "src", Reflect::Url);
@@ -2923,7 +2990,19 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "HTMLVideoElement", Some("HTMLMediaElement"), crate::host::html_element_ctor);
     define_class(realm, "HTMLAudioElement", Some("HTMLMediaElement"), crate::host::html_element_ctor);
     // --- SVGElement
+    // MathML elements (MathML Core): GlobalEventHandlers (html.js),
+    // HTMLOrSVGElement and ElementCSSInlineStyle.
+    let mathml = define_class(realm, "MathMLElement", Some("Element"), illegal_ctor);
+    realm.define_accessor(mathml, "tabIndex", Some(e_tab_index_get), Some(e_tab_index_set), ACC);
+    realm.define_accessor(mathml, "style", Some(e_style), Some(e_style_set), ACC);
+    realm.define_accessor(mathml, "dataset", Some(e_dataset), None, ACC);
+    realm.define_method(mathml, "focus", 0, e_focus);
+    realm.define_method(mathml, "blur", 0, e_blur);
     let svg = define_class(realm, "SVGElement", Some("Element"), illegal_ctor);
+    // GlobalEventHandlers: on HTML, SVG and MathML elements (not Element).
+    for p in [html, mathml, svg] {
+        crate::events::install_handler_props(realm, p, EVENT_HANDLER_NAMES);
+    }
     realm.define_accessor(svg, "tabIndex", Some(e_tab_index_get), Some(e_tab_index_set), ACC);
     realm.define_accessor(svg, "ownerSVGElement", Some(svg_owner), None, ACC);
     realm.define_accessor(svg, "style", Some(e_style), Some(e_style_set), ACC);

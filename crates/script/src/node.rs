@@ -887,65 +887,6 @@ pub(crate) fn node_or_text(realm: &mut Realm, doc: u32, v: &Value) -> JsResult<N
     Ok(with_doc(doc, |d| NodeRef { doc, node: d.create_text(&s) }))
 }
 
-/// `innerText`-like text with newlines between block-level elements.
-pub(crate) fn inner_text(n: NodeRef) -> String {
-    const BLOCK: &[&str] = &["p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "header", "footer", "ul", "ol", "pre", "blockquote", "table", "dd", "dt", "hr", "nav", "main", "aside", "form", "fieldset", "figure", "figcaption", "address"];
-    with_doc(n.doc, |doc| {
-        let mut out = String::new();
-        fn walk(doc: &Document, id: NodeId, out: &mut String) {
-            match &doc.node(id).data {
-                NodeData::Text(t) => out.push_str(t),
-                NodeData::Element(e) => {
-                    if matches!(e.tag.as_str(), "script" | "style" | "template" | "noscript") {
-                        return;
-                    }
-                    let block = BLOCK.contains(&e.tag.as_str());
-                    if block && !out.is_empty() && !out.ends_with('\n') {
-                        out.push('\n');
-                    }
-                    if e.tag == "br" {
-                        out.push('\n');
-                        return;
-                    }
-                    for c in doc.children(id) {
-                        walk(doc, c, out);
-                    }
-                    if block && !out.ends_with('\n') {
-                        out.push('\n');
-                    }
-                }
-                _ => {
-                    for c in doc.children(id) {
-                        walk(doc, c, out);
-                    }
-                }
-            }
-        }
-        walk(doc, n.node, &mut out);
-        // Collapse runs of whitespace like rendered text would.
-        let mut res = String::with_capacity(out.len());
-        let mut prev_space = true;
-        for ch in out.chars() {
-            if ch == '\n' {
-                while res.ends_with(' ') {
-                    res.pop();
-                }
-                res.push('\n');
-                prev_space = true;
-            } else if ch.is_whitespace() {
-                if !prev_space {
-                    res.push(' ');
-                    prev_space = true;
-                }
-            } else {
-                res.push(ch);
-                prev_space = false;
-            }
-        }
-        res.trim_matches('\n').to_string()
-    })
-}
-
 // ----------------------------------------------------------------- natives
 
 fn n_node_type(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {

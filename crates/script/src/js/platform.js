@@ -31,8 +31,9 @@
   const make = (C, state) => { const o = Object.create(C.prototype); hidden(o, S, state || {}); return o; };
   const nav = g.navigator;
   const setNav = (name, value) => { try { delete nav[name]; } catch (e) {} Object.defineProperty(g.Navigator.prototype, name, { get() { return value; }, configurable: true, enumerable: true }); };
-  const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, fn); };
-  const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true }); };
+  const named = g.__rhNative.named;
+  const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, named(fn, name)); };
+  const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get: get && named(get, 'get ' + name), set: set && named(set, 'set ' + name), configurable: true, enumerable: true }); };
   // Navigator members are accessors and operations of Navigator.prototype
   // (Web IDL), not own properties of navigator: consent managers and
   // fingerprinting guards read Object.getOwnPropertyDescriptor(

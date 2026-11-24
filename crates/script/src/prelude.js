@@ -5,6 +5,23 @@
   const g = globalThis;
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
 
+  // WebIDL names for operations and attribute accessors defined from JS
+  // (`fn.name` is the operation name, "get x" / "set x" for accessors).
+  // A function already named for another member gets a forwarding copy.
+  const namedFns = new WeakSet();
+  g.__rhNative.named = (fn, name) => {
+    if (typeof fn !== 'function' || fn.name === name) return fn;
+    if (namedFns.has(fn)) {
+      const target = fn;
+      fn = { [name](...a) { return target.apply(this, a); } }[name];
+      Object.defineProperty(fn, 'length', { value: target.length, configurable: true });
+    } else {
+      try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch (e) { return fn; }
+    }
+    namedFns.add(fn);
+    return fn;
+  };
+
   // ---------------------------------------------------------- DOMMatrix
   const IDENT = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
   // Column-major 4x4 like the spec's m11..m44 (m[i*4+j] = m(i+1)(j+1)).

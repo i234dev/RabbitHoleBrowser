@@ -461,6 +461,7 @@ pub(crate) fn wrap(realm: &mut Realm, n: NodeRef) -> Value {
         rabbithole_dom::NodeData::Comment(_) => ("Comment", "Comment"),
         rabbithole_dom::NodeData::Doctype(_) => ("DocumentType", "DocumentType"),
         rabbithole_dom::NodeData::Element(e) if matches!(e.ns, rabbithole_dom::Namespace::None | rabbithole_dom::Namespace::Other(_)) => ("Element", "Element"),
+        rabbithole_dom::NodeData::Element(e) if e.ns == rabbithole_dom::Namespace::MathMl => ("MathMLElement", "MathMLElement"),
         rabbithole_dom::NodeData::Element(e) => {
             let svg = e.tag != "#fragment" && is_svg_node(doc, n.node);
             element_class(&e.tag, svg)

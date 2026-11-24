@@ -18,13 +18,14 @@
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
   // Define accessors / methods only where the native bindings lack them.
+  const named = N.named;
   const acc = (C, name, get, set) => {
     if (!C || Object.prototype.hasOwnProperty.call(C.prototype, name)) return;
-    Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, name, { get: get && named(get, 'get ' + name), set: set && named(set, 'set ' + name), configurable: true, enumerable: true });
   };
   const method = (C, name, fn, force) => {
     if (!C || (!force && Object.prototype.hasOwnProperty.call(C.prototype, name))) return;
-    Object.defineProperty(C.prototype, name, { value: fn, writable: true, configurable: true });
+    Object.defineProperty(C.prototype, name, { value: named(fn, name), writable: true, configurable: true });
   };
   const resolveURL = (v) => { try { return new URL(v, document.baseURI).href; } catch (e) { return String(v); } };
 
@@ -33,7 +34,7 @@
   const table = g.__rhReflectTable || {};
   delete g.__rhReflectTable;
   const MIXINS = {
-    HTMLOrSVGOrMathMLElement: ['HTMLElement', 'SVGElement'],
+    HTMLOrSVGOrMathMLElement: ['HTMLElement', 'SVGElement', 'MathMLElement'],
     ARIAMixin: ['Element'],
     HTMLHyperlinkElementUtils: ['HTMLAnchorElement', 'HTMLAreaElement'],
     PopoverInvokerElement: ['HTMLButtonElement', 'HTMLInputElement'],

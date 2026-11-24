@@ -10,8 +10,9 @@
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
-  const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true }); };
-  const method = (C, name, fn) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) hidden(C.prototype, name, fn); };
+  const named = g.__rhNative.named;
+  const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get: get && named(get, 'get ' + name), set: set && named(set, 'set ' + name), configurable: true, enumerable: true }); };
+  const method = (C, name, fn) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) hidden(C.prototype, name, named(fn, name)); };
   // Enumerated attribute limited to known values.
   const {getAttribute, setAttribute, removeAttribute} = Element.prototype;
   function enumAttr(C, prop, attr, values, missing = '', invalid = missing, empty = invalid) {
@@ -85,7 +86,6 @@
     strAttr(g.SVGAElement, 'hreflang', 'hreflang');
     strAttr(g.SVGAElement, 'type', 'type');
   }
-  if (g.SVGElement) acc(g.SVGElement, 'nonce', function () { return this.getAttribute('nonce') || ''; }, function (v) { this.setAttribute('nonce', v); });
   if (g.SVGSVGElement) {
     for (const n of ['afterprint', 'beforeprint', 'beforeunload', 'hashchange', 'languagechange', 'message', 'messageerror', 'offline', 'online', 'pagehide', 'pagereveal', 'pageshow', 'pageswap', 'popstate', 'rejectionhandled', 'storage', 'unhandledrejection', 'unload']) {
       if (!Object.prototype.hasOwnProperty.call(g.SVGSVGElement.prototype, 'on' + n)) Object.defineProperty(g.SVGSVGElement.prototype, 'on' + n, { get() { return g['on' + n]; }, set(v) { g['on' + n] = v; }, configurable: true, enumerable: true });

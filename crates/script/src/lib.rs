@@ -21,6 +21,7 @@ pub use host::AuxiliaryDocument;
 mod media;
 mod node;
 mod reflect;
+mod inner_text;
 mod canvas2d;
 mod webcrypto;
 mod webgl;

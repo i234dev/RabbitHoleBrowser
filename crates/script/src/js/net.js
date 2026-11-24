@@ -23,7 +23,8 @@
       Object.defineProperty(C.prototype, k, { get() { return typeof v === 'function' ? v.call(this) : v; }, configurable: true, enumerable: true });
     }
   };
-  const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, fn); };
+  const named = g.__rhNative.named;
+  const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, named(fn, name)); };
 
   // ---------------------------------------------------------------- Blob
   const Blob = g.Blob;

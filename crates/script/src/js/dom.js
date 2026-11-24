@@ -17,10 +17,11 @@
   const S = Symbol('dom');
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
-  const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, fn); };
+  const named = g.__rhNative.named;
+  const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, named(fn, name)); };
   const acc = (C, name, get, set, force) => {
     if (!C || (!force && Object.prototype.hasOwnProperty.call(C.prototype, name))) return;
-    Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, name, { get: get && named(get, 'get ' + name), set: set && named(set, 'set ' + name), configurable: true, enumerable: true });
   };
   const consts = (C, map) => { for (const [k, v] of Object.entries(map)) { if (!Object.prototype.hasOwnProperty.call(C, k)) Object.defineProperty(C, k, { value: v, enumerable: true }); if (!Object.prototype.hasOwnProperty.call(C.prototype, k)) Object.defineProperty(C.prototype, k, { value: v, enumerable: true }); } };
 

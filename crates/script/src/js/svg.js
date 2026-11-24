@@ -12,7 +12,8 @@
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
-  const acc = (C, k, get, set) => Object.defineProperty(C.prototype, k, { get, set, configurable: true, enumerable: true });
+  const named = globalThis.__rhNative.named;
+  const acc = (C, k, get, set) => Object.defineProperty(C.prototype, k, { get: get && named(get, 'get ' + k), set: set && named(set, 'set ' + k), configurable: true, enumerable: true });
   const consts = (C, map) => { for (const [k, v] of Object.entries(map)) { Object.defineProperty(C, k, { value: v, enumerable: true }); Object.defineProperty(C.prototype, k, { value: v, enumerable: true }); } };
   const S = Symbol('svg');
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };

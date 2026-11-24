@@ -28,7 +28,8 @@
       if (!Object.prototype.hasOwnProperty.call(C.prototype, k)) Object.defineProperty(C.prototype, k, { value: v, enumerable: true });
     }
   };
-  const method = (C, name, fn) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) hidden(C.prototype, name, fn); };
+  const named = g.__rhNative.named;
+  const method = (C, name, fn) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) hidden(C.prototype, name, named(fn, name)); };
   // Copy dictionary members onto a freshly constructed event.
   const assign = (ev, init, map) => {
     for (const [k, d] of Object.entries(map)) {

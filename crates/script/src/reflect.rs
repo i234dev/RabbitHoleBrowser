@@ -322,6 +322,34 @@ pub(crate) fn reflect_native(realm: &mut Realm, _this: Value, args: &[Value]) ->
     Ok(Value::Bool(true))
 }
 
+// ------------------------------------------------------------- nonces
+
+thread_local! {
+    /// [[CryptographicNonce]] slots of elements whose nonce was set since
+    /// parsing (absent: the parsed nonce attribute's value).
+    static NONCES: std::cell::RefCell<std::collections::HashMap<NodeRef, String>> = Default::default();
+}
+
+/// The nonce attribute's change steps: the slot follows the attribute.
+pub(crate) fn nonce_attribute_changed(n: NodeRef, value: Option<&str>) {
+    NONCES.with(|m| m.borrow_mut().insert(n, value.unwrap_or("").to_string()));
+}
+
+/// `nonce` (HTMLOrSVGElement): the element's [[CryptographicNonce]], which
+/// the IDL setter changes without touching the content attribute.
+fn nonce_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "nonce")?;
+    let slot = NONCES.with(|m| m.borrow().get(&n).cloned());
+    Ok(Value::str(&slot.or_else(|| crate::element::get_attribute(n, "nonce")).unwrap_or_default()))
+}
+
+fn nonce_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "nonce")?;
+    let v = realm.to_rust_string(arg(args, 0))?;
+    NONCES.with(|m| m.borrow_mut().insert(n, v));
+    Ok(Value::Undefined)
+}
+
 // ------------------------------------------------- enumerated attributes
 
 const FORM_ENCTYPES: &[&str] = &["application/x-www-form-urlencoded", "multipart/form-data", "text/plain"];
@@ -352,6 +380,11 @@ pub(crate) fn install(realm: &mut Realm) {
         host.protos.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     };
     let proto = |name: &str| protos.iter().find(|p| p.0 == name).map(|p| p.1);
+    for iface in ["HTMLElement", "SVGElement", "MathMLElement"] {
+        if let Some(p) = proto(iface) {
+            realm.define_accessor(p, "nonce", Some(nonce_get), Some(nonce_set), ACC);
+        }
+    }
     let mut def = |iface: &str, prop: &str, attr: &str, kind: Reflect| {
         if let Some(p) = proto(iface) {
             reflect(realm, p, prop, attr, kind);
