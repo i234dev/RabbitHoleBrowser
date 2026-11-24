@@ -208,10 +208,8 @@
     const entry = REGISTRY[op] && REGISTRY[op].get(asciiUpper(name));
     if (!entry) throw notSupported('Algorithm: Unrecognized name');
     const [registered, dict] = entry;
-    // Conversion to the desired dictionary type reads every member again.
-    const again = alg.name;
-    if (again === undefined) throw new TypeError("Failed to read the 'name' property from 'Algorithm': Required member is undefined.");
-    str(again);
+    // The name member is read once (as engines do); the other members of
+    // the desired dictionary type are read in order below.
     const out = { name: registered };
     for (const [member, type, required] of dict) {
       const v = alg[member];
