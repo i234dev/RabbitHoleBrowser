@@ -86,6 +86,9 @@ pub enum InlineItem {
     Float(usize),
     Absolute(usize),
     Break,
+    /// A line break with `clear` (`<br clear>`): the next line goes below
+    /// the floats on that side.
+    ClearBreak(rabbithole_style::Clear),
 }
 
 /// Emphasis marks over (or under) each typographic character of a text

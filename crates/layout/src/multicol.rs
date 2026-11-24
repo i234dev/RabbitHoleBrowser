@@ -989,6 +989,15 @@ impl Layouter<'_> {
         let max_h = self.clamp_height(&style, f32::INFINITY, None, pb_v);
         let avail_h = cb.height.or(max_h.is_finite().then_some(max_h));
         let content_y = b.content_rect.y;
+        // A fieldset's rendered legend is not in its columns (HTML §15.3.13:
+        // the multi-column layout applies to its anonymous content box).
+        if let Some(legend) = self.rendered_legend(b) {
+            if !b.children[legend].style.column_span_all {
+                let mut st = (*b.children[legend].style).clone();
+                st.column_span_all = true;
+                b.children[legend].style = std::rc::Rc::new(st);
+            }
+        }
         // The flow: the contents laid out as one column.
         let saved = b.content_rect;
         b.content_rect.x = x0;
@@ -1027,6 +1036,19 @@ impl Layouter<'_> {
         }
         b.col_rules = (!rules.is_empty()).then(|| Box::new(rules));
         (end - content_y).max(0.0)
+    }
+}
+
+impl Layouter<'_> {
+    /// The index of a fieldset's rendered legend among its children.
+    fn rendered_legend(&self, b: &LayoutBox) -> Option<usize> {
+        let node = b.node?;
+        if b.formatting != Formatting::Block || self.ctx.doc.tag(node) != Some("fieldset") {
+            return None;
+        }
+        let i = b.children.iter().position(|c| c.flow == Flow::InFlow && c.pseudo.is_none())?;
+        let legend = b.children[i].node.is_some_and(|n| self.ctx.doc.tag(n) == Some("legend"));
+        legend.then_some(i)
     }
 }
 

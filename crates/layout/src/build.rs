@@ -1481,6 +1481,7 @@ fn flatten_one(mut c: LayoutBox, elem: Option<NodeId>, items: &mut Vec<InlineIte
                 });
             }
         }
+        BoxKind::LineBreak if c.style.clear != rabbithole_style::Clear::None => items.push(InlineItem::ClearBreak(c.style.clear)),
         BoxKind::LineBreak => items.push(InlineItem::Break),
         BoxKind::Inline => {
             let node = c.node;

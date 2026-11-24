@@ -1950,6 +1950,20 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     if let Some(c) = el.attr("bgcolor") {
         css.push_str(&format!("background-color:{};", legacy_color(c)));
     }
+    // `<br clear>` (HTML §15.3.10).
+    if tag == "br" {
+        if let Some(c) = el.attr("clear") {
+            let side = match c.trim().to_ascii_lowercase().as_str() {
+                "left" => "left",
+                "right" => "right",
+                "all" | "both" => "both",
+                _ => "",
+            };
+            if !side.is_empty() {
+                css.push_str(&format!("clear:{side};"));
+            }
+        }
+    }
     // The content language (inherited through `ComputedStyle::lang`).
     if let Some(l) = el.attr("lang").or_else(|| el.attr("xml:lang")) {
         css.push_str(&format!("-rh-lang:{};", lang_code(l)));

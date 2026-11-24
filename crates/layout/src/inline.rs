@@ -79,6 +79,8 @@ pub(crate) enum Piece {
     Float(usize),
     Abs(usize),
     Break,
+    /// A forced break whose next line clears floats.
+    ClearBreak(rabbithole_style::Clear),
     /// Extra space before the next word (`text-autospace`).
     Gap(f32),
 }
@@ -737,8 +739,11 @@ impl<'a> Layouter<'a> {
                 }
                 InlineItem::Float(c) => pieces.push(Piece::Float(*c)),
                 InlineItem::Absolute(c) => pieces.push(Piece::Abs(*c)),
-                InlineItem::Break => {
-                    pieces.push(Piece::Break);
+                InlineItem::Break | InlineItem::ClearBreak(_) => {
+                    pieces.push(match item {
+                        InlineItem::ClearBreak(c) => Piece::ClearBreak(*c),
+                        _ => Piece::Break,
+                    });
                     col.prev_space = true;
                     prev_break_opp = true;
                     space_opp = None;
@@ -1283,6 +1288,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     self.children[*c].static_align = None;
                 }
                 Piece::Break => self.finish_line(true),
+                Piece::ClearBreak(c) => {
+                    self.finish_line(true);
+                    let y = self.bfc.clear_y(*c);
+                    if y > self.cur.y {
+                        self.start_line(y);
+                    }
+                }
                 Piece::Gap(w) => {
                     if self.cur.has_content {
                         self.cur.x += w;

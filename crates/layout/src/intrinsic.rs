@@ -412,7 +412,7 @@ impl<'a> Layouter<'a> {
                     trail = 0.0;
                     space_trail = 0.0;
                 }
-                Piece::Break => {
+                Piece::Break | Piece::ClearBreak(_) => {
                     lead = false;
                     min = min.max(run - trail - space_trail);
                     run = forced_indent;

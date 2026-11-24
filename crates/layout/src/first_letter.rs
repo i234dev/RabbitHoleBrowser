@@ -96,7 +96,7 @@ fn scan_inline(b: &mut LayoutBox, fl: &Rc<ComputedStyle>, origin: &Rc<ComputedSt
         let (text, style) = match &b.items[i] {
             InlineItem::Text { text, style, .. } => (text, style),
             InlineItem::Open { .. } | InlineItem::Close | InlineItem::Float(_) | InlineItem::Absolute(_) => continue,
-            InlineItem::Atomic(_) | InlineItem::Break => return Scan::Stop,
+            InlineItem::Atomic(_) | InlineItem::Break | InlineItem::ClearBreak(_) => return Scan::Stop,
         };
         match letter_range(text, style.white_space) {
             Extent::Skip => continue,

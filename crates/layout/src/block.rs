@@ -381,7 +381,7 @@ pub(crate) fn inline_content_is_empty(b: &LayoutBox) -> bool {
                 }
             }
             InlineItem::Close | InlineItem::Float(_) | InlineItem::Absolute(_) => {}
-            InlineItem::Atomic(_) | InlineItem::Break => return false,
+            InlineItem::Atomic(_) | InlineItem::Break | InlineItem::ClearBreak(_) => return false,
         }
     }
     true
