@@ -86,6 +86,14 @@ enum Prop {
     AnchorScope,
     GridTemplateColumns,
     GridTemplateRows,
+    GridTemplateAreas,
+    GridAutoColumns,
+    GridAutoRows,
+    GridAutoFlow,
+    GridRowStart,
+    GridRowEnd,
+    GridColumnStart,
+    GridColumnEnd,
 }
 
 const ALL: &[Prop] = &[
@@ -144,6 +152,14 @@ const ALL: &[Prop] = &[
     Prop::AnchorScope,
     Prop::GridTemplateColumns,
     Prop::GridTemplateRows,
+    Prop::GridTemplateAreas,
+    Prop::GridAutoColumns,
+    Prop::GridAutoRows,
+    Prop::GridAutoFlow,
+    Prop::GridRowStart,
+    Prop::GridRowEnd,
+    Prop::GridColumnStart,
+    Prop::GridColumnEnd,
 ];
 
 impl Prop {
@@ -204,6 +220,14 @@ impl Prop {
             Prop::AnchorScope => "anchor-scope",
             Prop::GridTemplateRows => "grid-template-rows",
             Prop::GridTemplateColumns => "grid-template-columns",
+            Prop::GridTemplateAreas => "grid-template-areas",
+            Prop::GridAutoColumns => "grid-auto-columns",
+            Prop::GridAutoRows => "grid-auto-rows",
+            Prop::GridAutoFlow => "grid-auto-flow",
+            Prop::GridRowStart => "grid-row-start",
+            Prop::GridRowEnd => "grid-row-end",
+            Prop::GridColumnStart => "grid-column-start",
+            Prop::GridColumnEnd => "grid-column-end",
         }
     }
 
@@ -221,7 +245,11 @@ impl Prop {
         use Prop::*;
         match n {
             "offset" => matches!(self, OffsetPath | OffsetDistance | OffsetPosition | OffsetRotate | OffsetAnchor),
-            "grid" | "grid-template" => matches!(self, GridTemplateRows | GridTemplateColumns),
+            "grid-template" => matches!(self, GridTemplateRows | GridTemplateColumns | GridTemplateAreas),
+            "grid" => matches!(self, GridTemplateRows | GridTemplateColumns | GridTemplateAreas | GridAutoColumns | GridAutoRows | GridAutoFlow),
+            "grid-area" => matches!(self, GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd),
+            "grid-row" => matches!(self, GridRowStart | GridRowEnd),
+            "grid-column" => matches!(self, GridColumnStart | GridColumnEnd),
             "place-content" => matches!(self, AlignContent | JustifyContent),
             "place-items" => matches!(self, AlignItems | JustifyItems),
             "place-self" => matches!(self, AlignSelf | JustifySelf),
@@ -249,6 +277,11 @@ enum Val {
     PositionArea(rabbithole_style::props::anchor::PositionArea),
     AnchorScope(rabbithole_style::props::anchor::AnchorScope),
     Tracks(Vec<TrackListItem>),
+    /// Values that only animate discretely.
+    AutoTracks(Vec<rabbithole_style::TrackSize>),
+    AutoFlow(rabbithole_style::GridAutoFlow),
+    Line(rabbithole_style::GridLine),
+    Areas(Vec<Vec<String>>),
     Distribution(ContentDistribution, AlignFlags),
     ItemAlignment(ItemAlign, AlignFlags),
     F(f32),
@@ -319,6 +352,14 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         AnchorScope => Val::AnchorScope(s.anchor_scope.clone()),
         GridTemplateRows => Val::Tracks(s.grid_template_rows.clone()),
         GridTemplateColumns => Val::Tracks(s.grid_template_columns.clone()),
+        GridTemplateAreas => Val::Areas(s.grid_template_areas.clone()),
+        GridAutoColumns => Val::AutoTracks(s.grid_auto_columns.clone()),
+        GridAutoRows => Val::AutoTracks(s.grid_auto_rows.clone()),
+        GridAutoFlow => Val::AutoFlow(s.grid_auto_flow),
+        GridRowStart => Val::Line(s.grid_row_start.clone()),
+        GridRowEnd => Val::Line(s.grid_row_end.clone()),
+        GridColumnStart => Val::Line(s.grid_column_start.clone()),
+        GridColumnEnd => Val::Line(s.grid_column_end.clone()),
         JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
     }
 }
@@ -332,6 +373,14 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         (AnchorScope, Val::AnchorScope(value)) => s.anchor_scope.clone_from(value),
         (GridTemplateRows, Val::Tracks(tracks)) => s.grid_template_rows.clone_from(tracks),
         (GridTemplateColumns, Val::Tracks(tracks)) => s.grid_template_columns.clone_from(tracks),
+        (GridTemplateAreas, Val::Areas(a)) => s.grid_template_areas.clone_from(a),
+        (GridAutoColumns, Val::AutoTracks(t)) => s.grid_auto_columns.clone_from(t),
+        (GridAutoRows, Val::AutoTracks(t)) => s.grid_auto_rows.clone_from(t),
+        (GridAutoFlow, Val::AutoFlow(f)) => s.grid_auto_flow = *f,
+        (GridRowStart, Val::Line(l)) => s.grid_row_start.clone_from(l),
+        (GridRowEnd, Val::Line(l)) => s.grid_row_end.clone_from(l),
+        (GridColumnStart, Val::Line(l)) => s.grid_column_start.clone_from(l),
+        (GridColumnEnd, Val::Line(l)) => s.grid_column_end.clone_from(l),
         (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
         (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),
         (AlignSelf, Val::ItemAlignment(value, flags)) => (s.align_self, s.align_self_flags) = (*value, *flags),

@@ -3796,7 +3796,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         }
         "opacity" => {
             if comps.len() == 1 {
-                if let Some(n) = crate::color_model::alpha_value(c0) {
+                if let Some(n) = crate::color_model::alpha_value(c0).or_else(|| values::number(c0).map(f64::from)) {
                     style.opacity = if n.is_nan() { 0.0 } else { n.clamp(0.0, 1.0) as f32 };
                 }
             }

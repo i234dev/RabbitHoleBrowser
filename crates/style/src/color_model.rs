@@ -1493,7 +1493,6 @@ pub fn alpha_specified(c: &[Token]) -> Option<String> {
     }
 }
 
-/// Parse and resolve a color component with the thread's current color.
 thread_local! {
     /// The full-precision current color, when it is not an 8-bit color.
     static CURRENT: std::cell::Cell<Option<Abs>> = const { std::cell::Cell::new(None) };
@@ -1505,6 +1504,7 @@ pub fn set_current(c: Option<Abs>) {
     CURRENT.with(|v| v.set(c));
 }
 
+/// Parse and resolve a color component with the thread's current color.
 pub fn resolve_tokens(c: &[Token]) -> Option<(Spec, Abs)> {
     let spec = Spec::parse(c)?;
     let current = if spec.uses_current() {

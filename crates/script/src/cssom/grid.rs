@@ -60,6 +60,12 @@ fn size(value: &TrackSize) -> String {
     }
 }
 
+/// Computed `grid-auto-columns` / `grid-auto-rows`.
+pub(super) fn auto_tracks(list: &[TrackSize]) -> String {
+    if list.is_empty() { return "auto".into(); }
+    list.iter().map(size).collect::<Vec<_>>().join(" ")
+}
+
 pub(super) fn computed(list: &[TrackListItem]) -> String {
     let mut out = Vec::new();
     let mut pending = Vec::new();

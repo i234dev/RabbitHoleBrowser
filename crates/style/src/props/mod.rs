@@ -10,6 +10,7 @@ pub mod content;
 pub mod effects;
 pub mod flex;
 pub mod grid;
+pub mod grid_css;
 pub mod misc;
 pub mod motion;
 pub mod text;

@@ -161,6 +161,8 @@ fn run(args: &[String]) -> i32 {
         verbose: f.has("verbose"),
         memory_kb: f.num("memory-kb", 2_500_000u64),
     };
+    // Children install the suite's Ahem font (see `run_child`).
+    std::env::set_var("RH_WPT_AHEM", root.join("fonts/Ahem.ttf"));
     let base = server.base();
     eprintln!("running {} tests from {} at {} with {} jobs", tests.len(), root.display(), base, opts.jobs);
     let quiet = f.has("quiet");

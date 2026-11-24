@@ -221,6 +221,11 @@ pub fn run_child(url: &str, timeout: Duration, verbose: bool) -> i32 {
     let start = Instant::now();
     let mut engine = Engine::new_bundled_fonts_only();
     engine.loader.load_fonts = false;
+    // Like the reference browsers' WPT setups (and the reftest runner),
+    // the Ahem test font is installed as a family.
+    if let Some(data) = std::env::var_os("RH_WPT_AHEM").and_then(|p| std::fs::read(p).ok()) {
+        engine.fonts.add_font_data("Ahem", 400, false, &data);
+    }
     let viewport = Viewport { width: 800.0, height: 600.0 };
     let mut page = match engine.load(url, viewport) {
         Ok(p) => p,

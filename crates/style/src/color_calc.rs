@@ -103,6 +103,12 @@ pub fn parse(c: &[Token], keywords: &[&str]) -> Option<Calc> {
     Some(node)
 }
 
+/// A math function that is a `<length-percentage>`.
+pub fn parse_length_percentage(c: &[Token]) -> Option<Calc> {
+    let node = parse_value(c, &[], true)?;
+    (node.ty_with(Ty::LENGTH)? == Ty::LENGTH).then_some(node)
+}
+
 fn ident_constant(k: &str) -> Option<f64> {
     Some(match k.to_ascii_lowercase().as_str() {
         "e" => std::f64::consts::E,
@@ -292,22 +298,28 @@ fn parse_product(comps: &[&[Token]], keywords: &[&str]) -> Option<Calc> {
 impl Calc {
     /// The type of the expression, `None` when it is invalid.
     pub fn ty(&self) -> Option<Ty> {
+        self.ty_with(Ty::PERCENT)
+    }
+
+    /// The type with percentages typed as `pct` (lengths where they
+    /// resolve against one).
+    pub fn ty_with(&self, pct: Ty) -> Option<Ty> {
         match self {
             Calc::Num(_) | Calc::Key(_) => Some(Ty::NUMBER),
-            Calc::Pct(_) => Some(Ty::PERCENT),
+            Calc::Pct(_) => Some(pct),
             Calc::Dim(_, u) => unit_ty(u),
             Calc::Sum(v) => {
-                let t = v.first()?.ty()?;
+                let t = v.first()?.ty_with(pct)?;
                 for c in &v[1..] {
-                    if c.ty()? != t {
+                    if c.ty_with(pct)? != t {
                         return None;
                     }
                 }
                 Some(t)
             }
-            Calc::Prod(v) => v.iter().try_fold(Ty::NUMBER, |acc, c| Some(acc.mul(c.ty()?))),
-            Calc::Neg(c) => c.ty(),
-            Calc::Inv(c) => c.ty().map(Ty::inv),
+            Calc::Prod(v) => v.iter().try_fold(Ty::NUMBER, |acc, c| Some(acc.mul(c.ty_with(pct)?))),
+            Calc::Neg(c) => c.ty_with(pct),
+            Calc::Inv(c) => c.ty_with(pct).map(Ty::inv),
             Calc::Func(name, args) => {
                 let same = || -> Option<Ty> {
                     let mut t = None;
@@ -315,7 +327,7 @@ impl Calc {
                         if matches!(a, Calc::Key(k) if k == "none") {
                             continue;
                         }
-                        let at = a.ty()?;
+                        let at = a.ty_with(pct)?;
                         if t.is_some_and(|t| t != at) {
                             return None;
                         }
@@ -327,16 +339,16 @@ impl Calc {
                     "min" | "max" | "clamp" | "hypot" | "mod" | "rem" | "abs" => same(),
                     n if n.starts_with("round") => same(),
                     "sign" => {
-                        args[0].ty()?;
+                        args[0].ty_with(pct)?;
                         Some(Ty::NUMBER)
                     }
                     "sin" | "cos" | "tan" => {
-                        let t = args[0].ty()?;
+                        let t = args[0].ty_with(pct)?;
                         (t == Ty::NUMBER || t == Ty::ANGLE).then_some(Ty::NUMBER)
                     }
-                    "asin" | "acos" | "atan" => (args[0].ty()? == Ty::NUMBER).then_some(Ty::ANGLE),
+                    "asin" | "acos" | "atan" => (args[0].ty_with(pct)? == Ty::NUMBER).then_some(Ty::ANGLE),
                     "atan2" => same().map(|_| Ty::ANGLE),
-                    "pow" | "sqrt" | "log" | "exp" => args.iter().all(|a| a.ty() == Some(Ty::NUMBER)).then_some(Ty::NUMBER),
+                    "pow" | "sqrt" | "log" | "exp" => args.iter().all(|a| a.ty_with(pct) == Some(Ty::NUMBER)).then_some(Ty::NUMBER),
                     _ => None,
                 }
             }
