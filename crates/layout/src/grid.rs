@@ -1925,6 +1925,7 @@ impl<'a> Layouter<'a> {
     fn projected_columns(&mut self,b:&mut LayoutBox,items:&[GridItem],cols:&TrackList,rows:Option<&TrackList>,col_gap:f32,row_gap:f32,cbw:f32,geometry:GridGeometry,phase:MeasurePhase)->Vec<Contribution> {
         let _probe = self.grid_publication.probe_grid();
         let style=b.style.clone();
+        let lanes=style.grid_lanes||subgrid::inherits_stacking(b);
         let mut out=Vec::new();
         for it in items {
             let child=&mut b.children[it.idx];
@@ -1940,7 +1941,8 @@ impl<'a> Layouter<'a> {
             let item=subgrid::rebase_item(it,&child.style,cbw,reference);let it=&item;
             let row_source=if !row_request {None} else {rows.map_or(Some(subgrid::AxisInheritance::Stacking),|rows| {
                 self.grid_work.tracks(rows);
-                if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,geometry.block,style.align_content)}
+                // Rows of unknown sizes still give the span and line names.
+                if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,geometry.block,style.align_content).or_else(||(!lanes).then(||subgrid::sizing_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,geometry.block,style.align_content)))}
                 else {let (positions,_)=subgrid::positions(rows,row_gap,geometry.block,style.align_content);Some(subgrid::section(rows,&positions,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names))}
             })};
             if column_request {
@@ -2081,8 +2083,12 @@ impl<'a> Layouter<'a> {
                 baselines.push((out.len(), baseline::measure(&container, child, it, true)));
             }
             // The automatic minimum fits an area of fixed maximum tracks.
+            // (A cyclic percentage height behaves as `auto`: its automatic
+            // minimum in `auto` minimum tracks is clamped as well.)
+            let auto_minimum_tracks = rows.tracks.get(it.area.row.0.max(0) as usize..(it.area.row.1.max(0) as usize).min(rows.tracks.len())).is_some_and(|t| t.iter().all(|t| t.min == Sizing::Auto));
+            let auto_height = child.style.height.is_auto() || (auto_minimum_tracks && resolve_size(child.style.height, cbh, bb, it.edges.pb_v).is_none());
             let min = match fixed_max_span(&rows.tracks, it.area.row.0, it.area.row.1, row_gap).filter(|_| rows.sized()) {
-                Some(limit) if child.style.height.is_auto() && child.style.min_height.is_auto() && !crate::flex::is_scroll_container(&child.style) => h.min(limit.max(extras_v)),
+                Some(limit) if auto_height && child.style.min_height.is_auto() && !crate::flex::is_scroll_container(&child.style) => h.min(limit.max(extras_v)),
                 _ => h,
             };
             // With an automatic preferred height, an explicit minimum height

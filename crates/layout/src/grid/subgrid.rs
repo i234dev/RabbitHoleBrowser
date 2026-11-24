@@ -416,6 +416,21 @@ pub(super) fn item_layer_source(mut source:AxisInheritance,item:&GridItem,style:
     source
 }
 
+/// The rows of a standalone axis with a definite size, as known before the
+/// columns are sized: flexible rows divide the free space (with empty
+/// contents) and become fixed, so orthogonal items in them can be measured
+/// against a definite area. Other rows keep their sizing functions.
+pub(super) fn flexible_estimate(rows:&TrackList,block:Option<f32>,gap:f32)->Option<TrackList> {
+    let block=block?;
+    if rows.inherited.is_some()||!rows.tracks.iter().any(|t|t.is_flex()) {return None;}
+    let mut estimate=rows.clone();
+    size_tracks_with_space(&mut estimate.tracks,&[],GridSpace::Definite(block),gap,false);
+    for t in &mut estimate.tracks {
+        if t.is_flex() {let size=t.base;*t=Track::new(Sizing::Fixed(size),Sizing::Fixed(size));t.base=size;t.limit=Some(size);}
+    }
+    Some(estimate)
+}
+
 /// Shared-axis sizing and alignment are ignored, including automatic margins.
 /// The subgrid's margin box must fill exactly the inherited grid area.
 pub(super) fn stretch_item(b:&LayoutBox,it:&mut GridItem) {
@@ -594,7 +609,8 @@ impl<'a> Layouter<'a> {
         let (items,mut cols,row_tracks)=self.place_items(b,&style,inline_size,block,col_gap,row_gap,0.,0.);
         let flipped=(!rows).then(||shared(b,false)).flatten().filter(|t|t.flipped).map(|t|t.sizes.len());
         let mut result=if !rows {
-            self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase)
+            let estimate=flexible_estimate(&row_tracks,block,row_gap);
+            self.projected_columns(b,&items,&cols,Some(estimate.as_ref().unwrap_or(&row_tracks)),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase)
         } else {
             if cols.inherited.is_none() {
                 let contributions=self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase);

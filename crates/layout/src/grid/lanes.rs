@@ -512,7 +512,8 @@ impl<'a> Layouter<'a> {
             let (columns,rows)=subgrid::requests(child);
             let start=it.fixed.unwrap_or(0);
             if rows {self.grid_work.tracks(tl);}
-            let rows=if !rows {None} else if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(tl,start,start+it.span,row_gap,it.fixed.is_some(),row_available,align)}
+            // Rows of unknown sizes still give the span and line names.
+            let rows=if !rows {None} else if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(tl,start,start+it.span,row_gap,it.fixed.is_some(),row_available,align).or_else(||Some(subgrid::sizing_section_aligned(tl,start,start+it.span,row_gap,it.fixed.is_some(),row_available,align)))}
                 else {let (positions,_)=subgrid::positions(tl,row_gap,row_available,align);Some(subgrid::section(tl,&positions,start,start+it.span,row_gap,it.fixed.is_some()))};
             self.with_subgrid(child,columns.then_some(subgrid::AxisInheritance::Stacking),rows,cbw,|this,child|this.lane_item_width(child,it,cbw,available))
         }).collect()
