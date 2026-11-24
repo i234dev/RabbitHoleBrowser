@@ -224,6 +224,17 @@ fn request_render_update(_realm: &mut Realm, _this: Value, _args: &[Value]) -> J
 
 /// `setFactory(name, fn)`: JS constructors the natives use to build
 /// objects (e.g. "rect" for DOMRect).
+/// `editingImpl(spec)`: the lazily compiled editing implementation
+/// (editing_impl.js) or, with `spec`, the editing specification algorithms
+/// (editing_spec.js); each evaluates to a factory.
+fn editing_impl(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if realm.to_boolean(&arg(args, 0)) {
+        realm.eval_builtin(include_str!("js/editing_spec.js"), "rabbithole:editing_spec.js")
+    } else {
+        realm.eval_builtin(include_str!("js/editing_impl.js"), "rabbithole:editing_impl.js")
+    }
+}
+
 fn set_factory(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let name = arg_str(realm, args, 0)?;
     let f = arg(args, 1);
@@ -501,6 +512,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "cssomExpandPlace", 2, crate::cssom::cssom_expand_place);
     realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
+    realm.define_method(o, "editingImpl", 1, editing_impl);
     realm.define_method(o, "setSheetsPending", 1, set_sheets_pending);
     realm.define_method(o, "setSheetText", 2, set_sheet_text);
     realm.define_method(o, "fetchText", 1, fetch_text);
