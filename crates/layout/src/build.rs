@@ -499,7 +499,9 @@ impl<'a> Builder<'a> {
             || matches!(style.display, Display::FlowRoot | Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid)
             // A block container with `align-content` other than normal
             // is an independent formatting context (CSS Align §5.4).
-            || (style.align_content != rabbithole_style::ContentDistribution::Stretch && style.display.is_block_level());
+            || (style.align_content != rabbithole_style::ContentDistribution::Stretch && style.display.is_block_level())
+            // A multi-column container (Multicol 1 §2).
+            || (style.multicol && !matches!(style.display, Display::Inline | Display::Contents));
         let contained = !matches!(style.display, Display::Inline | Display::Contents) && !matches!(tag, "html" | "body");
         b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && (!matches!(tag, "html" | "body") || (tag == "body" && contained_root_or_body));
         if contained && (style.contain_paint || style.contain_layout) {

@@ -1876,9 +1876,33 @@ pub struct ComputedStyle {
     pub text_emphasis_right: bool,
     /// `ruby-position: under` (inherited).
     pub ruby_under: bool,
-    /// A multi-column container (`columns` / `column-count` /
-    /// `column-width` not `auto`; columns themselves are not laid out).
+    /// A multi-column container (`column-count` or `column-width` not
+    /// `auto`; CSS Multi-column Layout 1).
     pub multicol: bool,
+    /// `column-count` (`None` = `auto`).
+    pub column_count: Option<u32>,
+    /// `column-width` in px (`None` = `auto`).
+    pub column_width: Option<f32>,
+    /// `column-fill: auto` (else `balance`).
+    pub column_fill_auto: bool,
+    /// `column-span: all`.
+    pub column_span_all: bool,
+    /// `column-rule-width` (px, as specified; used only with a visible
+    /// style).
+    pub column_rule_width: f32,
+    pub column_rule_style: BorderStyle,
+    /// The `column-rule-style` keyword (see `props::multicol::rule_style_css`).
+    pub column_rule_style_kw: u8,
+    /// `column-rule-color` (`None` = currentcolor).
+    pub column_rule_color: Option<Color>,
+    /// `break-before` / `break-after` / `break-inside` (see
+    /// `props::multicol::BREAK_*`).
+    pub break_before: u8,
+    pub break_after: u8,
+    pub break_inside: u8,
+    /// `orphans` / `widows` (inherited).
+    pub orphans: u16,
+    pub widows: u16,
     /// `mix-blend-mode` (see `rabbithole_gfx::blend_mode_index`; 0 =
     /// normal).
     pub mix_blend_mode: u8,
@@ -2203,6 +2227,19 @@ impl ComputedStyle {
             mix_blend_mode: 0,
             isolate: false,
             multicol: false,
+            column_count: None,
+            column_width: None,
+            column_fill_auto: false,
+            column_span_all: false,
+            column_rule_width: 3.0,
+            column_rule_style: BorderStyle::None,
+            column_rule_style_kw: 0,
+            column_rule_color: None,
+            break_before: 0,
+            break_after: 0,
+            break_inside: 0,
+            orphans: 2,
+            widows: 2,
             text_wrap_balance: false,
             text_autospace: false,
             wrap_inside_avoid: false,
@@ -2376,6 +2413,8 @@ impl ComputedStyle {
             border_spacing: parent.border_spacing,
             caption_side_bottom: parent.caption_side_bottom,
             empty_cells_hide: parent.empty_cells_hide,
+            orphans: parent.orphans,
+            widows: parent.widows,
             ..ComputedStyle::initial()
         }
     }
@@ -2470,6 +2509,8 @@ impl ComputedStyle {
             && self.user_select == o.user_select
             && self.border_collapse == o.border_collapse
             && self.border_spacing == o.border_spacing
+            && self.orphans == o.orphans
+            && self.widows == o.widows
     }
 
     /// Resolved corner radii in px: [tl, tr, br, bl] × (h, v) for a box of

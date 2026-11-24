@@ -908,6 +908,32 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
             rabbithole_style::props::grid_css::shorthand(prop, &get).unwrap_or_default()
         }
         "display" => display_css(s.display).to_string(),
+        "column-count" => s.column_count.map_or_else(|| "auto".into(), |n| n.to_string()),
+        "column-width" => s.column_width.map_or_else(|| "auto".into(), px),
+        "columns" => match (s.column_width, s.column_count) {
+            (None, None) => "auto".into(),
+            (Some(w), None) => px(w),
+            (None, Some(n)) => n.to_string(),
+            (Some(w), Some(n)) => format!("{} {n}", px(w)),
+        },
+        "column-fill" => if s.column_fill_auto { "auto" } else { "balance" }.into(),
+        "column-span" => if s.column_span_all { "all" } else { "none" }.into(),
+        "column-rule-width" => px(s.column_rule_width),
+        "column-rule-style" => rabbithole_style::props::multicol::rule_style_css(s.column_rule_style_kw).into(),
+        "column-rule-color" => color_css(s.column_rule_color.unwrap_or(s.color)),
+        "column-rule" => {
+            let kw = rabbithole_style::props::multicol::rule_style_css(s.column_rule_style_kw);
+            let color = color_css(s.column_rule_color.unwrap_or(s.color));
+            if kw == "none" { format!("{} {color}", px(s.column_rule_width)) } else { format!("{} {kw} {color}", px(s.column_rule_width)) }
+        }
+        "break-before" => rabbithole_style::props::multicol::break_css(s.break_before).into(),
+        "break-after" => rabbithole_style::props::multicol::break_css(s.break_after).into(),
+        "break-inside" => rabbithole_style::props::multicol::break_css(s.break_inside).into(),
+        "orphans" => s.orphans.to_string(),
+        "widows" => s.widows.to_string(),
+        "column-gap" => {
+            if s.column_gap_normal { "normal".into() } else { length_css(&s.column_gap, cb.w) }
+        }
         "shape-outside" => shapes::computed(s.shape_outside.as_deref(), s.shape_outside_position_explicit, rabbithole_style::ShapeBox::Margin),
         "shape-margin" => position_css(&s.shape_margin),
         "offset-path" => shapes::computed(s.motion().path.as_deref(),s.motion().explicit_center,rabbithole_style::ShapeBox::Border),

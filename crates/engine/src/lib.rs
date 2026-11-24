@@ -2650,6 +2650,10 @@ impl Page {
                 return rects.into_iter().map(|r| self.client_fragment_rect(node, r)).collect();
             }
         }
+        if let Some(rects) = self.layout.fragment_rects(&self.doc, node) {
+            // A box broken across columns: one rect per fragment.
+            return rects.into_iter().map(|r| self.client_fragment_rect(node, r)).collect();
+        }
         self.client_rect_of(node).into_iter().collect()
     }
 

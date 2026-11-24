@@ -27,6 +27,7 @@ mod intrinsic;
 mod table;
 mod text;
 mod linebreak;
+mod multicol;
 mod widgets;
 mod wm;
 mod filter;

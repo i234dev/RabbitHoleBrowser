@@ -2219,7 +2219,7 @@ fn is_inherited(name: &str) -> bool {
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
             | "font-synthesis" | "font-synthesis-style" | "font-synthesis-small-caps" | "text-justify" | "hyphenate-character" | "text-decoration-skip-ink"
-            | "writing-mode" | "-webkit-writing-mode" | "text-orientation" | "-webkit-text-orientation" | "text-combine-upright" | "-webkit-text-combine"
+            | "orphans" | "widows" | "writing-mode" | "-webkit-writing-mode" | "text-orientation" | "-webkit-text-orientation" | "text-combine-upright" | "-webkit-text-combine"
     )
 }
 
@@ -2415,7 +2415,31 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "font-synthesis-style" => to.font_synthesis_style = from.font_synthesis_style,
         "font-synthesis-small-caps" => to.font_synthesis_small_caps = from.font_synthesis_small_caps,
         "line-break" => to.line_break = from.line_break,
-        "columns" | "column-count" | "column-width" => to.multicol = from.multicol,
+        "columns" | "column-count" | "column-width" | "-webkit-columns" | "-moz-columns" | "-webkit-column-count" | "-moz-column-count"
+        | "-webkit-column-width" | "-moz-column-width" => {
+            to.multicol = from.multicol;
+            to.column_count = from.column_count;
+            to.column_width = from.column_width;
+        }
+        "column-fill" | "-webkit-column-fill" | "-moz-column-fill" => to.column_fill_auto = from.column_fill_auto,
+        "column-span" | "-webkit-column-span" => to.column_span_all = from.column_span_all,
+        "column-rule" | "-webkit-column-rule" | "-moz-column-rule" => {
+            to.column_rule_width = from.column_rule_width;
+            to.column_rule_style = from.column_rule_style;
+            to.column_rule_style_kw = from.column_rule_style_kw;
+            to.column_rule_color = from.column_rule_color;
+        }
+        "column-rule-width" | "-webkit-column-rule-width" | "-moz-column-rule-width" => to.column_rule_width = from.column_rule_width,
+        "column-rule-style" | "-webkit-column-rule-style" | "-moz-column-rule-style" => {
+            to.column_rule_style = from.column_rule_style;
+            to.column_rule_style_kw = from.column_rule_style_kw;
+        }
+        "column-rule-color" | "-webkit-column-rule-color" | "-moz-column-rule-color" => to.column_rule_color = from.column_rule_color,
+        "break-before" | "page-break-before" | "-webkit-column-break-before" => to.break_before = from.break_before,
+        "break-after" | "page-break-after" | "-webkit-column-break-after" => to.break_after = from.break_after,
+        "break-inside" | "page-break-inside" | "-webkit-column-break-inside" => to.break_inside = from.break_inside,
+        "orphans" => to.orphans = from.orphans,
+        "widows" => to.widows = from.widows,
         "text-underline-position" => to.text_underline_position = from.text_underline_position,
         "text-decoration-inset" => to.text_decoration_inset = from.text_decoration_inset,
         "text-decoration-line" => to.text_decoration = from.text_decoration,
@@ -4139,6 +4163,8 @@ const SUPPORTS_PROBE: &[(&str, &str)] = &[
     ("white-space", "pre"), ("text-transform", "uppercase"), ("font-style", "italic"), ("font-weight", "300"),
     ("flex-direction", "column"), ("flex-wrap", "wrap"), ("border-top-width", "7px"), ("border-top-style", "dotted"),
     ("border-top-color", "rgb(1, 2, 3)"),
+    ("columns", "7px 3"), ("column-fill", "auto"), ("column-span", "all"), ("column-rule", "7px dotted rgb(1, 2, 3)"),
+    ("break-before", "column"), ("break-after", "column"), ("break-inside", "avoid-column"), ("orphans", "7"), ("widows", "7"),
 ];
 
 /// Properties every value of which `SUPPORTS_PROBE` detects.
@@ -4149,6 +4175,8 @@ const SUPPORTS_CHECKED: &[&str] = &[
     "padding-top", "padding-right", "padding-bottom", "padding-left", "top", "right", "bottom", "left", "width", "height", "min-width",
     "min-height", "max-width", "max-height", "color", "background-color", "opacity", "z-index", "box-sizing", "text-align", "white-space",
     "text-transform", "font-style", "font-weight", "flex-direction", "flex-wrap", "border-top-width", "border-top-style", "border-top-color",
+    "columns", "column-count", "column-width", "column-fill", "column-span", "column-rule", "column-rule-width", "column-rule-style",
+    "column-rule-color", "break-before", "break-after", "break-inside", "orphans", "widows",
 ];
 
 fn probe_apply(base: &ComputedStyle, name: &str, value: &[Token]) -> ComputedStyle {

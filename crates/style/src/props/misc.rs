@@ -224,8 +224,6 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         "-webkit-animation-fill-mode" => "animation-fill-mode",
         "-webkit-animation-play-state" => "animation-play-state",
         "-webkit-overflow-scrolling" => "overscroll-behavior",
-        "-webkit-columns" | "-moz-columns" => "columns",
-        "-webkit-column-count" | "-moz-column-count" => "column-count",
         n => n,
     };
     let c0 = comps[0];
@@ -578,17 +576,13 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             style.container_inline = inline;
             note_container(inline);
         }
-        "columns" | "column-count" | "column-width" => {
-            style.multicol = !comps.iter().all(|c| values::is_ident(c, "auto"));
-        }
         "list-style-image" | "overscroll-behavior" | "overscroll-behavior-x"
         | "overscroll-behavior-y" | "scroll-behavior" | "scroll-snap-type" | "scroll-snap-align" | "scroll-padding"
         | "scroll-padding-top" | "scroll-margin-bottom" | "scroll-margin-left" | "scroll-margin-right" | "scrollbar-width"
-        | "scrollbar-color" | "scrollbar-gutter" | "column-gap-x" | "column-rule"
-        | "column-span" | "column-fill" | "break-inside" | "break-before" | "break-after" | "page-break-inside"
-        | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color"
+        | "scrollbar-color" | "scrollbar-gutter" | "column-gap-x"
+        | "box-decoration-break" | "caret-color"
         | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"
-        | "-ms-touch-action" | "speak" | "orphans" | "widows" | "page" | "size" | "marks" | "quotes-x" | "all-x"
+        | "-ms-touch-action" | "speak" | "page" | "size" | "marks" | "quotes-x" | "all-x"
         | "view-transition-name"
         | "anchor-name" | "position-anchor" | "field-sizing" | "forced-color-adjust" | "interpolate-size" | "math-style"
         | "-webkit-box-sizing" | "-moz-box-sizing" | "-webkit-user-drag" | "-webkit-user-modify" | "-webkit-locale"

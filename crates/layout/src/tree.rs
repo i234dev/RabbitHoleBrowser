@@ -392,6 +392,11 @@ pub struct LayoutBox {
     pub(crate) wm_background: Option<Rc<ComputedStyle>>,
     /// Ruby layout role: 1 = a base/annotation pair box, 2 = its base.
     pub(crate) ruby: u8,
+    /// A box of a multi-column flow broken across columns: its fragments
+    /// (`rect` is then their union; see `multicol.rs`).
+    pub(crate) col_pieces: Option<Box<crate::multicol::ColPieces>>,
+    /// A multi-column container's column rules (line boxes).
+    pub(crate) col_rules: Option<Box<Vec<Rect>>>,
 }
 
 /// Orientation of a writing-mode wrapper's contents relative to the space
@@ -473,6 +478,8 @@ impl LayoutBox {
             motion_transform: std::cell::Cell::new(None),
             wm_kind: WmKind::Cw,
             wm_background: None,
+            col_pieces: None,
+            col_rules: None,
         }
     }
 
@@ -740,6 +747,14 @@ impl LayoutBox {
         self.rect = self.rect.translate(dx, dy);
         self.content_rect = self.content_rect.translate(dx, dy);
         self.static_pos = (self.static_pos.0 + dx, self.static_pos.1 + dy);
+        if let Some(p) = &mut self.col_pieces {
+            p.translate(dx, dy);
+        }
+        if let Some(r) = &mut self.col_rules {
+            for r in r.iter_mut() {
+                *r = r.translate(dx, dy);
+            }
+        }
         if let Some(m) = &mut self.wm_transform {
             // The contents stay in their logical space.
             m[4] += dx;
@@ -1171,6 +1186,14 @@ impl LayoutTree {
     pub fn box_in_document(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<(&LayoutBox, Rect)> {
         let (b,coordinates) = self.box_and_coordinates(doc,node)?;
         Some((b,physical_rect(coordinates,b.rect)))
+    }
+
+    /// The border boxes of the fragments of `node`'s box when it is broken
+    /// across columns, in document coordinates (`None` when unbroken).
+    pub fn fragment_rects(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<Vec<Rect>> {
+        let (b, coordinates) = self.box_and_coordinates(doc, node)?;
+        let p = b.col_pieces.as_deref()?;
+        Some(p.pieces.iter().map(|p| physical_rect(coordinates, p.rect)).collect())
     }
 
     /// The used motion-path transform, including the element's other CSS

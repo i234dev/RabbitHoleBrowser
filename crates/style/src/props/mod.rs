@@ -13,6 +13,7 @@ pub mod grid;
 pub mod grid_css;
 pub mod misc;
 pub mod motion;
+pub mod multicol;
 pub mod text;
 
 use crate::computed::*;
@@ -56,6 +57,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         || effects::apply(name, comps, style, ctx)
         || text::apply(name, comps, value, style, parent, ctx)
         || content::apply(name, comps, style, ctx)
+        || multicol::apply(name, comps, style, ctx)
         || misc::apply(name, comps, style, ctx)
 }
 

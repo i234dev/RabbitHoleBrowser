@@ -1171,7 +1171,10 @@ impl<'a> Layouter<'a> {
     }
 
     fn layout_contents(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
-        if matches!(b.formatting, Formatting::Inline | Formatting::Block) && !b.style.multicol && b.style.line_clamp.is_some_and(|n| n > 0) {
+        if matches!(b.formatting, Formatting::Inline | Formatting::Block) && (b.style.multicol || b.style.line_clamp.is_some_and(|n| n > 0)) {
+            if b.style.multicol {
+                return self.layout_multicol(b, cb);
+            }
             return self.layout_clamped(b, cb, bfc, top_collapsible, bottom_collapsible);
         }
         self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible)
@@ -1250,6 +1253,11 @@ impl<'a> Layouter<'a> {
     /// collapsed bottom margin plus those of empty blocks in between). While
     /// `at_top`, the parent's top margin chain is still open — those margins
     /// were already applied when the parent was positioned.
+    /// Lay out the block-level children of a formatting context root.
+    pub(crate) fn layout_block_children_of(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc) -> f32 {
+        self.layout_block_children(b, cb, bfc, false, false)
+    }
+
     fn layout_block_children(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         let saved = std::mem::replace(&mut self.center_blocks, b.style.text_align_webkit_center);
         let saved_rtl = std::mem::replace(&mut self.cb_rtl, b.style.direction == rabbithole_style::Direction::Rtl);
@@ -1383,8 +1391,7 @@ impl<'a> Layouter<'a> {
     #[inline(always)]
     fn compute_width(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
         let intrinsic_limit = |l: Length| l.is_intrinsic() || rabbithole_style::is_fit_content_fn(l);
-        // (Multi-column containers have no column-aware intrinsic sizes yet.)
-        if b.style.multicol || (!intrinsic_limit(b.style.min_width) && !intrinsic_limit(b.style.max_width) && !rabbithole_style::is_fit_content_fn(b.style.width)) {
+        if !intrinsic_limit(b.style.min_width) && !intrinsic_limit(b.style.max_width) && !rabbithole_style::is_fit_content_fn(b.style.width) {
             return self.compute_width_inner(b, cbw, cb_h, pb_h, ml, mr, mode);
         }
         self.compute_width_with_limits(b, cbw, cb_h, pb_h, ml, mr, mode)

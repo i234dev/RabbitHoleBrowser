@@ -1102,6 +1102,11 @@ pub(crate) fn translate_contents(b: &mut LayoutBox, dx: f32, dy: f32) {
         m.x += dx;
         m.baseline += dy;
     }
+    if let Some(r) = &mut b.col_rules {
+        for r in r.iter_mut() {
+            *r = r.translate(dx, dy);
+        }
+    }
     for c in &mut b.children {
         c.translate(dx, dy);
     }

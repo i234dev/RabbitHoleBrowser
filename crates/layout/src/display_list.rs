@@ -414,6 +414,7 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbith
         listed: std::collections::HashSet::new(),
         flipped: false,
         wm_bg: None,
+        piece_geom: None,
         wm_m: None,
         in_clamped: false,
         parents3d: Vec::new(),
@@ -471,6 +472,9 @@ struct Painter<'l, 't, 'a> {
     /// The box a vertical-mode wrapper turns, with the wrapper's physical
     /// rect, mapping and background layers: painted in physical space.
     wm_bg: Option<(usize, Rect, Matrix, std::rc::Rc<rabbithole_style::ComputedStyle>)>,
+    /// While painting one column fragment of a box broken across columns:
+    /// its unfragmented border, padding and content boxes.
+    piece_geom: Option<(Rect, Rect, Rect)>,
     /// Inside vertical subtrees: their wrappers' mappings composed (the
     /// current logical space onto the outermost horizontal one).
     wm_m: Option<Matrix>,
@@ -1432,12 +1436,35 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     }
 
     fn paint_background_and_border(&mut self, b: &'t LayoutBox, skip_bg: bool) {
-        if b.style.visibility != Visibility::Hidden && b.style.pointer_events != PointerEvents::None {
+        if let Some(p) = b.col_pieces.as_deref().filter(|_| self.piece_geom.is_none()) {
+            // Broken across columns: each fragment is a slice of the
+            // unfragmented box (`box-decoration-break: slice`).
+            for piece in &p.pieces {
+                if b.style.visibility != Visibility::Hidden && b.style.pointer_events != PointerEvents::None {
+                    self.record_hit(piece.rect, b.node);
+                }
+                if b.style.visibility == Visibility::Hidden || !self.visible(&piece.rect) {
+                    continue;
+                }
+                // (Unclipped across the column: shadows and outsets.)
+                let clip = Rect::new(piece.rect.x - 1.0e4, piece.rect.y, piece.rect.w + 2.0e4, piece.rect.h);
+                self.list.push(DisplayItem::PushClip(clip));
+                self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, 1.0, piece.dx, piece.dy]));
+                self.piece_geom = Some((p.border, p.padding, p.content));
+                self.paint_background_and_border(b, skip_bg);
+                self.piece_geom = None;
+                self.list.push(DisplayItem::PopTransform);
+                self.list.push(DisplayItem::PopClip);
+            }
+            return;
+        }
+        let pieced = self.piece_geom.is_some();
+        if !pieced && b.style.visibility != Visibility::Hidden && b.style.pointer_events != PointerEvents::None {
             self.record_hit(b.rect, b.node);
         }
         let style = &b.style;
-        let rect = b.rect;
-        if style.visibility == Visibility::Hidden || rect.is_empty() || !self.visible(&rect) {
+        let rect = self.piece_geom.map_or(b.rect, |g| g.0);
+        if style.visibility == Visibility::Hidden || rect.is_empty() || (!pieced && !self.visible(&rect)) {
             return;
         }
         let mut radii = box_radii(b);
@@ -1462,8 +1489,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         });
         let geom = BoxGeometry {
             border: rect,
-            padding: b.padding_rect(),
-            content: b.content_rect,
+            padding: self.piece_geom.map_or_else(|| b.padding_rect(), |g| g.1),
+            content: self.piece_geom.map_or(b.content_rect, |g| g.2),
             radii,
             border_width: style.border_width,
             scrolled,
@@ -1564,6 +1591,28 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         if shaped {
             self.list.push(DisplayItem::PopClip);
+        }
+        if let Some(rules) = &b.col_rules {
+            self.paint_column_rules(style, rules);
+        }
+    }
+
+    /// A multi-column container's column rules (Multicol 1 §4), over its
+    /// background and border, under its contents.
+    fn paint_column_rules(&mut self, style: &rabbithole_style::ComputedStyle, rules: &[Rect]) {
+        let color = style.column_rule_color.unwrap_or(style.color);
+        let s = style.column_rule_style;
+        for r in rules {
+            if !self.visible(r) {
+                continue;
+            }
+            self.list.push(DisplayItem::Border {
+                rect: *r,
+                widths: [0.0, 0.0, 0.0, r.w],
+                colors: [color; 4],
+                styles: [s; 4],
+                radii: [(0.0, 0.0); 4],
+            });
         }
     }
 
