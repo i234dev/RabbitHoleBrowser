@@ -155,6 +155,16 @@ fn positive_integer(c: &[Token]) -> Option<u16> {
     }
 }
 
+/// The [`ComputedStyle::column_rule_list`] bit of a `column-rule-*`
+/// longhand.
+fn list_bit(name: &str) -> u8 {
+    match name {
+        "column-rule-width" => 1,
+        "column-rule-style" => 2,
+        _ => 4,
+    }
+}
+
 fn set_multicol(style: &mut ComputedStyle) {
     style.multicol = style.column_count.is_some() || style.column_width.is_some() || style.column_height.is_some();
 }
@@ -261,13 +271,13 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             };
             let repeat = |c: &[Token]| matches!(c.first(), Some(Token::Function(f)) if f.eq_ignore_ascii_case("repeat"));
             if comps.iter().all(|c| valid(c) || repeat(c)) {
-                style.column_rule_list = true;
+                style.column_rule_list |= list_bit(name);
             }
         }
         "column-rule-width" if single => {
             if let Some(w) = rule_width(c0, ctx) {
                 style.column_rule_width = w;
-                style.column_rule_list = false;
+                style.column_rule_list &= !list_bit(name);
             }
         }
         "column-rule-style" if single => {
@@ -275,18 +285,18 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 if let (Some(s), Some(k)) = (rule_style(&kw), rule_style_kw(&kw)) {
                     style.column_rule_style = s;
                     style.column_rule_style_kw = k;
-                    style.column_rule_list = false;
+                    style.column_rule_list &= !list_bit(name);
                 }
             }
         }
         "column-rule-color" if single => match values::parse_color_component(c0) {
             Some(ColorValue::Color(col)) => {
                 style.column_rule_color = Some(col);
-                style.column_rule_list = false;
+                style.column_rule_list &= !list_bit(name);
             }
             Some(ColorValue::CurrentColor) => {
                 style.column_rule_color = None;
-                style.column_rule_list = false;
+                style.column_rule_list &= !list_bit(name);
             }
             None => {}
         },
@@ -311,7 +321,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             style.column_rule_style_kw = k;
             style.column_rule_width = width.unwrap_or(3.0);
             style.column_rule_color = color.flatten();
-            style.column_rule_list = false;
+            style.column_rule_list = 0;
         }
         "break-before" | "break-after" if single => {
             if let Some(v) = values::ident(c0).and_then(|kw| break_between(&kw)) {

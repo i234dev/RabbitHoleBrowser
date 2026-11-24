@@ -486,6 +486,14 @@ impl LayoutBox {
         }
     }
 
+    /// The border box of a box broken across columns as if it were not,
+    /// at its first fragment (`None` when unbroken).
+    pub fn unfragmented_rect(&self) -> Option<Rect> {
+        let p = self.col_pieces.as_ref()?;
+        let first = p.pieces.first()?.rect;
+        Some(Rect::new(first.x, first.y, p.border.w, p.border.h))
+    }
+
     /// The padding box size of a box broken across columns, as if it were
     /// not (`None` when unbroken).
     pub fn unfragmented_padding_size(&self) -> Option<(f32, f32)> {

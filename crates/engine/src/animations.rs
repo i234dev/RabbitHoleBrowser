@@ -1192,7 +1192,7 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
             Val::MotionRotation(MotionRotation { follows_path: a.follows_path, degrees: lerp(a.degrees,b.degrees,t) }),
         (Val::F(x), Val::F(y)) => Val::F(lerp(*x, *y, t)),
         // Integers interpolate rounded to the nearest (CSS Values 4 §3.1).
-        (Val::Count(Some(x)), Val::Count(Some(y))) => Val::Count(Some((lerp(*x as f32, *y as f32, t) + 0.5).floor().max(1.0) as u32)),
+        (Val::Count(Some(x)), Val::Count(Some(y))) => Val::Count(Some((lerp(*x as f32, *y as f32, t) + 0.5 + 1e-4).floor().max(1.0) as u32)),
         (Val::OptPx(Some(x)), Val::OptPx(Some(y))) => Val::OptPx(Some(lerp(*x, *y, t).max(0.0))),
         (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) => interpolate_colors(a, b, t),
         (Val::L(x), Val::L(y)) => lerp_lp(x, y, t).map(Val::L).unwrap_or_else(discrete),

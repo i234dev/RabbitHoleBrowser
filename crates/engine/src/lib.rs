@@ -2822,7 +2822,7 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
         u.2 = u.2.max(r.x + r.w + dx);
         u.3 = u.3.max(r.y + r.h + dy);
     }
-    fn walk(bx: &rabbithole_layout::LayoutBox, u: &mut (f32, f32, f32, f32), dx: f32, dy: f32) {
+    fn walk(bx: &rabbithole_layout::LayoutBox, u: &mut (f32, f32, f32, f32), dx: f32, dy: f32, columns: bool) {
         for line in &bx.lines {
             for f in &line.fragments {
                 add(u, &f.rect, dx, dy);
@@ -2840,14 +2840,20 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
                 add(u, &b, dx, dy);
                 continue;
             }
+            // Inside a box (not the multi-column container itself), a
+            // descendant broken across columns counts unbroken.
+            if let Some(r) = c.unfragmented_rect().filter(|_| !columns) {
+                add(u, &r, dx, dy);
+                continue;
+            }
             add(u, &c.rect, dx, dy);
             let clamp_cut = c.style.line_clamp.is_some() && c.children.iter().any(|x| x.clamped);
             if !c.clips && !clamp_cut {
-                walk(c, u, dx, dy);
+                walk(c, u, dx, dy, columns || c.style.multicol);
             }
         }
     }
-    walk(b, &mut u, ox, oy);
+    walk(b, &mut u, ox, oy, b.style.multicol);
     let s = &b.style;
     let vertical = matches!(s.writing_mode, WritingMode::VerticalRl | WritingMode::VerticalLr | WritingMode::SidewaysLr);
     let rtl = s.direction == Direction::Rtl;
