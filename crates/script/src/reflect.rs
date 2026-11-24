@@ -325,6 +325,42 @@ pub(crate) fn reflect_native(realm: &mut Realm, _this: Value, args: &[Value]) ->
     Ok(Value::Bool(true))
 }
 
+// ---------------------------------------------------------- translate
+
+/// `translate`: whether the element's translation mode is
+/// translate-enabled — its own `translate` attribute ("yes" or "" / "no",
+/// HTML elements only) or else its parent element's mode, enabled at the
+/// root.
+fn translate_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "translate")?;
+    let enabled = with_doc(n.doc, |doc| {
+        let mut cur = Some(n.node);
+        while let Some(id) = cur {
+            let Some(e) = doc.element(id) else { break };
+            if e.ns == rabbithole_dom::Namespace::Html {
+                if let Some(v) = doc.attr(id, "translate") {
+                    if v.is_empty() || v.eq_ignore_ascii_case("yes") {
+                        return true;
+                    }
+                    if v.eq_ignore_ascii_case("no") {
+                        return false;
+                    }
+                }
+            }
+            cur = doc.parent(id).filter(|&p| doc.element(p).is_some());
+        }
+        true
+    });
+    Ok(Value::Bool(enabled))
+}
+
+fn translate_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "translate")?;
+    let v = realm.to_boolean(&arg(args, 0));
+    crate::element::set_attribute(n, "translate", Some(if v { "yes" } else { "no" }));
+    Ok(Value::Undefined)
+}
+
 // ------------------------------------------------------------- nonces
 
 thread_local! {
@@ -387,6 +423,9 @@ pub(crate) fn install(realm: &mut Realm) {
         if let Some(p) = proto(iface) {
             realm.define_accessor(p, "nonce", Some(nonce_get), Some(nonce_set), ACC);
         }
+    }
+    if let Some(p) = proto("HTMLElement") {
+        realm.define_accessor(p, "translate", Some(translate_get), Some(translate_set), ACC);
     }
     let mut def = |iface: &str, prop: &str, attr: &str, kind: Reflect| {
         if let Some(p) = proto(iface) {

@@ -39,13 +39,32 @@ fn d_body(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 fn d_body_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
-    let Some(new) = node_of(realm, &arg(args, 0)) else { return Ok(Value::Undefined) };
-    let (old, html) = with_doc(d, |doc| (doc.body(), doc.html_element()));
-    if let Some(html) = html {
-        if let Some(o) = old {
-            node::remove_node(NodeRef { doc: d, node: o });
+    let v = arg(args, 0);
+    // `HTMLElement? body`: anything else is a TypeError.
+    let new = if v.is_null() { None } else {
+        let is_html = node_of(realm, &v).is_some_and(|n| with_doc(n.doc, |doc| doc.element(n.node).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Html)));
+        if !is_html {
+            return Err(realm.throw_type_error("Failed to set the 'body' property on 'Document': The provided value is not of type 'HTMLElement'."));
         }
-        insert_node(realm, NodeRef { doc: d, node: html }, new, None)?;
+        node_of(realm, &v)
+    };
+    let Some(new) = new.filter(|n| with_doc(n.doc, |doc| doc.element(n.node).is_some_and(|e| e.tag == "body" || e.tag == "frameset"))) else {
+        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "Failed to set the 'body' property on 'Document': The new body element is of type other than 'BODY' or 'FRAMESET'."));
+    };
+    let (old, html) = with_doc(d, |doc| (doc.body(), doc.html_element()));
+    if old == Some(new.node) && new.doc == d {
+        return Ok(Value::Undefined);
+    }
+    match (old, html) {
+        (Some(o), _) => {
+            let parent = with_doc(d, |doc| doc.parent(o));
+            if let Some(p) = parent {
+                insert_node(realm, NodeRef { doc: d, node: p }, new, Some(o))?;
+                node::remove_node(NodeRef { doc: d, node: o });
+            }
+        }
+        (None, Some(html)) => insert_node(realm, NodeRef { doc: d, node: html }, new, None)?,
+        (None, None) => return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "Failed to set the 'body' property on 'Document': No document element exists.")),
     }
     Ok(Value::Undefined)
 }
