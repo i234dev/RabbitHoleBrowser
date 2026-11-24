@@ -141,6 +141,15 @@ thread_local! {
     static LAST_PLACEMENT: std::cell::Cell<Placement> = const { std::cell::Cell::new(Placement { row_off: 0, col_off: 0, row_lines: 1, col_lines: 1 }) };
 }
 
+/// Physical horizontal padding and border of an orthogonal item, which its
+/// writing-mode wrapper holds in the item's logical block axis.
+fn wrapped_padding_border(wrapper: &LayoutBox, cbw: f32) -> f32 {
+    wrapper.children.first().map_or(0.0, |r| {
+        let s = &r.style;
+        s.padding.top.resolve_or_zero(cbw) + s.padding.bottom.resolve_or_zero(cbw) + s.border_width.top + s.border_width.bottom
+    })
+}
+
 /// Resolved placement of an item: [start, end) track indices per axis.
 #[derive(Debug, Clone, Copy)]
 struct Area {
@@ -1956,6 +1965,7 @@ impl<'a> Layouter<'a> {
             _=>None,
         };
         let (min,max)=match resolve_size(child.style.width,Some(cbw),bb,it.edges.pb_h) {
+            Some(w) if !pct(child.style.width)&&child.wm_wrapper&&!bb&&it.edges.pb_h==0. =>{let w=w+wrapped_padding_border(child,cbw);(w,w)},
             Some(w) if !pct(child.style.width)=>(w,w),
             _ if ratio_width.is_some()=>{let w=ratio_width.unwrap_or(0.);(w,w)},
             // A percentage of the (still indefinite) grid area behaves as auto.
@@ -2084,8 +2094,13 @@ impl<'a> Layouter<'a> {
     fn grid_item_width(&mut self, child: &mut LayoutBox, it: &GridItem, aw: f32, cbw: f32) -> f32 {
         let bb = child.style.box_sizing == BoxSizing::BorderBox;
         let avail_inner = (aw - it.edges.pb_h - it.edges.margin_sum(Axis::Row)).max(0.0);
-        let _ = cbw;
         match resolve_size(child.style.width, Some(aw), bb, it.edges.pb_h) {
+            // An orthogonal item's wrapper carries no padding or border of
+            // its own: a content-box width adds the item's (Grid2 §6.6).
+            Some(w) if child.wm_wrapper && !bb && it.edges.pb_h == 0.0 => {
+                let w = self.clamp_width(&child.style.clone(), w, aw, it.edges.pb_h);
+                w + wrapped_padding_border(child, cbw)
+            }
             Some(w) => self.clamp_width(&child.style.clone(), w, aw, it.edges.pb_h),
             None if matches!(child.style.width, Length::FitContent | Length::MinContent | Length::MaxContent) && child.kind != BoxKind::Image => {
                 let (min, max) = self.intrinsic(child);
