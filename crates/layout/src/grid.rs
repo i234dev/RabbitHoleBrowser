@@ -160,6 +160,13 @@ fn wrapped_padding_border_v(wrapper: &LayoutBox, cbw: f32) -> f32 {
     })
 }
 
+/// Whether an in-flow child has a negative (or possibly negative) margin,
+/// which can pull it over its siblings.
+pub(crate) fn negative_item_margins(b: &LayoutBox) -> bool {
+    let negative = |l: Length| match l { Length::Px(v) => v < 0.0, Length::Percent(p) => p < 0.0, Length::Auto => false, _ => true };
+    b.children.iter().any(|c| c.flow == Flow::InFlow && [c.style.margin.top, c.style.margin.bottom, c.style.margin.left, c.style.margin.right].into_iter().any(negative))
+}
+
 /// Resolved placement of an item: [start, end) track indices per axis.
 #[derive(Debug, Clone, Copy)]
 struct Area {
@@ -1324,6 +1331,13 @@ impl<'a> Layouter<'a> {
         } else {
             let mut col_contribs=Vec::new();
             let mut row_contribs=Vec::new();
+            // Items whose min-content contribution can change with the
+            // row sizes (percentages of the area's height inside).
+            let pct_h=|c:&LayoutBox|c.style.height.has_percent()||c.style.min_height.has_percent()||c.style.max_height.has_percent();
+            let row_dependent:Vec<usize>=if project||cols.inherited.is_some()||rows.inherited.is_some() {Vec::new()} else {
+                (0..items.len()).filter(|&k|{let c=&b.children[items[k].idx];c.is_in_flow()&&(pct_h(c)||crate::flex::depends_on_definite_height(c))}).collect()
+            };
+            let templates=(!row_dependent.is_empty()).then(||(cols.clone(),rows.clone()));
             // Column sizing.
             if cols.inherited.is_none() {
                 col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw,Some((&cols,col_gap)),Some((&rows,row_gap)))};
@@ -1379,13 +1393,46 @@ impl<'a> Layouter<'a> {
                     }
                 }
             }
+            // Grid2 §12.1 steps 3-4: once, re-resolve the columns when a
+            // min-content contribution changes with the row sizes, then
+            // the rows with the new columns.
+            if let Some((col_template,row_template))=templates.filter(|_|content_height.is_none()&&!rows.tracks.iter().any(|t|t.deferred.is_some())) {
+                let used_rows=TrackList{tracks:rows.tracks.iter().map(|t|{let mut f=Track::new(Sizing::Fixed(t.base),Sizing::Fixed(t.base));f.base=t.base;f.limit=Some(t.base);f.collapsed=t.collapsed;f}).collect(),names:rows.names.clone(),css_names:rows.css_names.clone(),inherited:None};
+                let mut adjusted=col_contribs.clone();
+                let mut changed=false;
+                for &k in &row_dependent {
+                    let it=&items[k];
+                    let c=self.column_contribution(&mut b.children[it.idx],it,cbw,ItemBases::new(it,Some((&cols,col_gap)),Some((&used_rows,row_gap))));
+                    if let Some(old)=adjusted.get_mut(k) {
+                        if old.min!=c.min {changed=true;}
+                        *old=c;
+                    }
+                }
+                if changed&&adjusted.len()==items.len() {
+                    self.column_baseline_shims(b,&items,&mut adjusted,cbw,Some(&col_template),Some((&used_rows,row_gap)));
+                    cols=col_template;
+                    size_tracks(&mut cols.tracks,&adjusted,Some(cbw),col_gap,col_stretch);
+                    col_pos=subgrid::positions(&cols,col_gap,Some(cbw),style.justify_content).0;
+                    rows=row_template;
+                    row_contribs=self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,&rows,row_gap);
+                    let space=subgrid::standalone_space(b,true,cb.height);
+                    size_tracks_with_space(&mut rows.tracks,&row_contribs,space,row_gap,row_stretch);
+                    if cb.height.is_none() && space == GridSpace::MaxContent {
+                        row_avail = resize_rows_to_limits(&mut rows.tracks, &row_contribs, &style, cbw, row_gap, row_stretch).or(cb.height);
+                    }
+                }
+            }
         }
         let (mut row_pos, rows_extent) = subgrid::positions(&rows, row_gap, row_avail, style.align_content);
         let rows_extent = content_height.unwrap_or(rows_extent);
         // A percentage row gap of an indefinite height is zero for sizing,
         // then resolves against the resulting height for layout (CSS Align 3 §8.1).
         let row_gap = if cb.height.is_none() && rows.inherited.is_none() && !style.row_gap_normal && matches!(style.row_gap, Length::Percent(_) | Length::Calc(..) | Length::Math(_)) {
-            let used = style.row_gap.resolve_or_zero(rows_extent).max(0.0);
+            // (Against the content height the container takes: the rows'
+            // extent within its definite min-/max-height.)
+            let min_h = definite_height_limit(&style, cbw, false).unwrap_or(0.0);
+            let max_h = definite_height_limit(&style, cbw, true).unwrap_or(f32::INFINITY);
+            let used = style.row_gap.resolve_or_zero(rows_extent.min(max_h).max(min_h)).max(0.0);
             if used != row_gap {
                 row_pos = subgrid::positions(&rows, used, row_avail, style.align_content).0;
             }

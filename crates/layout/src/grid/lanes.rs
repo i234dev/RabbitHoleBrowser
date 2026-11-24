@@ -620,8 +620,7 @@ impl<'a> Layouter<'a> {
         self.grid_layouts += 1;
         // Negative margins can stack items over earlier ones: items then
         // paint atomically, like inline blocks (Grid2 §9.5).
-        let negative = |l: Length| match l { Length::Px(v) => v < 0.0, Length::Percent(p) => p < 0.0, Length::Auto => false, _ => true };
-        b.grid_items_overlap = b.children.iter().any(|c| c.flow == Flow::InFlow && [c.style.margin.top, c.style.margin.bottom, c.style.margin.left, c.style.margin.right].into_iter().any(negative));
+        b.grid_items_overlap = negative_item_margins(b);
         if self.grid_publication.enabled() { b.used_grid_tracks = [None, None]; }
         let style = b.style.clone();
         let rows = row_lanes(b);
@@ -762,7 +761,11 @@ impl<'a> Layouter<'a> {
         // A percentage row gap of an indefinite height is zero for sizing,
         // then resolves against the resulting height (CSS Align 3 §8.1).
         let row_gap = if avail.is_none() && tl.inherited.is_none() && !style.row_gap_normal && matches!(style.row_gap, Length::Percent(_) | Length::Calc(..) | Length::Math(_)) {
-            let used = style.row_gap.resolve_or_zero(rows_extent).max(0.0);
+            // (Against the content height the container takes: the rows'
+            // extent within its definite min-/max-height.)
+            let min_h = definite_height_limit(&style, cbw, false).unwrap_or(0.0);
+            let max_h = definite_height_limit(&style, cbw, true).unwrap_or(f32::INFINITY);
+            let used = style.row_gap.resolve_or_zero(rows_extent.min(max_h).max(min_h)).max(0.0);
             if used != row_gap {
                 row_pos = subgrid::positions(&tl, used, row_avail, style.align_content).0;
             }

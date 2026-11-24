@@ -217,6 +217,9 @@ pub(crate) fn is_scroll_container(style: &ComputedStyle) -> bool {
 impl<'a> Layouter<'a> {
     /// Lay out the flex items of `b`; returns the content height.
     pub(crate) fn layout_flex(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
+        // Items pulled over each other by negative margins paint
+        // atomically, like inline blocks (CSS Flexbox §5).
+        b.grid_items_overlap = crate::grid::negative_item_margins(b);
         // The container's (min, max) content heights when its height is
         // indefinite (set by `layout_block` just before this call).
         let limits = self.flex_limits.take();
@@ -1433,7 +1436,7 @@ fn overflow_fallback(dist: ContentDistribution, mods: AlignMods, free: f32, reve
 /// auto one that comes out the same) can change its contents: children
 /// sized by percentages of that height, also through nested flex and grid
 /// containers (whose stretched or flexed items become definite).
-fn depends_on_definite_height(b: &LayoutBox) -> bool {
+pub(crate) fn depends_on_definite_height(b: &LayoutBox) -> bool {
     use crate::tree::Formatting;
     match b.pct_dependent.get() & 3 {
         1 => return false,

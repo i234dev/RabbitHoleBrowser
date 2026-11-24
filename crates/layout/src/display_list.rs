@@ -1282,7 +1282,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 self.paint_float_or_atomic(c);
             }
         }
-        if b.grid_items_overlap && b.formatting == crate::tree::Formatting::Grid && b.lines.is_empty() {
+        if b.grid_items_overlap && matches!(b.formatting, crate::tree::Formatting::Grid | crate::tree::Formatting::Flex) && b.lines.is_empty() {
             // Grid items paint as inline blocks (atomically), in
             // order-modified document order (Grid2 §9.5 / §4.3). Their
             // positioned descendants stay with the enclosing context.

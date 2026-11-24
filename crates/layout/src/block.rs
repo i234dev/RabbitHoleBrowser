@@ -2046,7 +2046,10 @@ impl<'a> Layouter<'a> {
                 let used = l.or(r).unwrap_or(before);
                 // A specified width resolves against the whole containing
                 // block; only shrink-to-fit uses the space past an inset.
-                let specified = !style.width.is_auto() && c.kind != BoxKind::Image && ratio.is_none() && !table;
+                // (`stretch` and other math sizes keep the inset-modified space.)
+                let specified = matches!(style.width, Length::Px(_) | Length::Percent(_) | Length::Calc(..))
+                    && !matches!(style.min_width, Length::Math(_)) && !matches!(style.max_width, Length::Math(_))
+                    && c.kind != BoxKind::Image && ratio.is_none() && !table;
                 (WidthMode::ShrinkToFit, if specified { cb.w } else { (cb.w - used).max(0.0) })
             }
         };
