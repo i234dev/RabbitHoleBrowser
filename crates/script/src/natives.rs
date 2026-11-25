@@ -440,6 +440,21 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
             }
         }
     }
+    // Optional second argument: only these global names (interfaces of an
+    // API evaluated after startup).
+    let mut only: Option<std::collections::HashSet<String>> = None;
+    if let Some(V::Object(list)) = args.get(1).map(|a| a.v()) {
+        let n = realm.get(Value::Object(list), PropertyKey::str("length"))?;
+        let n = match n.v() { V::Number(n) => n as u32, _ => 0 };
+        let mut names = std::collections::HashSet::new();
+        for i in 0..n {
+            let v = realm.get(Value::Object(list), PropertyKey::index(i))?;
+            if let V::String(s) = v.v() {
+                names.insert(s.to_rust_string());
+            }
+        }
+        only = Some(names);
+    }
     let is_proxy = |realm: &Realm, id| matches!(realm.obj(id).kind, rabbithole_js::ObjectKind::Proxy { .. });
     let g = realm.global();
     if is_proxy(realm, g) {
@@ -449,7 +464,7 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
     for key in realm.own_keys(g)? {
         let PropertyKey::String(name) = &key else { continue };
         let units = name.as_units();
-        if units.first().is_none_or(|&c| !(u16::from(b'A')..=u16::from(b'Z')).contains(&c)) || units.starts_with(&[95, 95]) || skip.contains(&name.to_rust_string()) {
+        if units.first().is_none_or(|&c| !(u16::from(b'A')..=u16::from(b'Z')).contains(&c)) || units.starts_with(&[95, 95]) || skip.contains(&name.to_rust_string()) || only.as_ref().is_some_and(|o| !o.contains(&name.to_rust_string())) {
             continue;
         }
         let Some(d) = realm.get_own_property(g, &key) else { continue };
@@ -504,9 +519,16 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
     Ok(Value::Bool(true))
 }
 
+fn load_lazy_api(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let index = realm.to_number(args.first().cloned().unwrap_or(Value::Undefined))?;
+    crate::load_lazy_api(realm, index as usize);
+    Ok(Value::Undefined)
+}
+
 pub(crate) fn install(realm: &mut Realm) {
     let o = realm.new_object();
     realm.define_method(o, "webidlEnumerable", 1, webidl_enumerable);
+    realm.define_method(o, "loadLazyApi", 1, load_lazy_api);
     realm.define_method(o, "inflate", 2, native_inflate);
     realm.define_method(o, "deflate", 2, native_deflate);
     crate::webcrypto::install(realm, o);
