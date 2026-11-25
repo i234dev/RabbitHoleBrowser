@@ -270,7 +270,12 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 _ => values::parse_color_component(c).is_some(),
             };
             let repeat = |c: &[Token]| matches!(c.first(), Some(Token::Function(f)) if f.eq_ignore_ascii_case("repeat"));
-            if comps.iter().all(|c| valid(c) || repeat(c)) {
+            // (Lists may also be comma-separated.)
+            let ok = comps.iter().all(|c| {
+                let c: Vec<Token> = c.iter().filter(|t| !matches!(t, Token::Comma)).cloned().collect();
+                c.is_empty() || valid(&c) || repeat(&c)
+            });
+            if ok {
                 style.column_rule_list |= list_bit(name);
             }
         }

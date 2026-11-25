@@ -1189,7 +1189,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                     }
                     let g2 = Geometry { y0: f, colh: floor(h2), lift: f - phys, step: p.step, per_row, row_gap: p.row_gap };
                     off = plan2.off;
-                    sets.push(Set { first: j, end: b, g: g2, flow_end: strip_end + off });
+                    sets.push(Set { first: j, end: b, g: g2, flow_end: if last { f32::INFINITY } else { strip_end + off } });
                     rows.push(RowOut { top: phys, height: h2, used: plan2.used.clamp(1, n) });
                     phys += h2;
                 }
@@ -1199,7 +1199,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                         locked[i] |= plan.locked[i];
                     }
                     off = plan.off;
-                    sets.push(Set { first: a, end: b, g, flow_end: strip_end + off });
+                    sets.push(Set { first: a, end: b, g, flow_end: if last { f32::INFINITY } else { strip_end + off } });
                     for r in 0..count {
                         rows.push(RowOut { top: phys, height: colh, used: if p.wrap { (used - r * n).min(n) } else { used } });
                         phys += colh + if r + 1 < count { p.row_gap } else { 0.0 };

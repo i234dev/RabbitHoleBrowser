@@ -57,8 +57,9 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         || effects::apply(name, comps, style, ctx)
         || text::apply(name, comps, value, style, parent, ctx)
         || content::apply(name, comps, style, ctx)
-        || multicol::apply(name, comps, style, ctx)
         || misc::apply(name, comps, style, ctx)
+        // (Last: other properties do not pay for its name match.)
+        || multicol::apply(name, comps, style, ctx)
 }
 
 // ------------------------------------------------------------ shared helpers
