@@ -136,6 +136,8 @@ pub struct ChildFrame {
     pub source: FrameSource,
     pub page: Option<Box<Page>>,
     pending: Option<Receiver<Result<Loaded, String>>>,
+    /// When the pending load started (young loads are polled more often).
+    pending_since: Option<std::time::Instant>,
     /// The page shows a previous source; the current one must be loaded.
     stale: bool,
     /// Content box size (CSS px) the child is laid out for.
@@ -478,10 +480,17 @@ impl Page {
 
     pub(crate) fn frames_next_due(&self) -> Option<f64> {
         let mut due: Option<f64> = None;
-        // Poll background loads every 25 ms (engine clock).
-        let poll = self.image_state.clock.map(|origin| (std::time::Instant::now() + std::time::Duration::from_millis(25)).saturating_duration_since(origin).as_secs_f64() * 1000.0).unwrap_or(0.0);
+        // Poll background loads every 25 ms (engine clock), every 4 ms in
+        // their first second (a nearby or cached document arrives within a
+        // few milliseconds; waiting for a slow poll would dominate).
+        let now = std::time::Instant::now();
+        let poll = |since: Option<std::time::Instant>| {
+            let young = since.is_some_and(|t| now.saturating_duration_since(t) < std::time::Duration::from_secs(1));
+            let interval = std::time::Duration::from_millis(if young { 4 } else { 25 });
+            self.image_state.clock.map(|origin| (now + interval).saturating_duration_since(origin).as_secs_f64() * 1000.0).unwrap_or(0.0)
+        };
         for c in &self.frames.children {
-            let d = if c.pending.is_some() { Some(poll) } else { c.page.as_ref().and_then(|p| if p.script.frame_load_pending || p.script.frame_initial_load_pending { Some(0.0) } else { p.next_script_due() }) };
+            let d = if c.pending.is_some() { Some(poll(c.pending_since)) } else { c.page.as_ref().and_then(|p| if p.script.frame_load_pending || p.script.frame_initial_load_pending { Some(0.0) } else { p.next_script_due() }) };
             if let Some(d) = d {
                 due = Some(due.map(|x: f64| x.min(d)).unwrap_or(d));
             }
@@ -574,7 +583,7 @@ impl Engine {
                     changed = true;
                 }
                 None => {
-                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, stale: false, size: attr_size(&page.doc, node), dirty: true, image: None, canvas: None });
+                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, pending_since: None, stale: false, size: attr_size(&page.doc, node), dirty: true, image: None, canvas: None });
                     changed = true;
                 }
             }
@@ -684,6 +693,7 @@ impl Engine {
                     }
                 }
                 c.pending = Some(rx);
+                c.pending_since = Some(std::time::Instant::now());
             }
         }
         self.paint_frames(page);
@@ -729,7 +739,7 @@ impl Engine {
         }
         // Source Blank: a `src` attribute shows up as a change on the next
         // sync and starts the real load.
-        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, stale: false, size, dirty: true, image: None, canvas: None });
+        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, pending_since: None, stale: false, size, dirty: true, image: None, canvas: None });
         Some(id)
     }
 
@@ -1052,6 +1062,7 @@ impl Engine {
             let _ = tx.send(loader.load_request(&req, vp).map_err(|e| e.to_string()));
         });
         c.pending = Some(rx);
+                c.pending_since = Some(std::time::Instant::now());
     }
 
     /// Deliver queued `postMessage`s and frame navigations anywhere in the
@@ -1175,6 +1186,7 @@ impl Engine {
             let _ = tx.send(loader.load_request(&req, vp).map_err(|e| e.to_string()));
         });
         c.pending = Some(rx);
+                c.pending_since = Some(std::time::Instant::now());
     }
 
     /// Wheel scrolling over a frame (document point of the owner):
