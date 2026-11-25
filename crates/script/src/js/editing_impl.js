@@ -1705,17 +1705,21 @@
     // The specification assumes block editing hosts: an inline host gets
     // line breaks instead of paragraphs, as in other browsers.
     if (getComputedStyle(t.host).display.startsWith('inline')) return false;
-    // Removing formatting keeps links and the selection, and a link typed
-    // inside a link splits it; lists inside table cells and sublists keep
-    // their boundaries: the implementation above does these as browsers do.
-    if (cmd === 'removeformat' || (cmd === 'createlink' && t.range.collapsed)) return false;
+    // A link typed inside a link splits it; lists inside table cells keep
+    // their boundaries and items moved to another kind of list keep their
+    // sublists: the implementation above does these as browsers do.
+    if (cmd === 'createlink' && t.range.collapsed) return false;
     const el = n => n.nodeType === 1 ? n : n.parentElement;
     if (listCommands.has(cmd)) {
       const inCell = n => el(n)?.closest('td,th,caption');
-      const nested = n => el(n)?.closest('li')?.parentElement?.closest('li') || el(n)?.closest('li')?.querySelector('ol,ul');
       const inTable = el(t.range.commonAncestorContainer)?.closest('table,thead,tbody,tfoot,tr');
+      const withSublist = n => {
+        const item = el(n)?.closest('li');
+        return item && item.parentElement?.localName !== listCommands.get(cmd) &&
+          Array.prototype.some.call(item.children, c => c.localName === 'ol' || c.localName === 'ul');
+      };
       if (inCell(t.range.startContainer) || inCell(t.range.endContainer) || (inTable && t.host.contains(inTable)) ||
-          nested(t.range.startContainer)) return false;
+          withSublist(t.range.startContainer) || withSublist(t.range.endContainer)) return false;
     }
     // Formatting the block of an xmp or listing element nests it in the new
     // block, and text after a sublist is indented with its whole item, as in
