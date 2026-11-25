@@ -140,9 +140,61 @@ struct FetchTask {
     network: Option<std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>>,
     lifetime_done: bool,
 }
+/// One cache: entries in insertion order, indexed by key and by URL.
+#[derive(Default)]
 struct CacheRecord {
     origin: String,
-    entries: Vec<(String, String)>,
+    /// Sequence number → entry (insertion order).
+    entries: BTreeMap<u64, CacheEntry>,
+    by_key: std::collections::HashMap<String, u64>,
+    by_url: std::collections::HashMap<String, std::collections::BTreeSet<u64>>,
+    /// Charged bytes of the entries.
+    bytes: usize,
+    next: u64,
+}
+/// A cached request/response pair: `meta` is the JSON of the request
+/// headers and response metadata, `body` the response bytes.
+struct CacheEntry {
+    key: String,
+    url: String,
+    meta: String,
+    body: Vec<u8>,
+}
+impl CacheEntry {
+    fn charge(&self) -> Option<usize> { self.key.len().checked_add(self.meta.len())?.checked_add(self.body.len()) }
+}
+impl CacheRecord {
+    fn new(origin: String) -> CacheRecord { CacheRecord { origin, ..Default::default() } }
+    fn remove(&mut self, key: &str) -> Option<CacheEntry> {
+        let seq = self.by_key.remove(key)?;
+        let entry = self.entries.remove(&seq)?;
+        if let Some(set) = self.by_url.get_mut(&entry.url) {
+            set.remove(&seq);
+            if set.is_empty() { self.by_url.remove(&entry.url); }
+        }
+        self.bytes -= entry.charge().unwrap_or(0);
+        Some(entry)
+    }
+    fn insert(&mut self, entry: CacheEntry) {
+        let bytes = entry.charge().unwrap_or(0);
+        // Replacing a key keeps its place.
+        let seq = match self.by_key.get(&entry.key) {
+            Some(&seq) => {
+                let old = self.entries.remove(&seq).unwrap();
+                self.bytes -= old.charge().unwrap_or(0);
+                if let Some(set) = self.by_url.get_mut(&old.url) {
+                    set.remove(&seq);
+                    if set.is_empty() { self.by_url.remove(&old.url); }
+                }
+                seq
+            }
+            None => { self.next += 1; self.next }
+        };
+        self.by_key.insert(entry.key.clone(), seq);
+        self.by_url.entry(entry.url.clone()).or_default().insert(seq);
+        self.bytes += bytes;
+        self.entries.insert(seq, entry);
+    }
 }
 struct Client {
     execution_ready: bool,
@@ -413,7 +465,9 @@ pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
     realm.define_method(n, "swFetchDone", 1, fetch_done);
     realm.define_method(n, "cacheOperation", 4, cache_operation);
     realm.define_method(n, "storagePersisted", 0, storage_persisted);
-    realm.define_method(n, "cacheBatchOperation", 4, cache_batch_operation);
+    realm.define_method(n, "cacheBatchOperation", 6, cache_batch_operation);
+    realm.define_method(n, "cacheQuery", 3, cache_query);
+    realm.define_method(n, "cacheBody", 2, cache_body);
     realm.define_method(n, "swRegister", 4, register);
     realm.define_method(n, "swUnregister", 1, unregister);
     realm.define_method(n, "swSnapshot", 0, snapshot);
@@ -669,7 +723,9 @@ impl CacheUsage {
         self.bytes <= limits.max_total_bytes && self.origins.values().all(|bytes| *bytes <= limits.max_origin_bytes) && self.entries <= limits.max_entries && self.caches <= limits.max_caches
     }
 }
-fn cache_data_usage(s: &Store, replacement: Option<(u64, &[(String, String)])>) -> Option<CacheUsage> {
+/// `replacement`: a cache's entry count and charged bytes after a pending
+/// change.
+fn cache_data_usage(s: &Store, replacement: Option<(u64, usize, usize)>) -> Option<CacheUsage> {
     let mut usage = CacheUsage::default();
     for (origin, names) in &s.cache_names {
         usage.charge(origin, origin.len())?;
@@ -678,30 +734,48 @@ fn cache_data_usage(s: &Store, replacement: Option<(u64, &[(String, String)])>) 
     for (&id, cache) in &s.caches {
         usage.caches = usage.caches.checked_add(1)?;
         usage.charge(&cache.origin, cache.origin.len())?;
-        let entries = replacement.filter(|(changed, _)| *changed == id).map(|(_, rows)| rows).unwrap_or(&cache.entries);
-        usage.entries = usage.entries.checked_add(entries.len())?;
-        for (key, record) in entries { usage.charge(&cache.origin, key.len().checked_add(record.len())?)?; }
+        let (entries, bytes) = replacement.filter(|(changed, _, _)| *changed == id).map(|(_, n, b)| (n, b)).unwrap_or((cache.entries.len(), cache.bytes));
+        usage.entries = usage.entries.checked_add(entries)?;
+        usage.charge(&cache.origin, bytes)?;
     }
     Some(usage)
 }
 enum CacheWriteError { Identity, Quota }
-fn cache_replace(s: &mut Store, id: u64, origin: &str, removals: &[String], puts: Vec<(String, String)>) -> Result<(), CacheWriteError> {
+fn cache_replace(s: &mut Store, id: u64, origin: &str, removals: &[String], puts: Vec<CacheEntry>) -> Result<(), CacheWriteError> {
     let cache = s.caches.get(&id).filter(|cache| cache.origin == origin).ok_or(CacheWriteError::Identity)?;
-    let new_bytes = puts.iter().try_fold(0usize, |sum, (key, record)| sum.checked_add(key.len())?.checked_add(record.len()));
+    let new_bytes = puts.iter().try_fold(0usize, |sum, entry| sum.checked_add(entry.charge()?));
     if new_bytes.is_none_or(|bytes| bytes > s.cache_limits.max_total_bytes || bytes > s.cache_limits.max_origin_bytes) { return Err(CacheWriteError::Quota); }
-    // Mutate a candidate only. Quota errors cannot discard the previous value
-    // or partially commit addAll/remove-and-replace batches.
-    let remove: std::collections::BTreeSet<&str> = removals.iter().map(String::as_str).collect();
-    let mut candidate = cache.entries.clone();
-    candidate.retain(|(key, _)| !remove.contains(key.as_str()));
-    let mut index: BTreeMap<String, usize> = candidate.iter().enumerate().map(|(index, (key, _))| (key.clone(), index)).collect();
-    for (key, record) in puts {
-        if let Some(&index) = index.get(&key) { candidate[index].1 = record; }
-        else { index.insert(key.clone(), candidate.len()); candidate.push((key, record)); }
+    // Check the result before changing anything: quota errors cannot
+    // discard the previous value or partially commit addAll /
+    // remove-and-replace batches.
+    // Charged size of each touched key after the change (None: absent).
+    let mut overlay: std::collections::HashMap<&str, Option<usize>> = std::collections::HashMap::new();
+    let current = |overlay: &std::collections::HashMap<&str, Option<usize>>, key: &str| match overlay.get(key) {
+        Some(size) => *size,
+        None => cache.by_key.get(key).map(|seq| cache.entries[seq].charge().unwrap_or(0)),
+    };
+    let (mut entries, mut bytes) = (cache.entries.len(), cache.bytes);
+    for key in removals {
+        if let Some(size) = current(&overlay, key) {
+            entries -= 1;
+            bytes -= size;
+            overlay.insert(key, None);
+        }
     }
-    let usage = cache_data_usage(s, Some((id, &candidate))).ok_or(CacheWriteError::Quota)?;
+    for entry in &puts {
+        match current(&overlay, &entry.key) {
+            Some(size) => bytes -= size,
+            None => entries += 1,
+        }
+        let size = entry.charge().ok_or(CacheWriteError::Quota)?;
+        bytes = bytes.checked_add(size).ok_or(CacheWriteError::Quota)?;
+        overlay.insert(&entry.key, Some(size));
+    }
+    let usage = cache_data_usage(s, Some((id, entries, bytes))).ok_or(CacheWriteError::Quota)?;
     if !usage.fits(s.cache_limits) { return Err(CacheWriteError::Quota); }
-    s.caches.get_mut(&id).unwrap().entries = candidate;
+    let cache = s.caches.get_mut(&id).unwrap();
+    for key in removals { cache.remove(key); }
+    for entry in puts { cache.insert(entry); }
     Ok(())
 }
 fn cache_write_error(realm: &mut Realm, error: CacheWriteError) -> Value {
@@ -722,17 +796,78 @@ fn cache_batch_strings(realm: &mut Realm, value: Value) -> JsResult<Vec<String>>
     }
     values.into_iter().map(|value| realm.to_rust_string(value)).collect()
 }
+/// `(id, removals, keys, urls, metas, bodies)`: remove entries by key, then
+/// store the new ones (bodies are BufferSources), atomically.
 fn cache_batch_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let id = realm.to_number(arg(args, 0))? as u64;
     let removals = cache_batch_strings(realm, arg(args, 1))?;
     let keys = cache_batch_strings(realm, arg(args, 2))?;
-    let records = cache_batch_strings(realm, arg(args, 3))?;
-    if keys.len() != records.len() || keys.iter().collect::<std::collections::BTreeSet<_>>().len() != keys.len() { return Err(realm.throw_type_error("Invalid Cache Storage batch")); }
+    let urls = cache_batch_strings(realm, arg(args, 3))?;
+    let metas = cache_batch_strings(realm, arg(args, 4))?;
+    let bodies_value = arg(args, 5);
+    let mut bodies = Vec::with_capacity(keys.len());
+    if !bodies_value.is_undefined() {
+        for index in 0..keys.len() {
+            let item = realm.get_str(bodies_value.clone(), &index.to_string())?;
+            realm.native_root(item.clone());
+            bodies.push(if item.is_undefined() { Vec::new() } else { crate::fetch::buffer_source_bytes(realm, &item, "body")? });
+        }
+    }
+    bodies.resize(keys.len(), Vec::new());
+    if keys.len() != metas.len() || keys.len() != urls.len() || keys.iter().collect::<std::collections::BTreeSet<_>>().len() != keys.len() { return Err(realm.throw_type_error("Invalid Cache Storage batch")); }
     let url = with_env(|e| e.document_url());
     if !trustworthy(&url) { return Err(exception(realm, "SecurityError", "Cache Storage requires a secure, non-opaque origin")); }
     let store = registry(realm)?;
-    let result = cache_replace(&mut store.borrow_mut(), id, &url.origin(), &removals, keys.into_iter().zip(records).collect());
+    let puts = keys.into_iter().zip(urls).zip(metas).zip(bodies).map(|(((key, url), meta), body)| CacheEntry { key, url, meta, body }).collect();
+    let result = cache_replace(&mut store.borrow_mut(), id, &url.origin(), &removals, puts);
     result.map(|_| Value::Undefined).map_err(|error| cache_write_error(realm, error))
+}
+
+/// `(id, url, ignoreSearch)`: `[{key, meta}]` of the entries stored for
+/// `url` (every entry when it is empty), in insertion order.
+fn cache_query(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let id = realm.to_number(arg(args, 0))? as u64;
+    let query = arg_str(realm, args, 1)?;
+    let ignore_search = realm.to_boolean(&arg(args, 2));
+    let rows: Vec<(String, String)> = {
+        let store = cache_for(realm, id)?;
+        let s = store.borrow();
+        let cache = &s.caches[&id];
+        let strip = |u: &str| u.split('?').next().unwrap_or("").to_string();
+        if query.is_empty() {
+            cache.entries.values().map(|e| (e.key.clone(), e.meta.clone())).collect()
+        } else if ignore_search {
+            let q = strip(&query);
+            cache.entries.values().filter(|e| strip(&e.url) == q).map(|e| (e.key.clone(), e.meta.clone())).collect()
+        } else {
+            cache.by_url.get(&query).map(|seqs| seqs.iter().map(|seq| &cache.entries[seq]).map(|e| (e.key.clone(), e.meta.clone())).collect()).unwrap_or_default()
+        }
+    };
+    let out = rows.into_iter().map(|(key, meta)| object(realm, &[("key", Value::str(&key)), ("meta", Value::str(&meta))])).collect();
+    Ok(realm.new_array_value(out))
+}
+
+/// `(id, key)`: the stored response bytes as a new ArrayBuffer.
+fn cache_body(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let id = realm.to_number(arg(args, 0))? as u64;
+    let key = arg_str(realm, args, 1)?;
+    let bytes = {
+        let store = cache_for(realm, id)?;
+        let s = store.borrow();
+        let cache = &s.caches[&id];
+        cache.by_key.get(&key).map(|seq| cache.entries[seq].body.clone()).unwrap_or_default()
+    };
+    Ok(crate::fetch::make_array_buffer(realm, bytes))
+}
+
+/// The store, after checking that cache `id` belongs to this origin.
+fn cache_for(realm: &mut Realm, id: u64) -> JsResult<Rc<RefCell<Store>>> {
+    let url = with_env(|e| e.document_url());
+    if !trustworthy(&url) { return Err(exception(realm, "SecurityError", "Cache Storage requires a secure, non-opaque origin")); }
+    let origin = url.origin();
+    let store = registry(realm)?;
+    if !store.borrow().caches.get(&id).is_some_and(|c| c.origin == origin) { return Err(realm.throw_type_error("Invalid cache storage identity")); }
+    Ok(store)
 }
 
 // Serialized response records cross realms without retaining any foreign GC
@@ -749,8 +884,6 @@ fn storage_persisted(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value
 fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let op = arg_str(realm, args, 0)?;
     let key = arg_str(realm, args, 2)?;
-    let payload = arg_str(realm, args, 3)?;
-    let id = realm.to_number(arg(args, 1))? as u64;
     let url = with_env(|e| e.document_url());
     if !trustworthy(&url) { return Err(exception(realm, "SecurityError", "Cache Storage requires a secure, non-opaque origin")); }
     let origin = url.origin();
@@ -769,7 +902,7 @@ fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Valu
             usage.caches = usage.caches.saturating_add(1);
             if !usage.fits(s.cache_limits) { return Err(exception(realm, "QuotaExceededError", "Cache Storage data budget exceeded")); }
             let id = s.id();
-            s.caches.insert(id, CacheRecord { origin: origin.clone(), entries: Vec::new() });
+            s.caches.insert(id, CacheRecord::new(origin.clone()));
             s.cache_names.entry(origin).or_default().push((key, id));
             Ok(Value::Number(id as f64))
         }
@@ -779,27 +912,7 @@ fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Valu
             if let Some(i) = found { names.remove(i); }
             Ok(Value::Bool(found.is_some()))
         }
-        "put" => {
-            let result = cache_replace(&mut s, id, &origin, &[], vec![(key, payload)]);
-            drop(s);
-            result.map(|_| Value::Undefined).map_err(|error| cache_write_error(realm, error))
-        }
-        _ => {
-            let cache = s.caches.get_mut(&id).filter(|cache| cache.origin == origin).ok_or_else(|| realm.throw_type_error("Invalid cache storage identity"))?;
-            match op.as_str() {
-                "entries" => {
-                    let mut out = Vec::new();
-                    for (key, payload) in &cache.entries { out.push(object(realm, &[("key", Value::str(key)), ("record", Value::str(payload))])); }
-                    Ok(realm.new_array_value(out))
-                }
-                "remove" => {
-                    let found = cache.entries.iter().position(|(k, _)| *k == key);
-                    if let Some(i) = found { cache.entries.remove(i); }
-                    Ok(Value::Bool(found.is_some()))
-                }
-                _ => Err(realm.throw_type_error("Unknown cache operation")),
-            }
-        }
+        _ => Err(realm.throw_type_error("Unknown cache operation")),
     }
 }
 
