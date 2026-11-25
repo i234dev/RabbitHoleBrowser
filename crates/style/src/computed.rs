@@ -1550,14 +1550,6 @@ pub struct Animation {
     pub timeline: String,
 }
 
-impl Animation {
-    /// Has no timeline: `none`, or a name no timeline answers (named
-    /// scroll and view timelines are not supported). Such an animation is
-    /// inactive and has no effect.
-    pub fn without_timeline(&self) -> bool {
-        self.timeline == "none" || self.timeline.starts_with("--")
-    }
-}
 
 /// Simple affine matrix helpers for transforms: [a, b, c, d, e, f] with
 /// x' = a·x + c·y + e, y' = b·x + d·y + f. 3D functions contribute their

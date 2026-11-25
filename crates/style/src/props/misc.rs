@@ -428,8 +428,12 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 [Token::Function(f), ..] if f.eq_ignore_ascii_case("scroll") || f.eq_ignore_ascii_case("view") => Some(format!("{}()", f.to_ascii_lowercase())),
                 _ => None,
             });
-            if let Some(v) = v {
-                each_animation(style, v, |a, t| a.timeline = t);
+            // (Applied to the animations named; it does not add any.)
+            if let Some(v) = v.filter(|v| !v.is_empty()) {
+                let n = v.len();
+                for (i, a) in style.animations.iter_mut().enumerate() {
+                    a.timeline = v[i % n].clone();
+                }
             }
         }
         "scroll-margin-top" | "scroll-margin" => {

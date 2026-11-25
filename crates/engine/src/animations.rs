@@ -1873,9 +1873,8 @@ impl Engine {
     fn sync_animations(&self, page: &mut Page, node: NodeId, before: Option<&ComputedStyle>, after: &ComputedStyle, now: f64) {
         let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
         let old_names: Vec<&str> = before.map(|b| b.animations.iter().map(|a| a.name.as_str()).collect()).unwrap_or_default();
-        // Cancel animations whose name went away (or whose timeline did:
-        // an animation without a timeline is inactive).
-        let names: Vec<String> = after.animations.iter().filter(|a| !a.without_timeline()).map(|a| a.name.clone()).collect();
+        // Cancel animations whose name went away.
+        let names: Vec<String> = after.animations.iter().map(|a| a.name.clone()).collect();
         let mut i = 0;
         while i < page.anim.animations.len() {
             let a = &page.anim.animations[i];
@@ -1889,7 +1888,7 @@ impl Engine {
             }
         }
         for (index, spec) in after.animations.iter().enumerate() {
-            if spec.name.is_empty() || spec.name == "none" || spec.without_timeline() {
+            if spec.name.is_empty() || spec.name == "none" {
                 continue;
             }
             if let Some(a) = page.anim.animations.iter_mut().find(|a| a.node == node && a.name == spec.name) {

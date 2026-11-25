@@ -752,7 +752,7 @@ impl Engine {
             let layout_w = rects.get(&n).map(|r| r.w);
             // (Dangling markup: not fetched.)
             let choice = select_image(&page.doc, n, vp, dpr, scripting, layout_w)
-                .filter(|c| !Url::potentially_dangling_markup(&c.url))
+                .filter(|c| !is_dangling_fetch(&c.url))
                 .and_then(|c| page.base_url.join(&c.url).filter(|u| u.scheme != "javascript").map(|u| (u, c.density)));
             let Some((url, density)) = choice else {
                 if page.image_state.reqs.remove(&n).is_some() || page.images.contains_key(&n) {
@@ -769,11 +769,8 @@ impl Engine {
                     continue;
                 }
             } else if page.images.contains_key(&n) && !script_nodes.contains(&n) {
-                // Loaded by the page loader before the first layout: its
-                // load (or error) event is still due.
-                let broken = page.images.get(&n).is_some_and(|i| i.broken);
-                page.image_state.reqs.insert(n, Req { url: key, density, status: if broken { Status::Failed } else { Status::Loaded } });
-                page.image_state.events.push((n, if broken { "error" } else { "load" }));
+                // Loaded by the page loader before the first layout.
+                page.image_state.reqs.insert(n, Req { url: key, density, status: Status::Loaded });
                 continue;
             }
             if !self.loader.load_images {
@@ -1002,15 +999,11 @@ impl Engine {
 
     /// Fire queued `load`/`error` events on image elements.
     pub(crate) fn fire_image_events(&self, page: &mut Page) -> crate::ScriptOutcome {
+        let events = std::mem::take(&mut page.image_state.events);
         let mut out = crate::ScriptOutcome::default();
         if page.script.host.is_none() {
-            // (Kept for the page's scripts unless there will be none.)
-            if !self.scripting {
-                page.image_state.events.clear();
-            }
             return out;
         }
-        let events = std::mem::take(&mut page.image_state.events);
         for (n, ev) in events {
             let o = self.dispatch_event(page, n, ev, rabbithole_script::EventInit { bubbles: false, cancelable: false, detail: None });
             out.relayout |= o.relayout;
@@ -1051,6 +1044,12 @@ fn favicon_url(doc: &Document, base: &Url, page: &Url) -> Option<Url> {
         }
     }
     best.map(|(_, u)| u).or_else(|| page.is_http().then(|| page.join("/favicon.ico")).flatten())
+}
+
+/// Dangling markup mitigation for an image URL (not `data:` URLs, which
+/// are not fetched from the network).
+pub(crate) fn is_dangling_fetch(url: &str) -> bool {
+    !url.trim_start().get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) && Url::potentially_dangling_markup(url)
 }
 
 /// Put a fetch result on an element (`None` = failed). Returns true when

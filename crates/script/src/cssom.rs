@@ -325,11 +325,10 @@ fn grid_property(name: &str) -> bool {
     rabbithole_style::props::grid_css::is_longhand(name) || rabbithole_style::props::grid_css::longhands(name).is_some()
 }
 
-/// Multi-column and gap properties, whose values the style system fully
-/// validates (`supports_declaration` is exact for them).
+/// Length properties of columns and gaps that do not take the unitless
+/// length quirk (CSSOM drops unitless and, for gaps, negative values).
 fn multicol_property(name: &str) -> bool {
-    matches!(name, "columns" | "column-count" | "column-width" | "column-height" | "column-wrap" | "column-fill" | "column-span"
-        | "column-rule" | "column-rule-width" | "column-rule-style" | "column-gap" | "row-gap")
+    matches!(name, "column-width" | "column-rule-width" | "column-gap" | "row-gap")
 }
 
 fn checked_property(name: &str) -> bool {
@@ -413,8 +412,15 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
     }
     // (Invalid values, such as unitless lengths, which only some properties
     // accept in quirks mode, are dropped.)
-    if multicol_property(name) && rabbithole_style::cascade::supports_declaration(name, tokens) == Some(false) {
-        return None;
+    if multicol_property(name) {
+        let parts = rabbithole_style::values::components(tokens);
+        if let [[Token::Number(n)]] = parts.as_slice() {
+            if *n != 0.0 { return None; }
+        }
+        let gap = matches!(name, "column-gap" | "row-gap");
+        if let [[Token::Dimension(v, _) | Token::Percentage(v) | Token::Number(v)]] = parts.as_slice() {
+            if gap && *v < 0.0 { return None; }
+        }
     }
     Some(tokens_to_css(tokens))
 }
