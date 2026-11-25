@@ -5734,10 +5734,11 @@ function canonicalSpaceSequence(n, nonBreakingStart, nonBreakingEnd) {
 }
 
 // RabbitHole: like other browsers, rewrites the run of spaces at (node,
-// offset) within its Text node (or, after deleting at the end of a Text
-// node, within the next one if that starts with a space) as a canonical space sequence whose
+// offset) within its Text node (after deleting at the end of a Text node,
+// within the next one if that starts with a space, or none) as a canonical space sequence whose
 // ends at the Text node's edges are non-breaking spaces.
 function rebalanceWhitespaceInTextNode(node, offset) {
+    var deleting = currentCommand == "delete" || currentCommand == "forwarddelete";
     if (node.nodeType != Node.TEXT_NODE) {
         if (offset > 0 && node.childNodes[offset - 1] && node.childNodes[offset - 1].nodeType == Node.TEXT_NODE) {
             node = node.childNodes[offset - 1];
@@ -5746,11 +5747,20 @@ function rebalanceWhitespaceInTextNode(node, offset) {
             node = node.childNodes[offset];
             offset = 0;
         } else {
-            return;
+            // The start of the following content, e.g. after joining blocks.
+            var first = node.childNodes[offset];
+            while (first && first.nodeType == Node.ELEMENT_NODE && first.firstChild && isEditable(first)) {
+                first = first.firstChild;
+            }
+            if (!first || first.nodeType != Node.TEXT_NODE) {
+                return;
+            }
+            node = first;
+            offset = 0;
         }
     }
     var isSpace = function(c) { return c == " " || c == "\xa0" };
-    if (offset == node.length && (currentCommand == "delete" || currentCommand == "forwarddelete")) {
+    if (offset == node.length && deleting) {
         var next = nextNode(node);
         while (next
         && ((next.nodeType == Node.TEXT_NODE && !next.length)
@@ -5762,6 +5772,10 @@ function rebalanceWhitespaceInTextNode(node, offset) {
         && isEditable(next) && inSameEditingHost(node, next)) {
             node = next;
             offset = 0;
+        } else if (next && next.nodeType == Node.TEXT_NODE && inSameEditingHost(node, next)) {
+            // Before other text, the spaces before the deletion stay as they
+            // are.
+            return;
         }
     }
     if (!isEditable(node)
