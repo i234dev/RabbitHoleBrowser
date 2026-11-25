@@ -5276,12 +5276,13 @@ function deleteSelection(flags) {
     // if the last member of node list (if any) is not an ancestor of node;
     // node is editable; and node is not a thead, tbody, tfoot, tr, th, or td."
     //
-    // RabbitHole: like other browsers, also a selected non-editable element
-    // whose parent is editable.
+    // RabbitHole: like other browsers, also a selected non-editable block or
+    // void element whose parent is editable.
     var nodeList = getContainedNodes(getActiveRange(),
         function(node) {
             return (isEditable(node)
                 || (node.nodeType == Node.ELEMENT_NODE
+                    && (!isInlineNode(node) || isHtmlElement(node, voidElementNames))
                     && node.parentNode
                     && (isEditable(node.parentNode) || isEditingHost(node.parentNode))))
                 && !isHtmlElement(node, ["thead", "tbody", "tfoot", "tr", "th", "td"]);

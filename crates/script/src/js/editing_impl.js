@@ -1704,7 +1704,7 @@
           nested(t.range.startContainer)) return false;
     }
     // Formatting the block of an xmp or listing element nests it in the new
-    // block, and text directly in a list is indented with its item, as in
+    // block, and text after a sublist is indented with its whole item, as in
     // other browsers.
     if (cmd === 'formatblock' && value && (el(t.range.startContainer)?.closest('xmp,listing') || el(t.range.endContainer)?.closest('xmp,listing'))) return false;
     // A selected select element is removed as a whole, and a paragraph
@@ -1714,7 +1714,11 @@
         (!t.range.collapsed && t.range.commonAncestorContainer.nodeType === 1 &&
          Array.prototype.some.call(t.range.commonAncestorContainer.getElementsByTagName('select'), s => t.range.intersectsNode(s)))) return false;
     if (cmd === 'insertparagraph' && t.range.startContainer.localName === 'br' && t.range.startContainer.parentElement?.localName === 'li') return false;
-    if (cmd === 'indent' && t.range.startContainer.nodeType === 3 && /^(ol|ul)$/.test(t.range.startContainer.parentElement?.localName)) return false;
+    if (cmd === 'indent') {
+      const item = el(t.range.startContainer)?.closest('li');
+      const sublist = item && Array.prototype.find.call(item.children, c => c.localName === 'ol' || c.localName === 'ul');
+      if (sublist && sublist.compareDocumentPosition(t.range.startContainer) & Node.DOCUMENT_POSITION_FOLLOWING && !sublist.contains(t.range.startContainer)) return false;
+    }
     // Spaces typed before text that preserves white-space end in a
     // nonbreaking space, as the implementation above does.
     if (cmd === 'inserttext' && /^[ \u00a0]+$/.test(value) && t.range.collapsed) {
