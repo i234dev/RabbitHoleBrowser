@@ -146,6 +146,7 @@ pub(crate) fn swap_images(items: &mut [DisplayItem], swaps: &[(Arc<Image>, Arc<I
                 }
             }
             DisplayItem::LayerMask(items) | DisplayItem::Filtered { items, .. } | DisplayItem::Blended { items, .. } | DisplayItem::Isolated { items, .. } => swap_images(items, swaps),
+            DisplayItem::Transform3d(g) => swap_images(&mut g.items, swaps),
             _ => {}
         }
     }
@@ -155,6 +156,7 @@ fn contains_images(items: &[DisplayItem], swaps: &[(Arc<Image>, Arc<Image>)]) ->
     items.iter().any(|it| match it {
         DisplayItem::Image { image, .. } | DisplayItem::ImageTiled { image, .. } => swaps.iter().any(|(old, _)| Arc::ptr_eq(old, image)),
         DisplayItem::LayerMask(items) | DisplayItem::Filtered { items, .. } | DisplayItem::Blended { items, .. } | DisplayItem::Isolated { items, .. } => contains_images(items, swaps),
+        DisplayItem::Transform3d(g) => contains_images(&g.items, swaps),
         _ => false,
     })
 }
