@@ -1953,6 +1953,16 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
                 g.a.imul_rr64(RDX, R9);
                 g.a.mov_imm64(R9, key.wrapping_mul(crate::ic::MEGA_MUL_KEY));
                 g.a.alu_rr64(Alu::Xor, RDX, R9);
+                // the receiver's prototype id (none: NO_OBJ)
+                let have = g.a.label();
+                g.a.load32(R10, Mem::base(RAX, l.proto_id));
+                g.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
+                g.a.jcc(CC_E, have);
+                g.a.mov_imm32(R10, crate::ic::NO_OBJ);
+                g.a.bind(have);
+                g.a.mov_imm64(R9, crate::ic::MEGA_MUL_PROTO);
+                g.a.imul_rr64(R10, R9);
+                g.a.alu_rr64(Alu::Xor, RDX, R10);
                 g.a.shr_ri64(RDX, (64 - crate::ic::MEGA_BITS) as u8);
                 g.a.imul_rri64(RDX, RDX, crate::ic::MEGA_SIZE);
                 g.a.alu_rm64(Alu::Add, RDX, Mem::base(R8, l.mega_ptr));

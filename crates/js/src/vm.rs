@@ -3289,11 +3289,19 @@ impl Realm {
                     let obj = rd!(o);
                     let key = rd!(k);
                     let val = rd!(v);
+                    let named = key.is_string() && matches!(obj.as_object().and_then(|id| self.heap.try_get(id)).map(|o| &o.kind), Some(ObjectKind::Ordinary));
                     let key = self.to_property_key(key)?;
-                    let ok = self.set(obj, key.clone(), val)?;
+                    // `obj[name] = v` of an ordinary object: remember how the
+                    // store went in the megamorphic cache (see `set_elem_named`).
+                    let before = if named { self.ic_before_set(&obj, &key) } else { None };
+                    let ok = self.set(obj.clone(), key.clone(), val)?;
                     if !ok && frame!().code().flags.is_strict {
                         let k = self.key_display(&key);
                         return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
+                    }
+                    if ok && before.is_some() {
+                        let rec = self.ic_fill_set(&obj, &key, before, false);
+                        self.mega_put_set(&obj, &key, before, rec);
                     }
                 }
                 Op::GetGlobalR(d, ic) => {
@@ -4781,6 +4789,9 @@ impl Realm {
     /// back when not applicable.
     #[inline]
     pub(crate) fn set_elem_fast(&mut self, obj: &Value, key: &Value, v: Value) -> Result<(), Value> {
+        if let (V::Object(_), V::String(name)) = (obj.v(), key.v()) {
+            return self.set_elem_named(obj, name, v);
+        }
         let (V::Object(id), V::Number(n)) = (obj.v(), key.v()) else { return Err(v) };
         let i = n as u32;
         if i as f64 != n || i >= (1 << 28) {
@@ -4817,6 +4828,21 @@ impl Realm {
                     Err(v)
                 }
             }
+            _ => Err(v),
+        }
+    }
+
+    /// `obj[name] = v` through the megamorphic store cache (an existing
+    /// writable data property or a cached addition), for ordinary objects;
+    /// gives `v` back when it does not apply.
+    #[inline(never)]
+    fn set_elem_named(&mut self, obj: &Value, name: &JsStr, v: Value) -> Result<(), Value> {
+        let Some(rec) = self.mega_get(obj, name.bits() | 1) else { return Err(v) };
+        if !matches!(rec.kind, crate::ic::IC_OWN | crate::ic::IC_ADD | crate::ic::IC_ADD_DEEP) {
+            return Err(v);
+        }
+        match obj.as_object().and_then(|id| self.heap.try_get(id)).map(|o| &o.kind) {
+            Some(ObjectKind::Ordinary) => self.ic_set(&rec, obj, name, v),
             _ => Err(v),
         }
     }
