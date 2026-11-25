@@ -408,14 +408,57 @@ fn nav_vendor(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> 
     Ok(Value::str(if chromium_major(&ua).is_some() { "Google Inc." } else { "" }))
 }
 
+/// Bytes of beacons still in flight, against the keepalive quota.
+const BEACON_QUOTA: usize = 64 * 1024;
+thread_local! {
+    static BEACONS: std::cell::RefCell<Vec<(std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `navigator.sendBeacon(url, data)`: queue a credentialed keepalive POST
+/// in the background. Returns false when the body exceeds what is left of
+/// the 64 KiB keepalive quota shared by beacons still in flight.
 fn nav_send_beacon(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    // Fire and forget.
     let url = arg_str(realm, args, 0)?;
     let Some(u) = resolve_url(&url) else {
         return Err(realm.throw_type_error(&format!("Failed to execute 'sendBeacon' on 'Navigator': Invalid URL '{url}'")));
     };
-    {
-        let _ = with_env(|env| env.fetch(rabbithole_net::Request::post(u, rabbithole_net::Body::text("text/plain", "")).with_dest(rabbithole_net::Destination::Empty).with_referer(env.document_url())));
+    if !u.is_http() {
+        return Err(realm.throw_type_error(&format!("Failed to execute 'sendBeacon' on 'Navigator': Beacons are only supported over HTTP(S), not '{url}'")));
+    }
+    let data = arg(args, 1);
+    let (bytes, content_type) = if data.is_undefined() || data.is_null() {
+        (Vec::new(), None)
+    } else {
+        crate::fetch::body_bytes_from_value(realm, &data)?
+    };
+    let size = bytes.len();
+    let in_flight = BEACONS.with(|b| {
+        let mut b = b.borrow_mut();
+        b.retain(|(rx, _)| matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        b.iter().map(|(_, n)| n).sum::<usize>()
+    });
+    if size > BEACON_QUOTA.saturating_sub(in_flight) {
+        return Ok(Value::Bool(false));
+    }
+    // A CORS-safelisted (or absent) Content-Type makes a no-cors request;
+    // any other type goes through CORS (and its preflight).
+    let safelisted = content_type.as_deref().is_none_or(|ct| {
+        let essence = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        matches!(essence.as_str(), "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain")
+    });
+    let mode = if safelisted { rabbithole_net::RequestMode::NoCors } else { rabbithole_net::RequestMode::Cors };
+    let mut req = rabbithole_net::Request::post(u, rabbithole_net::Body { content_type: content_type.unwrap_or_default(), data: bytes });
+    if data.is_undefined() || data.is_null() {
+        req.body = None;
+    }
+    let (referer, policy) = with_env(|env| (env.document_url(), env.referrer_policy()));
+    let req = req.with_dest(rabbithole_net::Destination::Empty).with_referer(referer).with_referrer_policy(policy).with_mode(mode, rabbithole_net::CredentialsMode::Include);
+    match with_env(|env| env.fetch_background(req.clone())) {
+        Some(rx) => BEACONS.with(|b| b.borrow_mut().push((rx, size))),
+        // Environments without background requests (tests, embedders).
+        None => {
+            let _ = with_env(|env| env.fetch(req));
+        }
     }
     Ok(Value::Bool(true))
 }

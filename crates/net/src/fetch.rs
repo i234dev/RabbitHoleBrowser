@@ -1058,7 +1058,7 @@ impl Fetcher {
         if let Some(o) = origin_header {
             h.push(("Origin".into(), o));
         }
-        if let Some(b) = body {
+        if let Some(b) = body.filter(|b| !b.content_type.is_empty()) {
             h.push(("Content-Type".into(), b.content_type.clone()));
         }
         h.push(("User-Agent".into(), self.user_agent.clone()));
@@ -1304,7 +1304,7 @@ impl Fetcher {
             let origin_value = if tainted_origin { "null".to_string() } else { origin_str.clone().unwrap_or_else(|| "null".into()) };
             if tainting == ResponseType::Cors {
                 let mut probe = author_headers.clone();
-                if let Some(b) = &body {
+                if let Some(b) = body.as_ref().filter(|b| !b.content_type.is_empty()) {
                     probe.push(("content-type".into(), b.content_type.clone()));
                 }
                 let unsafe_headers = cors::unsafe_request_header_names(&probe);

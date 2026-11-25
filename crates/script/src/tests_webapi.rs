@@ -1831,6 +1831,24 @@ fn navigator_members_live_on_the_prototype() {
     assert_eq!(out, "'0|userAgent:function:true|languages:function:true|language:function:true|platform:function:true|onLine:function:true|cookieEnabled:function:true|hardwareConcurrency:function:true|webdriver:function:true|function|function|false|en-US|en-US|en-US|true|true'");
 }
 
+/// `sendBeacon` rejects non-HTTP(S) URLs and bodies over the 64 KiB
+/// keepalive quota, and queues the rest.
+#[test]
+fn send_beacon_checks_scheme_and_quota() {
+    let out = result_of(
+        "<html><body></body></html>",
+        r#"
+        const r = [];
+        try { navigator.sendBeacon('data:text/plain,x'); r.push('no-throw'); } catch (e) { r.push(e instanceof TypeError); }
+        r.push(navigator.sendBeacon('https://example.test/b', 'x'.repeat(65537)));
+        r.push(navigator.sendBeacon('https://example.test/b', new URLSearchParams('a=1')));
+        r.push(navigator.sendBeacon('https://example.test/b'));
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(out, "'true|false|true|true'");
+}
+
 /// The URL components of `<a>` are settable (HTMLHyperlinkElementUtils):
 /// video blocks strip a flag from `a.hash` before decorating the link.
 #[test]
