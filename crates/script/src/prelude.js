@@ -5,6 +5,40 @@
   const g = globalThis;
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
 
+  // WebIDL names for operations and attribute accessors defined from JS
+  // (`fn.name` is the operation name, "get x" / "set x" for accessors).
+  // A function already named for another member gets a forwarding copy.
+  const namedFns = new WeakSet();
+  g.__rhNative.named = (fn, name) => {
+    if (typeof fn !== 'function' || fn.name === name) return fn;
+    if (namedFns.has(fn)) {
+      const target = fn;
+      fn = { [name](...a) { return target.apply(this, a); } }[name];
+      Object.defineProperty(fn, 'length', { value: target.length, configurable: true });
+    } else {
+      try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch (e) { return fn; }
+    }
+    namedFns.add(fn);
+    return fn;
+  };
+  // WebIDL's receiver check for an interface member defined from JS: a
+  // getter, setter or operation of interface C throws a TypeError unless
+  // `this` implements C (never C.prototype itself). Members of the global
+  // object's interfaces keep their implicit-window behaviour.
+  const globalProtos = new Set();
+  for (let o = Object.getPrototypeOf(g); o; o = Object.getPrototypeOf(o)) globalProtos.add(o);
+  g.__rhNative.branded = (C, fn, kind, name) => {
+    const n = kind === 'method' ? name : kind + ' ' + name;
+    if (typeof fn !== 'function' || !C || typeof C !== 'function' || !C.prototype || globalProtos.has(C.prototype) || C === Object) return g.__rhNative.named(fn, n);
+    let w;
+    if (kind === 'get') w = { [n]() { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return fn.call(this); } }[n];
+    else if (kind === 'set') w = { [n](v) { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return fn.call(this, v); } }[n];
+    else w = { [n](...a) { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return fn.apply(this, a); } }[n];
+    Object.defineProperty(w, 'name', { value: n, configurable: true });
+    if (kind === 'method') Object.defineProperty(w, 'length', { value: fn.length, configurable: true });
+    return w;
+  };
+
   // ---------------------------------------------------------- DOMMatrix
   const IDENT = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
   // Column-major 4x4 like the spec's m11..m44 (m[i*4+j] = m(i+1)(j+1)).

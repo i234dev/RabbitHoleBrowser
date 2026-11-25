@@ -20,6 +20,8 @@ pub use live::SharedRange;
 pub use host::AuxiliaryDocument;
 mod media;
 mod node;
+mod reflect;
+mod inner_text;
 mod canvas2d;
 mod webcrypto;
 mod webgl;
@@ -404,6 +406,7 @@ impl ScriptHost {
             events::install(realm);
             node::install(realm);
             element::install(realm);
+            reflect::install(realm);
             document::install(realm);
             window::install(realm);
             frames::install(realm);

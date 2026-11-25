@@ -39,13 +39,32 @@ fn d_body(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 fn d_body_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
-    let Some(new) = node_of(realm, &arg(args, 0)) else { return Ok(Value::Undefined) };
-    let (old, html) = with_doc(d, |doc| (doc.body(), doc.html_element()));
-    if let Some(html) = html {
-        if let Some(o) = old {
-            node::remove_node(NodeRef { doc: d, node: o });
+    let v = arg(args, 0);
+    // `HTMLElement? body`: anything else is a TypeError.
+    let new = if v.is_null() { None } else {
+        let is_html = node_of(realm, &v).is_some_and(|n| with_doc(n.doc, |doc| doc.element(n.node).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Html)));
+        if !is_html {
+            return Err(realm.throw_type_error("Failed to set the 'body' property on 'Document': The provided value is not of type 'HTMLElement'."));
         }
-        insert_node(realm, NodeRef { doc: d, node: html }, new, None)?;
+        node_of(realm, &v)
+    };
+    let Some(new) = new.filter(|n| with_doc(n.doc, |doc| doc.element(n.node).is_some_and(|e| e.tag == "body" || e.tag == "frameset"))) else {
+        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "Failed to set the 'body' property on 'Document': The new body element is of type other than 'BODY' or 'FRAMESET'."));
+    };
+    let (old, html) = with_doc(d, |doc| (doc.body(), doc.html_element()));
+    if old == Some(new.node) && new.doc == d {
+        return Ok(Value::Undefined);
+    }
+    match (old, html) {
+        (Some(o), _) => {
+            let parent = with_doc(d, |doc| doc.parent(o));
+            if let Some(p) = parent {
+                insert_node(realm, NodeRef { doc: d, node: p }, new, Some(o))?;
+                node::remove_node(NodeRef { doc: d, node: o });
+            }
+        }
+        (None, Some(html)) => insert_node(realm, NodeRef { doc: d, node: html }, new, None)?,
+        (None, None) => return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "Failed to set the 'body' property on 'Document': No document element exists.")),
     }
     Ok(Value::Undefined)
 }
@@ -94,8 +113,20 @@ fn d_url(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::str(&crate::window::current_href()))
 }
 
-fn d_referrer(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+fn d_referrer(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let _ = this_doc(realm, &this)?;
     Ok(Value::str(""))
+}
+
+/// `document.hidden`: documents of this host are always visible.
+fn d_hidden(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let _ = this_doc(realm, &this)?;
+    Ok(Value::Bool(false))
+}
+
+fn d_visibility_state(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let _ = this_doc(realm, &this)?;
+    Ok(Value::str("visible"))
 }
 
 fn d_domain(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -735,15 +766,6 @@ fn impl_create_html_document(realm: &mut Realm, _this: Value, args: &[Value]) ->
     Ok(new_aux_document(realm, &html))
 }
 
-fn d_constant_str(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    let v = native_data::<String>(realm).map(|s| s.to_string()).unwrap_or_default();
-    Ok(Value::str(&v))
-}
-
-fn d_false(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(false))
-}
-
 fn d_null(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Null)
 }
@@ -872,7 +894,7 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "plugins", d_embeds, None);
     acc(realm, "styleSheets", d_style_sheets, None);
     acc(realm, "implementation", d_implementation, None);
-    acc(realm, "hidden", d_false, None);
+    acc(realm, "hidden", d_hidden, None);
     acc(realm, "fullscreenElement", d_null, None);
     acc(realm, "pointerLockElement", d_null, None);
     acc(realm, "pictureInPictureElement", d_null, None);
@@ -886,11 +908,7 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "contentType", d_content_type, None);
     acc(realm, "designMode", d_design_mode, Some(d_design_mode_set));
     acc(realm, "dir", d_dir_get, Some(d_dir_set));
-    for (name, val) in [("visibilityState", "visible")] {
-        let data: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(val.to_string());
-        let g = realm.new_native_function_full(&format!("get {name}"), 0, d_constant_str, Some(data), vec![], false);
-        realm.define_accessor_values(d, name, Some(Value::Object(g)), None, ACC);
-    }
+    acc(realm, "visibilityState", d_visibility_state, None);
     let m = |realm: &mut Realm, name: &str, arity: u32, f: rabbithole_js::NativeFn| {
         realm.define_method(d, name, arity, f);
     };

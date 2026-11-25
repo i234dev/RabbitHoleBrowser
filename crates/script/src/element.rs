@@ -3,88 +3,15 @@
 use crate::env::with_env;
 use rabbithole_js::V;
 use crate::host::*;
-use crate::node::{self, children_of, inner_text, insert_node, remove_node, set_inner_html, set_text_content};
+use crate::node::{self, children_of, insert_node, remove_node, set_inner_html, set_text_content};
 use rabbithole_dom::{ControlDirection, Document, NodeData, NodeId};
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, ALL, CONFIGURABLE, ENUMERABLE};
-use std::rc::Rc;
 
 const ACC: u8 = CONFIGURABLE | ENUMERABLE;
 
 // ------------------------------------------------------- attribute reflection
 
-#[derive(Clone, Copy, PartialEq)]
-#[allow(dead_code)]
-pub(crate) enum Reflect {
-    Str,
-    NullableStr,
-    Popover,
-    Bool,
-    /// Number (`NaN`-free: 0 when missing)
-    Num,
-    /// Integer with a default
-    Int(i32),
-    /// URL resolved against the base
-    Url,
-    /// Enumerated string with a default
-    Default(&'static str),
-}
-
-pub(crate) struct AttrSpec {
-    pub attr: &'static str,
-    pub kind: Reflect,
-}
-
-fn reflect_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let spec = native_data::<AttrSpec>(realm).expect("attr spec");
-    let n = this_node(realm, &this, spec.attr)?;
-    let raw = with_doc(n.doc, |doc| doc.attr(n.node, spec.attr).map(|s| s.to_string()));
-    Ok(match spec.kind {
-        Reflect::Str => Value::str(raw.as_deref().unwrap_or("")),
-        Reflect::Popover => raw.as_deref().map(Document::popover_mode).map(Value::str).unwrap_or(Value::Null),
-        Reflect::NullableStr => raw.as_deref().map(Value::str).unwrap_or(Value::Null),
-        Reflect::Bool => Value::Bool(raw.is_some()),
-        Reflect::Num => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0)),
-        Reflect::Int(d) => Value::Number(raw.and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(d as f64)),
-        Reflect::Url => match raw {
-            Some(r) => Value::str(&resolve_url(&r).map(|u| u.to_string()).unwrap_or(r)),
-            None => Value::str(""),
-        },
-        Reflect::Default(d) => Value::str(raw.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or(d)),
-    })
-}
-
-fn reflect_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let spec = native_data::<AttrSpec>(realm).expect("attr spec");
-    let n = this_node(realm, &this, spec.attr)?;
-    let v = arg(args, 0);
-    match spec.kind {
-        Reflect::Bool => {
-            let b = realm.to_boolean(&v);
-            set_attribute(n, spec.attr, if b { Some("") } else { None });
-        }
-        Reflect::NullableStr | Reflect::Popover if v.is_nullish() => {
-            if get_attribute(n, spec.attr).is_some() { set_attribute(n, spec.attr, None); }
-        }
-        Reflect::Num | Reflect::Int(_) => {
-            let num = realm.to_number(v)?;
-            let s = rabbithole_js::value::number_to_string(num);
-            set_attribute(n, spec.attr, Some(&s));
-        }
-        _ => {
-            let s = realm.to_rust_string(v)?;
-            set_attribute(n, spec.attr, Some(&s));
-        }
-    }
-    Ok(Value::Undefined)
-}
-
-/// Define `prop` on `proto` as an accessor reflecting attribute `attr`.
-pub(crate) fn reflect(realm: &mut Realm, proto: ObjectId, prop: &str, attr: &'static str, kind: Reflect) {
-    let data: Rc<dyn std::any::Any> = Rc::new(AttrSpec { attr, kind });
-    let g = realm.new_native_function_full(&format!("get {prop}"), 0, reflect_get, Some(data.clone()), vec![], false);
-    let s = realm.new_native_function_full(&format!("set {prop}"), 1, reflect_set, Some(data), vec![], false);
-    realm.define_accessor_values(proto, prop, Some(Value::Object(g)), Some(Value::Object(s)), ACC);
-}
+pub(crate) use crate::reflect::{reflect, Reflect};
 
 /// Set/remove an attribute with mutation records and dirtiness.
 /// The attribute name to use on `n`: lower-cased for HTML elements in
@@ -587,21 +514,31 @@ fn camel_to_data(name: &str) -> String {
     out
 }
 
-fn data_to_camel(attr: &str) -> String {
-    let rest = &attr[5..];
+/// The DOMStringMap name of a `data-*` attribute: "-" followed by an ASCII
+/// lowercase letter becomes that letter uppercased; None for attributes
+/// that have no name (not `data-*`, or with ASCII uppercase letters).
+fn data_to_camel(attr: &str) -> Option<String> {
+    let rest = attr.strip_prefix("data-")?;
+    if rest.bytes().any(|b| b.is_ascii_uppercase()) {
+        return None;
+    }
     let mut out = String::new();
-    let mut upper = false;
-    for c in rest.chars() {
-        if c == '-' {
-            upper = true;
-        } else if upper {
-            out.push(c.to_ascii_uppercase());
-            upper = false;
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '-' && chars.peek().is_some_and(|n| n.is_ascii_lowercase()) {
+            out.push(chars.next().unwrap().to_ascii_uppercase());
         } else {
             out.push(c);
         }
     }
-    out
+    Some(out)
+}
+
+/// The value of the `data-*` attribute whose DOMStringMap name is `name`.
+fn dataset_lookup(n: NodeRef, name: &str) -> Option<String> {
+    with_doc(n.doc, |doc| {
+        doc.element(n.node)?.attrs.iter().find(|(k, _)| data_to_camel(k).as_deref() == Some(name)).map(|(_, v)| v.clone())
+    })
 }
 
 fn proxy_target_node(realm: &mut Realm, args: &[Value]) -> JsResult<NodeRef> {
@@ -615,7 +552,7 @@ fn dataset_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let n = proxy_target_node(realm, args)?;
     let key = arg(args, 1);
     if let V::String(k) = key.v() {
-        if let Some(v) = get_attribute(n, &camel_to_data(&k.to_rust_string())) {
+        if let Some(v) = dataset_lookup(n, &k.to_rust_string()) {
             return Ok(Value::str(&v));
         }
     }
@@ -628,15 +565,22 @@ fn dataset_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 fn dataset_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let k = realm.to_rust_string(arg(args, 1))?;
+    if k.as_bytes().windows(2).any(|w| w[0] == b'-' && w[1].is_ascii_lowercase()) {
+        return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to set a named property on 'DOMStringMap': '{k}' is not a valid property name.")));
+    }
     let v = realm.to_rust_string(arg(args, 2))?;
-    set_attribute(n, &camel_to_data(&k), Some(&v));
+    let attr = camel_to_data(&k);
+    if !crate::document::valid_attribute_local_name(&attr) {
+        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("Failed to set a named property on 'DOMStringMap': '{attr}' is not a valid attribute name.")));
+    }
+    set_attribute(n, &attr, Some(&v));
     Ok(Value::Bool(true))
 }
 
 fn dataset_has(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let k = realm.to_rust_string(arg(args, 1))?;
-    Ok(Value::Bool(get_attribute(n, &camel_to_data(&k)).is_some()))
+    Ok(Value::Bool(dataset_lookup(n, &k).is_some()))
 }
 
 fn dataset_delete(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -650,7 +594,7 @@ fn dataset_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     let n = proxy_target_node(realm, args)?;
     let keys: Vec<Value> = with_doc(n.doc, |doc| {
         doc.element(n.node)
-            .map(|e| e.attrs.iter().filter(|(k, _)| k.starts_with("data-")).map(|(k, _)| Value::str(&data_to_camel(k))).collect())
+            .map(|e| e.attrs.iter().filter_map(|(k, _)| data_to_camel(k)).map(|k| Value::str(&k)).collect())
             .unwrap_or_default()
     });
     Ok(array(realm, keys))
@@ -659,7 +603,7 @@ fn dataset_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 fn dataset_gopd(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let k = realm.to_rust_string(arg(args, 1))?;
-    match get_attribute(n, &camel_to_data(&k)) {
+    match dataset_lookup(n, &k) {
         Some(v) => Ok(object_from(realm, vec![("value", Value::str(&v)), ("writable", Value::Bool(true)), ("enumerable", Value::Bool(true)), ("configurable", Value::Bool(true))])),
         None => Ok(Value::Undefined),
     }
@@ -819,35 +763,103 @@ fn e_outer_html_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 
 fn e_inner_text_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "innerText")?;
-    Ok(Value::str(&inner_text(n)))
+    Ok(Value::str(&crate::inner_text::inner_text(n)))
+}
+
+/// `a.text`: the descendant text content.
+fn a_text_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "text")?;
+    Ok(Value::str(&with_doc(n.doc, |doc| doc.text_content(n.node))))
+}
+
+/// The rendered text fragment of `text`: text runs and a `<br>` for each
+/// line break (CR LF, CR or LF), as new detached nodes.
+fn rendered_text_fragment(doc: u32, text: &str) -> Vec<NodeRef> {
+    with_doc(doc, |d| {
+        let mut out = Vec::new();
+        let mut run = String::new();
+        let mut chars = text.chars().peekable();
+        let flush = |run: &mut String, d: &mut Document, out: &mut Vec<NodeRef>| {
+            if !run.is_empty() {
+                let t = d.create_text(run);
+                out.push(NodeRef { doc, node: t });
+                run.clear();
+            }
+        };
+        while let Some(c) = chars.next() {
+            if c == '\r' || c == '\n' {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                flush(&mut run, d, &mut out);
+                let br = d.create_element("br", vec![]);
+                out.push(NodeRef { doc, node: br });
+            } else {
+                run.push(c);
+            }
+        }
+        flush(&mut run, d, &mut out);
+        out
+    })
 }
 
 fn e_inner_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "innerText")?;
-    let text = arg_str(realm, args, 0)?;
-    // Newlines become <br>.
-    let parts: Vec<&str> = text.split('\n').collect();
+    let text = arg_null_to_empty(realm, args, 0)?;
     let old = children_of(n);
-    let added = with_doc(n.doc, |doc| {
+    let added = rendered_text_fragment(n.doc, &text);
+    with_doc(n.doc, |doc| {
         doc.clear_children(n.node);
-        let mut added = Vec::new();
-        for (i, part) in parts.iter().enumerate() {
-            if i > 0 {
-                let br = doc.create_element("br", vec![]);
-                doc.append_child(n.node, br);
-                added.push(NodeRef { doc: n.doc, node: br });
-            }
-            if !part.is_empty() {
-                let t = doc.create_text(part);
-                doc.append_child(n.node, t);
-                added.push(NodeRef { doc: n.doc, node: t });
-            }
+        for a in &added {
+            doc.append_child(n.node, a.node);
         }
-        added
     });
     node::record_child_list(n, added, old);
     if n.doc == 0 {
         mark_dirty();
+    }
+    Ok(Value::Undefined)
+}
+
+/// Merge `text` with its next sibling when both are Text nodes.
+fn merge_with_next_text(n: NodeRef) {
+    let next = with_doc(n.doc, |doc| {
+        let next = doc.next_sibling(n.node)?;
+        match (&doc.node(n.node).data, &doc.node(next).data) {
+            (NodeData::Text(a), NodeData::Text(b)) if !doc.is_cdata(n.node) && !doc.is_cdata(next) => Some((next, format!("{a}{b}"))),
+            _ => None,
+        }
+    });
+    if let Some((next, data)) = next {
+        node::set_character_data(n, &data);
+        remove_node(NodeRef { doc: n.doc, node: next });
+    }
+}
+
+fn e_outer_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "outerText")?;
+    let text = arg_null_to_empty(realm, args, 0)?;
+    let parent = with_doc(n.doc, |doc| doc.parent(n.node));
+    let Some(p) = parent else {
+        return Err(crate::misc::dom_exception(realm, "NoModificationAllowedError", "Failed to set the 'outerText' property on 'HTMLElement': The element has no parent."));
+    };
+    let (next, previous) = with_doc(n.doc, |doc| (doc.next_sibling(n.node), doc.prev_sibling(n.node)));
+    let mut nodes = rendered_text_fragment(n.doc, &text);
+    if nodes.is_empty() {
+        nodes.push(with_doc(n.doc, |d| NodeRef { doc: n.doc, node: d.create_text("") }));
+    }
+    let pref = NodeRef { doc: n.doc, node: p };
+    for nn in nodes {
+        insert_node(realm, pref, nn, Some(n.node))?;
+    }
+    remove_node(n);
+    if let Some(next) = next {
+        if let Some(prev_of_next) = with_doc(n.doc, |doc| doc.prev_sibling(next)) {
+            merge_with_next_text(NodeRef { doc: n.doc, node: prev_of_next });
+        }
+    }
+    if let Some(previous) = previous {
+        merge_with_next_text(NodeRef { doc: n.doc, node: previous });
     }
     Ok(Value::Undefined)
 }
@@ -1840,8 +1852,16 @@ fn input_type_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
     let n = this_node(realm, &this, "type")?;
     let tag = tag_of(n).unwrap_or_default();
     Ok(Value::str(&match tag.as_str() {
-        "input" => get_attribute(n, "type").map(|t| t.to_ascii_lowercase()).filter(|t| !t.is_empty()).unwrap_or_else(|| "text".into()),
-        "button" => get_attribute(n, "type").map(|t| t.to_ascii_lowercase()).filter(|t| !t.is_empty()).unwrap_or_else(|| "submit".into()),
+        // Enumerated, limited to known values: unknown types are text
+        // (input) and submit (button) controls.
+        "input" => {
+            let t = get_attribute(n, "type").unwrap_or_default();
+            crate::reflect::INPUT_TYPES.iter().find(|k| k.eq_ignore_ascii_case(&t)).unwrap_or(&"text").to_string()
+        }
+        "button" => {
+            let t = get_attribute(n, "type").unwrap_or_default();
+            ["submit", "reset", "button"].iter().find(|k| k.eq_ignore_ascii_case(&t)).unwrap_or(&"submit").to_string()
+        }
         "select" => if get_attribute(n, "multiple").is_some() { "select-multiple".into() } else { "select-one".into() },
         "textarea" => "textarea".into(),
         _ => get_attribute(n, "type").unwrap_or_default(),
@@ -2097,6 +2117,24 @@ fn option_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     Ok(Value::Undefined)
 }
 
+/// `option.label`: the label content attribute when present, else the
+/// option's text; setting writes the attribute.
+fn option_label_get(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "label")?;
+    // (The label attribute in no namespace, not a namespaced one.)
+    match find_attr_ns(n, None, "label").map(|(_, v)| v) {
+        Some(l) => Ok(Value::str(&l)),
+        None => option_text_get(realm, this, args),
+    }
+}
+
+fn option_label_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "label")?;
+    let v = arg_str(realm, args, 0)?;
+    set_attribute(n, "label", Some(&v));
+    Ok(Value::Undefined)
+}
+
 fn option_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "value")?;
     Ok(Value::str(&option_value(n)))
@@ -2282,6 +2320,8 @@ fn img_current_src(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     let n = this_node(realm, &this, "currentSrc")?;
     match img_engine_state(n) {
         Some((_, _, _, src)) if !src.is_empty() => Ok(Value::str(&src)),
+        // No current request: "" for an absent or empty src.
+        _ if get_attribute(n, "src").is_none_or(|s| s.is_empty()) => Ok(Value::str("")),
         _ => img_src_get(realm, this, args),
     }
 }
@@ -2344,11 +2384,10 @@ fn img_src_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 fn img_src_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "src")?;
-    let raw = get_attribute(n, "src").unwrap_or_default();
-    if raw.is_empty() {
-        return Ok(Value::str(""));
-    }
-    Ok(Value::str(&resolve_url(&raw).map(|u| u.to_string()).unwrap_or(raw)))
+    // A reflected URL: absent is "", anything else parses against the base
+    // ("" being the document's base URL itself).
+    let Some(raw) = get_attribute(n, "src") else { return Ok(Value::str("")) };
+    Ok(Value::str(&base_url().join(raw.trim_matches(|c: char| c <= ' ')).map(|u| u.to_string()).unwrap_or(raw)))
 }
 
 // script / style / link / template / canvas / media ---------------------------------
@@ -2468,7 +2507,7 @@ fn media_can_play_type(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResul
 }
 
 fn iframe_content_window(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Some(n) = node_of(realm, &this) else { return Ok(Value::Null) };
+    let n = this_node(realm, &this, "contentWindow")?;
     let id = with_env(|env| if n.doc == 0 { env.ensure_frame(n.node) }
         else if n.doc & FRAME_DOC != 0 { env.ensure_frame_in((n.doc & !FRAME_DOC) as u64, n.node) }
         else { None });
@@ -2477,7 +2516,7 @@ fn iframe_content_window(realm: &mut Realm, this: Value, _: &[Value]) -> JsResul
 
 /// The frame's document, when it is same-origin (null otherwise).
 fn iframe_content_document(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Some(n) = node_of(realm, &this) else { return Ok(Value::Null) };
+    let n = this_node(realm, &this, "contentDocument")?;
     let Some(id) = with_env(|env| if n.doc == 0 { env.ensure_frame(n.node) }
         else if n.doc & FRAME_DOC != 0 { env.ensure_frame_in((n.doc & !FRAME_DOC) as u64, n.node) }
         else { None }) else { return Ok(Value::Null) };
@@ -2628,12 +2667,11 @@ pub(crate) fn install(realm: &mut Realm) {
     ] {
         reflect(realm, el, prop, attr, Reflect::NullableStr);
     }
-    crate::events::install_handler_props(realm, el, EVENT_HANDLER_NAMES);
 
     let html = define_class(realm, "HTMLElement", Some("Element"), crate::host::html_element_ctor);
     let hacc = |realm: &mut Realm, name: &str, g: rabbithole_js::NativeFn, s: Option<rabbithole_js::NativeFn>| realm.define_accessor(html, name, Some(g), s, ACC);
     hacc(realm, "innerText", e_inner_text_get, Some(e_inner_text_set));
-    hacc(realm, "outerText", e_inner_text_get, Some(e_inner_text_set));
+    hacc(realm, "outerText", e_inner_text_get, Some(e_outer_text_set));
     hacc(realm, "dataset", e_dataset, None);
     hacc(realm, "style", e_style, Some(e_style_set));
     hacc(realm, "hidden", e_hidden_get, Some(e_hidden_set));
@@ -2645,7 +2683,7 @@ pub(crate) fn install(realm: &mut Realm) {
     hacc(realm, "offsetTop", e_offset_top, None);
     hacc(realm, "offsetLeft", e_offset_left, None);
     hacc(realm, "offsetParent", e_offset_parent, None);
-    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize"), ("nonce", "nonce")] {
+    for (prop, attr) in [("title", "title"), ("lang", "lang"), ("accessKey", "accesskey"), ("autocapitalize", "autocapitalize")] {
         reflect(realm, html, prop, attr, Reflect::Str);
     }
     reflect(realm, html, "popover", "popover", Reflect::Popover);
@@ -2693,18 +2731,11 @@ pub(crate) fn install(realm: &mut Realm) {
     let data = proto("HTMLDataElement");
     reflect(realm, data, "value", "value", Reflect::Str);
     let cell = proto("HTMLTableCellElement");
-    reflect(realm, cell, "colSpan", "colspan", Reflect::Int(1));
-    reflect(realm, cell, "rowSpan", "rowspan", Reflect::Int(1));
     reflect(realm, cell, "headers", "headers", Reflect::Str);
     let ol = proto("HTMLOListElement");
-    reflect(realm, ol, "start", "start", Reflect::Int(1));
     reflect(realm, ol, "reversed", "reversed", Reflect::Bool);
-    let li = proto("HTMLLIElement");
-    reflect(realm, li, "value", "value", Reflect::Int(0));
     let quote = proto("HTMLQuoteElement");
     reflect(realm, quote, "cite", "cite", Reflect::Url);
-    let progress = proto("HTMLProgressElement");
-    reflect(realm, progress, "max", "max", Reflect::Num);
     let details = proto("HTMLDetailsElement");
     reflect(realm, details, "open", "open", Reflect::Bool);
     let dialog = proto("HTMLDialogElement");
@@ -2731,11 +2762,8 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, source, "media", "media", Reflect::Str);
     let time = proto("HTMLTimeElement");
     reflect(realm, time, "dateTime", "datetime", Reflect::Str);
-    let quote = proto("HTMLQuoteElement");
-    reflect(realm, quote, "cite", "cite", Reflect::Str);
     let progress = proto("HTMLProgressElement");
-    reflect(realm, progress, "value", "value", Reflect::Num);
-    reflect(realm, progress, "max", "max", Reflect::Int(1));
+    reflect(realm, progress, "value", "value", Reflect::Double(0.0));
     let area = proto("HTMLAreaElement");
     realm.define_accessor(area, "href", Some(a_href_get), Some(a_href_set), ACC);
 
@@ -2750,7 +2778,7 @@ pub(crate) fn install(realm: &mut Realm) {
         reflect(realm, a, p, at, Reflect::Str);
     }
     realm.define_accessor(a, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
-    realm.define_accessor(a, "text", Some(e_inner_text_get), Some(n_text_set_alias), ACC);
+    realm.define_accessor(a, "text", Some(a_text_get), Some(n_text_set_alias), ACC);
 
     // --- HTMLInputElement
     let input = define_class(realm, "HTMLInputElement", Some("HTMLElement"), crate::host::html_element_ctor);
@@ -2758,7 +2786,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(input, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(input, "defaultValue", Some(input_default_value_get), Some(input_default_value_set), ACC);
     realm.define_accessor(input, "checked", Some(input_checked_get), Some(input_checked_set), ACC);
-    realm.define_accessor(input, "defaultChecked", Some(input_checked_get), Some(input_checked_set), ACC);
+    reflect(realm, input, "defaultChecked", "checked", Reflect::Bool);
     realm.define_accessor(input, "type", Some(input_type_get), Some(input_type_set), ACC);
     realm.define_accessor(input, "form", Some(input_form), None, ACC);
     realm.define_accessor(input, "labels", Some(input_labels), None, ACC);
@@ -2780,15 +2808,12 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(input, "stepUp", 0, e_noop);
     realm.define_method(input, "stepDown", 0, e_noop);
     realm.define_method(input, "showPicker", 0, e_noop);
-    for (p, at) in [("name", "name"), ("placeholder", "placeholder"), ("min", "min"), ("max", "max"), ("step", "step"), ("pattern", "pattern"), ("accept", "accept"), ("autocomplete", "autocomplete"), ("alt", "alt"), ("src", "src"), ("dirName", "dirname")] {
+    for (p, at) in [("name", "name"), ("placeholder", "placeholder"), ("min", "min"), ("max", "max"), ("step", "step"), ("pattern", "pattern"), ("accept", "accept"), ("autocomplete", "autocomplete"), ("alt", "alt"), ("dirName", "dirname")] {
         reflect(realm, input, p, at, Reflect::Str);
     }
     for (p, at) in [("disabled", "disabled"), ("required", "required"), ("readOnly", "readonly"), ("multiple", "multiple"), ("autofocus", "autofocus"), ("indeterminate", "data-rh-indeterminate")] {
         reflect(realm, input, p, at, Reflect::Bool);
     }
-    reflect(realm, input, "maxLength", "maxlength", Reflect::Int(-1));
-    reflect(realm, input, "minLength", "minlength", Reflect::Int(-1));
-    reflect(realm, input, "size", "size", Reflect::Int(20));
 
     // --- HTMLTextAreaElement
     let ta = define_class(realm, "HTMLTextAreaElement", Some("HTMLElement"), crate::host::html_element_ctor);
@@ -2813,9 +2838,6 @@ pub(crate) fn install(realm: &mut Realm) {
     for (p, at) in [("disabled", "disabled"), ("required", "required"), ("readOnly", "readonly"), ("autofocus", "autofocus")] {
         reflect(realm, ta, p, at, Reflect::Bool);
     }
-    reflect(realm, ta, "rows", "rows", Reflect::Int(2));
-    reflect(realm, ta, "cols", "cols", Reflect::Int(20));
-    reflect(realm, ta, "maxLength", "maxlength", Reflect::Int(-1));
 
     // --- HTMLSelectElement / HTMLOptionElement
     let sel = define_class(realm, "HTMLSelectElement", Some("HTMLElement"), crate::host::html_element_ctor);
@@ -2841,11 +2863,10 @@ pub(crate) fn install(realm: &mut Realm) {
     for (p, at) in [("disabled", "disabled"), ("required", "required"), ("multiple", "multiple"), ("autofocus", "autofocus")] {
         reflect(realm, sel, p, at, Reflect::Bool);
     }
-    reflect(realm, sel, "size", "size", Reflect::Int(0));
     let opt = define_class(realm, "HTMLOptionElement", Some("HTMLElement"), option_ctor);
     realm.define_accessor(opt, "value", Some(option_value_get), Some(input_value_set), ACC);
     realm.define_accessor(opt, "text", Some(option_text_get), Some(option_text_set), ACC);
-    realm.define_accessor(opt, "label", Some(option_text_get), Some(e_noop), ACC);
+    realm.define_accessor(opt, "label", Some(option_label_get), Some(option_label_set), ACC);
     realm.define_accessor(opt, "selected", Some(option_selected_get), Some(option_selected_set), ACC);
     realm.define_accessor(opt, "defaultSelected", Some(option_default_selected_get), Some(option_default_selected_set), ACC);
     realm.define_accessor(opt, "index", Some(option_index), None, ACC);
@@ -2864,11 +2885,9 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(form, "reset", 0, form_reset);
     realm.define_method(form, "checkValidity", 0, form_check_validity);
     realm.define_method(form, "reportValidity", 0, form_check_validity);
-    for (p, at) in [("name", "name"), ("target", "target"), ("autocomplete", "autocomplete"), ("acceptCharset", "accept-charset")] {
+    for (p, at) in [("name", "name"), ("target", "target"), ("acceptCharset", "accept-charset")] {
         reflect(realm, form, p, at, Reflect::Str);
     }
-    reflect(realm, form, "method", "method", Reflect::Default("get"));
-    reflect(realm, form, "enctype", "enctype", Reflect::Default("application/x-www-form-urlencoded"));
     reflect(realm, form, "noValidate", "novalidate", Reflect::Bool);
 
     // --- HTMLImageElement
@@ -2892,7 +2911,7 @@ pub(crate) fn install(realm: &mut Realm) {
     // --- HTMLScriptElement
     let script = define_class(realm, "HTMLScriptElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(script, "text", Some(script_text_get), Some(script_text_set), ACC);
-    for (p, at) in [("type", "type"), ("charset", "charset"), ("integrity", "integrity"), ("nonce", "nonce")] {
+    for (p, at) in [("type", "type"), ("charset", "charset"), ("integrity", "integrity")] {
         reflect(realm, script, p, at, Reflect::Str);
     }
     reflect(realm, script, "src", "src", Reflect::Url);
@@ -2944,20 +2963,18 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(canvas, "toDataURL", 0, canvas_to_data_url);
     realm.define_method(canvas, "toBlob", 1, e_noop);
     realm.define_method(canvas, "captureStream", 0, node_null);
-    reflect(realm, canvas, "width", "width", Reflect::Int(300));
-    reflect(realm, canvas, "height", "height", Reflect::Int(150));
     // --- HTMLButtonElement
     let button = define_class(realm, "HTMLButtonElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(button, "popoverTargetElement", Some(popover_target_get), Some(popover_target_set), ACC);
     realm.define_accessor(button, "type", Some(input_type_get), Some(input_type_set), ACC);
-    realm.define_accessor(button, "value", Some(input_value_get), Some(input_value_set), ACC);
+    reflect(realm, button, "value", "value", Reflect::Str);
     realm.define_accessor(button, "form", Some(input_form), None, ACC);
     realm.define_accessor(button, "labels", Some(input_labels), None, ACC);
     realm.define_accessor(button, "validity", Some(input_validity), None, ACC);
     realm.define_method(button, "checkValidity", 0, node_true);
     realm.define_method(button, "reportValidity", 0, node_true);
     realm.define_method(button, "setCustomValidity", 1, e_noop);
-    for (p, at) in [("name", "name"), ("formAction", "formaction"), ("formMethod", "formmethod"), ("formTarget", "formtarget"), ("formEnctype", "formenctype")] {
+    for (p, at) in [("name", "name"), ("formTarget", "formtarget")] {
         reflect(realm, button, p, at, Reflect::Str);
     }
     for (p, at) in [("disabled", "disabled"), ("autofocus", "autofocus"), ("formNoValidate", "formnovalidate")] {
@@ -2982,9 +2999,6 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, media, "src", "src", Reflect::Url);
     reflect(realm, media, "currentSrc", "src", Reflect::Url);
     reflect(realm, media, "poster", "poster", Reflect::Url);
-    for (p, at) in [("preload", "preload")] {
-        reflect(realm, media, p, at, Reflect::Str);
-    }
     for (p, at) in [("autoplay", "autoplay"), ("controls", "controls"), ("loop", "loop"), ("muted", "muted"), ("playsInline", "playsinline")] {
         reflect(realm, media, p, at, Reflect::Bool);
     }
@@ -2995,7 +3009,29 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "HTMLVideoElement", Some("HTMLMediaElement"), crate::host::html_element_ctor);
     define_class(realm, "HTMLAudioElement", Some("HTMLMediaElement"), crate::host::html_element_ctor);
     // --- SVGElement
+    // MathML elements (MathML Core): GlobalEventHandlers (html.js),
+    // HTMLOrSVGElement and ElementCSSInlineStyle.
+    let mathml = define_class(realm, "MathMLElement", Some("Element"), illegal_ctor);
+    realm.define_accessor(mathml, "tabIndex", Some(e_tab_index_get), Some(e_tab_index_set), ACC);
+    realm.define_accessor(mathml, "style", Some(e_style), Some(e_style_set), ACC);
+    realm.define_accessor(mathml, "dataset", Some(e_dataset), None, ACC);
+    realm.define_method(mathml, "focus", 0, e_focus);
+    realm.define_method(mathml, "blur", 0, e_blur);
+    // MathML <a> (MathML Core): href, target and HyperlinkElementUtils.
+    let ma = define_class(realm, "MathMLAnchorElement", Some("MathMLElement"), illegal_ctor);
+    realm.define_accessor(ma, "href", Some(a_href_get), Some(a_href_set), ACC);
+    for (name, g) in [("protocol", a_protocol as rabbithole_js::NativeFn), ("host", a_host), ("hostname", a_hostname), ("port", a_port), ("pathname", a_pathname), ("search", a_search), ("hash", a_hash), ("origin", a_origin)] {
+        realm.define_accessor(ma, name, Some(g), None, ACC);
+    }
+    reflect(realm, ma, "target", "target", Reflect::Str);
+    reflect(realm, ma, "rel", "rel", Reflect::Str);
+    realm.define_accessor(ma, "relList", Some(e_rel_list), Some(e_rel_list_set), ACC);
+    realm.define_method(ma, "toString", 0, a_to_string);
     let svg = define_class(realm, "SVGElement", Some("Element"), illegal_ctor);
+    // GlobalEventHandlers: on HTML, SVG and MathML elements (not Element).
+    for p in [html, mathml, svg] {
+        crate::events::install_handler_props(realm, p, EVENT_HANDLER_NAMES);
+    }
     realm.define_accessor(svg, "tabIndex", Some(e_tab_index_get), Some(e_tab_index_set), ACC);
     realm.define_accessor(svg, "ownerSVGElement", Some(svg_owner), None, ACC);
     realm.define_accessor(svg, "style", Some(e_style), Some(e_style_set), ACC);
@@ -3383,15 +3419,17 @@ fn form_action_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
 
 fn img_width_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "width")?;
-    let v = realm.to_number(arg(args, 0))?;
-    set_attribute(n, "width", Some(&format!("{}", v as i64)));
+    // unsigned long: out-of-range values set the default, 0.
+    let v = realm.to_uint32(arg(args, 0))?;
+    set_attribute(n, "width", Some(&(if v > 2147483647 { 0 } else { v }).to_string()));
     Ok(Value::Undefined)
 }
 
 fn img_height_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "height")?;
-    let v = realm.to_number(arg(args, 0))?;
-    set_attribute(n, "height", Some(&format!("{}", v as i64)));
+    // unsigned long: out-of-range values set the default, 0.
+    let v = realm.to_uint32(arg(args, 0))?;
+    set_attribute(n, "height", Some(&(if v > 2147483647 { 0 } else { v }).to_string()));
     Ok(Value::Undefined)
 }
 

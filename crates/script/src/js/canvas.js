@@ -17,6 +17,9 @@
   const N = g.__rhNative;
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
+  // Element interfaces captured now: worker realms remove the globals.
+  const HTMLCanvasElement = g.HTMLCanvasElement, HTMLImageElement = g.HTMLImageElement, HTMLVideoElement = g.HTMLVideoElement;
+  const isA = (x, C) => typeof C === 'function' && x instanceof C;
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const S = Symbol('canvas');
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
@@ -357,7 +360,7 @@
   const pendingFlush = new Set();
   let flushQueued = false;
   function markDirty(s) {
-    if (!s.owner || !(s.owner instanceof g.HTMLCanvasElement)) return;
+    if (!s.owner || !isA(s.owner, HTMLCanvasElement)) return;
     pendingFlush.add(s);
     if (!flushQueued) { flushQueued = true; queueMicrotask(flushCanvases); }
   }
@@ -378,7 +381,7 @@
   // ------------------------------------------------ CanvasRenderingContext2D
   const DEFAULT_STATE = () => ({ fillStyle: '#000000', fill: [0, 0, 0, 1], strokeStyle: '#000000', stroke: [0, 0, 0, 1], globalAlpha: 1, globalCompositeOperation: 'source-over', lineWidth: 1, lineCap: 'butt', lineJoin: 'miter', miterLimit: 10, lineDash: [], lineDashOffset: 0, font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', direction: 'inherit', letterSpacing: '0px', wordSpacing: '0px', fontKerning: 'auto', fontStretch: 'normal', fontVariantCaps: 'normal', textRendering: 'auto', shadowBlur: 0, shadowColor: 'rgba(0, 0, 0, 0)', shadow: [0, 0, 0, 0], shadowOffsetX: 0, shadowOffsetY: 0, filter: 'none', imageSmoothingEnabled: true, imageSmoothingQuality: 'low', lang: 'inherit', m: [1, 0, 0, 1, 0, 0], clip: null });
   function resetState(ctx) { ctx[S].state = DEFAULT_STATE(); ctx[S].stack = []; ctx[S].path = newPathState(() => ctx[S].state.m); }
-  const surf = (ctx) => (ctx[S].canvas instanceof g.HTMLCanvasElement ? surfaceOf(ctx[S].canvas) : ctx[S].surface);
+  const surf = (ctx) => (isA(ctx[S].canvas, HTMLCanvasElement) ? surfaceOf(ctx[S].canvas) : ctx[S].surface);
   function params(ctx) {
     const st = ctx[S].state;
     return { alpha: st.globalAlpha, op: st.globalCompositeOperation, clip: st.clip, shadowColor: st.shadow[3] > 0 ? F64(st.shadow) : null, shadowBlur: st.shadowBlur, shadowOffsetX: st.shadowOffsetX, shadowOffsetY: st.shadowOffsetY };
@@ -605,16 +608,16 @@
   }
   // Pixels of a CanvasImageSource: { width, height, data }.
   function sourcePixels(image) {
-    if (image instanceof g.HTMLCanvasElement) { const s = surfaceOf(image); if (s.lost) throw domError('The WebGL drawing buffer is lost.', 'InvalidStateError'); return s.width && s.height ? { width: s.width, height: s.height, data: pixelsOf(s) } : null; }
+    if (isA(image, HTMLCanvasElement)) { const s = surfaceOf(image); if (s.lost) throw domError('The WebGL drawing buffer is lost.', 'InvalidStateError'); return s.width && s.height ? { width: s.width, height: s.height, data: pixelsOf(s) } : null; }
     if (image instanceof OffscreenCanvas) { const s = image[S].surface; if (s.lost) throw domError('The WebGL drawing buffer is lost.', 'InvalidStateError'); return s.width && s.height ? { width: s.width, height: s.height, data: pixelsOf(s) } : null; }
     if (image instanceof ImageBitmap) { if (image[S].closed) throw domError('The image source is detached.', 'InvalidStateError'); return image[S]; }
     if (image instanceof ImageData) return { width: image.width, height: image.height, data: image.data };
-    if (image instanceof g.HTMLImageElement || (g.SVGImageElement && image instanceof g.SVGImageElement)) {
+    if (isA(image, HTMLImageElement) || isA(image, g.SVGImageElement)) {
       const p = N.imagePixels(image);
       if (!p) { if (image.complete && image.naturalWidth === 0 && image.getAttribute('src')) throw domError("Failed to execute 'drawImage' on 'CanvasRenderingContext2D': The HTMLImageElement provided is in the 'broken' state.", 'InvalidStateError'); return null; }
       return { width: p.width, height: p.height, data: new Uint8ClampedArray(p.data) };
     }
-    if (image instanceof g.HTMLVideoElement) return null;
+    if (isA(image, HTMLVideoElement)) return null;
     throw new TypeError("The provided value is not of type '(CSSImageValue or HTMLCanvasElement or HTMLImageElement or HTMLVideoElement or ImageBitmap or OffscreenCanvas or SVGImageElement or VideoFrame)'.");
   }
 
@@ -748,6 +751,49 @@
   clone.receiveCanvas = size => new OffscreenCanvas(size[0], size[1]);
   tag(OffscreenCanvas, 'OffscreenCanvas');
   N.installHandlers(OffscreenCanvas.prototype, ['contextlost', 'contextrestored']);
+  // WebIDL shape of the 2D context, Path2D and friends: operation lengths
+  // (required argument counts), TypeErrors for missing arguments and
+  // foreign receivers, and accessor names.
+  {
+    const named = N.named;
+    // name: [length, required]
+    const PATH_IDL = { closePath: 0, moveTo: 2, lineTo: 2, quadraticCurveTo: 4, bezierCurveTo: 6, arcTo: 5, rect: 4, roundRect: 4, arc: 5, ellipse: 7 };
+    const CTX_IDL = Object.assign({
+      scale: 2, rotate: 1, translate: 2, transform: 6, setTransform: 0, createLinearGradient: 4, createRadialGradient: 6, createConicGradient: 3,
+      createPattern: 2, clearRect: 4, fillRect: 4, strokeRect: 4, fill: 0, stroke: 0, clip: 0, isPointInPath: 2, isPointInStroke: 2,
+      drawFocusIfNeeded: 1, fillText: 3, strokeText: 3, measureText: 1, drawImage: 3, createImageData: 1, getImageData: 4, putImageData: 3,
+      setLineDash: 1, isContextLost: 0, getTransform: 0, resetTransform: 0, beginPath: 0, save: 0, restore: 0, reset: 0, getLineDash: 0,
+      getContextAttributes: 0,
+    }, PATH_IDL);
+    const idl = (P0, table, iface) => {
+      for (const [name, n] of Object.entries(table)) {
+        const d = Object.getOwnPropertyDescriptor(P0, name);
+        if (!d || typeof d.value !== 'function') continue;
+        const f = d.value;
+        const w = { [name](...a) {
+          if (this == null || !Object.prototype.hasOwnProperty.call(Object(this), S)) throw new TypeError('Illegal invocation');
+          if (a.length < n) throw new TypeError(`Failed to execute '${name}' on '${iface}': ${n} argument${n === 1 ? '' : 's'} required, but only ${a.length} present.`);
+          return f.apply(this, a);
+        } }[name];
+        Object.defineProperty(w, 'length', { value: n, configurable: true });
+        d.value = w;
+        Object.defineProperty(P0, name, d);
+      }
+    };
+    idl(CanvasRenderingContext2D.prototype, CTX_IDL, 'CanvasRenderingContext2D');
+    idl(Path2D.prototype, Object.assign({ addPath: 1 }, PATH_IDL), 'Path2D');
+    idl(CanvasGradient.prototype, { addColorStop: 2 }, 'CanvasGradient');
+    idl(CanvasPattern.prototype, { setTransform: 0 }, 'CanvasPattern');
+    Object.defineProperty(Path2D, 'length', { value: 0, configurable: true });
+    Object.defineProperty(ImageData, 'length', { value: 2, configurable: true });
+    for (const P0 of [CanvasRenderingContext2D.prototype, TextMetrics.prototype]) {
+      for (const k of Object.getOwnPropertyNames(P0)) {
+        const d = Object.getOwnPropertyDescriptor(P0, k);
+        if (d.get) named(d.get, 'get ' + k);
+        if (d.set) named(d.set, 'set ' + k);
+      }
+    }
+  }
   class OffscreenCanvasRenderingContext2D { constructor() { ILLEGAL(); } }
   for (const k of Reflect.ownKeys(CanvasRenderingContext2D.prototype)) {
     if (k === 'constructor' || k === Symbol.toStringTag || k === 'drawFocusIfNeeded' || k === 'scrollPathIntoView') continue;
@@ -787,7 +833,7 @@
           }, reject);
           return;
         }
-        if (source instanceof g.HTMLImageElement && !source.complete) {
+        if (isA(source, HTMLImageElement) && !source.complete) {
           source.addEventListener('load', () => { try { done(sourcePixels(source)); } catch (e) { reject(e); } }, { once: true });
           source.addEventListener('error', () => reject(domError('The image element contains no image data.', 'InvalidStateError')), { once: true });
           return;
@@ -802,7 +848,7 @@
     constructor() { ILLEGAL(); }
     get canvas() { return this[S].canvas; }
     transferFromImageBitmap(bm) {
-      const isEl = this[S].canvas instanceof g.HTMLCanvasElement;
+      const isEl = isA(this[S].canvas, HTMLCanvasElement);
       if (bm === null) { const s = isEl ? surfaceOf(this[S].canvas) : this[S].surface; N.canvasResize(s.id, s.width, s.height); markDirty(s); return; }
       if (bm[S].closed) throw domError("Failed to execute 'transferFromImageBitmap': The input ImageBitmap has been detached", 'InvalidStateError');
       if (isEl) { this[S].canvas.width = bm.width; this[S].canvas.height = bm.height; }

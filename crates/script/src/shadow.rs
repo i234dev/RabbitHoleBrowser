@@ -152,6 +152,9 @@ pub(crate) fn on_child_list(parent: NodeRef, added: &[NodeRef], removed: &[NodeR
 
 /// Called after an attribute change.
 pub(crate) fn on_attribute(n: NodeRef, name: &str, old: Option<String>, new: Option<&str>) {
+    if name == "nonce" {
+        crate::reflect::nonce_attribute_changed(n, new);
+    }
     if state().borrow().ce_upgraded.contains(&n) {
         // Only observed attributes get a reaction (checked again when it runs).
         let observed = definition_for(n).map(|d| d.observed.iter().any(|o| o.as_str() == name || o.eq_ignore_ascii_case(name))).unwrap_or(false);

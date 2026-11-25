@@ -443,9 +443,11 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
         targets.push(cid);
     }
     for o in targets {
+        // (`length` and `name` of an interface object are the function's.)
+        let callable = realm.is_callable(&Value::Object(o));
         for key in realm.own_keys(o)? {
             let PropertyKey::String(k) = &key else { continue };
-            if k.eq_str("constructor") || k.eq_str("prototype") || k.eq_str("length") || k.eq_str("name") || k.as_units().starts_with(&[95, 95]) {
+            if k.eq_str("constructor") || k.eq_str("prototype") || (callable && (k.eq_str("length") || k.eq_str("name"))) || k.as_units().starts_with(&[95, 95]) {
                 continue;
             }
             let Some(d) = realm.get_own_property(o, &key) else { continue };
@@ -483,6 +485,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
     realm.define_method(o, "imagePixels", 1, image_pixels);
     realm.define_method(o, "installHandlers", 2, install_handlers);
+    realm.define_method(o, "reflect", 5, crate::reflect::reflect_native);
     realm.define_method(o, "historyTraverse", 3, crate::window::history_traverse_native);
     realm.define_method(o, "listenersThrew", 0, crate::events::listeners_threw);
     realm.define_method(o, "markHTMLDDA", 1, mark_htmldda);

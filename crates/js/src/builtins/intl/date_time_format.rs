@@ -259,8 +259,6 @@ fn get_number(realm: &mut Realm, opts: Option<ObjectId>, name: &str, min: f64, m
 
 // ------------------------------------------------------------ time zones
 
-const ZONEINFO_DIRS: [&str; 4] = ["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/usr/share/lib/zoneinfo", "/etc/zoneinfo"];
-
 /// Available IANA time zone identifiers: lower-cased name → (identifier,
 /// zoneinfo file holding its rules).
 fn zone_table() -> &'static std::collections::HashMap<String, (String, String)> {
@@ -287,7 +285,7 @@ fn zone_table() -> &'static std::collections::HashMap<String, (String, String)> 
                 }
             }
         }
-        for dir in ZONEINFO_DIRS {
+        for &dir in dt::system_zoneinfo_dirs() {
             let base = std::path::Path::new(dir);
             if !base.is_dir() {
                 continue;
@@ -311,6 +309,11 @@ fn zone_table() -> &'static std::collections::HashMap<String, (String, String)> 
             }
             break;
         }
+        // The embedded database covers hosts without one (Windows) and
+        // names the system copy lacks.
+        for (name, _) in dt::tzdb::names() {
+            map.entry(name.to_ascii_lowercase()).or_insert_with(|| (name.to_string(), name.to_string()));
+        }
         for utc in ["UTC", "Etc/UTC", "GMT", "Etc/GMT"] {
             map.entry(utc.to_ascii_lowercase()).or_insert_with(|| (utc.to_string(), String::new()));
         }
@@ -322,7 +325,9 @@ fn zone_table() -> &'static std::collections::HashMap<String, (String, String)> 
 /// the tzdata Zone entries (`UTC` for `Etc/UTC`), sorted.
 pub(super) fn time_zone_ids() -> Vec<String> {
     let mut out = vec!["UTC".to_string()];
-    for dir in ZONEINFO_DIRS {
+    let keep = |name: &str| !matches!(name, "Etc/UTC" | "Etc/GMT" | "Factory") && zone_table().contains_key(&name.to_ascii_lowercase());
+    let mut system = false;
+    for &dir in dt::system_zoneinfo_dirs() {
         let Ok(zi) = std::fs::read_to_string(std::path::Path::new(dir).join("tzdata.zi")) else { continue };
         for line in zi.lines() {
             let mut it = line.split_whitespace();
@@ -330,12 +335,15 @@ pub(super) fn time_zone_ids() -> Vec<String> {
                 continue;
             }
             let Some(name) = it.next() else { continue };
-            if matches!(name, "Etc/UTC" | "Etc/GMT" | "Factory") || !zone_table().contains_key(&name.to_ascii_lowercase()) {
-                continue;
+            if keep(name) {
+                out.push(name.to_string());
             }
-            out.push(name.to_string());
         }
+        system = true;
         break;
+    }
+    if !system {
+        out.extend(dt::tzdb::names().into_iter().filter(|&(n, zone)| zone && keep(n)).map(|(n, _)| n.to_string()));
     }
     out.sort();
     out.dedup();

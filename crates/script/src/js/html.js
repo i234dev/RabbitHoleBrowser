@@ -18,13 +18,14 @@
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
   // Define accessors / methods only where the native bindings lack them.
+  const named = N.named;
   const acc = (C, name, get, set) => {
     if (!C || Object.prototype.hasOwnProperty.call(C.prototype, name)) return;
-    Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, name, { get: get && globalThis.__rhNative.branded(C, get, 'get', name), set: set && globalThis.__rhNative.branded(C, set, 'set', name), configurable: true, enumerable: true });
   };
   const method = (C, name, fn, force) => {
     if (!C || (!force && Object.prototype.hasOwnProperty.call(C.prototype, name))) return;
-    Object.defineProperty(C.prototype, name, { value: fn, writable: true, configurable: true });
+    Object.defineProperty(C.prototype, name, { value: named(fn, name), writable: true, configurable: true });
   };
   const resolveURL = (v) => { try { return new URL(v, document.baseURI).href; } catch (e) { return String(v); } };
 
@@ -33,7 +34,7 @@
   const table = g.__rhReflectTable || {};
   delete g.__rhReflectTable;
   const MIXINS = {
-    HTMLOrSVGOrMathMLElement: ['HTMLElement', 'SVGElement'],
+    HTMLOrSVGOrMathMLElement: ['HTMLElement', 'SVGElement', 'MathMLElement'],
     ARIAMixin: ['Element'],
     HTMLHyperlinkElementUtils: ['HTMLAnchorElement', 'HTMLAreaElement'],
     PopoverInvokerElement: ['HTMLButtonElement', 'HTMLInputElement'],
@@ -77,6 +78,8 @@
       if (!C) continue;
       for (const [prop, attr, kind, dflt] of entries) {
         if (prop in C.prototype) continue;
+        // The native reflection algorithms cover every kind but token lists.
+        if (kind !== 't' && N.reflect(C.prototype, prop, attr, kind, dflt)) continue;
         const [get, set] = reflector(attr, kind, dflt);
         acc(C, prop, get, set);
       }
@@ -129,7 +132,7 @@
     for (const C of [g.HTMLBodyElement, g.HTMLFrameSetElement].filter(Boolean)) {
       for (const n of WINDOW_HANDLERS.concat(['blur', 'error', 'focus', 'load', 'resize', 'scroll'])) {
         if (Object.prototype.hasOwnProperty.call(C.prototype, 'on' + n)) continue;
-        Object.defineProperty(C.prototype, 'on' + n, { get() { return g['on' + n]; }, set(v) { g['on' + n] = v; }, configurable: true, enumerable: true });
+        Object.defineProperty(C.prototype, 'on' + n, { get: N.branded(C, function () { return g['on' + n]; }, 'get', 'on' + n), set: N.branded(C, function (v) { g['on' + n] = v; }, 'set', 'on' + n), configurable: true, enumerable: true });
       }
     }
   }
@@ -554,9 +557,9 @@
   for (const name of ['HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'HTMLFieldSetElement', 'HTMLOutputElement', 'HTMLObjectElement']) {
     const C = g[name];
     if (!C) continue;
-    Object.defineProperty(C.prototype, 'validity', { get() { const el = this; return makeValidity(() => validityFlags(el)); }, configurable: true, enumerable: true });
-    Object.defineProperty(C.prototype, 'willValidate', { get() { return !barred(this); }, configurable: true, enumerable: true });
-    Object.defineProperty(C.prototype, 'validationMessage', { get() { return this.willValidate ? message(this, validityFlags(this)) : ''; }, configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, 'validity', { get: N.branded(C, function () { const el = this; return makeValidity(() => validityFlags(el)); }, 'get', 'validity'), configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, 'willValidate', { get: N.branded(C, function () { return !barred(this); }, 'get', 'willValidate'), configurable: true, enumerable: true });
+    Object.defineProperty(C.prototype, 'validationMessage', { get: N.branded(C, function () { return this.willValidate ? message(this, validityFlags(this)) : ''; }, 'get', 'validationMessage'), configurable: true, enumerable: true });
     method(C, 'setCustomValidity', function (m) { m = String(m); if (m) customMessages.set(this, m); else customMessages.delete(this); }, true);
     method(C, 'checkValidity', function () { return checkValidityOf(this, null, false); }, true);
     method(C, 'reportValidity', function () { return checkValidityOf(this, null, true); }, true);
@@ -999,7 +1002,7 @@
     if (h === null) return null;
     try { return new URL(h, document.baseURI); } catch (e) { return null; }
   };
-  for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement]) {
+  for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement, g.MathMLAnchorElement]) {
     if (!C) continue;
     for (const k of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) {
       const set = k === 'origin' ? undefined : function (v) {
@@ -1011,7 +1014,7 @@
       // Native getters without a setter (the anchor's) get this one:
       // `a.hash = '#x'` must update the href, not throw in strict code.
       const d = Object.getOwnPropertyDescriptor(C.prototype, k);
-      if (d && d.get && !d.set && set) { Object.defineProperty(C.prototype, k, { get: d.get, set, configurable: true, enumerable: true }); continue; }
+      if (d && d.get && !d.set && set) { Object.defineProperty(C.prototype, k, { get: d.get, set: N.branded(C, set, 'set', k), configurable: true, enumerable: true }); continue; }
       acc(C, k, function () {
         const u = hyperlinkURL(this);
         if (!u) return k === 'protocol' ? ':' : '';
@@ -1021,7 +1024,7 @@
   }
   if (g.HTMLAreaElement) {
     acc(g.HTMLAreaElement, 'relList', function () { let m = tokenLists.get(this); if (!m) { m = {}; tokenLists.set(this, m); } return m.rel || (m.rel = makeTokenList(this, 'rel')); });
-    method(g.HTMLAreaElement, 'toString', function () { return this.href; });
+    method(g.HTMLAreaElement, 'toString', N.branded(g.HTMLAreaElement, function () { return this.href; }, 'method', 'toString'));
   }
   if (g.HTMLMapElement) acc(g.HTMLMapElement, 'areas', function () { return Object.setPrototypeOf(Array.from(this.querySelectorAll('area')), g.HTMLCollection.prototype); });
   if (g.HTMLDataListElement) acc(g.HTMLDataListElement, 'options', function () { return Object.setPrototypeOf(Array.from(this.querySelectorAll('option')), g.HTMLCollection.prototype); });

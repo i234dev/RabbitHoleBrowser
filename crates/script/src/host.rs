@@ -461,6 +461,8 @@ pub(crate) fn wrap(realm: &mut Realm, n: NodeRef) -> Value {
         rabbithole_dom::NodeData::Comment(_) => ("Comment", "Comment"),
         rabbithole_dom::NodeData::Doctype(_) => ("DocumentType", "DocumentType"),
         rabbithole_dom::NodeData::Element(e) if matches!(e.ns, rabbithole_dom::Namespace::None | rabbithole_dom::Namespace::Other(_)) => ("Element", "Element"),
+        rabbithole_dom::NodeData::Element(e) if e.ns == rabbithole_dom::Namespace::MathMl && e.tag == "a" => ("MathMLAnchorElement", "MathMLAnchorElement"),
+        rabbithole_dom::NodeData::Element(e) if e.ns == rabbithole_dom::Namespace::MathMl => ("MathMLElement", "MathMLElement"),
         rabbithole_dom::NodeData::Element(e) => {
             let svg = e.tag != "#fragment" && is_svg_node(doc, n.node);
             element_class(&e.tag, svg)
@@ -559,6 +561,12 @@ pub(crate) fn define_class(realm: &mut Realm, name: &'static str, parent: Option
     };
     let p = realm.new_object_with_proto(parent_proto);
     let c = realm.new_native_constructor(name, 0, ctor, p);
+    // The interface object inherits from its parent interface's object.
+    if let Some(pp) = parent.map(proto) {
+        if let Some(parent_ctor) = realm.obj(pp).props.get(&PropertyKey::str("constructor")).and_then(|d| d.value.as_object()) {
+            realm.obj_mut(c).set_proto(Some(parent_ctor));
+        }
+    }
     realm.define_global(name, Value::Object(c));
     realm.define_property(p, rabbithole_js::realm::SYM_TO_STRING_TAG, Value::str(name), rabbithole_js::CONFIGURABLE);
     state().borrow_mut().protos.insert(name, p);

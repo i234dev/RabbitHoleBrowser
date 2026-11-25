@@ -7,6 +7,7 @@
   // replacement of these globals, which may wrap, delay or drop them.
   const { setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame, cancelAnimationFrame, queueMicrotask } = globalThis;
   const g = globalThis, N = g.__rhNative;
+  const HTMLCanvasElementC = g.HTMLCanvasElement;
   const invoke = Reflect.apply;
   const UniformFloats = Float32Array, UniformInts = Int32Array;
   const uniformLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(UniformFloats.prototype), 'length').get;
@@ -86,7 +87,7 @@
   }
   function syncSize(s) {
     if (s.lost) return;
-    if (s.canvas instanceof g.HTMLCanvasElement) N.canvasSurface(s.canvas);
+    if (typeof HTMLCanvasElementC === 'function' && s.canvas instanceof HTMLCanvasElementC) N.canvasSurface(s.canvas);
     else if (s.logicalWidth !== s.surface.width || s.logicalHeight !== s.surface.height) resize(s, s.surface.width, s.surface.height);
   }
   function owned(s, object, kind, nullable = false, deleted = false) {

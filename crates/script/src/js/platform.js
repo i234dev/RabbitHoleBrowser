@@ -30,9 +30,11 @@
   const domError = (msg, name) => new g.DOMException(msg, name);
   const make = (C, state) => { const o = Object.create(C.prototype); hidden(o, S, state || {}); return o; };
   const nav = g.navigator;
-  const setNav = (name, value) => { try { delete nav[name]; } catch (e) {} Object.defineProperty(g.Navigator.prototype, name, { get() { return value; }, configurable: true, enumerable: true }); };
-  const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, fn); };
-  const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true }); };
+  const brandNav = (get, name) => g.__rhNative.branded(g.Navigator, get, 'get', name);
+  const setNav = (name, value) => { try { delete nav[name]; } catch (e) {} Object.defineProperty(g.Navigator.prototype, name, { get: brandNav(function () { return value; }, name), configurable: true, enumerable: true }); };
+  const named = g.__rhNative.named;
+  const method = (C, name, fn, force) => { if (C && (force || !Object.prototype.hasOwnProperty.call(C.prototype, name))) hidden(C.prototype, name, named(fn, name)); };
+  const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get: get && globalThis.__rhNative.branded(C, get, 'get', name), set: set && globalThis.__rhNative.branded(C, set, 'set', name), configurable: true, enumerable: true }); };
   // Navigator members are accessors and operations of Navigator.prototype
   // (Web IDL), not own properties of navigator: consent managers and
   // fingerprinting guards read Object.getOwnPropertyDescriptor(
@@ -42,9 +44,9 @@
     if (!d || !d.configurable) continue;
     if (!Object.prototype.hasOwnProperty.call(g.Navigator.prototype, k)) {
       let nd;
-      if (d.get || d.set) nd = { get: d.get, set: d.set, configurable: true, enumerable: true };
+      if (d.get || d.set) nd = { get: d.get && brandNav(d.get, k), set: d.set, configurable: true, enumerable: true };
       else if (typeof d.value === 'function') nd = { value: d.value, writable: true, configurable: true, enumerable: true };
-      else { const v = d.value; nd = { get: Object.getOwnPropertyDescriptor({ get [k]() { return v; } }, k).get, configurable: true, enumerable: true }; }
+      else { const v = d.value; nd = { get: brandNav(function () { return v; }, k), configurable: true, enumerable: true }; }
       Object.defineProperty(g.Navigator.prototype, k, nd);
     }
     delete nav[k];
@@ -663,7 +665,7 @@
 
   // Legacy document colors / misc.
   for (const [k, attr] of [['fgColor', 'text'], ['linkColor', 'link'], ['vlinkColor', 'vlink'], ['alinkColor', 'alink'], ['bgColor', 'bgcolor']]) {
-    acc(g.Document, k, function () { return (this.body && this.body.getAttribute(attr)) || ''; }, function (v) { if (this.body) this.body.setAttribute(attr, v); });
+    acc(g.Document, k, function () { return (this.body && this.body.getAttribute(attr)) || ''; }, function (v) { if (this.body) this.body.setAttribute(attr, v === null ? '' : v); });
   }
   acc(g.Document, 'applets', function () { return Object.setPrototypeOf([], g.HTMLCollection.prototype); });
   acc(g.Document, 'lastModified', function () { const d = new Date(); const p = (n) => String(n).padStart(2, '0'); return `${p(d.getMonth() + 1)}/${p(d.getDate())}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; });
