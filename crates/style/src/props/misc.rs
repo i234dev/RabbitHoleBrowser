@@ -82,6 +82,7 @@ fn parse_animations(comps: &[&[Token]]) -> Vec<Animation> {
             direction: "normal".into(),
             fill_mode: "none".into(),
             paused: false,
+            timeline: "auto".into(),
         };
         let mut times = 0;
         for c in item {
@@ -143,7 +144,7 @@ fn each_animation<T: Clone>(style: &mut ComputedStyle, vals: Vec<T>, f: impl Fn(
     if style.animations.len() < vals.len() {
         style.animations.resize(
             vals.len(),
-            Animation { name: String::new(), duration: 0.0, delay: 0.0, timing: "ease".into(), iterations: Some(1.0), direction: "normal".into(), fill_mode: "none".into(), paused: false },
+            Animation { name: String::new(), duration: 0.0, delay: 0.0, timing: "ease".into(), iterations: Some(1.0), direction: "normal".into(), fill_mode: "none".into(), paused: false, timeline: "auto".into() },
         );
     }
     let n = style.animations.len();
@@ -420,7 +421,17 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.animation_composition = Some(list.into());
             }
         }
-        "animation-timeline" => {}
+        "animation-timeline" => {
+            let v = single_list(comps, |c| match c {
+                [Token::Ident(i)] if i.starts_with("--") => Some(i.clone()),
+                [Token::Ident(i)] if i.eq_ignore_ascii_case("auto") || i.eq_ignore_ascii_case("none") => Some(i.to_ascii_lowercase()),
+                [Token::Function(f), ..] if f.eq_ignore_ascii_case("scroll") || f.eq_ignore_ascii_case("view") => Some(format!("{}()", f.to_ascii_lowercase())),
+                _ => None,
+            });
+            if let Some(v) = v {
+                each_animation(style, v, |a, t| a.timeline = t);
+            }
+        }
         "scroll-margin-top" | "scroll-margin" => {
             if let Some(v) = super::px(c0, ctx) {
                 style.scroll_margin_top = v;

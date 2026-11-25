@@ -1259,6 +1259,15 @@ impl Url {
         None
     }
 
+    /// Fetch's dangling markup mitigation: URL text (leading and trailing
+    /// C0 controls and spaces aside) with both a tab or newline and a "<",
+    /// as markup left open by an injection produces. Such requests to
+    /// HTTP(S) URLs are network errors.
+    pub fn potentially_dangling_markup(input: &str) -> bool {
+        let t = input.trim_matches(|c: char| c <= ' ');
+        t.contains(['\t', '\n', '\r']) && t.contains('<')
+    }
+
     /// Strict absolute-URL parse (no scheme guessing).
     pub fn parse_absolute(input: &str) -> Option<Url> {
         parse_with_base(input, None)

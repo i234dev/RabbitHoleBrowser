@@ -66,7 +66,8 @@
       case 9: return 4 / 3;
       case 10: return 16;
       case 3: return el ? fontSize(el) : 16;
-      case 4: return (el ? fontSize(el) : 16) / 2;
+      // (The font's x-height; half the font size when it has none.)
+      case 4: { const x = el ? N.exSize(el) : undefined; return x > 0 ? x : (el ? fontSize(el) : 16) / 2; }
       case 2: {
         if (!el) return 0;
         const [w, h] = viewportSize(el);

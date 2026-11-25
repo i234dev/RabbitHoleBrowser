@@ -767,8 +767,11 @@ impl Engine {
                     continue;
                 }
             } else if page.images.contains_key(&n) && !script_nodes.contains(&n) {
-                // Loaded by the page loader before the first layout.
-                page.image_state.reqs.insert(n, Req { url: key, density, status: Status::Loaded });
+                // Loaded by the page loader before the first layout: its
+                // load (or error) event is still due.
+                let broken = page.images.get(&n).is_some_and(|i| i.broken);
+                page.image_state.reqs.insert(n, Req { url: key, density, status: if broken { Status::Failed } else { Status::Loaded } });
+                page.image_state.events.push((n, if broken { "error" } else { "load" }));
                 continue;
             }
             if !self.loader.load_images {
@@ -997,11 +1000,15 @@ impl Engine {
 
     /// Fire queued `load`/`error` events on image elements.
     pub(crate) fn fire_image_events(&self, page: &mut Page) -> crate::ScriptOutcome {
-        let events = std::mem::take(&mut page.image_state.events);
         let mut out = crate::ScriptOutcome::default();
         if page.script.host.is_none() {
+            // (Kept for the page's scripts unless there will be none.)
+            if !self.scripting {
+                page.image_state.events.clear();
+            }
             return out;
         }
+        let events = std::mem::take(&mut page.image_state.events);
         for (n, ev) in events {
             let o = self.dispatch_event(page, n, ev, rabbithole_script::EventInit { bubbles: false, cancelable: false, detail: None });
             out.relayout |= o.relayout;

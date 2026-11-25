@@ -97,6 +97,18 @@ impl Head {
     }
 }
 
+/// A line of a response head (ending in LF): a CR anywhere but right
+/// before that LF, or a NUL byte, makes the response a network error (as
+/// in browsers; lenient parsing of them enables response splitting).
+fn check_head_line(line: &[u8]) -> io::Result<()> {
+    let body = line.strip_suffix(b"\n").unwrap_or(line);
+    let body = body.strip_suffix(b"\r").unwrap_or(body);
+    if body.iter().any(|&b| b == b'\r' || b == 0) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "bare CR or NUL in response head"));
+    }
+    Ok(())
+}
+
 /// Read a response head, skipping interim 1xx responses (except 101).
 /// Returns `Ok(None)` when the connection was closed before any byte.
 pub fn read_head(io: &mut BufReader<Stream>) -> io::Result<Option<Head>> {
@@ -118,6 +130,7 @@ pub fn read_head(io: &mut BufReader<Stream>) -> io::Result<Option<Head>> {
                 break;
             }
         }
+        check_head_line(&line)?;
         let status_line = String::from_utf8_lossy(&line).trim_end().to_string();
         let mut parts = status_line.splitn(3, ' ');
         let version = parts.next().unwrap_or("");
@@ -136,6 +149,7 @@ pub fn read_head(io: &mut BufReader<Stream>) -> io::Result<Option<Head>> {
             if total > 256 * 1024 {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "response head too large"));
             }
+            check_head_line(&line)?;
             let text = String::from_utf8_lossy(&line);
             let text = text.trim_end_matches(['\r', '\n']);
             if text.is_empty() {
@@ -402,5 +416,14 @@ mod tests {
         assert!(head.http10);
         assert_eq!(body, b"until close");
         assert!(!reused);
+    }
+
+    #[test]
+    fn bare_cr_or_nul_in_head_is_an_error() {
+        assert!(check_head_line(b"HTTP/1.1 200 OK\r\n").is_ok());
+        assert!(check_head_line(b"X: y\n").is_ok());
+        assert!(check_head_line(b"HTTP/1.1 200 OK\r\r\n").is_err());
+        assert!(check_head_line(b"X: a\rb\r\n").is_err());
+        assert!(check_head_line(b"X: a\0b\r\n").is_err());
     }
 }

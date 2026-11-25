@@ -711,7 +711,8 @@ fn screen_depth(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
 }
 
 fn make_screen(realm: &mut Realm) -> ObjectId {
-    let p = define_class(realm, "Screen", Some("EventTarget"), illegal_ctor);
+    // (CSSOM View: Screen is not an EventTarget.)
+    let p = define_class(realm, "Screen", None, illegal_ctor);
     let o = realm.new_object_with_proto(Some(p));
     realm.set_host_data(o, Box::new(ScreenData));
     realm.set_class_name(o, "Screen");

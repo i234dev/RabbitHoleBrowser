@@ -78,6 +78,17 @@ fn containing_node(ctx: &LayoutContext, node: NodeId, style: &ComputedStyle) -> 
     None
 }
 
+/// Is `cb` inside the multi-column flow that breaks `anchor`: a descendant
+/// of the anchor's nearest multi-column container?
+fn shares_column_flow(ctx: &LayoutContext, anchor: NodeId, cb: NodeId) -> bool {
+    let mut m = ctx.doc.flat_parent(anchor);
+    while let Some(n) = m {
+        if ctx.styles.get(n).is_some_and(|s| s.column_count.is_some() || s.column_width.is_some()) { break; }
+        m = ctx.doc.flat_parent(n);
+    }
+    m.is_some_and(|m| cb != m && ctx.doc.is_shadow_including_inclusive_ancestor(m,cb))
+}
+
 fn container(ctx: &LayoutContext, tree: &LayoutTree, parent: Option<NodeId>) -> (Rect,Writing) {
     // A containing block broken across columns is the box as if it were
     // not, at its first fragment.
@@ -420,6 +431,14 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree, choices: &HashM
                         }
                     };
                     return Some(crate::tree::physical_rect(coordinates,flow.translate(first.dx,first.dy)));
+                }
+            }
+            // An anchor broken across columns, seen from a containing block
+            // in the same multi-column flow: the box as if unbroken, at its
+            // first fragment (from outside the flow: its fragments' bounds).
+            if let (Some((b,coordinates)),Some(cb)) = (tree.box_and_coordinates(ctx.doc,a),cb_node) {
+                if b.col_pieces.is_some() && shares_column_flow(ctx,a,cb) {
+                    if let Some(r) = b.unfragmented_rect() { return Some(crate::tree::physical_rect(coordinates,r)); }
                 }
             }
             tree.box_in_document(ctx.doc,a).map(|(_,r)| r).or_else(|| tree.inline_rect(ctx.doc,a))

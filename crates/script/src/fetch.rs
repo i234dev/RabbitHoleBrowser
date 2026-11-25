@@ -1258,6 +1258,12 @@ fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
     for id in [p, resolve, reject] { realm.native_root(Value::Object(id)); }
     let request = (|| -> JsResult<Request> {
         let mut req = if let Some(source) = navigation.as_ref().filter(|_| !overridden) { source.clone() } else { build_request(&url, &method, &headers, &body).map_err(|e| realm.throw_type_error(&e))? };
+        // Dangling markup mitigation: a network error.
+        if let V::String(s) = input.v() {
+            if req.url.is_http() && rabbithole_net::Url::potentially_dangling_markup(&s.to_rust_string()) {
+                return Err(realm.throw_type_error("Failed to fetch"));
+            }
+        }
         let option = |realm: &mut Realm, name: &str| -> JsResult<Option<(String, bool)>> {
             let mut v = if init.as_object().is_some() { realm.get_str(init.clone(), name)? } else { Value::Undefined };
             let explicit = !v.is_undefined();

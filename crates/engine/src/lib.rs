@@ -2020,6 +2020,10 @@ fn resolve_url(base: &str, raw: &str) -> Option<String> {
     if raw.is_empty() || raw.starts_with("data:") {
         return if raw.is_empty() { None } else { Some(raw.to_string()) };
     }
+    // (Subresources of dangling markup are not fetched.)
+    if Url::potentially_dangling_markup(raw) {
+        return None;
+    }
     // Every `url()` of a cascade resolves against the same few bases:
     // keep the last one parsed.
     thread_local! {
