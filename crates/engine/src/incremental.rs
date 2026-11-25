@@ -454,7 +454,7 @@ impl Engine {
                     }
                 }
             }
-            damage_from_log(&page.doc, &log, &mut incr.box_dirty, &mut incr.layout_full);
+            damage_from_log(&page.doc, &page.styles, &log, &mut incr.box_dirty, &mut incr.layout_full);
             if verify_enabled() {
                 let mut check = StyleEngine::new(&page.sheets, &env);
                 let full = check.full(&page.doc, &page.sheets, &opts);
@@ -897,7 +897,7 @@ fn collect_containers(root: &rabbithole_layout::LayoutBox) -> HashMap<NodeId, ra
 /// Layout damage implied by DOM mutations (independent of style changes):
 /// changed text, child lists and attributes (replaced elements, list
 /// markers, form controls...).
-fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId>, full: &mut bool) {
+fn damage_from_log(doc: &Document, styles: &rabbithole_style::StyledTree, log: &MutationLog, dirty: &mut HashSet<NodeId>, full: &mut bool) {
     if log.overflow {
         *full = true;
         return;
@@ -926,6 +926,17 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
         }
     };
     let mut parents_done: HashSet<NodeId> = HashSet::new();
+    // Numbered list markers count their `li` siblings: an inserted or
+    // removed child renumbers the ordinal markers after it (all of them in
+    // reversed lists, or when the removed child's place is unknown).
+    // Bullets do not depend on position.
+    let ordinal = |n: NodeId| {
+        styles.styles.get(n).and_then(|s| s.as_ref()).is_none_or(|s| {
+            !matches!(s.list_style_type, rabbithole_style::ListStyleType::None | rabbithole_style::ListStyleType::Disc | rabbithole_style::ListStyleType::Circle | rabbithole_style::ListStyleType::Square)
+        })
+    };
+    let mut renumbered: HashSet<NodeId> = HashSet::new();
+    let mut renumbered_all: HashSet<NodeId> = HashSet::new();
     for m in &log.entries {
         match m {
             Mutation::Attr { node, name, .. } => {
@@ -960,10 +971,29 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
                 dirty.insert(p);
                 dirty.insert(*child);
                 // (What depends on the parent alone, once per parent.)
+                let inserted = doc.parent(*child) == Some(*parent);
+                if !doc.is_element(*child, "li") {
+                    // Markers count `li` elements only.
+                } else if inserted && doc.attr(*parent, "reversed").is_none() {
+                    // Walk the following siblings until one an earlier
+                    // mutation already walked from.
+                    renumbered.insert(*child);
+                    let mut s = doc.next_sibling(*child);
+                    while let Some(n) = s {
+                        if !renumbered.insert(n) {
+                            break;
+                        }
+                        if doc.is_element(n, "li") && ordinal(n) {
+                            dirty.insert(n);
+                        }
+                        s = doc.next_sibling(n);
+                    }
+                } else if renumbered_all.insert(*parent) {
+                    dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li") && ordinal(c)));
+                }
+                // Other children keep their boxes (the parent's box is
+                // rebuilt around them).
                 if parents_done.insert(*parent) {
-                    // List markers count their `li` siblings; other children
-                    // keep their boxes (the parent's box is rebuilt around them).
-                    dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li")));
                     if shadow && p == *parent {
                         // A light child of a host is laid out in its slot.
                         host_slots(p, dirty);

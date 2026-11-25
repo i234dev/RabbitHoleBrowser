@@ -116,6 +116,38 @@ fn child_list_changes_with_structural_selectors() {
     check(&engine, &mut page, "text change");
 }
 
+/// Inserting or removing list items renumbers the ordinal markers after
+/// them (all of them in reversed lists); bullets stay as they are.
+#[test]
+fn list_item_changes_renumber_markers() {
+    let (engine, mut page) = load(
+        r#"<html><body><ol id="o"><li>a</li><li id="o2">b</li><li>c</li><li>d</li></ol>
+        <ol id="r" reversed><li>a</li><li id="r2">b</li><li>c</li></ol>
+        <ul id="u"><li>a</li><li id="u2">b</li><li>c</li></ul>
+        <ul id="m" style="list-style-type: lower-roman"><li>a</li><li id="m2" style="list-style-type: disc">b</li><li>c</li></ul></body></html>"#,
+    );
+    for (list, at) in [("o", "o2"), ("r", "r2"), ("u", "u2"), ("m", "m2")] {
+        let parent = id(&page, list);
+        let before = id(&page, at);
+        let li = page.doc.create_element("li", vec![]);
+        let t = page.doc.create_text("new");
+        page.doc.append_child(li, t);
+        page.doc.insert_before(parent, li, Some(before));
+        check(&engine, &mut page, &format!("insert into #{list}"));
+        let li2 = page.doc.create_element("li", vec![]);
+        page.doc.append_child(parent, li2);
+        let first = page.doc.first_child(parent);
+        let li3 = page.doc.create_element("li", vec![]);
+        page.doc.insert_before(parent, li3, first);
+        check(&engine, &mut page, &format!("append and prepend in #{list}"));
+        page.doc.detach(li);
+        check(&engine, &mut page, &format!("remove from #{list}"));
+        let d = page.doc.create_element("div", vec![]);
+        page.doc.insert_before(parent, d, Some(before));
+        check(&engine, &mut page, &format!("insert a non-item into #{list}"));
+    }
+}
+
 #[test]
 fn insertions_and_moves_with_positional_selectors() {
     let (engine, mut page) = load(
