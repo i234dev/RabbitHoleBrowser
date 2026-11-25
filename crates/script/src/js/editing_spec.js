@@ -2736,6 +2736,11 @@ function pushDownValues(node, command, newValue) {
         ancestor = ancestor.parentNode) {
             var specified = getSpecifiedCommandValue(ancestor, command);
             if (specified !== null) {
+                // As written, since computed colors are not keywords.
+                var written = /(?:^|;)\s*color\s*:\s*([a-z]+)\s*(?:;|$)/i.exec(ancestor.getAttribute("style") || "");
+                specified = written ? written[1]
+                    : isHtmlElement(ancestor, "font") && ancestor.hasAttribute("color") ? ancestor.getAttribute("color")
+                    : specified;
                 if (/^[a-z]+$/i.test(specified) && specified.toLowerCase() != newValue.toLowerCase()) {
                     splitAncestorsAround(node, ancestor).forEach(function(element) {
                         clearValue(element, command);
@@ -2940,6 +2945,39 @@ function isEditableOrInlineIsland(node) {
             && isInlineNode(node)
             && node.parentNode
             && (isEditable(node.parentNode) || isEditingHost(node.parentNode)));
+}
+
+// RabbitHole: moves a collapsed active range at the end (or start) of
+// editable inline formatting elements to after (or before) them.
+function moveCaretOutOfInlineEdges() {
+    var range = getActiveRange();
+    var node = range.startContainer, offset = range.startOffset;
+    if (node.nodeType == Node.TEXT_NODE) {
+        if (offset == node.length && (offset || !node.previousSibling)) {
+            offset = 1 + getNodeIndex(node);
+            node = node.parentNode;
+        } else if (offset == 0) {
+            offset = getNodeIndex(node);
+            node = node.parentNode;
+        } else {
+            return;
+        }
+    }
+    var moved = false;
+    while (isHtmlElement(node, formattingElementNames)
+    && !isHtmlElement(node, "a")
+    && isEditable(node)
+    && node.parentNode
+    && (offset == node.childNodes.length || offset == 0)) {
+        offset = getNodeIndex(node) + (offset == 0 && node.childNodes.length ? 0 : 1);
+        node = node.parentNode;
+        moved = true;
+    }
+    if (moved) {
+        getSelection().collapse(node, offset);
+        range.setStart(node, offset);
+        range.setEnd(node, offset);
+    }
 }
 
 // RabbitHole: whether node starts (or with atEnd, ends) ancestor, ignoring
@@ -7960,8 +7998,12 @@ commands.inserthtml = {
         // "If the active range's start node is a block node with no visible
         // children, call createElement("br") on the context object and append
         // the result as the last child of the active range's start node."
+        //
+        // RabbitHole: unless elements were inserted (like a hidden span), as
+        // in other browsers.
         if (isBlockNode(getActiveRange().startContainer)
-        && ![].some.call(getActiveRange().startContainer.childNodes, isVisible)) {
+        && ![].some.call(getActiveRange().startContainer.childNodes, isVisible)
+        && !descendants.some(function(node) { return node.nodeType == Node.ELEMENT_NODE })) {
             getActiveRange().startContainer.appendChild(document.createElement("br"));
         }
 
@@ -7970,6 +8012,8 @@ commands.inserthtml = {
         // second."
         getActiveRange().setStart(lastChild.parentNode, 1 + getNodeIndex(lastChild));
         getActiveRange().setEnd(lastChild.parentNode, 1 + getNodeIndex(lastChild));
+        // RabbitHole: and the selection.
+        getSelection().collapse(lastChild.parentNode, 1 + getNodeIndex(lastChild));
 
         // "Fix disallowed ancestors of each member of descendants."
         for (var i = 0; i < descendants.length; i++) {
@@ -7993,7 +8037,15 @@ commands.insertimage = {
         }
 
         // "Delete the selection, with strip wrappers false."
-        deleteSelection({stripWrappers: false});
+        //
+        // RabbitHole: like other browsers, an image replacing a selection
+        // goes outside the inline elements that the selection ended or
+        // started inside of.
+        var replacing = !getActiveRange().collapsed;
+        deleteSelection({stripWrappers: replacing});
+        if (replacing) {
+            moveCaretOutOfInlineEdges();
+        }
 
         // "Let range be the active range."
         var range = getActiveRange();
@@ -8577,6 +8629,17 @@ commands.insertparagraph = {
 //@{
 commands.inserttext = {
     action: function(value) {
+        // RabbitHole: a line break right after the selection stays, as in
+        // other browsers (see below).
+        var keptBreak = null;
+        if (getActiveRange() && !getActiveRange().collapsed) {
+            var endContainer = getActiveRange().endContainer, endOffset = getActiveRange().endOffset;
+            var after = endContainer.nodeType == Node.TEXT_NODE
+                ? (endOffset == endContainer.length ? nextNodeDescendants(endContainer) : null)
+                : endContainer.childNodes[endOffset] || nextNodeDescendants(endContainer);
+            keptBreak = isHtmlElement(after, "br") ? after : null;
+        }
+
         // "Delete the selection, with strip wrappers false."
         deleteSelection({stripWrappers: false, firstFormatting: true});
 
@@ -8678,7 +8741,8 @@ commands.inserttext = {
             // FIXME: IE incorrectly returns false here instead of true
             // sometimes?
             if (node.childNodes.length == 1
-            && isCollapsedLineBreak(node.firstChild)) {
+            && isCollapsedLineBreak(node.firstChild)
+            && node.firstChild != keptBreak) {
                 node.removeChild(node.firstChild);
             }
 

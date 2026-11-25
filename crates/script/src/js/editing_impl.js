@@ -1621,8 +1621,11 @@
         const caret = sel.getRangeAt(0);
         const point = caret.startContainer, offset = caret.startOffset;
         const following = point.nodeType === 3 ? (offset === point.length ? point.nextSibling : null) : point.childNodes[offset];
+        // Typing replaces the line break that only keeps an empty line.
         if (following && (caretBreaks.has(following) ||
-            following.localName === 'br' && following.parentNode === host && host.childNodes.length === 1))
+            following.localName === 'br' && following.parentNode === host && host.childNodes.length === 1 ||
+            following.localName === 'br' && !following.nextSibling && following.parentNode !== host &&
+              !isBlock(following.parentNode) && containingBlock(following, host).textContent === ''))
           following.remove();
         if (toggles?.size) {
           const node = doc.createTextNode(lines[i]);
