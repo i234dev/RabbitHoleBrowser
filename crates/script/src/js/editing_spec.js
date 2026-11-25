@@ -2500,7 +2500,12 @@ function reorderModifiableDescendants(node, command, newValue) {
 
     // "Append the node as the last child of candidate, preserving ranges."
     movePreservingRanges(node, candidate, -1);
+    reorderedElements.add(candidate);
 }
+
+// RabbitHole: elements moved up by reorderModifiableDescendants (see
+// forceValue).
+var reorderedElements = new WeakSet();
 
 function recordValues(nodeList) {
     // "Let values be a list of (node, command, specified command value)
@@ -2738,6 +2743,47 @@ function pushDownValues(node, command, newValue) {
         return;
     }
 
+    // RabbitHole: like other browsers, inline formatting elements that set
+    // another value are split around node, and the part with node loses the
+    // value: an s, em or strike element (with CSS styling, a strike element
+    // only from its edges, and a u element only from its end before text)
+    // when the format is toggled off, and, where the specification
+    // would not push the value down, an element setting another font name,
+    // size or color.
+    var top = null;
+    if (isInlineNode(node)) {
+        for (var i = 0; i < ancestorList.length && isHtmlElement(ancestorList[i], formattingElementNames); i++) {
+            if (getSpecifiedCommandValue(ancestorList[i], command) !== null) {
+                top = ancestorList[i];
+            }
+        }
+    }
+    if (top
+    && ["strikethrough", "italic", "underline"].indexOf(command) != -1
+    && commands[command].inlineCommandActivatedValues.indexOf(newValue) == -1
+    && isSimpleModifiableElement(top)
+    && ((command == "italic" && isHtmlElement(top, "em"))
+        || (command == "strikethrough" && isHtmlElement(top, "s"))
+        || (command == "strikethrough" && isHtmlElement(top, "strike")
+            && (!cssStylingFlag || isAtEdgeOf(node, top, true) || isAtEdgeOf(node, top, false)))
+        || (command == "underline" && isHtmlElement(top, "u") && isAtEdgeOf(node, top, true)
+            && top.nextSibling && top.nextSibling.nodeType == Node.TEXT_NODE))) {
+        splitAncestorsAround(node, top).forEach(function(element) {
+            clearValue(element, command);
+        });
+        return;
+    }
+    if (top
+    && ["fontname", "fontsize", "forecolor"].indexOf(command) != -1
+    && newValue !== null
+    && top == ancestorList[ancestorList.length - 1]
+    && !areLooselyEquivalentValues(command, getEffectiveCommandValue(top.parentNode, command), newValue)) {
+        splitAncestorsAround(node, top).forEach(function(element) {
+            clearValue(element, command);
+        });
+        return;
+    }
+
     // "Let propagated value be the specified command value of command on the
     // last member of ancestor list."
     var propagatedValue = getSpecifiedCommandValue(ancestorList[ancestorList.length - 1], command);
@@ -2809,6 +2855,94 @@ function pushDownValues(node, command, newValue) {
 }
 
 
+// RabbitHole: splits the ancestors of node up to top so that node is the
+// only child of each; returns them, node's parent first.
+function splitAncestorsAround(node, top) {
+    var branch = [];
+    var child = node;
+    var copy = function(element) {
+        var clone = element.cloneNode(false);
+        clone.removeAttribute("id");
+        return clone;
+    };
+    var onlyEmptyText = function(from, to) {
+        for (var n = from; n && n != to; n = n.nextSibling) {
+            if (n.nodeType != Node.TEXT_NODE || n.length) {
+                return false;
+            }
+        }
+        return true;
+    };
+    while (child != top) {
+        var parent = child.parentNode;
+        branch.push(parent);
+        if (!onlyEmptyText(parent.firstChild, child)) {
+            var before = copy(parent);
+            parent.parentNode.insertBefore(before, parent);
+            while (parent.firstChild != child) {
+                movePreservingRanges(parent.firstChild, before, -1);
+            }
+        }
+        if (!onlyEmptyText(child.nextSibling, null)) {
+            var after = copy(parent);
+            parent.parentNode.insertBefore(after, parent.nextSibling);
+            while (parent.lastChild != child) {
+                movePreservingRanges(parent.lastChild, after, 0);
+            }
+        }
+        child = parent;
+    }
+    return branch;
+}
+
+// RabbitHole: whether node starts (or with atEnd, ends) ancestor, ignoring
+// empty Text nodes.
+function isAtEdgeOf(node, ancestor, atEnd) {
+    var empty = function(n) { return n.nodeType == Node.TEXT_NODE && !n.length };
+    for (var n = node; n != ancestor; n = n.parentNode) {
+        for (var x = atEnd ? n.nextSibling : n.previousSibling; x; x = atEnd ? x.nextSibling : x.previousSibling) {
+            if (!empty(x)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// RabbitHole: the local name of the element that forcing the value creates
+// (see forceValue).
+function forcedElementName(command, newValue) {
+    if (command == "createlink" || command == "unlink") {
+        return "a";
+    }
+    if (command == "subscript" || command == "superscript") {
+        return newValue == "subscript" ? "sub" : newValue == "superscript" ? "sup" : "span";
+    }
+    if (command == "fontsize"
+    && ["x-small", "small", "medium", "large", "x-large", "xx-large", "xxx-large"].indexOf(newValue) != -1
+    && (!cssStylingFlag || newValue == "xxx-large")) {
+        return "font";
+    }
+    if (!cssStylingFlag) {
+        if (command == "bold" && (newValue == "bold" || newValue == "700")) {
+            return "b";
+        }
+        if (command == "italic" && newValue == "italic") {
+            return "i";
+        }
+        if (command == "strikethrough" && newValue == "line-through") {
+            return "s";
+        }
+        if (command == "underline" && newValue == "underline") {
+            return "u";
+        }
+        if ((command == "forecolor" && parseSimpleColor(newValue)) || command == "fontname") {
+            return "font";
+        }
+    }
+    return "span";
+}
+
 //@}
 ///// Forcing the value of a node /////
 //@{
@@ -2837,6 +2971,7 @@ function forceValue(node, command, newValue) {
         }
 
         var nextOfForced = node.nextSibling;
+        var nextToReordered = reorderedElements.has(node.previousSibling) || reorderedElements.has(node.nextSibling);
 
         // "Wrap the one-node list consisting of node, with sibling criteria
         // returning true for a simple modifiable element whose specified
@@ -2845,9 +2980,12 @@ function forceValue(node, command, newValue) {
         // with new parent instructions returning null."
         wrap([node],
             function(node) {
-                // RabbitHole: typed text does not move into the formatting
-                // element after it, as in other browsers.
+                // RabbitHole: like other browsers, not into another kind of
+                // element than the one it would create (unless reordered just
+                // now), and typed text does not move into the formatting
+                // element after it.
                 return !(typingRestore && node == nextOfForced)
+                    && (isHtmlElement(node, ["span", forcedElementName(command, newValue)]) || nextToReordered)
                     && isSimpleModifiableElement(node)
                     && areEquivalentValues(command, getSpecifiedCommandValue(node, command), newValue)
                     && areLooselyEquivalentValues(command, getEffectiveCommandValue(node, command), newValue);
