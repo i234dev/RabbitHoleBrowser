@@ -46,7 +46,7 @@ Standalone callers painting a page's display list must also pass `page.fonts`.
 Incremental style/layout observes the document and host selection revisions.
 A newly available local or host face invalidates the page's style and layout on
 its next flush. Frame synchronization also notices a child's changed font view
-and regenerates its cached raster. Screenshot setup restyles after loading
+and marks its cached raster for regeneration when the page is next presented. Screenshot setup restyles after loading
 system fonts, before it calculates capture geometry. Loading another page never changes the aliases of
 a retained page or frame.
 
@@ -70,6 +70,9 @@ Generic lookup does not inspect private aliases such as downloaded Arial or
 Consolas when mapping platform candidates. `ui-rounded` currently uses the
 host's Sans fallback; quoted `"ui-rounded"` still selects a literal name.
 The font setter keeps its previous value when shorthand resolution fails.
+Drawing is recorded and done when the pixels are needed, but text is shaped and
+its glyphs are rasterized with the fonts available when `fillText` or
+`strokeText` is called.
 
 The shared shorthand resolver takes an explicit parent and length context.
 Canvas currently supplies its fixed 16px relative/root base, zero viewport
