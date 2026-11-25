@@ -322,6 +322,9 @@ impl Engine {
         page.incr.unrendered.get_mut().clear();
         let fonts_now = page.fonts.selection_generation();
         if page.incr.fonts_seen != Some(fonts_now) {
+            if debug_enabled() && page.incr.fonts_seen.is_some() {
+                eprintln!("[incr] font selection changed: full restyle + layout");
+            }
             page.incr.fonts_seen = Some(fonts_now);
             page.incr.style = None;
             page.incr.layout_full = true;
@@ -399,6 +402,18 @@ impl Engine {
             previous_styles = std::mem::take(&mut out.previous);
             if debug_enabled() {
                 eprintln!("[incr] style: full={} recomputed={} changed={} mutations={}", out.full, out.recomputed, out.changes.len(), log.entries.len());
+                if out.full || out.recomputed > 500 {
+                    let d = &page.doc;
+                    let desc = |n: NodeId| format!("{}{}{}", d.tag(n).unwrap_or("#"), d.attr(n, "id").map(|v| format!("#{v}")).unwrap_or_default(), d.attr(n, "class").map(|v| format!(".{}", v.split_whitespace().next().unwrap_or(""))).unwrap_or_default());
+                    for m in log.entries.iter().take(8) {
+                        match m {
+                            rabbithole_dom::Mutation::Attr { node, name, .. } => eprintln!("[incr]   attr {name} on {}", desc(*node)),
+                            rabbithole_dom::Mutation::Children { parent, child } => eprintln!("[incr]   children of {} ({})", desc(*parent), desc(*child)),
+                            rabbithole_dom::Mutation::Text { node } => eprintln!("[incr]   text in {:?}", d.parent(*node).map(desc)),
+                            rabbithole_dom::Mutation::Node { node } => eprintln!("[incr]   node {}", desc(*node)),
+                        }
+                    }
+                }
             }
             anim_full = out.full;
             if !out.full && (!page.anim.is_idle() || out.changes.iter().any(|c| c.new.as_ref().map(|s| !s.transitions.is_empty() || !s.animations.is_empty()).unwrap_or(false))) {
@@ -599,6 +614,9 @@ impl Engine {
                 .map(|(k, _)| k.as_str())
                 .collect();
             if generated_content_uses(styles, &changed) {
+                if debug_enabled() {
+                    eprintln!("[incr] full layout: generated-content image changed");
+                }
                 incr.layout_full = true;
                 incr.layout_dirty = true;
             } else {
@@ -932,6 +950,9 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
             }
             Mutation::Children { parent, child } => {
                 if doc.element(boxed(*parent)).is_none() {
+                    if debug_enabled() {
+                        eprintln!("[incr] full layout: child list of a non-element ({:?}) changed", doc.tag(*parent));
+                    }
                     *full = true;
                     continue;
                 }
