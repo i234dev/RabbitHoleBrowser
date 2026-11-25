@@ -17,7 +17,7 @@ It can be used three ways:
 
 _Both images were produced by RabbitHole's renderer: every pixel comes from its own rasterizer._
 
-## Status (v0.2.45)
+## Status (v0.2.46)
 
 RabbitHole is young but already runs real, heavy sites: Google search,
 YouTube (playback with sound and AV1/VP9 video), Wikipedia,
@@ -31,6 +31,22 @@ paired Speedometer 3.1 run on 17 November 2026 it was faster in 10 of 10 blocks,
 median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md)).
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
+
+Version 0.2.46 completes several areas of the web platform. WPT testharness
+rises to **89.8 %** (1,578,581 / 1,757,120 subtests on 38,226 pages;
+[record](docs/benchmarks/wpt-apis-2026-11-25-v0.2.46.md)): HTML DOM 99.0 %,
+CSS Color 99.1 %, CSS Grid 95.7 %, WebCrypto 99.9 % and editing 96.5 %. It adds
+multi-column layout (`column-count`, `column-width`, spanners, balancing and
+fragmentation), baseline alignment and subgrid in grid layout, CSS Color 4/5 at
+full precision (`color-mix()`, relative colors, `light-dark()`), IANA time
+zones on every platform (an embedded tz database when the system has none),
+post-quantum and modern WebCrypto algorithms (ML-KEM, ML-DSA, Ed448, X448,
+AES-OCB, SHA-3, Argon2), the editing algorithms of the WPT reference
+implementation, and fixes for CSS transitions that never started after a style
+sheet change. WPT CSS reftests reach 84.5 %
+([record](docs/benchmarks/wpt-css-2026-11-25-v0.2.46.md)). Speedometer 3.1 is
+1.027× faster than 0.2.45 in 8 of 8 paired runs; chart drawing with canvas 2D
+is 1.45× faster ([record](docs/benchmarks/speedometer-2026-11-25-v0.2.46.md)).
 
 Version 0.2.45 opens the 0.2 series with a broad pass over the web platform
 APIs, measured with WPT testharness: **87.4 %** of 1,756,838 subtests on 38,226
@@ -226,8 +242,8 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 | Suite | Result | Notes |
 |---|---|---|
 | **test262** (ECMAScript) | **99.90 %** (46,017 / 46,064 run) | 2026-11-18, 0.1.34 JavaScript code `fe3d71e`, JIT on, 8 workers, profile ci; **99.93 % excluding Intl**, ECMA-402 98.6 %; multi-agent `Atomics` and `Intl.NumberFormat` v3 tests included; [measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md) and `crates/js/tests/test262_baseline.txt` |
-| **WPT testharness** (web APIs: DOM, HTML, Encoding, Fetch, WebCrypto, editing, CSSOM, …) | **87.4 %** (1,534,634 / 1,756,838 subtests, 38,226 pages) | 2026-11-23/24, 0.2.45 engine `de718d24`, WPT `831baf28`, natively discovered browser pages (1,946 wptserve variants not rerun); 0.1.44 had 44.0 % on the same pages; [measurement](docs/benchmarks/wpt-apis-2026-11-24-v0.2.45.md) and `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **83.7 %** (16,435 / 19,627) | 2026-11-23, 0.2.45 CSS/layout code `b6879c73`; transforms 94.3 %, color 96.5 %, CSS2 92.8 %, css-ui 91.2 %, images 90.5 %, flexbox 85.6 %, filter-effects 75.9 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-23-v0.2.45.md) and `crates/engine/tests/wpt-css-baseline.txt` |
+| **WPT testharness** (web APIs: DOM, HTML, Encoding, Fetch, WebCrypto, editing, CSSOM, …) | **89.8 %** (1,578,581 / 1,757,120 subtests, 38,226 pages) | 2026-11-25, 0.2.46 engine `7b235dfb`, WPT `831baf28`, natively discovered browser pages (1,946 wptserve variants not run); 0.2.45 had 87.4 % and 0.1.44 44.0 % on the same pages; [measurement](docs/benchmarks/wpt-apis-2026-11-25-v0.2.46.md) and `tools/wpt/` |
+| **WPT CSS reftests** (pixel comparison) | **84.5 %** (16,576 / 19,627) | 2026-11-25, 0.2.46 source `7b235dfb`; color 96.5 %, box 95.2 %, transforms 94.3 %, CSS2 92.9 %, css-ui 91.2 %, images 90.7 %, flexbox 85.8 %, grid 84.2 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-25-v0.2.46.md) and `crates/engine/tests/wpt-css-baseline.txt` |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
@@ -534,6 +550,11 @@ for WebCrypto primitives and RSA; `str0m` for ICE, DTLS and SRTP, with
 provider for DTLS); and `sctp-proto` for data channels, vendored in
 `vendor/sctp-proto` with a seven-line patch for empty messages
 (RFC 8831 §6.6). They add about 7 MB to the executable.
+
+Since 0.2.46 the editing commands port the algorithms of the WPT reference
+implementation (`editing/include/implementation.js`, BSD-3-Clause), and an
+embedded IANA tz database (public domain) backs time zones when the system has
+none; see [NOTICE](NOTICE).
 
 ## Roadmap
 

@@ -1,37 +1,36 @@
 # WPT reftest baseline: per-directory pass/total, then failing tests.
-dir css/CSS2 5783 6232
+dir css/CSS2 5789 6232
 dir css/compositing 36 60
-dir css/css-align 37 64
-dir css/css-backgrounds 607 718
+dir css/css-align 36 64
+dir css/css-backgrounds 609 718
 dir css/css-borders 42 123
-dir css/css-box 38 42
+dir css/css-box 40 42
 dir css/css-cascade 41 51
 dir css/css-color 300 311
-dir css/css-conditional 150 172
-dir css/css-contain 307 435
+dir css/css-conditional 151 172
+dir css/css-contain 320 435
 dir css/css-display 179 223
-dir css/css-flexbox 879 1027
-dir css/css-fonts 262 387
-dir css/css-grid 1397 1763
-dir css/css-images 436 482
-dir css/css-masking 269 384
+dir css/css-flexbox 881 1027
+dir css/css-fonts 267 387
+dir css/css-grid 1484 1763
+dir css/css-images 437 482
+dir css/css-masking 271 384
 dir css/css-nesting 13 17
-dir css/css-overflow 449 719
-dir css/css-position 161 251
-dir css/css-sizing 400 568
-dir css/css-text 1201 1550
+dir css/css-overflow 451 719
+dir css/css-position 164 251
+dir css/css-sizing 403 568
+dir css/css-text 1203 1550
 dir css/css-text-decor 284 339
 dir css/css-transforms 749 794
 dir css/css-ui 877 962
-dir css/css-values 115 192
-dir css/css-writing-modes 934 1162
+dir css/css-values 116 192
+dir css/css-writing-modes 944 1162
 dir css/filter-effects 281 370
 dir css/selectors 208 229
 fail css/CSS2/abspos/abspos-containing-block-initial-004a.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004b.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004c.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004d.xht
-fail css/CSS2/abspos/abspos-containing-block-initial-009a.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-009b.xht
 fail css/CSS2/abspos/static-inside-float-inside-inline.html
 fail css/CSS2/abspos/static-inside-inline-002.html
@@ -105,7 +104,6 @@ fail css/CSS2/borders/border-bottom-width-applies-to-006.xht
 fail css/CSS2/borders/border-color-011.xht
 fail css/CSS2/borders/border-color-012.xht
 fail css/CSS2/borders/border-color-applies-to-006.xht
-fail css/CSS2/borders/border-conflict-style-107.html
 fail css/CSS2/borders/border-top-applies-to-006.xht
 fail css/CSS2/borders/border-top-color-applies-to-006.xht
 fail css/CSS2/borders/border-top-width-applies-to-006.xht
@@ -171,10 +169,7 @@ fail css/CSS2/floats-clear/floats-132.xht
 fail css/CSS2/floats-clear/floats-143.xht
 fail css/CSS2/floats-clear/floats-147.xht
 fail css/CSS2/floats-clear/floats-149.xht
-fail css/CSS2/floats-clear/floats-clear-multicol-000.html
-fail css/CSS2/floats-clear/floats-clear-multicol-001.html
 fail css/CSS2/floats-clear/floats-clear-multicol-balancing-000.html
-fail css/CSS2/floats-clear/floats-clear-multicol-balancing-001.html
 fail css/CSS2/floats-clear/margin-collapse-018.xht
 fail css/CSS2/floats-clear/margin-collapse-033.xht
 fail css/CSS2/floats-clear/margin-collapse-034.xht
@@ -323,7 +318,6 @@ fail css/CSS2/normal-flow/resizable-iframe-paint-order.html
 fail css/CSS2/normal-flow/width-applies-to-006.xht
 fail css/CSS2/pagination/float-page-break-inside-avoid-2-print.html
 fail css/CSS2/pagination/float-page-break-inside-avoid-8-print.html
-fail css/CSS2/positioning/absolute-non-replaced-height-006.xht
 fail css/CSS2/positioning/absolute-non-replaced-max-height-011.xht
 fail css/CSS2/positioning/absolute-non-replaced-width-005.xht
 fail css/CSS2/positioning/absolute-non-replaced-width-027.xht
@@ -518,6 +512,7 @@ fail css/css-align/blocks/align-content-block-break-content-010.html
 fail css/css-align/blocks/align-content-block-break-content-020.html
 fail css/css-align/blocks/align-content-block-break-overflow-010.html
 fail css/css-align/blocks/align-content-block-break-overflow-020.html
+fail css/css-align/blocks/align-content-block-overflow-000.html
 fail css/css-align/blocks/align-content-table-cell-002.html
 fail css/css-align/blocks/align-content-table-cell-003.html
 fail css/css-align/blocks/align-content-table-cell-004.html
@@ -529,10 +524,8 @@ fail css/css-align/self-alignment/self-align-safe-unsafe-grid-002.html
 fail css/css-align/self-alignment/self-align-safe-unsafe-grid-003.html
 fail css/css-backgrounds/animations/background-color-animation-custom-property.html
 fail css/css-backgrounds/animations/background-color-animation-custom-timing-function-reverse.html
-fail css/css-backgrounds/animations/background-color-animation-half-opaque.html
 fail css/css-backgrounds/animations/background-color-animation-pseudo-element.html
 fail css/css-backgrounds/animations/background-color-animation-with-blur.html
-fail css/css-backgrounds/animations/invalidation/background-color-transition-with-initially-transparent.html
 fail css/css-backgrounds/background-attachment-fixed-inside-transform-1.html
 fail css/css-backgrounds/background-attachment-local-hidden.html
 fail css/css-backgrounds/background-attachment-local/attachment-local-clipping-color-6.html
@@ -720,9 +713,7 @@ fail css/css-borders/corner-shape/inner-corner-intersection004.html
 fail css/css-borders/tentative/border-radius-side-shorthands/border-radius-side-shorthands-001.html
 fail css/css-borders/tentative/border-radius-side-shorthands/border-radius-side-shorthands-002.html
 fail css/css-box/margin-trim/block-container-block-end-self-collapsing-and-border.html
-fail css/css-box/margin-trim/multicol-spanner-005.html
 fail css/css-box/margin-trim/multicol-spanner-006.html
-fail css/css-box/margin-trim/multicol-spanner-007.html
 fail css/css-cascade/all-prop-001.html
 fail css/css-cascade/all-prop-unset-visited.html
 fail css/css-cascade/import-conditional-002.html
@@ -761,7 +752,6 @@ fail css/css-conditional/container-queries/container-for-cue.html
 fail css/css-conditional/container-queries/container-units-sharing-via-rule-node.html
 fail css/css-conditional/container-queries/first-letter-outside-size-container.html
 fail css/css-conditional/container-queries/inline-size-bfc-floats.html
-fail css/css-conditional/container-queries/multicol-inside-container.html
 fail css/css-conditional/container-queries/multiple-conditions-001.html
 fail css/css-conditional/container-queries/no-layout-containment-fixedpos-dynamic.html
 fail css/css-conditional/container-queries/no-layout-containment-fixedpos.html
@@ -772,9 +762,7 @@ fail css/css-contain/contain-content-003.html
 fail css/css-contain/contain-content-004.html
 fail css/css-contain/contain-content-011.html
 fail css/css-contain/contain-html-w-m-004.html
-fail css/css-contain/contain-inline-size-grid-indefinite-height-min-height-flex-row.html
 fail css/css-contain/contain-inline-size-intrinsic.html
-fail css/css-contain/contain-inline-size-multicol.html
 fail css/css-contain/contain-inline-size-vertical-rl-.html
 fail css/css-contain/contain-layout-006.html
 fail css/css-contain/contain-layout-007.html
@@ -841,9 +829,6 @@ fail css/css-contain/contain-size-breaks-001.html
 fail css/css-contain/contain-size-button-001.html
 fail css/css-contain/contain-size-flexbox-002.html
 fail css/css-contain/contain-size-grid-002.html
-fail css/css-contain/contain-size-grid-indefinite-height-min-height-flex-row.html
-fail css/css-contain/contain-size-monolithic-001.html
-fail css/css-contain/contain-size-multicol-001.html
 fail css/css-contain/contain-size-replaced-001.html
 fail css/css-contain/contain-size-replaced-002.html
 fail css/css-contain/contain-size-replaced-003a.html
@@ -860,13 +845,9 @@ fail css/css-contain/contain-size-select-elem-003.html
 fail css/css-contain/contain-size-select-elem-004.html
 fail css/css-contain/contain-size-select-elem-005.html
 fail css/css-contain/contain-strict-011.html
-fail css/css-contain/contain-style-counters-001.html
-fail css/css-contain/contain-style-counters-003.html
 fail css/css-contain/contain-style-counters-004.html
-fail css/css-contain/contain-style-counters-005.html
 fail css/css-contain/contain-style-ol-ordinal-pseudo-reversed.html
 fail css/css-contain/contain-style-ol-ordinal-pseudo.html
-fail css/css-contain/content-visibility/content-visibility-003.html
 fail css/css-contain/content-visibility/content-visibility-020.html
 fail css/css-contain/content-visibility/content-visibility-021.html
 fail css/css-contain/content-visibility/content-visibility-022.html
@@ -879,16 +860,12 @@ fail css/css-contain/content-visibility/content-visibility-099.html
 fail css/css-contain/content-visibility/content-visibility-animation-and-scroll.html
 fail css/css-contain/content-visibility/content-visibility-auto-svg-text.html
 fail css/css-contain/content-visibility/content-visibility-canvas.html
-fail css/css-contain/content-visibility/content-visibility-hidden-grid-web-font-load.html
 fail css/css-contain/content-visibility/content-visibility-on-root-svg.html
 fail css/css-contain/content-visibility/content-visibility-on-ruby.html
 fail css/css-contain/content-visibility/content-visibility-svg-gradient-unlock.html
 fail css/css-contain/content-visibility/content-visibility-svg-resources.html
 fail css/css-contain/content-visibility/content-visibility-video.html
 fail css/css-contain/content-visibility/content-visibility-vs-scrollIntoView-002.html
-fail css/css-contain/counter-scoping-001.html
-fail css/css-contain/counter-scoping-003.html
-fail css/css-contain/counter-scoping-004.html
 fail css/css-contain/quote-scoping-001.html
 fail css/css-contain/quote-scoping-003.html
 fail css/css-contain/quote-scoping-invalidation-001.html
@@ -1002,8 +979,6 @@ fail css/css-flexbox/flexbox-align-self-vert-rtl-002.xhtml
 fail css/css-flexbox/flexbox-align-self-vert-rtl-003.xhtml
 fail css/css-flexbox/flexbox-align-self-vert-rtl-004.xhtml
 fail css/css-flexbox/flexbox-align-self-vert-rtl-005.xhtml
-fail css/css-flexbox/flexbox-baseline-multi-line-horiz-002.html
-fail css/css-flexbox/flexbox-baseline-multi-line-vert-002.html
 fail css/css-flexbox/flexbox-basic-block-horiz-001v.xhtml
 fail css/css-flexbox/flexbox-basic-block-vert-001v.xhtml
 fail css/css-flexbox/flexbox-basic-textarea-vert-001.xhtml
@@ -1088,7 +1063,6 @@ fail css/css-flexbox/table-as-item-stretch-cross-size-5.html
 fail css/css-flexbox/table-as-item-stretch-cross-size.html
 fail css/css-fonts/cluster-matching-canonical-equivalence-002.html
 fail css/css-fonts/cluster-matching-canonical-equivalence-003.html
-fail css/css-fonts/downloadable-font-in-iframe-print.html
 fail css/css-fonts/font-default-04.html
 fail css/css-fonts/font-display/font-display-feature-policy-02.tentative.html
 fail css/css-fonts/font-display/font-display-preload.html
@@ -1145,15 +1119,11 @@ fail css/css-fonts/font-synthesis-style-binary.html
 fail css/css-fonts/font-synthesis-weight-binary.html
 fail css/css-fonts/font-variant-alternates-layers.html
 fail css/css-fonts/font-variant-caps.html
-fail css/css-fonts/font-variant-east-asian.html
 fail css/css-fonts/font-variant-emoji-003.html
 fail css/css-fonts/font-variant-emoji-004.html
 fail css/css-fonts/font-variant-emoji-005.html
 fail css/css-fonts/font-variant-emoji-1.html
 fail css/css-fonts/font-variant-ligatures-11.optional.html
-fail css/css-fonts/font-variant-ligatures.html
-fail css/css-fonts/font-variant-numeric.html
-fail css/css-fonts/font-variant-position.html
 fail css/css-fonts/font-weight-bolder-001.xht
 fail css/css-fonts/font-weight-lighter-001.xht
 fail css/css-fonts/font-weight-normal-001.xht
@@ -1218,15 +1188,8 @@ fail css/css-grid/abspos/grid-abspos-staticpos-align-self-safe-outer-cb-001.tent
 fail css/css-grid/abspos/grid-abspos-staticpos-align-self-safe-outer-cb-003.tentative.html
 fail css/css-grid/abspos/grid-abspos-staticpos-align-self-vertWM-002.html
 fail css/css-grid/abspos/grid-abspos-staticpos-align-self-vertWM-004.html
-fail css/css-grid/abspos/grid-fixedpos-static-position-not-containing-block.html
-fail css/css-grid/abspos/grid-positioned-item-dynamic-change-005.html
-fail css/css-grid/abspos/grid-positioned-items-background-001.html
-fail css/css-grid/abspos/grid-positioned-items-background-rtl-001.html
 fail css/css-grid/abspos/orthogonal-positioned-grid-items-014.html
 fail css/css-grid/abspos/orthogonal-positioned-grid-items-015.html
-fail css/css-grid/abspos/positioned-grid-descendants-017.html
-fail css/css-grid/abspos/positioned-grid-items-023.html
-fail css/css-grid/abspos/positioned-grid-items-negative-indices-003.html
 fail css/css-grid/abspos/positioned-grid-items-sizing-001.html
 fail css/css-grid/alignment/grid-align-baseline-005.html
 fail css/css-grid/alignment/grid-baseline-001.html
@@ -1234,7 +1197,6 @@ fail css/css-grid/alignment/grid-baseline-align-001.html
 fail css/css-grid/alignment/grid-baseline-align-cycles-001.html
 fail css/css-grid/alignment/grid-baseline-justify-001.html
 fail css/css-grid/alignment/grid-content-distribution-029.html
-fail css/css-grid/alignment/grid-gutters-016.html
 fail css/css-grid/alignment/grid-item-aspect-ratio-stretch-3.html
 fail css/css-grid/alignment/grid-item-content-baseline-001.html
 fail css/css-grid/alignment/grid-item-content-baseline-002.html
@@ -1250,33 +1212,17 @@ fail css/css-grid/alignment/grid-item-no-aspect-ratio-stretch-5.html
 fail css/css-grid/alignment/grid-item-no-aspect-ratio-stretch-6.html
 fail css/css-grid/alignment/grid-item-self-baseline-001.html
 fail css/css-grid/alignment/grid-justify-baseline-001.html
-fail css/css-grid/alignment/grid-self-alignment-baseline-with-grid-003.html
-fail css/css-grid/alignment/grid-self-alignment-baseline-with-grid-004.html
 fail css/css-grid/alignment/grid-self-alignment-stretch-input-range.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-002-b.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-002.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-003.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-004.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-005.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-006.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-007.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-changes-grid-area-size-007.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-changes-grid-area-size-008.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-changes-grid-area-size-009.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-changes-grid-area-size-010.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-changes-grid-area-size-011.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-changes-grid-area-size-012.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-horiz-004.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-horiz-005.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-horiz-006.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-horiz-007.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-lr-002.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-lr-003.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-lr-004.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-lr-005.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-lr-006.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-lr-007.html
-fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-004.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-005.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-006.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-007.html
@@ -1286,17 +1232,13 @@ fail css/css-grid/grid-definition/grid-auto-repeat-aspect-ratio-002.html
 fail css/css-grid/grid-definition/grid-auto-repeat-dynamic-001.html
 fail css/css-grid/grid-definition/grid-auto-repeat-dynamic-002.html
 fail css/css-grid/grid-definition/grid-auto-repeat-dynamic-003.html
-fail css/css-grid/grid-definition/grid-item-grid-container-percentage-rows-002.html
 fail css/css-grid/grid-definition/grid-template-rows-fit-content-001.html
 fail css/css-grid/grid-item-percentage-quirk-001.html
 fail css/css-grid/grid-item-percentage-quirk-002.html
 fail css/css-grid/grid-items/aspect-ratio-004.html
 fail css/css-grid/grid-items/aspect-ratio-nonreplaced-max-content-contribution-002.html
 fail css/css-grid/grid-items/grid-intrinsic-maximums.html
-fail css/css-grid/grid-items/grid-item-inline-contribution-001.html
-fail css/css-grid/grid-items/grid-item-inline-contribution-002.html
 fail css/css-grid/grid-items/grid-item-inline-contribution-003.html
-fail css/css-grid/grid-items/grid-item-inline-contribution-004.html
 fail css/css-grid/grid-items/grid-item-inline-contribution-005.html
 fail css/css-grid/grid-items/grid-item-min-size-auto-overflow-001.html
 fail css/css-grid/grid-items/grid-item-minmax-img-001.html
@@ -1304,7 +1246,6 @@ fail css/css-grid/grid-items/grid-item-percentage-sizes-001.html
 fail css/css-grid/grid-items/grid-item-percentage-sizes-002.html
 fail css/css-grid/grid-items/grid-item-percentage-sizes-003.html
 fail css/css-grid/grid-items/grid-size-with-orthogonal-child-dynamic.html
-fail css/css-grid/grid-items/percentage-size-indefinite-replaced.html
 fail css/css-grid/grid-items/percentage-size-replaced-subitems-001.html
 fail css/css-grid/grid-items/percentage-size-subitems-001.html
 fail css/css-grid/grid-items/replaced-element-014.html
@@ -1314,14 +1255,9 @@ fail css/css-grid/grid-lanes/abspos/column-grid-lanes-oof-track-reverse-rtl-001.
 fail css/css-grid/grid-lanes/abspos/row-grid-lanes-alignment.html
 fail css/css-grid/grid-lanes/abspos/row-grid-lanes-oof-track-reverse-002.html
 fail css/css-grid/grid-lanes/abspos/row-grid-lanes-oof-track-reverse-rtl-001.html
-fail css/css-grid/grid-lanes/abspos/row-grid-lanes-out-of-flow-001.html
 fail css/css-grid/grid-lanes/alignment/column-align-items-017.html
-fail css/css-grid/grid-lanes/alignment/column-fill-reverse-align-content-001.html
-fail css/css-grid/grid-lanes/alignment/column-fill-reverse-align-content-003.html
 fail css/css-grid/grid-lanes/alignment/column-fill-reverse-align-content-safe-001.html
 fail css/css-grid/grid-lanes/alignment/column-fill-reverse-dense-packing-align-items-multi-span-001.html
-fail css/css-grid/grid-lanes/alignment/column-grid-lanes-alignment-positioned-items-001.html
-fail css/css-grid/grid-lanes/alignment/column-grid-lanes-alignment-positioned-items-002.html
 fail css/css-grid/grid-lanes/alignment/column-grid-lanes-alignment-positioned-items-003.html
 fail css/css-grid/grid-lanes/alignment/column-grid-lanes-alignment-positioned-items-004.html
 fail css/css-grid/grid-lanes/alignment/column-grid-lanes-justify-self-003.html
@@ -1333,12 +1269,7 @@ fail css/css-grid/grid-lanes/alignment/column-track-reverse-justify-items-001.ht
 fail css/css-grid/grid-lanes/alignment/column-track-reverse-justify-items-002.html
 fail css/css-grid/grid-lanes/alignment/grid-lanes-align-content-001.html
 fail css/css-grid/grid-lanes/alignment/grid-lanes-content-distribution-001.html
-fail css/css-grid/grid-lanes/alignment/row-fill-reverse-justify-content-001.html
-fail css/css-grid/grid-lanes/alignment/row-fill-reverse-justify-content-003.html
-fail css/css-grid/grid-lanes/alignment/row-fill-reverse-justify-content-indefinite-size-001.html
 fail css/css-grid/grid-lanes/alignment/row-fill-reverse-justify-content-safe-001.html
-fail css/css-grid/grid-lanes/alignment/row-grid-lanes-alignment-positioned-items-001.html
-fail css/css-grid/grid-lanes/alignment/row-grid-lanes-alignment-positioned-items-002.html
 fail css/css-grid/grid-lanes/alignment/row-grid-lanes-alignment-positioned-items-003.html
 fail css/css-grid/grid-lanes/alignment/row-grid-lanes-alignment-positioned-items-004.html
 fail css/css-grid/grid-lanes/alignment/row-justify-items-016.html
@@ -1350,14 +1281,9 @@ fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-002b.
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-003a.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-003b.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-003c.html
-fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-004a.html
-fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-004b.html
-fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-005a.html
-fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-005b.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-006a.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-006b.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-container-baseline-008.html
-fail css/css-grid/grid-lanes/baseline/column-grid-lanes-item-baseline-004a.html
 fail css/css-grid/grid-lanes/baseline/column-grid-lanes-item-baseline-synthesized-001.html
 fail css/css-grid/grid-lanes/baseline/grid-lanes-grid-item-self-baseline-001.html
 fail css/css-grid/grid-lanes/baseline/grid-lanes-grid-item-self-baseline-002a.html
@@ -1366,7 +1292,7 @@ fail css/css-grid/grid-lanes/baseline/row-grid-lanes-item-baseline-001.html
 fail css/css-grid/grid-lanes/baseline/row-grid-lanes-item-baseline-002.html
 fail css/css-grid/grid-lanes/baseline/row-grid-lanes-item-baseline-003.html
 fail css/css-grid/grid-lanes/baseline/row-grid-lanes-item-baseline-004.html
-fail css/css-grid/grid-lanes/baseline/row-grid-lanes-item-baseline-005.html
+fail css/css-grid/grid-lanes/gap/grid-lanes-gap-002.html
 fail css/css-grid/grid-lanes/grid-placement/grid-lanes-grid-placement-named-lines-001.html
 fail css/css-grid/grid-lanes/grid-placement/grid-lanes-grid-placement-named-lines-002.html
 fail css/css-grid/grid-lanes/grid-placement/grid-lanes-grid-placement-named-lines-dense-packing-001.html
@@ -1377,7 +1303,6 @@ fail css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-intrinsic-sizing-rows-0
 fail css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-intrinsic-sizing-rows-004-mix1.html
 fail css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-intrinsic-sizing-rows-004-mix2.html
 fail css/css-grid/grid-lanes/item-placement/column-auto-placement-001.html
-fail css/css-grid/grid-lanes/item-placement/column-negative-margin-001.html
 fail css/css-grid/grid-lanes/item-placement/column-negative-margin-002.html
 fail css/css-grid/grid-lanes/item-placement/column-negative-margin-004.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/column-dense-packing-fit-tolerance-002.html
@@ -1385,18 +1310,14 @@ fail css/css-grid/grid-lanes/item-placement/dense-packing/column-dense-packing-f
 fail css/css-grid/grid-lanes/item-placement/dense-packing/column-dense-packing-multi-span-010.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/column-dense-packing-multi-span-011.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/column-dense-packing-multi-span-012.html
-fail css/css-grid/grid-lanes/item-placement/dense-packing/column-dense-packing-multi-span-013.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/column-track-reverse-dense-packing-fit-tolerance-002.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/row-dense-packing-fit-tolerance-002.html
-fail css/css-grid/grid-lanes/item-placement/dense-packing/row-dense-packing-multi-span-006.html
 fail css/css-grid/grid-lanes/item-placement/dense-packing/row-track-reverse-dense-packing-fit-tolerance-002.html
 fail css/css-grid/grid-lanes/item-placement/fit-tolerance/fit-tolerance-percentage-intrinsic-row-001.html
 fail css/css-grid/grid-lanes/item-placement/grid-lanes-item-placement-006.html
 fail css/css-grid/grid-lanes/item-placement/grid-lanes-item-placement-007.html
 fail css/css-grid/grid-lanes/item-placement/row-auto-placement-min-content.html
-fail css/css-grid/grid-lanes/item-placement/row-negative-margin-001.html
 fail css/css-grid/grid-lanes/item-placement/row-negative-margin-004.html
-fail css/css-grid/grid-lanes/items/column-intrinsic-maximums.html
 fail css/css-grid/grid-lanes/items/column-item-percentage-sizes-001.html
 fail css/css-grid/grid-lanes/items/column-item-percentage-sizes-002.html
 fail css/css-grid/grid-lanes/items/column-item-percentage-sizes-003.html
@@ -1429,13 +1350,7 @@ fail css/css-grid/grid-lanes/subgrid/grid-lanes-subgridded-to-grid/row/independe
 fail css/css-grid/grid-lanes/subgrid/grid-lanes-subgridded-to-grid/track-sizing/grid-lanes-subgrid-flex.html
 fail css/css-grid/grid-lanes/subgrid/grid-lanes-subgridded-to-grid/track-sizing/grid-lanes-subgrid-intrinsic-sizing.html
 fail css/css-grid/grid-lanes/subgrid/grid-lanes-subgridded-to-grid/track-sizing/grid-lanes-subgrid.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/baseline/row-grid-lanes-item-baseline-nested-subgrid-002.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/baseline/row-grid-lanes-item-baseline-subgrid-001.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/baseline/row-grid-lanes-item-baseline-subgrid-002.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/baseline/row-grid-lanes-item-baseline-subgrid-003.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/baseline/row-grid-lanes-item-baseline-subgrid-004.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/baseline/row-grid-lanes-item-baseline-subgrid-005.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/baseline/row-grid-lanes-item-baseline-subgrid-006.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/column-subgrid-abs-pos-002.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/column/grid-lanes-subgrid-001a.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/column/independent-formatting-context.html
@@ -1461,14 +1376,7 @@ fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-extra-margin-003.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-extra-margin-004.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-extra-margin-005.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-with-row-standalone-axis-size-001.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-with-row-standalone-axis-size-002.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-with-row-standalone-axis-size-003.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-with-row-standalone-axis-size-004.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-with-row-standalone-axis-size-006.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-with-row-standalone-axis-size-007.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-with-row-standalone-axis-size-008.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-with-row-standalone-axis-size-009.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-auto-placed-subgrid-inherited-tracks-001.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-auto-placed-subgrid-inherited-tracks-002.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-auto-placed-subgrid-inherited-tracks-003.html
@@ -1476,13 +1384,10 @@ fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-auto-placed-subgrid-nested-subgrid-inherited-tracks-002.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-auto-placed-subgrid-nested-subgrid-inherited-tracks-003.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-subgrid-extra-margin-002.html
-fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-subgrid-extra-margin-003.html
 fail css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-subgrid-extra-margin-005.html
 fail css/css-grid/grid-lanes/tentative/intrinsic-sizing/grid-lanes-baseline-alignment-affects-intrinsic-size-002.html
 fail css/css-grid/grid-lanes/tentative/intrinsic-sizing/grid-lanes-baseline-alignment-affects-intrinsic-size-003.html
-fail css/css-grid/grid-lanes/tentative/intrinsic-sizing/grid-lanes-baseline-alignment-affects-intrinsic-size-004.html
 fail css/css-grid/grid-lanes/tentative/intrinsic-sizing/grid-lanes-baseline-alignment-affects-intrinsic-size-005.html
-fail css/css-grid/grid-lanes/tentative/intrinsic-sizing/grid-lanes-baseline-alignment-affects-intrinsic-size-008.html
 fail css/css-grid/grid-lanes/tentative/item-placement/column-fill-reverse-definite-size-001.html
 fail css/css-grid/grid-lanes/tentative/item-placement/column-fill-reverse-definite-size-002.html
 fail css/css-grid/grid-lanes/tentative/item-placement/column-fill-reverse-indefinite-size-001.html
@@ -1517,16 +1422,11 @@ fail css/css-grid/grid-lanes/track-sizing/auto-repeat/intrinsic-auto-repeat/row-
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/intrinsic-auto-repeat/row-auto-repeat-auto-017.html
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/intrinsic-auto-repeat/row-auto-repeat-auto-018.html
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/intrinsic-auto-repeat/row-auto-repeat-auto-022.html
-fail css/css-grid/grid-lanes/track-sizing/auto-repeat/intrinsic-auto-repeat/row-auto-repeat-auto-023.html
-fail css/css-grid/grid-lanes/track-sizing/auto-repeat/intrinsic-auto-repeat/row-auto-repeat-auto-024.html
-fail css/css-grid/grid-lanes/track-sizing/auto-repeat/intrinsic-auto-repeat/row-auto-repeat-auto-027.html
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/intrinsic-auto-repeat/row-auto-repeat-auto-030.html
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/row-auto-repeat-019.html
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/row-auto-repeat-020.html
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/row-auto-repeat-024.html
 fail css/css-grid/grid-lanes/track-sizing/grid-lanes-fr-rows-indefinite-001.html
-fail css/css-grid/grid-lanes/track-sizing/grid-lanes-percentage-rows-indefinite-height-003.html
-fail css/css-grid/grid-lanes/track-sizing/grid-lanes-percentage-rows-indefinite-height-004.html
 fail css/css-grid/grid-model/display-grid.html
 fail css/css-grid/grid-model/display-inline-grid.html
 fail css/css-grid/grid-model/grid-floats-no-intrude-002.html
@@ -1537,22 +1437,12 @@ fail css/css-grid/grid-with-dynamic-img.html
 fail css/css-grid/grid-with-orthogonal-child-within-flexbox.html
 fail css/css-grid/layout-algorithm/flex-sizing-rows-indefinite-height-002.html
 fail css/css-grid/layout-algorithm/flex-sizing-rows-indefinite-height.html
-fail css/css-grid/layout-algorithm/grid-fit-content-width-percent-height-aspect-ratio-001.html
-fail css/css-grid/layout-algorithm/grid-float-intrinsic-width-percent-height-aspect-ratio-001.html
-fail css/css-grid/layout-algorithm/grid-inline-grid-intrinsic-width-percent-height-aspect-ratio-001.html
 fail css/css-grid/layout-algorithm/grid-intrinsic-size-dynamic-block-size.html
-fail css/css-grid/layout-algorithm/grid-max-content-width-percent-height-aspect-ratio-001.html
-fail css/css-grid/layout-algorithm/grid-min-content-width-percent-height-aspect-ratio-001.html
-fail css/css-grid/layout-algorithm/grid-percent-rows-filled-shrinkwrap-001.html
-fail css/css-grid/layout-algorithm/grid-percent-rows-spanned-shrinkwrap-001.html
 fail css/css-grid/layout-algorithm/grid-template-flexible-rerun-track-sizing.html
 fail css/css-grid/stretch-grid-item-checkbox-input.html
 fail css/css-grid/stretch-grid-item-radio-input.html
 fail css/css-grid/stretch-grid-item-text-input-overflow.html
 fail css/css-grid/subgrid/abs-pos-002.html
-fail css/css-grid/subgrid/baseline-001.html
-fail css/css-grid/subgrid/grid-gap-002.html
-fail css/css-grid/subgrid/grid-gap-003.html
 fail css/css-grid/subgrid/grid-gap-007.html
 fail css/css-grid/subgrid/grid-gap-008.html
 fail css/css-grid/subgrid/independent-formatting-context.html
@@ -1565,19 +1455,11 @@ fail css/css-grid/subgrid/orthogonal-writing-mode-003.html
 fail css/css-grid/subgrid/orthogonal-writing-mode-004.html
 fail css/css-grid/subgrid/repeat-auto-fill-003.html
 fail css/css-grid/subgrid/repeat-auto-fill-004.html
-fail css/css-grid/subgrid/standalone-axis-size-007.html
-fail css/css-grid/subgrid/standalone-axis-size-009.html
-fail css/css-grid/subgrid/standalone-axis-size-010.html
 fail css/css-grid/subgrid/standalone-axis-size-011.html
-fail css/css-grid/subgrid/standalone-axis-size-012.html
-fail css/css-grid/subgrid/standalone-axis-size-013.html
-fail css/css-grid/subgrid/subgrid-baseline-001.html
 fail css/css-grid/subgrid/subgrid-baseline-002.html
-fail css/css-grid/subgrid/subgrid-baseline-003.html
 fail css/css-grid/subgrid/subgrid-baseline-004.html
 fail css/css-grid/subgrid/subgrid-item-with-margin-left-auto.html
 fail css/css-grid/subgrid/writing-directions-001.html
-fail css/css-images/color-stop-color-mix-currentcolor-invalidation.html
 fail css/css-images/color-stop-currentcolor.html
 fail css/css-images/color-stop-light-dark-currentcolor-invalidation.html
 fail css/css-images/conic-gradient-color-with-sibling-index.html
@@ -1639,8 +1521,6 @@ fail css/css-masking/clip-path/animations/clip-path-path-interpolation-with-zoom
 fail css/css-masking/clip-path/animations/clip-path-shape-interpolation-with-zoom.html
 fail css/css-masking/clip-path/animations/clip-path-shape-transition-with-zoom.html
 fail css/css-masking/clip-path/animations/two-clip-path-animation-diff-length4.html
-fail css/css-masking/clip-path/clip-path-columns-shape-001.html
-fail css/css-masking/clip-path/clip-path-columns-shape-002.html
 fail css/css-masking/clip-path/clip-path-contentBox-1c.html
 fail css/css-masking/clip-path/clip-path-descendant-text-mutated-001.html
 fail css/css-masking/clip-path/clip-path-document-element-will-change.html
@@ -1849,7 +1729,6 @@ fail css/css-overflow/line-clamp/webkit-line-clamp-014.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-027.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-035.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-036.html
-fail css/css-overflow/line-clamp/webkit-line-clamp-043.html
 fail css/css-overflow/overflow-auto-scrollbar-gutter-intrinsic-003.html
 fail css/css-overflow/overflow-body-propagation-012.html
 fail css/css-overflow/overflow-body-propagation-014.html
@@ -1964,7 +1843,6 @@ fail css/css-overflow/scroll-markers/scroll-target-group-010.html
 fail css/css-overflow/scroll-markers/scroll-target-group-011.html
 fail css/css-overflow/scroll-markers/scroll-target-group-012.html
 fail css/css-overflow/scroll-markers/scroll-target-group-inline-targets.html
-fail css/css-overflow/scroll-markers/targeted-column-scroll-marker-selection-001.html
 fail css/css-overflow/scroll-markers/targeted-column-scroll-marker-selection-002.html
 fail css/css-overflow/scroll-markers/targeted-column-scroll-marker-selection-003.html
 fail css/css-overflow/scroll-markers/targeted-column-scroll-marker-selection-004.html
@@ -2021,8 +1899,10 @@ fail css/css-position/multicol/static-position/vrl-ltr-ltr-in-multicol.html
 fail css/css-position/multicol/static-position/vrl-ltr-rtl-in-multicol.tentative.html
 fail css/css-position/multicol/static-position/vrl-rtl-ltr-in-multicol.tentative.html
 fail css/css-position/multicol/static-position/vrl-rtl-rtl-in-multicol.html
+fail css/css-position/multicol/vlr-ltr-rtl-in-multicols.tentative.html
 fail css/css-position/multicol/vlr-rtl-ltr-in-multicols.tentative.html
 fail css/css-position/multicol/vlr-rtl-rtl-in-multicols.html
+fail css/css-position/multicol/vrl-ltr-rtl-in-multicols.tentative.html
 fail css/css-position/multicol/vrl-rtl-ltr-in-multicols.tentative.html
 fail css/css-position/multicol/vrl-rtl-rtl-in-multicols.html
 fail css/css-position/nested-inline-abspos-child-with-siblings.html
@@ -2051,10 +1931,6 @@ fail css/css-position/position-absolute-in-inline-009.html
 fail css/css-position/position-absolute-in-inline-010.html
 fail css/css-position/position-absolute-in-inline-011.html
 fail css/css-position/position-absolute-in-inline-012.html
-fail css/css-position/position-absolute-semi-replaced-stretch-button.html
-fail css/css-position/position-absolute-semi-replaced-stretch-input.html
-fail css/css-position/position-absolute-semi-replaced-stretch-other.html
-fail css/css-position/position-fixed-overflow-print.html
 fail css/css-position/position-fixed-scroll-nested-fixed.html
 fail css/css-position/static-position/htb-rtl-ltr.tentative.html
 fail css/css-position/static-position/htb-rtl-rtl.html
@@ -2074,7 +1950,6 @@ fail css/css-position/static-position/vrl-ltr-rtl.tentative.html
 fail css/css-position/static-position/vrl-rtl-ltr.tentative.html
 fail css/css-position/static-position/vrl-rtl-rtl.html
 fail css/css-position/sticky/position-sticky-change-top.html
-fail css/css-position/sticky/position-sticky-child-multicolumn.html
 fail css/css-position/sticky/position-sticky-escape-scroller-001.html
 fail css/css-position/sticky/position-sticky-escape-scroller-002.html
 fail css/css-position/sticky/position-sticky-escape-scroller-003.html
@@ -2106,10 +1981,7 @@ fail css/css-sizing/aspect-ratio/abspos-004.html
 fail css/css-sizing/aspect-ratio/block-aspect-ratio-017.html
 fail css/css-sizing/aspect-ratio/block-aspect-ratio-021.html
 fail css/css-sizing/aspect-ratio/block-aspect-ratio-032.html
-fail css/css-sizing/aspect-ratio/block-aspect-ratio-052.html
 fail css/css-sizing/aspect-ratio/block-aspect-ratio-053.html
-fail css/css-sizing/aspect-ratio/block-aspect-ratio-054.html
-fail css/css-sizing/aspect-ratio/block-aspect-ratio-055.html
 fail css/css-sizing/aspect-ratio/block-aspect-ratio-with-margin-collapsing-001.html
 fail css/css-sizing/aspect-ratio/flex-aspect-ratio-038.html
 fail css/css-sizing/aspect-ratio/flex-aspect-ratio-040.html
@@ -2454,7 +2326,6 @@ fail css/css-text/tab-size/tab-size-spacing-003.html
 fail css/css-text/text-align/text-align-end-009.html
 fail css/css-text/text-align/text-align-end-016.html
 fail css/css-text/text-align/text-align-justify-005.html
-fail css/css-text/text-align/text-align-last-015.html
 fail css/css-text/text-align/text-align-start-009.html
 fail css/css-text/text-autospace/text-autospace-004.html
 fail css/css-text/text-autospace/text-autospace-elements-007.html
@@ -2653,7 +2524,6 @@ fail css/css-text/word-space-transform/word-space-transform-030.html
 fail css/css-text/word-spacing/word-spacing-001.html
 fail css/css-text/word-spacing/word-spacing-002.html
 fail css/css-text/word-spacing/word-spacing-003.html
-fail css/css-text/word-spacing/word-spacing-animating-word-spacing.html
 fail css/css-text/word-spacing/word-spacing-combining-mark-001.html
 fail css/css-text/word-spacing/word-spacing-combining-mark-002.html
 fail css/css-text/wrap-inside/wrap-inside-avoid-block-child.html
@@ -2838,7 +2708,6 @@ fail css/css-values/calc-size/calc-size-min-max-sizes-003.html
 fail css/css-values/calc-size/calc-size-min-max-sizes-004.html
 fail css/css-values/calc-size/calc-size-min-max-sizes-005.html
 fail css/css-values/calc-size/calc-size-min-max-sizes-006.html
-fail css/css-values/calc-vertical-align-1.html
 fail css/css-values/calc-width-block-intrinsic-1.html
 fail css/css-values/calc-width-table-fixed-1.html
 fail css/css-values/cap-unit-001.html
@@ -2990,7 +2859,6 @@ fail css/css-writing-modes/forms/range-input-appearance-none-horizontal-rtl.opti
 fail css/css-writing-modes/forms/range-input-appearance-none-sideways-lr-rtl.optional.html
 fail css/css-writing-modes/forms/range-input-appearance-none-sideways-lr.optional.html
 fail css/css-writing-modes/forms/range-input-appearance-none-vertical-rtl.optional.html
-fail css/css-writing-modes/inline-block-alignment-007.xht
 fail css/css-writing-modes/line-box-direction-slr-056.xht
 fail css/css-writing-modes/line-box-direction-srl-055.xht
 fail css/css-writing-modes/line-box-direction-vlr-016.xht
@@ -3030,17 +2898,10 @@ fail css/css-writing-modes/sizing-orthog-htb-in-vrl-020.xht
 fail css/css-writing-modes/sizing-orthog-htb-in-vrl-021.xht
 fail css/css-writing-modes/sizing-orthog-htb-in-vrl-023.xht
 fail css/css-writing-modes/sizing-orthog-htb-in-vrl-024.xht
-fail css/css-writing-modes/sizing-orthog-prct-vlr-in-htb-001.xht
-fail css/css-writing-modes/sizing-orthog-prct-vlr-in-htb-002.xht
-fail css/css-writing-modes/sizing-orthog-prct-vlr-in-htb-005.xht
-fail css/css-writing-modes/sizing-orthog-prct-vrl-in-htb-001.xht
-fail css/css-writing-modes/sizing-orthog-prct-vrl-in-htb-002.xht
-fail css/css-writing-modes/sizing-orthog-prct-vrl-in-htb-005.xht
 fail css/css-writing-modes/sizing-orthog-vlr-in-htb-001.xht
 fail css/css-writing-modes/sizing-orthog-vlr-in-htb-003.xht
 fail css/css-writing-modes/sizing-orthog-vlr-in-htb-004.xht
 fail css/css-writing-modes/sizing-orthog-vlr-in-htb-009.xht
-fail css/css-writing-modes/sizing-orthog-vlr-in-htb-013.xht
 fail css/css-writing-modes/sizing-orthog-vlr-in-htb-015.xht
 fail css/css-writing-modes/sizing-orthog-vlr-in-htb-020.xht
 fail css/css-writing-modes/sizing-orthog-vlr-in-htb-021.xht
@@ -3048,7 +2909,6 @@ fail css/css-writing-modes/sizing-orthog-vrl-in-htb-001.xht
 fail css/css-writing-modes/sizing-orthog-vrl-in-htb-003.xht
 fail css/css-writing-modes/sizing-orthog-vrl-in-htb-004.xht
 fail css/css-writing-modes/sizing-orthog-vrl-in-htb-009.xht
-fail css/css-writing-modes/sizing-orthog-vrl-in-htb-013.xht
 fail css/css-writing-modes/sizing-orthog-vrl-in-htb-015.xht
 fail css/css-writing-modes/sizing-orthog-vrl-in-htb-020.xht
 fail css/css-writing-modes/sizing-orthog-vrl-in-htb-021.xht
@@ -3072,7 +2932,6 @@ fail css/css-writing-modes/table-progression-srl-002.html
 fail css/css-writing-modes/table-progression-vlr-002.html
 fail css/css-writing-modes/table-progression-vrl-002.html
 fail css/css-writing-modes/tcy-white-space-processing-003.html
-fail css/css-writing-modes/text-baseline-vlr-007.xht
 fail css/css-writing-modes/text-combine-upright-break-inside-001a.html
 fail css/css-writing-modes/text-combine-upright-compression-002.html
 fail css/css-writing-modes/text-combine-upright-compression-003.html

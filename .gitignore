@@ -4,3 +4,5 @@
 !assets/**/*.png
 !docs/**/*.png
 .DS_Store
+__pycache__/
+*.pyc
