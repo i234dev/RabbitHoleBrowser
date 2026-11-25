@@ -1210,7 +1210,7 @@ var getStateOverride, setStateOverride, unsetStateOverride,
 
     getOverrideOrder = function(command) {
         resetOverrides();
-        return command in order ? order[command] : 1e15;
+        return command in order ? order[command] : Number.MAX_SAFE_INTEGER;
     };
 
     getOverrideSource = function(command) {
@@ -4529,10 +4529,10 @@ function recordCurrentOverrides() {
             : ["subscript", "superscript"].indexOf(command) != -1 ? 0
             : ["fontname", "fontsize", "forecolor"].indexOf(command) != -1 ? 1 : 2;
     };
-    var position = overrides.map(function(pair, i) { return [rank(pair[0]) * 1e16 + getOverrideOrder(pair[0]), i] });
+    var position = overrides.map(function(pair, i) { return [rank(pair[0]), getOverrideOrder(pair[0]), i] });
     var sorted = overrides.slice().sort(function(a, b) {
         var pa = position[overrides.indexOf(a)], pb = position[overrides.indexOf(b)];
-        return pa[0] - pb[0] || pa[1] - pb[1];
+        return pa[0] - pb[0] || pa[1] - pb[1] || pa[2] - pb[2];
     });
     sorted.sources = {};
     sorted.forEach(function(pair) {
@@ -4910,14 +4910,16 @@ function deleteSelection(flags) {
     // RabbitHole: the node whose formatting the deletion keeps (see
     // recordCurrentStatesAndValues): like other browsers, the first Text node
     // if all of it is deleted, otherwise the node where the selection starts
-    // (typing over a selection keeps the specification's).
+    // (typing over a selection keeps the specification's if it is text).
     var formattingNode = getActiveRange().startContainer;
-    if (flags.firstFormatting) {
-        formattingNode = undefined;
-    } else if (!getActiveRange().collapsed) {
+    if (!getActiveRange().collapsed) {
         var firstDeleted = getAllEffectivelyContainedNodes(getActiveRange())
             .filter(isFormattableNode)[0];
-        if (firstDeleted
+        if (flags.firstFormatting) {
+            if (firstDeleted && firstDeleted.nodeType == Node.TEXT_NODE) {
+                formattingNode = undefined;
+            }
+        } else if (firstDeleted
         && firstDeleted.nodeType == Node.TEXT_NODE
         && getPosition(firstDeleted, 0, getActiveRange().startContainer, getActiveRange().startOffset) != "before"
         && getPosition(firstDeleted, firstDeleted.length, getActiveRange().endContainer, getActiveRange().endOffset) != "after") {
@@ -7745,8 +7747,12 @@ commands.insertlinebreak = {
         //
         // RabbitHole: the new line keeps the inline formatting of the
         // deleted selection, as in other browsers.
+        // Like other browsers, the inline elements around deleted content
+        // that does not start with text are not kept.
         var collapsed = getActiveRange().collapsed;
-        deleteSelection({stripWrappers: false});
+        var firstDeleted = collapsed ? null : getAllEffectivelyContainedNodes(getActiveRange())
+            .filter(isFormattableNode)[0];
+        deleteSelection({stripWrappers: !!firstDeleted && firstDeleted.nodeType != Node.TEXT_NODE});
         if (!collapsed) {
             carriedOverrides = recordCarriedOverrides();
         }
