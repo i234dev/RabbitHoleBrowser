@@ -31,21 +31,24 @@ pub struct Surface {
     next_clip: u32,
     /// Drawing recorded and not done yet, in call order.
     queue: Vec<Op>,
+    /// About how much memory `queue` holds.
+    queued_bytes: usize,
     /// The last clearing path found to cover every pixel completely.
     full_clear: Option<(Vec<f64>, u32, u32)>,
 }
 
-/// Most drawing calls recorded before they are done anyway.
-const MAX_QUEUE: usize = 4096;
+/// Most memory recorded drawing holds before it is done anyway.
+const MAX_QUEUED_BYTES: usize = 32 << 20;
 
 impl Surface {
     fn new(width: u32, height: u32) -> Surface {
-        Surface { width, height, rgba: vec![0; (width as usize) * (height as usize) * 4], clips: HashMap::new(), next_clip: 0, queue: Vec::new(), full_clear: None }
+        Surface { width, height, rgba: vec![0; (width as usize) * (height as usize) * 4], clips: HashMap::new(), next_clip: 0, queue: Vec::new(), queued_bytes: 0, full_clear: None }
     }
 
     fn record(&mut self, op: Op) {
+        self.queued_bytes += op.bytes();
         self.queue.push(op);
-        if self.queue.len() >= MAX_QUEUE {
+        if self.queued_bytes >= MAX_QUEUED_BYTES {
             self.flush();
         }
     }
@@ -55,6 +58,7 @@ impl Surface {
         if self.queue.is_empty() {
             return;
         }
+        self.queued_bytes = 0;
         for op in std::mem::take(&mut self.queue) {
             draw(self, op);
         }
@@ -78,7 +82,28 @@ impl Surface {
         }
         self.queue.retain(|op| matches!(op, Op::Clip { .. } | Op::FreeClip(_)));
         self.queue.push(Op::ClearAll);
+        self.queued_bytes = self.queue.iter().map(Op::bytes).sum();
         true
+    }
+}
+
+impl Op {
+    /// About how much memory the call holds.
+    fn bytes(&self) -> usize {
+        let segs = |s: &Vec<PathSeg>| s.len() * std::mem::size_of::<PathSeg>();
+        let src = |s: &Src| match s {
+            Src::Pattern { rgba, .. } => rgba.len(),
+            Src::Linear { stops, .. } | Src::Radial { stops, .. } | Src::Conic { stops, .. } => stops.len() * 24,
+            Src::Solid(_) => 0,
+        };
+        std::mem::size_of::<Op>()
+            + match self {
+                Op::Fill { segs: g, src: c, .. } | Op::Stroke { segs: g, src: c, .. } => segs(g) + src(c),
+                Op::Clip { segs: g, .. } | Op::Clear { segs: g, .. } => segs(g),
+                Op::Put { data, .. } | Op::DrawImage { data, .. } => data.len(),
+                Op::Text { glyphs, src: c, .. } => glyphs.len() * 24 + src(c),
+                Op::FreeClip(_) | Op::ClearAll => 0,
+            }
     }
 }
 

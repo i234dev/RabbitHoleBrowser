@@ -256,5 +256,6 @@ fn canvas_named_font_fill_and_stroke_keep_order_quotes_and_retained_context() {
     assert_ne!(named_fill, canvas_font_pixels(&engine, &mut b, "20px Scoped", false));
     assert_eq!(engine.eval_in_page(&mut a, "kept.clearRect(0,0,200,40);kept.fillText('WWWiii',0,25);kept.measureText('WWWiii').width===oldWidth"), "true");
     let canvas = a.doc.element_by_id("canvas").unwrap();
+    engine.present(&mut a);
     assert_eq!(a.images[&canvas].pixels(), named_fill.as_slice());
 }
