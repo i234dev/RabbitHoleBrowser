@@ -71,8 +71,11 @@ pub fn fresh_id() -> u32 {
 }
 
 struct Transitions {
-    small: Vec<(PropertyKey, Weak<Shape>)>,
+    /// (key, child, child's id).
+    small: Vec<(PropertyKey, Weak<Shape>, u32)>,
     map: Option<HashMap<PropertyKey, Weak<Shape>, FxBuild>>,
+    /// With `map`: the children by id (see [`Shape::transition_to`]).
+    by_id: HashMap<u32, Weak<Shape>, FxBuild>,
     /// Every key in `small` is an interned string (an interned key that
     /// matches none by identity matches none).
     small_interned: bool,
@@ -80,7 +83,7 @@ struct Transitions {
 
 impl Default for Transitions {
     fn default() -> Self {
-        Transitions { small: Vec::new(), map: None, small_interned: true }
+        Transitions { small: Vec::new(), map: None, by_id: HashMap::default(), small_interned: true }
     }
 }
 
@@ -260,25 +263,32 @@ impl Shape {
             index,
         });
         let mut t = self.transitions.borrow_mut();
+        let t = &mut *t;
         let weak = Rc::downgrade(&child);
         match &mut t.map {
             Some(m) => {
-                m.insert(key.clone(), weak);
+                m.insert(key.clone(), weak.clone());
+                if t.by_id.len() >= 2 * m.len() + 16 {
+                    t.by_id.retain(|_, w| w.strong_count() > 0);
+                }
+                t.by_id.insert(child.id, weak);
             }
             None => {
                 if t.small.len() >= 16 {
-                    t.small.retain(|(_, w)| w.strong_count() > 0);
+                    t.small.retain(|(_, w, _)| w.strong_count() > 0);
                 }
                 if t.small.len() >= 16 {
                     let mut m: HashMap<PropertyKey, Weak<Shape>, FxBuild> = HashMap::default();
-                    for (k, w) in t.small.drain(..) {
+                    for (k, w, id) in t.small.drain(..) {
+                        t.by_id.insert(id, w.clone());
                         m.insert(k, w);
                     }
-                    m.insert(key.clone(), weak);
+                    m.insert(key.clone(), weak.clone());
+                    t.by_id.insert(child.id, weak);
                     t.map = Some(m);
                 } else {
                     t.small_interned &= interned_string(key);
-                    t.small.push((key.clone(), weak));
+                    t.small.push((key.clone(), weak, child.id));
                 }
             }
         }
@@ -290,7 +300,7 @@ impl Shape {
     pub fn lookup_transition_str(&self, key: &JsStr) -> Option<Rc<Shape>> {
         let t = self.transitions.borrow();
         if t.map.is_none() {
-            for (x, w) in t.small.iter() {
+            for (x, w, _) in t.small.iter() {
                 if let PropertyKey::String(s) = x {
                     if s.ptr_eq(key) {
                         return w.upgrade();
@@ -310,7 +320,7 @@ impl Shape {
             Some(m) => m.get(key).and_then(|w| w.upgrade()),
             None => {
                 if let PropertyKey::String(k) = key {
-                    for (x, w) in t.small.iter() {
+                    for (x, w, _) in t.small.iter() {
                         if let PropertyKey::String(s) = x {
                             if s.ptr_eq(k) {
                                 return w.upgrade();
@@ -321,9 +331,21 @@ impl Shape {
                         return None;
                     }
                 }
-                t.small.iter().find(|(x, _)| key_eq(x, key)).and_then(|(_, w)| w.upgrade())
+                t.small.iter().find(|(x, _, _)| key_eq(x, key)).and_then(|(_, w, _)| w.upgrade())
             }
         }
+    }
+
+    /// The child shape with id `id` (a transition recorded by an inline
+    /// cache by its target's id: ids are never reused, so the child with
+    /// that id is the transition for the cached key).
+    #[inline]
+    pub fn transition_to(&self, id: u32) -> Option<Rc<Shape>> {
+        let t = self.transitions.borrow();
+        if t.map.is_some() {
+            return t.by_id.get(&id).and_then(|w| w.upgrade());
+        }
+        t.small.iter().find(|(_, _, c)| *c == id).and_then(|(_, w, _)| w.upgrade())
     }
 }
 

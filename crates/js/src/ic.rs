@@ -512,7 +512,7 @@ impl Realm {
     /// Fast path of a cached store of `v` into `recv.key`. Returns `v` back
     /// when the cache does not apply.
     #[inline]
-    pub(crate) fn ic_set(&mut self, ic: &PropIc, recv: &Value, key: &JsStr, v: Value) -> Result<(), Value> {
+    pub(crate) fn ic_set(&mut self, ic: &PropIc, recv: &Value, _key: &JsStr, v: Value) -> Result<(), Value> {
         let Some(id) = recv.as_object() else { return Err(v) };
         match ic.kind {
             IC_OWN => {
@@ -539,10 +539,7 @@ impl Realm {
                 if o.props.shape_id() != ic.shape || !o.extensible || o.proto.map(|p| p.0) != Some(ic.holder) || crate::shape::proto_epoch() != ic.mid_shape || !cacheable_receiver(o) {
                     return Err(v);
                 }
-                let next = match o.props.shape().and_then(|s| s.lookup_transition_str(key)) {
-                    Some(n) if n.id == ic.slot => n,
-                    _ => return Err(v),
-                };
+                let Some(next) = o.props.shape().and_then(|s| s.transition_to(ic.slot)) else { return Err(v) };
                 o.props.push_with_shape(next, Property::data(v, ALL));
                 Ok(())
             }
@@ -551,10 +548,7 @@ impl Realm {
                     return Err(v);
                 }
                 let o = self.heap.get_mut(id);
-                let next = match o.props.shape().and_then(|s| s.lookup_transition_str(key)) {
-                    Some(n) if n.id == ic.slot => n,
-                    _ => return Err(v),
-                };
+                let Some(next) = o.props.shape().and_then(|s| s.transition_to(ic.slot)) else { return Err(v) };
                 o.props.push_with_shape(next, Property::data(v, ALL));
                 Ok(())
             }
