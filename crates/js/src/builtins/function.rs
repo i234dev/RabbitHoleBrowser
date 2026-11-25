@@ -173,7 +173,7 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
     Ok(Value::String(JsStr::from_source(&s)))
 }
 
-fn has_instance(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+pub(crate) fn has_instance(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let r = realm.ordinary_has_instance(this, arg(args, 0))?;
     Ok(Value::Bool(r))
 }

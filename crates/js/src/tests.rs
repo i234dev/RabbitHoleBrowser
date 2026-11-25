@@ -2173,3 +2173,56 @@ fn primitive_assignment_observes_proxy_and_string_own_properties() {
     eq("var n = 0; Object.defineProperty(String.prototype, '0', {set(v) {n++;}}); 'abc'[0] = 'x'; n", "0");
     throws("'use strict'; 'abc'[0] = 'x'", "TypeError");
 }
+
+fn make_idl(realm: &mut crate::Realm, _this: crate::Value, args: &[crate::Value]) -> crate::JsResult<crate::Value> {
+    let target = args[0].as_object().unwrap();
+    let required = args[2].as_number().unwrap() as u32;
+    let f = realm.new_idl_function(target, args[1].clone(), required, required, "op", "Iface");
+    Ok(crate::Value::Object(f))
+}
+
+fn idl_eval(src: &str) -> Result<String, String> {
+    let mut realm = crate::Realm::new();
+    let g = realm.global();
+    realm.define_method(g, "idl", 3, make_idl);
+    match realm.eval(src, "t.js") {
+        Ok(v) => Ok(realm.to_string(v).map_err(|e| realm.error_to_string(&e))?.to_rust_string()),
+        Err(e) => Err(realm.error_to_string(&e)),
+    }
+}
+
+#[test]
+fn idl_functions_check_receiver_and_arguments() {
+    let setup = "class C { m(a, b) { return this.v + a + (b === undefined ? 0 : b); } } const S = Symbol('s');\
+        const byProto = idl(C.prototype.m, C.prototype, 1), bySym = idl(function (a) { return this[S] + a; }, S, 1), any = idl(function (a) { return [typeof this, a].join(); }, undefined, 0);\
+        const o = new C(); o.v = 10; o.byProto = byProto; const t = { [S]: 5, bySym };";
+    let ok = |body: &str, expected: &str| {
+        let src = format!("{setup} {body}");
+        assert_eq!(idl_eval(&src).unwrap_or_else(|e| panic!("{body}: {e}")), expected, "{body}");
+    };
+    let err = |body: &str, contains: &str| {
+        let src = format!("{setup} {body}");
+        let e = idl_eval(&src).expect_err(body);
+        assert!(e.contains(contains), "{body}: {e}");
+    };
+    // Plain calls, call/apply/Reflect.apply, many calls (interpreter and JIT paths).
+    ok("o.byProto(1, 2)", "13");
+    ok("byProto.call(o, 1)", "11");
+    ok("Reflect.apply(byProto, o, [1, 1])", "12");
+    ok("let s = 0; for (let i = 0; i < 5000; i++) s += o.byProto(i, 1); s", &((0..5000).map(|i| 11 + i).sum::<i64>()).to_string());
+    ok("t.bySym(1)", "6");
+    ok("let u = 0; for (let i = 0; i < 3000; i++) u += t.bySym(1); u", "18000");
+    ok("any(1)", "undefined,1");
+    ok("[byProto.length, byProto.name, typeof byProto.prototype]", "1,op,undefined");
+    // Accessors.
+    ok("Object.defineProperty(C.prototype, 'x', { get: idl(function () { return this.v * 2; }, C.prototype, 0) }); let x = 0; for (let i = 0; i < 2000; i++) x = o.x; x", "20");
+    // Failed checks.
+    err("byProto.call({}, 1)", "Illegal invocation");
+    err("o.byProto()", "1 argument required, but only 0 present");
+    err("Object.defineProperty(C.prototype, 'y', { get: idl(function () { return 1; }, C.prototype, 0) }); C.prototype.y; Object.create(null).y; const d = Object.getOwnPropertyDescriptor(C.prototype, 'y'); d.get.call({})", "Illegal invocation");
+    err("bySym.call(Object.create(t), 1)", "Illegal invocation");
+    err("for (let i = 0; i < 3000; i++) t.bySym(1); t.bySym()", "TypeError");
+    err("new byProto(1)", "not a constructor");
+    // Exceptions from the target propagate.
+    err("idl(function () { throw new RangeError('boom'); }, undefined, 0)()", "boom");
+}

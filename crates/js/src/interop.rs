@@ -1039,6 +1039,13 @@ impl Realm {
             return self.type_error("Right-hand side of 'instanceof' is not an object");
         }
         if let Some(h) = self.get_method(target.clone(), PropertyKey::Symbol(SYM_HAS_INSTANCE))? {
+            // %Function.prototype[@@hasInstance]% of this realm (the usual
+            // case): its steps without the native call.
+            if let Some(ObjectKind::Native(n)) = h.as_object().and_then(|id| self.heap.try_get(id)).map(|o| &o.kind) {
+                if n.func as usize == crate::builtins::function::has_instance as usize && n.realm == self.current_realm {
+                    return self.ordinary_has_instance(target, v);
+                }
+            }
             let r = self.call(h, target, &[v])?;
             return Ok(self.to_boolean(&r));
         }

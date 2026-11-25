@@ -199,6 +199,10 @@ impl Realm {
                     _ => unreachable!("non-generator frame suspended"),
                 }
             }
+            ObjectKind::Native(n) if n.intrinsic == INTRINSIC_IDL => {
+                let target = self.idl_target(id, &this, args.len())?;
+                self.call(target, this, args)
+            }
             ObjectKind::Native(n) => {
                 let func = n.func;
                 self.call_native(id, func, this, args, false)
@@ -687,6 +691,15 @@ impl Realm {
                 buf.extend_from_slice(&self.vstack[cb + 2..cb + 2 + argc]);
                 (bf.target, bf.this.clone())
             }
+            ObjectKind::Native(n) if n.intrinsic == INTRINSIC_IDL => {
+                let this = self.vstack[cb + 1].clone();
+                let Some(t) = idl_fast_check(&self.heap, n, &this, argc) else {
+                    self.arg_buf = buf;
+                    return Ok(false);
+                };
+                buf.extend_from_slice(&self.vstack[cb + 2..cb + 2 + argc]);
+                (t, this)
+            }
             _ => {
                 self.arg_buf = buf;
                 return Ok(false);
@@ -861,6 +874,16 @@ impl Realm {
                 return Ok(true);
             }
         }
+        if n.intrinsic == INTRINSIC_IDL {
+            // Its target is not a plain closure (or the checks throw): the
+            // general call, without a native frame.
+            let this = self.vstack[cb + 1].undef_if_empty();
+            let args = self.vstack[cb + 2..cb + 2 + argc].to_vec();
+            let v = self.call(Value::Object(id), this, &args)?;
+            let at = self.frames[fi].base as usize + b;
+            self.vstack[at] = v;
+            return Ok(true);
+        }
         let func = n.func;
         let this = self.vstack[cb + 1].undef_if_empty();
         let mut args = std::mem::take(&mut self.arg_buf);
@@ -883,8 +906,10 @@ impl Realm {
     fn call_cached_getter(&mut self, g: ObjectId, o: usize, fi: usize) -> JsResult<Value> {
         let this = self.vstack[self.frames[fi].base as usize + o].clone();
         if let Some(ObjectKind::Native(n)) = self.heap.try_get(g).map(|x| &x.kind) {
-            let f = n.func;
-            return self.call_native(g, f, this, &[], false);
+            if n.intrinsic != INTRINSIC_IDL {
+                let f = n.func;
+                return self.call_native(g, f, this, &[], false);
+            }
         }
         self.call(Value::Object(g), this, &[])
     }
@@ -2690,6 +2715,9 @@ impl Realm {
         } else if self.try_fast_call(fi, b as usize, argc as usize)? {
             return Ok(Flow::Reload);
         }
+        if self.try_idl_call(fbase + b as usize, b, argc as usize)? {
+            return Ok(Flow::Reload);
+        }
         if self.try_call_indirect(fi, b as usize, argc as usize)? {
             return Ok(Flow::Reload);
         }
@@ -2700,13 +2728,47 @@ impl Realm {
         self.exec_in(fi, op)
     }
 
+    /// `CallR` of an IDL function (see [`Realm::new_idl_function`]) whose
+    /// checks pass and whose target is a plain, non-arrow closure: the
+    /// target's frame takes the arguments straight from the caller's
+    /// slots. False when the general path is needed. (Kept out of line:
+    /// the call instruction's inlined fast paths stay small.)
+    #[inline(never)]
+    fn try_idl_call(&mut self, cb: usize, b: u16, argc: usize) -> JsResult<bool> {
+        let Some(id) = self.vstack[cb].as_object() else { return Ok(false) };
+        let Some(ObjectKind::Native(n)) = self.heap.try_get(id).map(|o| &o.kind) else { return Ok(false) };
+        if n.intrinsic != INTRINSIC_IDL {
+            return Ok(false);
+        }
+        let Some(t) = idl_fast_check(&self.heap, n, &self.vstack[cb + 1], argc) else { return Ok(false) };
+        let Some(ObjectKind::Function(c)) = self.heap.try_get(t).map(|o| &o.kind) else { return Ok(false) };
+        let cf = c.code.call_flags;
+        // (Lazy code has no flags yet: the general path compiles it.)
+        if cf & CALL_PLAIN == 0 || cf & CALL_ARROW != 0 {
+            return Ok(false);
+        }
+        let this = if cf & CALL_STRICT != 0 {
+            self.vstack[cb + 1].undef_if_empty()
+        } else {
+            match self.vstack[cb + 1].v() {
+                V::Undefined | V::Null | V::Empty => Value::Object(self.realm_global(c.code.realm.get())),
+                V::Object(o) => Value::Object(o),
+                _ => return Ok(false),
+            }
+        };
+        let code = std::ptr::NonNull::from(&*c.code);
+        let scope = c.scope;
+        self.push_closure_frame(t, code, scope, ArgSrc::Stack(cb + 2), argc, this, Value::Undefined, b as u32, false, false)?;
+        Ok(true)
+    }
+
     /// Is the value in stack slot `cb` a native function that
     /// [`Realm::try_native_call`] calls directly (not `call` / `apply`,
     /// which [`Realm::try_call_indirect`] forwards)?
     #[inline(always)]
     fn native_callee(&self, cb: usize) -> bool {
         let Some(id) = self.vstack[cb].as_object() else { return false };
-        matches!(self.heap.try_get(id).map(|o| &o.kind), Some(ObjectKind::Native(n)) if n.intrinsic != INTRINSIC_FN_CALL && n.intrinsic != INTRINSIC_FN_APPLY)
+        matches!(self.heap.try_get(id).map(|o| &o.kind), Some(ObjectKind::Native(n)) if n.intrinsic != INTRINSIC_FN_CALL && n.intrinsic != INTRINSIC_FN_APPLY && n.intrinsic != INTRINSIC_IDL)
     }
 
     /// `NewR`: plain function constructors, else the general path.
@@ -4738,6 +4800,10 @@ impl Realm {
                         return Ok(());
                     }
                 }
+                ObjectKind::Native(n) if n.intrinsic == INTRINSIC_IDL => {
+                    let target = self.idl_target(id, &this, args.len())?;
+                    return self.do_call(target, this, args, ret);
+                }
                 ObjectKind::Native(n) => {
                     let func = n.func;
                     let v = self.call_native(id, func, this, args, false)?;
@@ -5802,6 +5868,122 @@ pub const INTRINSIC_IMUL: u8 = 3;
 pub const INTRINSIC_FN_CALL: u8 = 4;
 /// `Function.prototype.apply`.
 pub const INTRINSIC_FN_APPLY: u8 = 5;
+/// A WebIDL operation or accessor implemented by a JavaScript function
+/// (see [`Realm::new_idl_function`]): calls check the receiver and the
+/// argument count and run the target's frame directly.
+pub const INTRINSIC_IDL: u8 = 6;
+
+/// The target of IDL function `n` when receiver `this` and `argc`
+/// arguments pass its checks by plain heap reads; `None` when they fail or
+/// need the general algorithm (proxies), which [`Realm::idl_target`] runs.
+#[inline]
+fn idl_fast_check(heap: &Heap, n: &NativeFunction, this: &Value, argc: usize) -> Option<ObjectId> {
+    let [target, brand, required, ..] = n.captures.as_slice() else { return None };
+    if let V::Number(r) = required.v() {
+        if (argc as f64) < r {
+            return None;
+        }
+    }
+    match brand.v() {
+        V::Undefined => {}
+        V::Object(proto) => {
+            let V::Object(mut o) = this.v() else { return None };
+            loop {
+                let obj = heap.try_get(o)?;
+                if matches!(obj.kind, ObjectKind::Proxy { .. }) {
+                    return None;
+                }
+                match obj.proto {
+                    Some(p) if p == proto => break,
+                    Some(p) => o = p,
+                    None => return None,
+                }
+            }
+        }
+        V::Symbol(sym) => {
+            let V::Object(o) = this.v() else { return None };
+            let obj = heap.try_get(o)?;
+            if matches!(obj.kind, ObjectKind::Proxy { .. }) {
+                return None;
+            }
+            obj.props.find_slot(&PropertyKey::Symbol(sym))?;
+        }
+        _ => return None,
+    }
+    target.as_object()
+}
+
+/// The native behind [`Realm::new_idl_function`] (calls the interpreter
+/// does not forward directly, e.g. `Reflect.apply`).
+fn idl_function_native(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(f) = realm.current_callee else { return realm.type_error("Illegal invocation") };
+    let target = realm.idl_target(f, &this, args.len())?;
+    realm.call(target, this, args)
+}
+
+impl Realm {
+    /// A function implementing a WebIDL operation or attribute accessor by
+    /// calling `target` with the same receiver and arguments, after the
+    /// checks WebIDL makes before running the implementation: a receiver
+    /// that does not implement the interface throws a TypeError ("Illegal
+    /// invocation"), and so do fewer than `required` arguments. `brand`
+    /// says which receivers implement it: `undefined` (any), an object
+    /// (those with it on their prototype chain) or a symbol (those with it
+    /// as an own property). `length` and `name` are the function's.
+    /// Unlike a JavaScript wrapper, it adds no frame: the interpreter
+    /// checks and pushes the target's frame itself.
+    pub fn new_idl_function(&mut self, target: ObjectId, brand: Value, required: u32, length: u32, name: &str, iface: &str) -> ObjectId {
+        let captures = vec![Value::Object(target), brand, Value::Number(required as f64), Value::str(iface)];
+        let id = self.new_native_function_full(name, length, idl_function_native, None, captures, false);
+        if let ObjectKind::Native(n) = &mut self.obj_mut(id).kind {
+            n.intrinsic = INTRINSIC_IDL;
+        }
+        id
+    }
+
+    /// The target of IDL function `f` (see [`Realm::new_idl_function`]),
+    /// or the TypeError its checks throw for receiver `this` and `argc`
+    /// arguments.
+    pub(crate) fn idl_target(&mut self, f: ObjectId, this: &Value, argc: usize) -> JsResult<Value> {
+        let (target, brand, required, iface, name) = match &self.obj(f).kind {
+            ObjectKind::Native(n) if n.captures.len() >= 4 => (n.captures[0].clone(), n.captures[1].clone(), n.captures[2].clone(), n.captures[3].clone(), n.name.clone()),
+            _ => return self.type_error("Illegal invocation"),
+        };
+        let branded = match brand.v() {
+            V::Object(proto) => match this.v() {
+                V::Object(mut o) => loop {
+                    match self.get_prototype_of(o)? {
+                        None => break false,
+                        Some(p) if p == proto => break true,
+                        Some(p) => o = p,
+                    }
+                },
+                _ => false,
+            },
+            V::Symbol(sym) => match this.v() {
+                V::Object(o) => !matches!(self.obj(o).kind, ObjectKind::Proxy { .. }) && self.get_own_property(o, &PropertyKey::Symbol(sym)).is_some(),
+                _ => false,
+            },
+            _ => true,
+        };
+        if !branded {
+            return self.type_error("Illegal invocation");
+        }
+        let required = match required.v() {
+            V::Number(r) => r as usize,
+            _ => 0,
+        };
+        if argc < required {
+            let iface = match iface.v() {
+                V::String(s) => s.to_rust_string(),
+                _ => String::new(),
+            };
+            let s = if required == 1 { "" } else { "s" };
+            return self.type_error(&format!("Failed to execute '{}' on '{iface}': {required} argument{s} required, but only {argc} present.", name.to_rust_string()));
+        }
+        Ok(target)
+    }
+}
 
 /// Instructions (backward jumps and calls) between GC / watchdog checks.
 pub(crate) const TICK_INTERVAL: u32 = 1024;
