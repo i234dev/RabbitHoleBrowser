@@ -434,6 +434,11 @@
   function strokeSpec(st) {
     return { width: st.lineWidth, cap: st.lineCap, join: st.lineJoin, miter: st.miterLimit, dashes: st.lineDash.length ? F64(st.lineDash) : null, dashOffset: st.lineDashOffset };
   }
+  function transformBy(ctx, a, b, c, d, e, f) {
+    if (!ok6(a, b, c, d, e, f)) return;
+    const st = ctx[S].state, m = st.m;
+    st.m = [m[0] * a + m[2] * b, m[1] * a + m[3] * b, m[0] * c + m[2] * d, m[1] * c + m[3] * d, m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5]];
+  }
   class CanvasRenderingContext2D {
     constructor() { ILLEGAL(); }
     get canvas() { return this[S].canvas; }
@@ -448,14 +453,12 @@
     }
     reset() { const sf = surf(this); N.canvasResize(sf.id, sf.width, sf.height); resetState(this); markDirty(sf); }
     isContextLost() { return false; }
-    scale(x, y) { this.transform(x, 0, 0, y, 0, 0); }
-    rotate(a) { const c = Math.cos(a), s = Math.sin(a); this.transform(c, s, -s, c, 0, 0); }
-    translate(x, y) { this.transform(1, 0, 0, 1, x, y); }
-    transform(a, b, c, d, e, f) {
-      if (!ok6(a, b, c, d, e, f)) return;
-      const m = this[S].state.m;
-      this[S].state.m = [m[0] * a + m[2] * b, m[1] * a + m[3] * b, m[0] * c + m[2] * d, m[1] * c + m[3] * d, m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5]];
-    }
+    // (scale, rotate and translate transform directly, not through the
+    // public operation and its checks.)
+    scale(x, y) { transformBy(this, x, 0, 0, y, 0, 0); }
+    rotate(a) { const c = Math.cos(a), s = Math.sin(a); transformBy(this, c, s, -s, c, 0, 0); }
+    translate(x, y) { transformBy(this, 1, 0, 0, 1, x, y); }
+    transform(a, b, c, d, e, f) { transformBy(this, a, b, c, d, e, f); }
     getTransform() { const m = this[S].state.m; return new g.DOMMatrix([m[0], m[1], m[2], m[3], m[4], m[5]]); }
     setTransform(a, b, c, d, e, f) {
       if (typeof a === 'object' || a === undefined) { const mm = g.DOMMatrix.fromMatrix(a || {}); this[S].state.m = [mm.a, mm.b, mm.c, mm.d, mm.e, mm.f]; return; }
