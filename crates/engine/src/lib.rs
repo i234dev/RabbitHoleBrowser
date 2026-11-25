@@ -728,7 +728,7 @@ impl Loader {
             if self.load_scripts && doc.attr(n, "loading").map(|l| l.trim().eq_ignore_ascii_case("lazy")).unwrap_or(false) {
                 continue;
             }
-            let Some(choice) = images::select_image(doc, n, viewport, self.device_pixel_ratio, self.load_scripts, None) else { continue };
+            let Some(choice) = images::select_image(doc, n, viewport, self.device_pixel_ratio, self.load_scripts, None).filter(|c| !Url::potentially_dangling_markup(&c.url)) else { continue };
             let Some(url) = base.join(&choice.url) else { continue };
             if url.scheme == "javascript" {
                 continue;

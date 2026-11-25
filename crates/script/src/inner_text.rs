@@ -66,6 +66,8 @@ fn svg_unrendered(tag: &str) -> bool {
 struct Collector {
     doc: u32,
     items: Vec<Item>,
+    /// The text before the element ends inside a word (capitalization).
+    before_in_word: bool,
 }
 
 impl Collector {
@@ -276,7 +278,11 @@ impl Collector {
     fn text(&mut self, text: &str, ws: WhiteSpace, transform: TextTransform, lang: &str) {
         // (Capitalization continues words from the preceding text, which
         // may come from other elements: "a<span>b</span>c" stays "abc".)
-        let in_word = matches!(self.items.last(), Some(Item::Char(c, false)) if continues_word(*c));
+        let in_word = match self.items.last() {
+            Some(Item::Char(c, false)) => continues_word(*c),
+            Some(_) => false,
+            None => self.before_in_word,
+        };
         let text = apply_transform(text, transform, lang, in_word);
         let collapse_spaces = matches!(ws, WhiteSpace::Normal | WhiteSpace::Nowrap | WhiteSpace::PreLine);
         let collapse_newlines = matches!(ws, WhiteSpace::Normal | WhiteSpace::Nowrap);
@@ -292,6 +298,34 @@ impl Collector {
                 ' ' | '\t' if collapse_spaces => self.items.push(Item::Char(' ', true)),
                 _ => self.items.push(Item::Char(c, false)),
             }
+        }
+    }
+}
+
+/// Does the rendered text before `n` (in its inline formatting context)
+/// end inside a word? ("a<span>b</span>c": the span starts mid-word.)
+fn preceding_in_word(c: &Collector, n: NodeId) -> bool {
+    let mut cur = n;
+    loop {
+        match with_doc(c.doc, |d| d.prev_sibling(cur)) {
+            Some(p) => {
+                let (text, element) = with_doc(c.doc, |d| match &d.node(p).data {
+                    NodeData::Text(t) => (Some(t.clone()), false),
+                    NodeData::Element(_) => (Some(d.text_content(p)), true),
+                    _ => (None, false),
+                });
+                if element && !matches!(c.display(p), Some(Display::Inline)) {
+                    return false;
+                }
+                if let Some(ch) = text.and_then(|t| t.chars().last()) {
+                    return continues_word(ch);
+                }
+                cur = p;
+            }
+            None => match with_doc(c.doc, |d| d.parent(cur)) {
+                Some(par) if matches!(c.display(par), Some(Display::Inline)) => cur = par,
+                _ => return false,
+            },
         }
     }
 }
@@ -499,7 +533,8 @@ pub(crate) fn inner_text(n: NodeRef) -> String {
     if !being_rendered(n) {
         return with_doc(n.doc, |doc| doc.text_content(n.node));
     }
-    let mut c = Collector { doc: n.doc, items: Vec::new() };
+    let mut c = Collector { doc: n.doc, items: Vec::new(), before_in_word: false };
+    c.before_in_word = preceding_in_word(&c, n.node);
     let (in_select, in_option) = with_doc(n.doc, |doc| {
         let mut sel = false;
         let mut opt = false;

@@ -750,7 +750,9 @@ impl Engine {
         let mut to_fetch: Vec<Url> = Vec::new();
         for n in nodes {
             let layout_w = rects.get(&n).map(|r| r.w);
+            // (Dangling markup: not fetched.)
             let choice = select_image(&page.doc, n, vp, dpr, scripting, layout_w)
+                .filter(|c| !Url::potentially_dangling_markup(&c.url))
                 .and_then(|c| page.base_url.join(&c.url).filter(|u| u.scheme != "javascript").map(|u| (u, c.density)));
             let Some((url, density)) = choice else {
                 if page.image_state.reqs.remove(&n).is_some() || page.images.contains_key(&n) {

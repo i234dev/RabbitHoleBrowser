@@ -60,6 +60,9 @@ pub trait HostEnv {
         None
     }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>>;
+    /// The x-height (in px) of the first available font of a node's
+    /// computed style (what `1ex` is worth on it).
+    fn ex_height(&mut self, _node: NodeId) -> Option<f32> { None }
     /// Final Grid axis metadata after bringing this document's layout up to
     /// date. None for no box, a stacking axis or an unsupported completion.
     fn anchor_style(&mut self, _frame: Option<u64>, _node: NodeId) -> Option<Rc<ComputedStyle>> { None }

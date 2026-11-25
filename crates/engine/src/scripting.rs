@@ -336,6 +336,11 @@ impl HostEnv for EngineEnv<'_> {
         }
         Some(self.page.nodes_at_viewport(x, y))
     }
+    fn ex_height(&mut self, node: NodeId) -> Option<f32> {
+        let s = self.computed_style(node)?;
+        let _fonts = rabbithole_style::values::scope_unit_fonts(Some(self.page.fonts.clone()), rabbithole_style::values::font_unit_skip(&self.page.styles.font_faces));
+        Some(rabbithole_style::values::font_units(&s).1 * s.computed_font_size())
+    }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>> {
         let r = if self.page.script.dom_dirty {
             // The DOM changed: compute just this element's chain instead of

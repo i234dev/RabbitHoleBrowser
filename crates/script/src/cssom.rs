@@ -1342,16 +1342,10 @@ pub(crate) fn computed_value_native(realm: &mut Realm, _: Value, args: &[Value])
 /// `ex` length is worth on it), or undefined without a computed style.
 pub(crate) fn ex_size_native(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let Some(n) = node_of(realm, &arg(args, 0)) else { return Ok(Value::Undefined) };
-    let style = if n.doc == 0 {
-        with_env(|env| env.computed_style(n.node))
-    } else if n.doc & crate::host::FRAME_DOC != 0 {
-        with_env(|env| env.frame_computed_style((n.doc & !crate::host::FRAME_DOC) as u64, n.node))
-    } else {
-        None
-    };
-    let Some(s) = style else { return Ok(Value::Undefined) };
-    let (_, ex, _) = rabbithole_style::values::font_units(&s);
-    Ok(Value::Number((ex * s.computed_font_size()) as f64))
+    if n.doc != 0 {
+        return Ok(Value::Undefined);
+    }
+    Ok(with_env(|env| env.ex_height(n.node)).map_or(Value::Undefined, |x| Value::Number(x as f64)))
 }
 
 fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
