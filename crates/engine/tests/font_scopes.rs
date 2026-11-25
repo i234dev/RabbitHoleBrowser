@@ -125,6 +125,7 @@ fn iframe_font_view_is_independent_of_retained_parent_and_new_pages() {
     // Restyling the parent must notice its child's changed view, regenerate
     // the child layout, then repaint the cached iframe raster in the parent.
     engine.restyle(&mut parent);
+    engine.present(&mut parent);
     let iframe = parent.frames.children[0].node;
     let child = parent.frames.children[0].page.as_ref().unwrap();
     let child_before = engine.snapshot(child);
@@ -171,6 +172,8 @@ fn late_host_registration_recomputes_retained_unit_geometry() {
     let child_after = child.rect_of(child_node).unwrap();
     assert_ne!(child_before.w, child_after.w);
     assert!((child_after.w - expected).abs() < 0.02);
+    engine.present(&mut a);
+    let child = a.frames.children[0].page.as_ref().unwrap();
     let raster = a.images.get(&a.frames.children[0].node).unwrap();
     assert_eq!(raster.pixels(), engine.snapshot(child).rgba.as_slice());
     engine.check_incremental(&mut a).unwrap();

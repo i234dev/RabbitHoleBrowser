@@ -565,6 +565,22 @@ impl Canvas {
         out
     }
 
+    /// Write the pixels of [x0, x1) × [y0, y1) into `out`, an RGBA buffer
+    /// of the canvas' size laid out like [`Canvas::to_rgba8`]'s.
+    pub fn write_rgba8_region(&self, out: &mut [u8], x0: u32, y0: u32, x1: u32, y1: u32) {
+        let (w, x1, y1) = (self.width as usize, x1.min(self.width) as usize, y1.min(self.height) as usize);
+        let x0 = (x0 as usize).min(x1);
+        for y in (y0 as usize).min(y1)..y1 {
+            let row = y * w;
+            for (o, &p) in out[(row + x0) * 4..(row + x1) * 4].chunks_exact_mut(4).zip(&self.data[row + x0..row + x1]) {
+                o[0] = (p >> 16) as u8;
+                o[1] = (p >> 8) as u8;
+                o[2] = p as u8;
+                o[3] = 255;
+            }
+        }
+    }
+
     /// Blit another canvas at (x, y) (used to composite the browser chrome).
     pub fn blit(&mut self, src: &Canvas, x: i32, y: i32) {
         let x0 = x.max(0);

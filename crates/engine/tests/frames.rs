@@ -507,6 +507,8 @@ fn damage_repainted_frames_match_full_paints() {
     for n in 1..8 {
         assert_eq!(eval(&e, &mut page, &format!("stepFrame({n})")), n.to_string());
         settle(&e, &mut page);
+        // Frames are rasterized when the page is presented.
+        e.present(&mut page);
         let shown = page.images.get(&node).expect("frame image").clone();
         let c = child(&mut page, 0);
         let mut full = rabbithole_engine::gfx::Canvas::new(shown.width, shown.height);

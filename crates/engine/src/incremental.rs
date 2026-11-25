@@ -230,6 +230,15 @@ impl IncrementalState {
         }
     }
 
+    /// `node`'s image `old` was replaced by `new` in the page and in its
+    /// box (same natural size): layout need not look at it again.
+    pub(crate) fn image_replaced(&mut self, node: NodeId, old: &Arc<rabbithole_gfx::Image>, new: &Arc<rabbithole_gfx::Image>) {
+        let ptr = |v: &Arc<rabbithole_gfx::Image>| Arc::as_ptr(v) as *const u8 as usize;
+        if let Some(seen) = self.images_seen.get_mut(&node).filter(|s| **s == ptr(old)) {
+            *seen = ptr(new);
+        }
+    }
+
     /// A new display list replaced `old`.
     pub(crate) fn display_list_replaced(&mut self, old: rabbithole_layout::DisplayList) {
         if let CanvasSync::Current(s) = self.canvas {
@@ -708,7 +717,7 @@ impl Engine {
         let full = Rect::new(0.0, 0.0, w as f32, h as f32);
         let (dx, dy) = ((new.0 - old.0).round() as i64, (new.1 - old.1).round() as i64);
         let integral = (new.0 - old.0 - dx as f32).abs() < 1e-3 && (new.1 - old.1 - dy as f32).abs() < 1e-3;
-        self.flush_display_list(page);
+        self.present(page);
         let synced = matches!(page.incr.canvas, CanvasSync::Current(s) | CanvasSync::Stale(s) if s == old);
         if !synced || !integral || dx.abs() >= w || dy.abs() >= h || page.incr.depends_on_page_scroll(&page.layout) {
             self.render(page, canvas, new.0, new.1);
@@ -786,7 +795,7 @@ impl Engine {
     /// everything. Returns the repainted device rectangles.
     pub fn render_damage(&self, page: &mut Page, canvas: &mut rabbithole_gfx::Canvas) -> Vec<rabbithole_gfx::Rect> {
         use rabbithole_gfx::Rect;
-        self.flush_display_list(page);
+        self.present(page);
         let scroll = page.page_scroll;
         let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
         let damage = match (page.incr.canvas, page.incr.painted_dl.as_ref()) {
@@ -815,7 +824,7 @@ impl Engine {
     /// unknown, repaint everything. Only meaningful for pages without
     /// fixed or sticky content (their position depends on the scroll).
     pub fn paint_damage_since(&self, page: &mut Page, origin: (f32, f32)) -> Option<Vec<rabbithole_gfx::Rect>> {
-        self.flush_display_list(page);
+        self.present(page);
         match (page.incr.canvas, page.incr.painted_dl.as_ref()) {
             (CanvasSync::Current(s), _) if s == origin => Some(Vec::new()),
             (CanvasSync::Stale(s), Some(prev)) if s == origin => rabbithole_layout::display_list_damage(prev, &page.display_list, origin),

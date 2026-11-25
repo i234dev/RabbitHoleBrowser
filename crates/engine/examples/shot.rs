@@ -291,6 +291,7 @@ fn main() {
         .or_else(|| page.url.fragment.clone().and_then(|f| page.fragment_scroll(&f)))
         .unwrap_or(0.0);
     engine.set_page_scroll(&mut page, 0.0, scroll_y);
+    engine.present(&mut page);
     engine.render(&page, &mut canvas, 0.0, scroll_y);
     let t3 = std::time::Instant::now();
     image::save_buffer(out, &canvas.to_rgba8(), w, h, image::ExtendedColorType::Rgba8).expect("write png");

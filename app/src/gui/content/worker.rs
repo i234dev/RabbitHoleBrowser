@@ -686,7 +686,7 @@ impl Worker {
     /// "Print": rasterize the page into A4 pages and write a PDF.
     fn print_pdf(&mut self, path: std::path::PathBuf) {
         let Some(page) = self.page.as_mut() else { return };
-        self.engine.flush_display_list(page);
+        self.engine.present(page);
         let t = Instant::now();
         let pages = crate::gui::pdf::paginate(&page.display_list, &page.fonts, page.viewport.width, page.content_height(), page.background, 2.0);
         let title = if page.title.trim().is_empty() { page.url.to_string() } else { page.title.trim().to_string() };
@@ -1110,6 +1110,8 @@ impl Worker {
     fn paint_frame(&mut self) {
         let Some(page) = self.page.as_mut() else { return };
         self.dirty = false;
+        // Child frames are rasterized now, when a frame is shown.
+        self.engine.present(page);
         let s = self.view.scale;
         let vp = self.view.viewport;
         let (sx, sy) = self.scroll;

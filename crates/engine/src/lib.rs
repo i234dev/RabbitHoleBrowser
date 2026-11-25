@@ -19,6 +19,7 @@ pub use service_worker_navigation::PendingServiceWorkerNavigation;
 pub mod images;
 pub mod incremental;
 pub mod pointer;
+mod present;
 pub mod reftest;
 pub mod scripting;
 pub mod select;
@@ -1777,18 +1778,21 @@ impl Engine {
     /// Paint with a device scale (HiDPI / zoom): the page is laid out in
     /// CSS pixels for a viewport of `canvas size / scale` and painted
     /// magnified by `scale`. Scroll offsets are in CSS pixels.
+    /// Child frames changed since [`Engine::present`] are painted from
+    /// their current content (slower than presenting first).
     pub fn render_scaled(&self, page: &Page, canvas: &mut Canvas, scroll_x: f32, scroll_y: f32, scale: f32) {
         canvas.clear(Color::WHITE);
         if page.background.a > 0 {
             let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
             canvas.fill_rect(full, page.background);
         }
+        let list = self.display_list_to_paint(page);
         if (scale - 1.0).abs() > 1e-3 {
             canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
-            rabbithole_layout::paint(&page.display_list, canvas, &page.fonts, scroll_x, scroll_y);
+            rabbithole_layout::paint(&list, canvas, &page.fonts, scroll_x, scroll_y);
             canvas.pop_transform();
         } else {
-            rabbithole_layout::paint(&page.display_list, canvas, &page.fonts, scroll_x, scroll_y);
+            rabbithole_layout::paint(&list, canvas, &page.fonts, scroll_x, scroll_y);
         }
     }
 }
