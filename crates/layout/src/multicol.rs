@@ -38,6 +38,16 @@ pub(crate) struct ColPiece {
     pub dy: f32,
 }
 
+/// The rows of columns of a multi-column container broken by an
+/// enclosing one: (top, height) in the enclosing flow, and whether it
+/// starts at the next enclosing fragmentainer (nothing fitted in the
+/// space left in the current one).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct ColRows {
+    pub rows: Vec<(f32, f32)>,
+    pub break_before: bool,
+}
+
 /// The fragments of a box broken across columns, with its unfragmented
 /// geometry in the flow thread (painting translates it into each column
 /// and clips it to the fragment).
@@ -339,7 +349,7 @@ impl Collector {
                     if fragmentable(c) {
                         self.container(c, forced, avoid_before, prev);
                     } else if let Some(rows) = &c.col_rows {
-                        self.rows(c, rows, forced, avoid_before, prev);
+                        self.rows(c, &rows.rows, forced || rows.break_before, avoid_before, prev);
                     } else {
                         self.push(Ev::Leaf { top: c.rect.y, bottom: c.rect.bottom(), forced, avoid_before, prev, mt: c.margin.top, line: None });
                     }
@@ -365,6 +375,8 @@ struct Plan {
     off: f32,
     /// A break was taken where `break-*: avoid` asked for none.
     violated: bool,
+    /// A break left fewer lines than `orphans` / `widows` asked for.
+    orphaned: bool,
     /// Containers kept whole in their column (`break-inside: avoid` that
     /// fits), by event index.
     locked: Vec<bool>,
@@ -461,6 +473,7 @@ fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0
     let mut budget = 4 * (b - a) + 64;
     let mut used = 0usize;
     let mut violated = false;
+    let mut orphaned = false;
     let mut locked = vec![false; n];
     // The end of each container (by its start).
     let mut ends = vec![usize::MAX; n];
@@ -604,6 +617,7 @@ fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0
                     // along breaks inside the container's padding.)
                     let glue = i > a && matches!(evs[i - 1], Ev::Start { edge: true, .. }) && at_column_top(g, pos[i - 1]);
                     violated |= avoid_before || glue || inside_avoid(evs, a, i);
+                    orphaned |= line.is_some_and(|l| l.idx > 0 && (l.idx < u32::from(l.orphans) || l.count - l.idx < u32::from(l.widows)));
                     let target = if skip_short_row(g, t, bt - t) { g.start(g.per_row) } else { g.end(k) };
                     let _ = push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
                 } else if skip_short_row(g, t, bt - t) {
@@ -647,7 +661,7 @@ fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0
         i += 1;
     }
     struts.truncate(n);
-    Plan { struts, used, shortfall, off, violated, locked }
+    Plan { struts, used, shortfall, off, violated, orphaned, locked }
 }
 
 /// Does flow position `t` start a column (or the set)?
@@ -796,6 +810,9 @@ struct Mover<'p> {
     lock: Option<usize>,
     /// Inside a nested formatting context (no spanners there).
     nested: u32,
+    /// Nested multi-column containers broken into rows whose first row
+    /// did not get the space assumed: (element, space left there).
+    misplaced: Vec<(rabbithole_dom::NodeId, f32)>,
 }
 
 impl Mover<'_> {
@@ -829,7 +846,7 @@ impl Mover<'_> {
         let start = c.rect.y + self.off;
         if self.lock.is_none() && fragmentable_box(c) && self.g.col(start) != self.g.col((c.rect.bottom() + self.off - EPS).max(start)) {
             let sets = [Set { first: 0, end: 0, g: self.g, flow_end: f32::INFINITY }];
-            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, positioned: 1, first: None, locked: &[], lock: None, nested: 1 };
+            let mut sub = Mover { struts: &[], sets: &[], spans: &[], i: 0, off: self.off, g: self.g, positioned: 1, first: None, locked: &[], lock: None, nested: 1, misplaced: Vec::new() };
             sub.contents(c);
             let end = (c.rect.bottom() + self.off).max(start);
             sub.sets = &sets;
@@ -964,10 +981,21 @@ impl Mover<'_> {
     fn rows(&mut self, c: &mut LayoutBox) {
         self.next();
         let start = c.rect.y + self.off;
-        let rows = c.col_rows.take().map(|r| *r).unwrap_or_default();
+        let rows = c.col_rows.take().map(|r| r.rows).unwrap_or_default();
         let mut shifts: Vec<(f32, f32, (f32, f32))> = Vec::with_capacity(rows.len());
-        for &(top, h) in &rows {
+        for (r, &(top, h)) in rows.iter().enumerate() {
             self.next();
+            if r == 0 && self.lock.is_none() {
+                // Where the first row really starts (what came before may
+                // have been pushed): the space left there.
+                let t = top + self.off;
+                let room = self.g.end(self.g.col(t)) - t;
+                if (room - h).abs() > EPS && room > EPS {
+                    if let Some(node) = c.node {
+                        self.misplaced.push((node, room));
+                    }
+                }
+            }
             shifts.push((top, top + h, self.shift(top)));
         }
         self.next();
@@ -1177,6 +1205,30 @@ impl Layouter<'_> {
     /// container with `column-count` or `column-width`); returns their
     /// height. `cb` is its content box.
     pub(crate) fn layout_multicol(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
+        let (mut h, misplaced, empty_first) = self.layout_multicol_pass(b, cb, false);
+        if empty_first {
+            // Nothing fitted in the space left in the enclosing column:
+            // start at the next one.
+            h = self.layout_multicol_pass(b, cb, true).0;
+        }
+        if !misplaced.is_empty() && !self.column_retry {
+            // Nested multi-column containers did not start where assumed
+            // (content before them was pushed): lay out again with the
+            // space they really got.
+            self.column_retry = true;
+            let before = self.column_rooms.len();
+            self.column_rooms.extend(misplaced);
+            let (h2, _, empty_first) = self.layout_multicol_pass(b, cb, false);
+            h = if empty_first { self.layout_multicol_pass(b, cb, true).0 } else { h2 };
+            self.column_rooms.truncate(before);
+            self.column_retry = false;
+        }
+        h
+    }
+
+    fn layout_multicol_pass(&mut self, b: &mut LayoutBox, cb: &Cb, restart: bool) -> (f32, Vec<(rabbithole_dom::NodeId, f32)>, bool) {
+        // (Fragments in an enclosing flow are placed again after this.)
+        b.col_pieces = None;
         let style = b.style.clone();
         let avail_w = cb.width;
         let gap = used_gap(&style, avail_w);
@@ -1203,10 +1255,21 @@ impl Layouter<'_> {
         // have a known height: rows of columns, the first in the space
         // left in the enclosing column (CSS Multicol 1 §8.1).
         let outer_frame = self.column_frame.take();
-        let nested_frame = outer_frame.filter(|_| cb.height.is_none() && style.column_height.is_none() && style.column_wrap != 2 && !has_spanner(b));
-        let first_row = nested_frame.map(|(y, h)| {
-            let used = (content_y - y).rem_euclid(h.max(1.0));
-            if h - used < EPS { h } else { h - used }
+        let nested_frame = outer_frame.filter(|_| style.column_height.is_none() && style.column_wrap != 2 && !has_spanner(b));
+        let first_row = nested_frame.and_then(|(y, h)| {
+            let room = if restart {
+                h
+            } else if let Some(&(_, r)) = b.node.and_then(|n| self.column_rooms.iter().rev().find(|e| e.0 == n)) {
+                r
+            } else {
+                let used = (content_y - y).rem_euclid(h.max(1.0));
+                if h - used < EPS { h } else { h - used }
+            };
+            // (A definite height that fits is not broken.)
+            match cb.height {
+                Some(ch) if ch <= room + EPS => None,
+                _ => Some(room),
+            }
         });
         // This container's own columns frame its nested ones when their
         // height is known before balancing.
@@ -1239,23 +1302,42 @@ impl Layouter<'_> {
             2 => true,
             _ => style.column_height.is_some(),
         } || first_row.is_some();
-        let column_height = style.column_height.or(nested_frame.map(|f| f.1));
+        let column_height = style.column_height.or(first_row.and(nested_frame).map(|f| f.1));
         let row_gap = if first_row.is_some() || style.row_gap_normal { 0.0 } else { style.row_gap.resolve_or_zero(cb.height.unwrap_or(0.0)).max(0.0) };
         let params = FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step, trim: style.margin_trim, column_height, wrap, row_gap, first_row };
-        let (rows, end) = fragment_flow(b, deltas, params);
+        let (rows, end, misplaced, violated_first) = fragment_flow(b, deltas, params);
         let mut rules = Vec::new();
         for r in &rows {
             // The rules of a last row (after the last spanner) reach the
             // container's content end (CSSWG issue 2309).
             let h = match cb.height {
-                Some(ch) if (r.top + r.height - end).abs() < EPS => r.height.max(content_y + ch - r.top),
+                Some(ch) if first_row.is_none() && (r.top + r.height - end).abs() < EPS => r.height.max(content_y + ch - r.top),
                 _ => r.height,
             };
             push_rules(&mut rules, &style, x0, w, gap, step, r.top, h, r.used);
         }
         b.col_rules = (!rules.is_empty()).then(|| Box::new(rules));
-        b.col_rows = (first_row.is_some() && rows.len() > 1).then(|| Box::new(rows.iter().map(|r| (r.top, r.height)).collect()));
-        (end - content_y).max(0.0)
+        let mut row_list: Vec<(f32, f32)> = rows.iter().map(|r| (r.top, r.height)).collect();
+        if let (Some(h0), Some((_, colh)), Some(ch)) = (first_row, nested_frame, cb.height) {
+            // A definite height is broken at the enclosing column ends
+            // whatever its content.
+            row_list.clear();
+            let (mut top, mut h) = (content_y, h0);
+            while top < content_y + ch - EPS {
+                let piece = h.min(content_y + ch - top);
+                row_list.push((top, piece));
+                top += piece;
+                h = colh;
+            }
+        }
+        // Did nothing fit in a first row shorter than the enclosing
+        // columns?
+        let empty_first = match (first_row, nested_frame) {
+            (Some(h0), Some((_, colh))) if !restart && h0 < colh - EPS => violated_first || !has_content_in(b, content_y, content_y + h0) || overflows(b, content_y + h0),
+            _ => false,
+        };
+        b.col_rows = (first_row.is_some() && (row_list.len() > 1 || restart)).then(|| Box::new(ColRows { rows: row_list, break_before: restart }));
+        ((end - content_y).max(0.0), misplaced, empty_first)
     }
 }
 
@@ -1293,7 +1375,27 @@ struct FlowParams {
 
 /// Choose the column heights of a laid out flow (the contents of `root`)
 /// and move its pieces into columns; returns the rows of columns.
-fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, p: FlowParams) -> (Vec<RowOut>, f32) {
+/// Does anything of the flow of `b` lie between `lo` and `hi`?
+fn has_content_in(b: &LayoutBox, lo: f32, hi: f32) -> bool {
+    let within = |r: &Rect| r.h > 0.0 && r.y < hi - EPS && r.bottom() > lo + EPS;
+    b.lines.iter().any(|l| within(&l.rect))
+        || b.children.iter().any(|c| {
+            (c.flow == Flow::InFlow || c.flow.is_float())
+                && match &c.col_pieces {
+                    Some(p) => p.pieces.iter().any(|q| within(&q.rect)),
+                    None => within(&c.rect),
+                }
+        })
+}
+
+/// Does an unbreakable piece of the flow of `b` that starts above `end`
+/// overflow it?
+fn overflows(b: &LayoutBox, end: f32) -> bool {
+    let over = |r: &Rect| r.h > 0.0 && r.y < end - EPS && r.bottom() > end + EPS;
+    b.lines.iter().any(|l| over(&l.rect)) || b.children.iter().any(|c| (c.flow == Flow::InFlow || c.flow.is_float()) && c.col_pieces.is_none() && over(&c.rect))
+}
+
+fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, p: FlowParams) -> (Vec<RowOut>, f32, Vec<(rabbithole_dom::NodeId, f32)>, bool) {
     let mut collector = Collector { evs: Vec::new(), clipped: Vec::new(), clip_depth: 0, deltas, nested: 0 };
     collector.contents(root);
     let evs = collector.evs;
@@ -1313,6 +1415,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
     // margin of a following spanner.
     let mut pending_mb = 0.0f32;
     let mut strip_start = p.y0;
+    let mut violated_first = false;
     let mut a = 0;
     loop {
         let b = (a..evs.len()).find(|&i| matches!(evs[i], Ev::Span { .. })).unwrap_or(evs.len());
@@ -1352,6 +1455,9 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                 _ => choose_height(&evs, &clipped, a, b, y0, phys, total, n, fixed, cap, off, first),
             };
             let first = first.filter(|_| p.fill_auto || plan.used > n);
+            // (Breaking against `avoid`, orphans or widows in a shorter first
+            // row: better start at the next enclosing fragmentainer.)
+            violated_first |= first.is_some() && (plan.violated || plan.orphaned);
             let colh = if fixed.is_some() { floor(colh) } else { colh };
             let per_row = if p.wrap { n } else { usize::MAX };
             let g = Geometry { first, y0, colh: floor(colh), lift: y0 - phys, step: p.step, per_row, row_gap: p.row_gap };
@@ -1441,14 +1547,14 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
     if sets.is_empty() {
         // (Spanners only.)
         let g = Geometry { first: None, y0: p.y0, colh: 1.0, lift: 0.0, step: p.step, per_row: usize::MAX, row_gap: 0.0 };
-        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None, nested: 0 };
+        let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None, nested: 0, misplaced: Vec::new() };
         mover.contents(root);
-        return (rows, phys);
+        return (rows, phys, mover.misplaced, violated_first);
     }
     let g = sets[0].g;
-    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None, nested: 0 };
+    let mut mover = Mover { struts: &struts, sets: &sets, spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None, nested: 0, misplaced: Vec::new() };
     mover.contents(root);
-    (rows, phys)
+    (rows, phys, mover.misplaced, violated_first)
 }
 
 /// The column height of one column set (events `a..b`, flow from `y0`,

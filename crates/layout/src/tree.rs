@@ -401,8 +401,8 @@ pub struct LayoutBox {
     /// A multi-column container's column rules (line boxes).
     pub(crate) col_rules: Option<Box<Vec<Rect>>>,
     /// A multi-column container broken by an enclosing one: its rows of
-    /// columns (top, height), one per fragment of the enclosing flow.
-    pub(crate) col_rows: Option<Box<Vec<(f32, f32)>>>,
+    /// columns, one per fragment of the enclosing flow.
+    pub(crate) col_rows: Option<Box<crate::multicol::ColRows>>,
 }
 
 /// Orientation of a writing-mode wrapper's contents relative to the space
@@ -814,7 +814,7 @@ impl LayoutBox {
             }
         }
         if let Some(rows) = &mut self.col_rows {
-            for r in rows.iter_mut() {
+            for r in rows.rows.iter_mut() {
                 r.0 += dy;
             }
         }

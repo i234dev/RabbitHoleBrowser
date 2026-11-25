@@ -111,6 +111,11 @@ pub(crate) struct Layouter<'a> {
     /// known height: (flow position where its columns start, their
     /// height). Nested multi-column containers break at its column ends.
     pub(crate) column_frame: Option<(f32, f32)>,
+    /// The space really left for the first row of nested multi-column
+    /// containers (by element), and whether such a correcting layout is
+    /// in progress.
+    pub(crate) column_rooms: Vec<(rabbithole_dom::NodeId, f32)>,
+    pub(crate) column_retry: bool,
     /// Pooled working storage of flex layout.
     pub(crate) flex_scratch: Vec<crate::flex::FlexScratch>,
     /// Whether `FontContext::select_family` & co. are implemented.
@@ -411,6 +416,8 @@ impl<'a> Layouter<'a> {
             float_band: None,
             refitting: false,
             column_frame: None,
+            column_rooms: Vec::new(),
+            column_retry: false,
             flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
