@@ -206,6 +206,7 @@ fn finish_render(engine: &Engine, page: &mut crate::Page, max_wait: Duration) ->
         // WPT's test-wait.js dispatches this bubbling event on the root after
         // the initial render. It belongs to the reftest harness, not normal
         // page loading. Take the first paint before letting the test proceed.
+        engine.present(page);
         let _ = engine.snapshot(page);
         dispatch_rendered(engine, page, deadline)?;
     }

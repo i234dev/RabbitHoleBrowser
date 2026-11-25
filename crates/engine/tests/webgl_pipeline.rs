@@ -16,6 +16,8 @@ fn framebuffer_instancing_vao_uint32_texture_sampling_reach_page_frame() {
         },
     );
     engine.restyle(&mut page);
+    // Canvas 2D pixels reach the page images when it is presented.
+    engine.present(&mut page);
     let console = page.take_console();
     let errors: Vec<_> = console
         .iter()

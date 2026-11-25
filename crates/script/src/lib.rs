@@ -1093,6 +1093,14 @@ impl ScriptHost {
         std::mem::replace(&mut self.state.borrow_mut().dirty, false)
     }
 
+    /// The pixels of 2D canvas surface `surface` (see
+    /// [`HostEnv::set_canvas_surface`]) with the drawing recorded so far
+    /// done: (width, height, straight RGBA). Call between script tasks.
+    pub fn canvas_pixels(&self, surface: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let _s = StateGuard::enter(self.state.clone());
+        canvas2d::surface_pixels(surface)
+    }
+
     /// Hygiene hook when the embedder removes nodes.
     pub fn node_removed(&mut self, node: NodeId) {
         let mut st = self.state.borrow_mut();

@@ -5,12 +5,18 @@
 //! Surfaces are straight (non-premultiplied) RGBA like `ImageData`;
 //! compositing implements the Porter-Duff operators and separable blend
 //! modes of Compositing and Blending Level 1.
+//!
+//! Drawing calls are recorded with everything they read from scripts and
+//! fonts, and drawn in order when the pixels are needed: read back
+//! (`getImageData`, encoding, use as an image source), or shown by the
+//! engine. A `clearRect` over the whole canvas drops the drawing recorded
+//! before it.
 
 use crate::env::with_env;
 use crate::host::*;
 use rabbithole_gfx::path::{flatten, Polylines};
 use rabbithole_gfx::raster::{box_blur, rasterize, Mask};
-use rabbithole_gfx::{FillRule, FontContext, LineCap, LineJoin, PathSeg, Point, StrokeStyle};
+use rabbithole_gfx::{FillRule, FontContext, GlyphBitmap, LineCap, LineJoin, PathSeg, Point, StrokeStyle};
 use rabbithole_js::{JsResult, Realm, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,9 +25,130 @@ use std::rc::Rc;
 pub struct Surface {
     pub width: u32,
     pub height: u32,
+    /// The pixels once the recorded drawing is done (see [`Surface::flush`]).
     pub rgba: Vec<u8>,
     clips: HashMap<u32, Rc<Vec<u8>>>,
     next_clip: u32,
+    /// Drawing recorded and not done yet, in call order.
+    queue: Vec<Op>,
+    /// About how much memory `queue` holds.
+    queued_bytes: usize,
+    /// The last clearing path found to cover every pixel completely.
+    full_clear: Option<(Vec<f64>, u32, u32)>,
+}
+
+/// Most memory recorded drawing holds before it is done anyway.
+const MAX_QUEUED_BYTES: usize = 32 << 20;
+
+impl Surface {
+    fn new(width: u32, height: u32) -> Surface {
+        Surface { width, height, rgba: vec![0; (width as usize) * (height as usize) * 4], clips: HashMap::new(), next_clip: 0, queue: Vec::new(), queued_bytes: 0, full_clear: None }
+    }
+
+    fn record(&mut self, op: Op) {
+        self.queued_bytes += op.bytes();
+        self.queue.push(op);
+        if self.queued_bytes >= MAX_QUEUED_BYTES {
+            self.flush();
+        }
+    }
+
+    /// Do the recorded drawing.
+    pub(crate) fn flush(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        self.queued_bytes = 0;
+        for op in std::mem::take(&mut self.queue) {
+            draw(self, op);
+        }
+    }
+
+    /// `clearRect` with device-space path `f` and no clip: when it
+    /// clears every pixel completely, the drawing recorded before it
+    /// cannot show (clip masks are still made).
+    fn clear_all(&mut self, f: &[f64]) -> bool {
+        let known = self.full_clear.as_ref().is_some_and(|(k, w, h)| k.as_slice() == f && *w == self.width && *h == self.height);
+        if !known {
+            if self.width == 0 || self.height == 0 || !rect_covers(f, self.width as f64, self.height as f64) {
+                return false;
+            }
+            let mask = rasterize(&fill_polys(&decode_path(f)), FillRule::NonZero, limit(self));
+            let all = mask.x0 <= 0 && mask.y0 <= 0 && mask.x0 + mask.width as i32 >= self.width as i32 && mask.y0 + mask.height as i32 >= self.height as i32 && (0..self.height as i32).all(|y| (0..self.width as i32).all(|x| mask.get(x, y) == 255));
+            if !all {
+                return false;
+            }
+            self.full_clear = Some((f.to_vec(), self.width, self.height));
+        }
+        self.queue.retain(|op| matches!(op, Op::Clip { .. } | Op::FreeClip(_)));
+        self.queue.push(Op::ClearAll);
+        self.queued_bytes = self.queue.iter().map(Op::bytes).sum();
+        true
+    }
+}
+
+impl Op {
+    /// About how much memory the call holds.
+    fn bytes(&self) -> usize {
+        let segs = |s: &Vec<PathSeg>| s.len() * std::mem::size_of::<PathSeg>();
+        let src = |s: &Src| match s {
+            Src::Pattern { rgba, .. } => rgba.len(),
+            Src::Linear { stops, .. } | Src::Radial { stops, .. } | Src::Conic { stops, .. } => stops.len() * 24,
+            Src::Solid(_) => 0,
+        };
+        std::mem::size_of::<Op>()
+            + match self {
+                Op::Fill { segs: g, src: c, .. } | Op::Stroke { segs: g, src: c, .. } => segs(g) + src(c),
+                Op::Clip { segs: g, .. } | Op::Clear { segs: g, .. } => segs(g),
+                Op::Put { data, .. } | Op::DrawImage { data, .. } => data.len(),
+                Op::Text { glyphs, src: c, .. } => glyphs.len() * 24 + src(c),
+                Op::FreeClip(_) | Op::ClearAll => 0,
+            }
+    }
+}
+
+/// Recorded path ops `f` are one axis-aligned rectangle containing
+/// [0, w] × [0, h].
+fn rect_covers(f: &[f64], w: f64, h: f64) -> bool {
+    let segs = decode_path(f);
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    for (i, sg) in segs.iter().enumerate() {
+        match sg {
+            PathSeg::MoveTo(p) if i == 0 => pts.push((p.x as f64, p.y as f64)),
+            PathSeg::LineTo(p) if i > 0 => pts.push((p.x as f64, p.y as f64)),
+            PathSeg::Close if i + 1 == segs.len() => {}
+            _ => return false,
+        }
+    }
+    if pts.len() == 5 && pts[4] == pts[0] {
+        pts.pop();
+    }
+    if pts.len() != 4 {
+        return false;
+    }
+    let aligned = (0..4).all(|i| {
+        let (a, b) = (pts[i], pts[(i + 1) % 4]);
+        (a.0 == b.0) != (a.1 == b.1)
+    });
+    let (x0, x1) = pts.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.0), hi.max(p.0)));
+    let (y0, y1) = pts.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+    aligned && x0 <= 0.0 && y0 <= 0.0 && x1 >= w && y1 >= h
+}
+
+/// A drawing call as recorded.
+enum Op {
+    Fill { segs: Vec<PathSeg>, even: bool, src: Src, p: Params },
+    Stroke { segs: Vec<PathSeg>, style: StrokeStyle, m: [f64; 6], src: Src, p: Params },
+    Clip { id: u32, segs: Vec<PathSeg>, even: bool, prev: Option<u32> },
+    FreeClip(u32),
+    Clear { segs: Vec<PathSeg>, p: Params },
+    /// Every pixel cleared to transparent black.
+    ClearAll,
+    Put { data: Vec<u8>, v: [i64; 8] },
+    DrawImage { data: Vec<u8>, iw: i64, ih: i64, sr: [f64; 4], dr: [f64; 4], m: [f64; 6], smooth: bool, p: Params },
+    /// Glyph coverage at device pixel positions (left, top); strokeText
+    /// dilates the coverage by `stroke` pixels.
+    Text { glyphs: Vec<(Rc<GlyphBitmap>, i32, i32)>, stroke: Option<i32>, src: Src, p: Params },
 }
 
 #[derive(Default)]
@@ -345,12 +472,26 @@ struct DrawParams {
     shadow: Option<([f32; 4], f64, f64, f64)>,
 }
 
-fn read_params(realm: &mut Realm, s: &Surface, v: &Value) -> JsResult<DrawParams> {
+/// Drawing parameters as recorded (the clip is looked up when drawing).
+struct Params {
+    alpha: f32,
+    op: String,
+    clip: Option<u32>,
+    shadow: Option<([f32; 4], f64, f64, f64)>,
+}
+
+impl Params {
+    fn resolve(&self, s: &Surface) -> DrawParams {
+        DrawParams { alpha: self.alpha, op: self.op.clone(), clip: self.clip.and_then(|id| s.clips.get(&id).cloned()), shadow: self.shadow }
+    }
+}
+
+fn read_params(realm: &mut Realm, v: &Value) -> JsResult<Params> {
     let alpha = dict_value(realm, v, "alpha")?;
     let alpha = if alpha.is_undefined() { 1.0 } else { realm.to_number(alpha)? as f32 };
     let op = dict_str(realm, v, "op")?.unwrap_or_else(|| "source-over".into());
     let clip = dict_value(realm, v, "clip")?;
-    let clip = if clip.is_nullish() { None } else { let id = realm.to_number(clip)? as u32; s.clips.get(&id).cloned() };
+    let clip = if clip.is_nullish() { None } else { Some(realm.to_number(clip)? as u32) };
     let sc = dict_value(realm, v, "shadowColor")?;
     let shadow = if sc.is_object() {
         let c = floats(realm, &sc)?;
@@ -365,7 +506,7 @@ fn read_params(realm: &mut Realm, s: &Surface, v: &Value) -> JsResult<DrawParams
     } else {
         None
     };
-    Ok(DrawParams { alpha, op, clip, shadow })
+    Ok(Params { alpha, op, clip, shadow })
 }
 
 /// Paint `src` through a coverage mask onto the surface.
@@ -420,6 +561,195 @@ fn limit(s: &Surface) -> (i32, i32, i32, i32) {
     (0, 0, s.width as i32, s.height as i32)
 }
 
+/// Do one recorded drawing call.
+fn draw(s: &mut Surface, op: Op) {
+    match op {
+        Op::Fill { segs, even, src, p } => {
+            let p = p.resolve(s);
+            let mask = rasterize(&fill_polys(&segs), if even { FillRule::EvenOdd } else { FillRule::NonZero }, limit(s));
+            paint_mask(s, &mask, &src, &p);
+        }
+        Op::Stroke { segs, style, m, src, p } => {
+            let p = p.resolve(s);
+            let inv = invert(m);
+            let mut user = Vec::with_capacity(segs.len());
+            let map = |pt: &Point, mm: &[f64; 6]| {
+                let (x, y) = apply(mm, pt.x as f64, pt.y as f64);
+                Point { x: x as f32, y: y as f32 }
+            };
+            for sg in &segs {
+                user.push(match sg {
+                    PathSeg::MoveTo(a) => PathSeg::MoveTo(map(a, &inv)),
+                    PathSeg::LineTo(a) => PathSeg::LineTo(map(a, &inv)),
+                    PathSeg::QuadTo(a, b) => PathSeg::QuadTo(map(a, &inv), map(b, &inv)),
+                    PathSeg::CubicTo(a, b, c) => PathSeg::CubicTo(map(a, &inv), map(b, &inv), map(c, &inv)),
+                    other => other.clone(),
+                });
+            }
+            let outline = rabbithole_gfx::canvas_ext::stroke_outline(&user, &style);
+            let mut dev = Polylines::default();
+            for c in outline.contours {
+                let pts = c.points.iter().map(|pt| map(pt, &m)).collect();
+                dev.contours.push(rabbithole_gfx::path::Contour { points: pts, closed: true });
+            }
+            let mask = rasterize(&dev, FillRule::NonZero, limit(s));
+            paint_mask(s, &mask, &src, &p);
+        }
+        Op::Clip { id, segs, even, prev } => {
+            let mask = rasterize(&fill_polys(&segs), if even { FillRule::EvenOdd } else { FillRule::NonZero }, limit(s));
+            let (w, h) = (s.width as i32, s.height as i32);
+            let mut full = vec![0u8; (w * h) as usize];
+            let prev = prev.and_then(|id| s.clips.get(&id).cloned());
+            for y in mask.y0.max(0)..(mask.y0 + mask.height as i32).min(h) {
+                for x in mask.x0.max(0)..(mask.x0 + mask.width as i32).min(w) {
+                    let i = (y * w + x) as usize;
+                    let mut v = mask.get(x, y);
+                    if let Some(p) = &prev {
+                        v = ((v as u32 * p[i] as u32) / 255) as u8;
+                    }
+                    full[i] = v;
+                }
+            }
+            s.clips.insert(id, Rc::new(full));
+        }
+        Op::FreeClip(id) => {
+            s.clips.remove(&id);
+        }
+        Op::Clear { segs, p } => {
+            let p = p.resolve(s);
+            let mask = rasterize(&fill_polys(&segs), FillRule::NonZero, limit(s));
+            let w = s.width as i32;
+            for y in mask.y0.max(0)..(mask.y0 + mask.height as i32).min(s.height as i32) {
+                for x in mask.x0.max(0)..(mask.x0 + mask.width as i32).min(w) {
+                    let i = (y * w + x) as usize;
+                    let mut cov = mask.get(x, y) as f32 / 255.0;
+                    if let Some(c) = &p.clip {
+                        cov *= c[i] as f32 / 255.0;
+                    }
+                    if cov <= 0.0 {
+                        continue;
+                    }
+                    let px = &mut s.rgba[i * 4..i * 4 + 4];
+                    px[3] = (px[3] as f32 * (1.0 - cov)) as u8;
+                    if px[3] == 0 {
+                        px.copy_from_slice(&[0, 0, 0, 0]);
+                    }
+                }
+            }
+        }
+        Op::ClearAll => s.rgba.fill(0),
+        Op::Put { data, v } => {
+            let [iw, ih, dx, dy, rx, ry, rw, rh] = v;
+            for y in ry.max(0)..(ry + rh).min(ih) {
+                let yy = dy + y;
+                if yy < 0 || yy >= s.height as i64 {
+                    continue;
+                }
+                for x in rx.max(0)..(rx + rw).min(iw) {
+                    let xx = dx + x;
+                    if xx < 0 || xx >= s.width as i64 {
+                        continue;
+                    }
+                    let si = ((y * iw + x) * 4) as usize;
+                    let di = ((yy * s.width as i64 + xx) * 4) as usize;
+                    if si + 4 <= data.len() {
+                        s.rgba[di..di + 4].copy_from_slice(&data[si..si + 4]);
+                    }
+                }
+            }
+        }
+        Op::DrawImage { data, iw, ih, sr, dr, m, smooth, p } => {
+            let p = p.resolve(s);
+            let (dx, dy, dw, dh) = (dr[0], dr[1], dr[2], dr[3]);
+            let corners = [(dx, dy), (dx + dw, dy), (dx + dw, dy + dh), (dx, dy + dh)];
+            let pts: Vec<Point> = corners.iter().map(|(x, y)| { let (a, b) = apply(&m, *x, *y); Point { x: a as f32, y: b as f32 } }).collect();
+            let poly = Polylines { contours: vec![rabbithole_gfx::path::Contour { points: pts, closed: true }] };
+            let mask = rasterize(&poly, FillRule::NonZero, limit(s));
+            let inv = invert(m);
+            let img = Rc::new(data);
+            let (sx, sy, sw, sh) = (sr[0], sr[1], sr[2], sr[3]);
+            // Map device → user → image space.
+            let full = {
+                // image coord = (user - d) * s/d + s0
+                let ax = sw / dw;
+                let ay = sh / dh;
+                [inv[0] * ax, inv[1] * ay, inv[2] * ax, inv[3] * ay, (inv[4] - dx) * ax + sx, (inv[5] - dy) * ay + sy]
+            };
+            let src = ImageSrc { inv: full, w: iw, h: ih, rgba: img, smooth, bounds: (sx, sy, sx + sw, sy + sh) };
+            let w = s.width as i32;
+            for y in mask.y0.max(0)..(mask.y0 + mask.height as i32).min(s.height as i32) {
+                for x in mask.x0.max(0)..(mask.x0 + mask.width as i32).min(w) {
+                    let i = (y * w + x) as usize;
+                    let mut cov = mask.get(x, y) as f32 / 255.0;
+                    if let Some(c) = &p.clip {
+                        cov *= c[i] as f32 / 255.0;
+                    }
+                    if cov <= 0.0 {
+                        continue;
+                    }
+                    let mut c = src.at(x, y);
+                    c[3] *= p.alpha;
+                    composite(&mut s.rgba[i * 4..i * 4 + 4], c, cov, &p.op);
+                }
+            }
+        }
+        Op::Text { glyphs, stroke, src, p } => {
+            let p = p.resolve(s);
+            let w = s.width as i32;
+            let h = s.height as i32;
+            let mut mask_data: HashMap<(i32, i32), u8> = HashMap::new();
+            let mut bb = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+            for (bm, left, top) in &glyphs {
+                for yy in 0..bm.height as i32 {
+                    for xx in 0..bm.width as i32 {
+                        let cov = bm.coverage[(yy * bm.width as i32 + xx) as usize];
+                        if cov == 0 {
+                            continue;
+                        }
+                        let (px, py) = (left + xx, top + yy);
+                        if px < 0 || py < 0 || px >= w || py >= h {
+                            continue;
+                        }
+                        let e = mask_data.entry((px, py)).or_insert(0);
+                        *e = (*e).max(cov);
+                        bb = (bb.0.min(px), bb.1.min(py), bb.2.max(px), bb.3.max(py));
+                    }
+                }
+            }
+            if mask_data.is_empty() {
+                return;
+            }
+            let (mw, mh) = ((bb.2 - bb.0 + 1) as u32, (bb.3 - bb.1 + 1) as u32);
+            let mut data = vec![0u8; (mw * mh) as usize];
+            for ((px, py), c) in mask_data {
+                data[((py - bb.1) as u32 * mw + (px - bb.0) as u32) as usize] = c;
+            }
+            if let Some(r) = stroke {
+                // strokeText: outline = dilated coverage minus the glyph interior.
+                let mut out = vec![0u8; data.len()];
+                for yy in 0..mh as i32 {
+                    for xx in 0..mw as i32 {
+                        let mut mx = 0u8;
+                        for ddy in -r..=r {
+                            for ddx in -r..=r {
+                                let (sx, sy) = (xx + ddx, yy + ddy);
+                                if sx >= 0 && sy >= 0 && sx < mw as i32 && sy < mh as i32 {
+                                    mx = mx.max(data[(sy as u32 * mw + sx as u32) as usize]);
+                                }
+                            }
+                        }
+                        let inner = data[(yy as u32 * mw + xx as u32) as usize];
+                        out[(yy as u32 * mw + xx as u32) as usize] = mx.saturating_sub(inner / 2);
+                    }
+                }
+                data = out;
+            }
+            let mask = Mask { x0: bb.0, y0: bb.1, width: mw, height: mh, data };
+            paint_mask(s, &mask, &src, &p);
+        }
+    }
+}
+
 // ------------------------------------------------------------- natives
 
 fn canvas_new(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -428,7 +758,7 @@ fn canvas_new(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
     let id = store(|st| {
         st.next += 1;
         let id = st.next;
-        st.surfaces.insert(id, Surface { width: w, height: h, rgba: vec![0; (w as usize) * (h as usize) * 4], clips: HashMap::new(), next_clip: 0 });
+        st.surfaces.insert(id, Surface::new(w, h));
         id
     });
     Ok(Value::Number(id as f64))
@@ -452,10 +782,10 @@ fn canvas_resize(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
         return Ok(Value::Undefined);
     }
     with_surface(realm, &arg(args, 0), |_, s| {
-        s.width = w;
-        s.height = h;
-        s.rgba = vec![0; (w as usize) * (h as usize) * 4];
-        s.clips.clear();
+        // The bitmap is reset: recorded drawing cannot show.
+        let next_clip = s.next_clip;
+        *s = Surface::new(w, h);
+        s.next_clip = next_clip;
         Ok(Value::Undefined)
     })
 }
@@ -464,7 +794,7 @@ fn canvas_resize(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
 fn canvas_free_clip(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let clip = num(realm, args, 1)? as u32;
     with_surface(realm, &arg(args, 0), |_, s| {
-        s.clips.remove(&clip);
+        s.record(Op::FreeClip(clip));
         Ok(Value::Undefined)
     })
 }
@@ -487,10 +817,8 @@ fn canvas_fill(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let m = read_matrix(realm, &arg(args, 4))?;
     let src = read_paint(realm, &arg(args, 3), m)?;
     with_surface(realm, &arg(args, 0), |realm, s| {
-        let p = read_params(realm, s, &arg(args, 5))?;
-        let segs = decode_path(&f);
-        let mask = rasterize(&fill_polys(&segs), if even { FillRule::EvenOdd } else { FillRule::NonZero }, limit(s));
-        paint_mask(s, &mask, &src, &p);
+        let p = read_params(realm, &arg(args, 5))?;
+        s.record(Op::Fill { segs: decode_path(&f), even, src, p });
         Ok(Value::Undefined)
     })
 }
@@ -523,31 +851,8 @@ fn canvas_stroke(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
     let m = read_matrix(realm, &arg(args, 4))?;
     let src = read_paint(realm, &arg(args, 3), m)?;
     with_surface(realm, &arg(args, 0), |realm, s| {
-        let p = read_params(realm, s, &arg(args, 5))?;
-        let segs = decode_path(&f);
-        let inv = invert(m);
-        let mut user = Vec::with_capacity(segs.len());
-        let map = |pt: &Point, mm: &[f64; 6]| {
-            let (x, y) = apply(mm, pt.x as f64, pt.y as f64);
-            Point { x: x as f32, y: y as f32 }
-        };
-        for sg in &segs {
-            user.push(match sg {
-                PathSeg::MoveTo(a) => PathSeg::MoveTo(map(a, &inv)),
-                PathSeg::LineTo(a) => PathSeg::LineTo(map(a, &inv)),
-                PathSeg::QuadTo(a, b) => PathSeg::QuadTo(map(a, &inv), map(b, &inv)),
-                PathSeg::CubicTo(a, b, c) => PathSeg::CubicTo(map(a, &inv), map(b, &inv), map(c, &inv)),
-                other => other.clone(),
-            });
-        }
-        let outline = rabbithole_gfx::canvas_ext::stroke_outline(&user, &style);
-        let mut dev = Polylines::default();
-        for c in outline.contours {
-            let pts = c.points.iter().map(|pt| map(pt, &m)).collect();
-            dev.contours.push(rabbithole_gfx::path::Contour { points: pts, closed: true });
-        }
-        let mask = rasterize(&dev, FillRule::NonZero, limit(s));
-        paint_mask(s, &mask, &src, &p);
+        let p = read_params(realm, &arg(args, 5))?;
+        s.record(Op::Stroke { segs: decode_path(&f), style, m, src, p });
         Ok(Value::Undefined)
     })
 }
@@ -559,23 +864,9 @@ fn canvas_clip(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let prev = arg(args, 3);
     let prev = if prev.is_nullish() { None } else { Some(realm.to_number(prev)? as u32) };
     with_surface(realm, &arg(args, 0), |_, s| {
-        let mask = rasterize(&fill_polys(&decode_path(&f)), if even { FillRule::EvenOdd } else { FillRule::NonZero }, limit(s));
-        let (w, h) = (s.width as i32, s.height as i32);
-        let mut full = vec![0u8; (w * h) as usize];
-        let prev = prev.and_then(|id| s.clips.get(&id).cloned());
-        for y in mask.y0.max(0)..(mask.y0 + mask.height as i32).min(h) {
-            for x in mask.x0.max(0)..(mask.x0 + mask.width as i32).min(w) {
-                let i = (y * w + x) as usize;
-                let mut v = mask.get(x, y);
-                if let Some(p) = &prev {
-                    v = ((v as u32 * p[i] as u32) / 255) as u8;
-                }
-                full[i] = v;
-            }
-        }
         s.next_clip += 1;
         let id = s.next_clip;
-        s.clips.insert(id, Rc::new(full));
+        s.record(Op::Clip { id, segs: decode_path(&f), even, prev });
         Ok(Value::Number(id as f64))
     })
 }
@@ -585,25 +876,9 @@ fn canvas_clip(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 fn canvas_clear(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let f = floats(realm, &arg(args, 1))?;
     with_surface(realm, &arg(args, 0), |realm, s| {
-        let p = read_params(realm, s, &arg(args, 2))?;
-        let mask = rasterize(&fill_polys(&decode_path(&f)), FillRule::NonZero, limit(s));
-        let w = s.width as i32;
-        for y in mask.y0.max(0)..(mask.y0 + mask.height as i32).min(s.height as i32) {
-            for x in mask.x0.max(0)..(mask.x0 + mask.width as i32).min(w) {
-                let i = (y * w + x) as usize;
-                let mut cov = mask.get(x, y) as f32 / 255.0;
-                if let Some(c) = &p.clip {
-                    cov *= c[i] as f32 / 255.0;
-                }
-                if cov <= 0.0 {
-                    continue;
-                }
-                let px = &mut s.rgba[i * 4..i * 4 + 4];
-                px[3] = (px[3] as f32 * (1.0 - cov)) as u8;
-                if px[3] == 0 {
-                    px.copy_from_slice(&[0, 0, 0, 0]);
-                }
-            }
+        let p = read_params(realm, &arg(args, 2))?;
+        if p.clip.is_some() || !s.clear_all(&f) {
+            s.record(Op::Clear { segs: decode_path(&f), p });
         }
         Ok(Value::Undefined)
     })
@@ -614,6 +889,7 @@ fn canvas_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
     let (sx, sy) = (num(realm, args, 1)? as i64, num(realm, args, 2)? as i64);
     let (sw, sh) = (num(realm, args, 3)? as i64, num(realm, args, 4)? as i64);
     let out = with_surface(realm, &arg(args, 0), |_, s| {
+        s.flush();
         let mut out = vec![0u8; (sw.max(0) * sh.max(0) * 4) as usize];
         for y in 0..sh {
             let yy = sy + y;
@@ -639,25 +915,9 @@ fn canvas_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
 fn canvas_put(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let data = bytes(realm, &arg(args, 1))?;
     let v: Vec<i64> = (2..10).map(|i| num(realm, args, i).map(|n| n as i64)).collect::<JsResult<_>>()?;
-    let (iw, ih, dx, dy, rx, ry, rw, rh) = (v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+    let v: [i64; 8] = v.try_into().expect("eight numbers");
     with_surface(realm, &arg(args, 0), |_, s| {
-        for y in ry.max(0)..(ry + rh).min(ih) {
-            let yy = dy + y;
-            if yy < 0 || yy >= s.height as i64 {
-                continue;
-            }
-            for x in rx.max(0)..(rx + rw).min(iw) {
-                let xx = dx + x;
-                if xx < 0 || xx >= s.width as i64 {
-                    continue;
-                }
-                let si = ((y * iw + x) * 4) as usize;
-                let di = ((yy * s.width as i64 + xx) * 4) as usize;
-                if si + 4 <= data.len() {
-                    s.rgba[di..di + 4].copy_from_slice(&data[si..si + 4]);
-                }
-            }
-        }
+        s.record(Op::Put { data, v });
         Ok(Value::Undefined)
     })
 }
@@ -675,39 +935,8 @@ fn canvas_draw_image(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
         return Ok(Value::Undefined);
     }
     with_surface(realm, &arg(args, 0), |realm, s| {
-        let p = read_params(realm, s, &arg(args, 7))?;
-        let (dx, dy, dw, dh) = (dr[0], dr[1], dr[2], dr[3]);
-        let corners = [(dx, dy), (dx + dw, dy), (dx + dw, dy + dh), (dx, dy + dh)];
-        let pts: Vec<Point> = corners.iter().map(|(x, y)| { let (a, b) = apply(&m, *x, *y); Point { x: a as f32, y: b as f32 } }).collect();
-        let poly = Polylines { contours: vec![rabbithole_gfx::path::Contour { points: pts, closed: true }] };
-        let mask = rasterize(&poly, FillRule::NonZero, limit(s));
-        let inv = invert(m);
-        let img = Rc::new(data);
-        let (sx, sy, sw, sh) = (sr[0], sr[1], sr[2], sr[3]);
-        // Map device → user → image space.
-        let full = {
-            // image coord = (user - d) * s/d + s0
-            let ax = sw / dw;
-            let ay = sh / dh;
-            [inv[0] * ax, inv[1] * ay, inv[2] * ax, inv[3] * ay, (inv[4] - dx) * ax + sx, (inv[5] - dy) * ay + sy]
-        };
-        let src = ImageSrc { inv: full, w: iw, h: ih, rgba: img, smooth, bounds: (sx, sy, sx + sw, sy + sh) };
-        let w = s.width as i32;
-        for y in mask.y0.max(0)..(mask.y0 + mask.height as i32).min(s.height as i32) {
-            for x in mask.x0.max(0)..(mask.x0 + mask.width as i32).min(w) {
-                let i = (y * w + x) as usize;
-                let mut cov = mask.get(x, y) as f32 / 255.0;
-                if let Some(c) = &p.clip {
-                    cov *= c[i] as f32 / 255.0;
-                }
-                if cov <= 0.0 {
-                    continue;
-                }
-                let mut c = src.at(x, y);
-                c[3] *= p.alpha;
-                composite(&mut s.rgba[i * 4..i * 4 + 4], c, cov, &p.op);
-            }
-        }
+        let p = read_params(realm, &arg(args, 7))?;
+        s.record(Op::DrawImage { data, iw, ih, sr: [sr[0], sr[1], sr[2], sr[3]], dr: [dr[0], dr[1], dr[2], dr[3]], m, smooth, p });
         Ok(Value::Undefined)
     })
 }
@@ -821,68 +1050,24 @@ fn canvas_fill_text(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     let dev_size = (size as f64 * scale) as f32;
     let glyphs = fc.shape(fid, dev_size, &text, 0.0);
     with_surface(realm, &arg(args, 0), |realm, s| {
-        let p = read_params(realm, s, &arg(args, 7))?;
+        let p = read_params(realm, &arg(args, 7))?;
         let (ox, oy) = apply(&m, x, y);
         // Glyphs are rasterized axis-aligned at the transformed size and
-        // positioned along the transformed baseline.
+        // positioned along the transformed baseline (with the fonts of
+        // this call).
         let dir = ((m[0] / scale), (m[1] / scale));
-        let w = s.width as i32;
-        let h = s.height as i32;
-        let mut mask_data: HashMap<(i32, i32), u8> = HashMap::new();
-        let mut bb = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        for g in &glyphs {
-            let bm = fc.rasterize(g.font, g.glyph, dev_size);
-            let gx = ox + dir.0 * (g.x + g.dx) as f64;
-            let gy = oy + dir.1 * (g.x + g.dx) as f64 - g.dy as f64;
-            let left = gx.round() as i32 + bm.left;
-            let top = gy.round() as i32 - bm.top;
-            for yy in 0..bm.height as i32 {
-                for xx in 0..bm.width as i32 {
-                    let cov = bm.coverage[(yy * bm.width as i32 + xx) as usize];
-                    if cov == 0 {
-                        continue;
-                    }
-                    let (px, py) = (left + xx, top + yy);
-                    if px < 0 || py < 0 || px >= w || py >= h {
-                        continue;
-                    }
-                    let e = mask_data.entry((px, py)).or_insert(0);
-                    *e = (*e).max(cov);
-                    bb = (bb.0.min(px), bb.1.min(py), bb.2.max(px), bb.3.max(py));
-                }
-            }
-        }
-        if mask_data.is_empty() {
-            return Ok(Value::Undefined);
-        }
-        let (mw, mh) = ((bb.2 - bb.0 + 1) as u32, (bb.3 - bb.1 + 1) as u32);
-        let mut data = vec![0u8; (mw * mh) as usize];
-        for ((px, py), c) in mask_data {
-            data[((py - bb.1) as u32 * mw + (px - bb.0) as u32) as usize] = c;
-        }
-        if stroke_w > 0.0 {
-            // strokeText: outline = dilated coverage minus the glyph interior.
-            let r = ((stroke_w * scale) / 2.0).ceil().max(1.0) as i32;
-            let mut out = vec![0u8; data.len()];
-            for yy in 0..mh as i32 {
-                for xx in 0..mw as i32 {
-                    let mut mx = 0u8;
-                    for ddy in -r..=r {
-                        for ddx in -r..=r {
-                            let (sx, sy) = (xx + ddx, yy + ddy);
-                            if sx >= 0 && sy >= 0 && sx < mw as i32 && sy < mh as i32 {
-                                mx = mx.max(data[(sy as u32 * mw + sx as u32) as usize]);
-                            }
-                        }
-                    }
-                    let inner = data[(yy as u32 * mw + xx as u32) as usize];
-                    out[(yy as u32 * mw + xx as u32) as usize] = mx.saturating_sub(inner / 2);
-                }
-            }
-            data = out;
-        }
-        let mask = Mask { x0: bb.0, y0: bb.1, width: mw, height: mh, data };
-        paint_mask(s, &mask, &src, &p);
+        let placed = glyphs
+            .iter()
+            .map(|g| {
+                let bm = fc.rasterize(g.font, g.glyph, dev_size);
+                let gx = ox + dir.0 * (g.x + g.dx) as f64;
+                let gy = oy + dir.1 * (g.x + g.dx) as f64 - g.dy as f64;
+                let (left, top) = (gx.round() as i32 + bm.left, gy.round() as i32 - bm.top);
+                (bm, left, top)
+            })
+            .collect();
+        let stroke = (stroke_w > 0.0).then(|| ((stroke_w * scale) / 2.0).ceil().max(1.0) as i32);
+        s.record(Op::Text { glyphs: placed, stroke, src, p });
         Ok(Value::Undefined)
     })
 }
@@ -893,11 +1078,28 @@ fn canvas_present(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
     if n.doc != 0 {
         return Ok(Value::Undefined);
     }
+    let id = num(realm, args, 0)? as u32;
+    let webgl = store(|st| st.webgl.contexts.contains_key(&id));
     with_surface(realm, &arg(args, 0), |_, s| {
         let (w, h) = (s.width, s.height);
+        // 2D drawing is done when the engine shows it.
+        if !webgl && w > 0 && h > 0 && with_env(|env| env.set_canvas_surface(n.node, id, w, h)) {
+            return Ok(Value::Undefined);
+        }
+        s.flush();
         let rgba = if w > 0 && h > 0 { Some(s.rgba.clone()) } else { None };
         with_env(|env| env.set_canvas_image(n.node, w, h, rgba));
         Ok(Value::Undefined)
+    })
+}
+
+/// The pixels of surface `id` with its recorded drawing done: (width,
+/// height, straight RGBA), or None (no such surface, or empty).
+pub(crate) fn surface_pixels(id: u32) -> Option<(u32, u32, Vec<u8>)> {
+    store(|st| {
+        let s = st.surfaces.get_mut(&id)?;
+        s.flush();
+        (s.width > 0 && s.height > 0).then(|| (s.width, s.height, s.rgba.clone()))
     })
 }
 
@@ -905,7 +1107,10 @@ fn canvas_present(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
 fn canvas_encode(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let ty = arg_str(realm, args, 1).unwrap_or_default();
     let quality = num(realm, args, 2).ok().filter(|q| (0.0..=1.0).contains(q)).unwrap_or(0.92);
-    let out = with_surface(realm, &arg(args, 0), |_, s| Ok(rabbithole_gfx::image::encode(s.width, s.height, &s.rgba, &ty, quality as f32)))?;
+    let out = with_surface(realm, &arg(args, 0), |_, s| {
+        s.flush();
+        Ok(rabbithole_gfx::image::encode(s.width, s.height, &s.rgba, &ty, quality as f32))
+    })?;
     match out {
         Some(b) => Ok(crate::fetch::make_array_buffer(realm, b)),
         None => Ok(Value::Null),

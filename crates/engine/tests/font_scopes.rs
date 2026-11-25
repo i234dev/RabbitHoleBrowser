@@ -125,6 +125,7 @@ fn iframe_font_view_is_independent_of_retained_parent_and_new_pages() {
     // Restyling the parent must notice its child's changed view, regenerate
     // the child layout, then repaint the cached iframe raster in the parent.
     engine.restyle(&mut parent);
+    engine.present(&mut parent);
     let iframe = parent.frames.children[0].node;
     let child = parent.frames.children[0].page.as_ref().unwrap();
     let child_before = engine.snapshot(child);
@@ -171,6 +172,8 @@ fn late_host_registration_recomputes_retained_unit_geometry() {
     let child_after = child.rect_of(child_node).unwrap();
     assert_ne!(child_before.w, child_after.w);
     assert!((child_after.w - expected).abs() < 0.02);
+    engine.present(&mut a);
+    let child = a.frames.children[0].page.as_ref().unwrap();
     let raster = a.images.get(&a.frames.children[0].node).unwrap();
     assert_eq!(raster.pixels(), engine.snapshot(child).rgba.as_slice());
     engine.check_incremental(&mut a).unwrap();
@@ -228,6 +231,7 @@ fn canvas_font_pixels(engine: &Engine, page: &mut Page, font: &str, stroke: bool
     );
     assert_eq!(engine.eval_in_page(page, &code), "true");
     let canvas = page.doc.element_by_id("canvas").unwrap();
+    engine.present(page);
     page.images.get(&canvas).expect("Canvas text pixels").pixels().to_vec()
 }
 
@@ -252,5 +256,6 @@ fn canvas_named_font_fill_and_stroke_keep_order_quotes_and_retained_context() {
     assert_ne!(named_fill, canvas_font_pixels(&engine, &mut b, "20px Scoped", false));
     assert_eq!(engine.eval_in_page(&mut a, "kept.clearRect(0,0,200,40);kept.fillText('WWWiii',0,25);kept.measureText('WWWiii').width===oldWidth"), "true");
     let canvas = a.doc.element_by_id("canvas").unwrap();
+    engine.present(&mut a);
     assert_eq!(a.images[&canvas].pixels(), named_fill.as_slice());
 }

@@ -142,8 +142,11 @@ pub struct ChildFrame {
     stale: bool,
     /// Content box size (CSS px) the child is laid out for.
     pub size: (f32, f32),
-    /// The child must be repainted into `image`.
+    /// The child changed: [`Engine::paint_frames`] must look at it.
     dirty: bool,
+    /// The child changed since `image` was painted (it is painted again
+    /// when the page is presented).
+    unpainted: bool,
     image: Option<Arc<Image>>,
     /// The child painted at device scale 1, kept to repaint only what
     /// changed (like the top-level page) instead of everything.
@@ -583,7 +586,7 @@ impl Engine {
                     changed = true;
                 }
                 None => {
-                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, pending_since: None, stale: false, size: attr_size(&page.doc, node), dirty: true, image: None, canvas: None });
+                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, pending_since: None, stale: false, size: attr_size(&page.doc, node), dirty: true, unpainted: false, image: None, canvas: None });
                     changed = true;
                 }
             }
@@ -739,7 +742,7 @@ impl Engine {
         }
         // Source Blank: a `src` attribute shows up as a change on the next
         // sync and starts the real load.
-        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, pending_since: None, stale: false, size, dirty: true, image: None, canvas: None });
+        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, pending_since: None, stale: false, size, dirty: true, unpainted: false, image: None, canvas: None });
         Some(id)
     }
 
@@ -771,31 +774,68 @@ impl Engine {
         any
     }
 
-    /// Repaint dirty child frames into their images and install them in
-    /// the parent's layout and display list (no relayout needed: the
-    /// raster's natural size is what the box was sized from).
+    /// Note the child frames that changed since they were last painted
+    /// and bring their layout up to date. Their rasters are made when the
+    /// page is presented
+    /// ([`Engine::present`]), not on every script task or tick; a frame
+    /// that has never been painted is painted now (its raster is what
+    /// layout sees as the iframe's image). Returns true when any frame
+    /// changed (the embedder should present a new frame).
     fn paint_frames(&self, page: &mut Page) -> bool {
-        let mut need_display_list = false;
         let mut any = false;
-        for i in 0..page.frames.children.len() {
-            let c = &mut page.frames.children[i];
+        let mut first = false;
+        for c in page.frames.children.iter_mut() {
             if !c.dirty {
                 continue;
             }
             let Some(child) = c.page.as_mut() else { continue };
+            // Layout and the display list stay as current as the parent's
+            // (only rasterizing waits).
+            self.flush_display_list(child);
             c.dirty = false;
+            c.unpainted = true;
             any = true;
+            first |= c.image.is_none();
+        }
+        if first {
+            self.raster_frames(page, true);
+        }
+        any
+    }
+
+    /// Repaint the unpainted child frames (only those without a raster
+    /// yet when `only_new`) into their images and install them in the
+    /// parent's layout and display list (no relayout needed: the raster's
+    /// natural size is what the box was sized from).
+    pub(crate) fn raster_frames(&self, page: &mut Page, only_new: bool) {
+        let mut need_display_list = false;
+        for i in 0..page.frames.children.len() {
+            let c = &mut page.frames.children[i];
+            let changed = c.unpainted || c.page.as_ref().is_some_and(|p| frames_unpainted(p));
+            if !changed || (only_new && c.image.is_some()) {
+                continue;
+            }
+            let Some(child) = c.page.as_mut() else { continue };
+            c.unpainted = false;
             let natural = attr_size(&page.doc, c.node);
+            let natural = (natural.0.round() as u32, natural.1.round() as u32);
             let raster = if self.device_pixel_ratio.max(1.0) == 1.0 {
-                self.render_frame_damage(child, c.size, &mut c.canvas)
+                self.render_frame_damage(child, c.size, &mut c.canvas, c.image.as_deref(), natural)
             } else {
                 c.canvas = None;
-                self.render_frame(child, c.size)
+                self.present(child);
+                Some(self.render_frame(child, &child.display_list, c.size))
             };
-            let img = Arc::new(raster.with_natural_size(natural.0.round() as u32, natural.1.round() as u32));
+            // Nothing changed since the last raster.
+            let Some(raster) = raster else { continue };
+            let img = Arc::new(raster.with_natural_size(natural.0, natural.1));
             let old = c.image.replace(img.clone());
             let node = c.node;
-            page.images.insert(node, img.clone());
+            // The box is patched below: the same natural size needs no
+            // relayout.
+            if let Some(old) = page.images.insert(node, img.clone()).filter(|o| (o.natural_width, o.natural_height) == (img.natural_width, img.natural_height)) {
+                page.incr.image_replaced(node, &old, &img);
+            }
             match find_box_mut(&mut page.layout.root, node) {
                 Some(b) => {
                     let had = b.image.is_some();
@@ -832,27 +872,56 @@ impl Engine {
         if need_display_list {
             self.rebuild_display_list(page);
         }
-        any
     }
 
     /// [`Engine::render_frame`] at device scale 1 into the frame's kept
     /// canvas, repainting only the regions whose display items changed
-    /// since the last paint (the same pixels as a full repaint).
-    fn render_frame_damage(&self, child: &mut Page, size: (f32, f32), kept: &mut Option<Canvas>) -> Image {
+    /// since the last paint (the same pixels as a full repaint). `old`,
+    /// the previous raster, gives the pixels outside those regions; None
+    /// when nothing changed and `old` can stay.
+    fn render_frame_damage(&self, child: &mut Page, size: (f32, f32), kept: &mut Option<Canvas>, old: Option<&Image>, natural: (u32, u32)) -> Option<Image> {
         let pw = size.0.ceil().clamp(1.0, MAX_RASTER) as u32;
         let ph = size.1.ceil().clamp(1.0, MAX_RASTER) as u32;
+        let mut fresh = false;
         if kept.as_ref().is_none_or(|c| c.width != pw || c.height != ph) {
             *kept = Some(Canvas::new(pw, ph));
             child.incr.forget_canvas();
+            fresh = true;
         }
         let canvas = kept.as_mut().expect("kept frame canvas");
-        self.render_damage(child, canvas);
-        Image::new(pw, ph, canvas.to_rgba8())
+        let damage = self.render_damage(child, canvas);
+        // The previous raster holds this canvas' pixels before the repaint.
+        let old = old.filter(|o| !fresh && o.width == pw && o.height == ph && o.anim.is_none() && o.vector.is_none());
+        let Some(old) = old else { return Some(Image::new(pw, ph, canvas.to_rgba8())) };
+        if damage.is_empty() && (old.natural_width, old.natural_height) == natural {
+            return None;
+        }
+        // Whole pixels covering each region (as `repaint_regions` paints them).
+        let regions: Vec<(u32, u32, u32, u32)> = damage
+            .iter()
+            .map(|r| {
+                let x0 = r.x.floor().clamp(0.0, pw as f32) as u32;
+                let y0 = r.y.floor().clamp(0.0, ph as f32) as u32;
+                let x1 = r.right().ceil().clamp(0.0, pw as f32) as u32;
+                let y1 = r.bottom().ceil().clamp(0.0, ph as f32) as u32;
+                (x0, y0, x1, y1)
+            })
+            .filter(|&(x0, y0, x1, y1)| x1 > x0 && y1 > y0)
+            .collect();
+        let area: u64 = regions.iter().map(|&(x0, y0, x1, y1)| (x1 - x0) as u64 * (y1 - y0) as u64).sum();
+        if area * 2 > pw as u64 * ph as u64 {
+            return Some(Image::new(pw, ph, canvas.to_rgba8()));
+        }
+        let mut rgba = old.rgba.clone();
+        for (x0, y0, x1, y1) in regions {
+            canvas.write_rgba8_region(&mut rgba, x0, y0, x1, y1);
+        }
+        Some(Image::new(pw, ph, rgba))
     }
 
-    /// Paint a child page at its scroll position into an image of the
-    /// frame's size (device pixels).
-    fn render_frame(&self, child: &Page, size: (f32, f32)) -> Image {
+    /// Paint a child page's display list `list` at its scroll position
+    /// into an image of the frame's size (device pixels).
+    fn render_frame(&self, child: &Page, list: &rabbithole_layout::DisplayList, size: (f32, f32)) -> Image {
         let scale = self.device_pixel_ratio.max(1.0);
         let pw = (size.0 * scale).ceil().clamp(1.0, MAX_RASTER) as u32;
         let ph = (size.1 * scale).ceil().clamp(1.0, MAX_RASTER) as u32;
@@ -862,9 +931,29 @@ impl Engine {
         }
         let (sx, sy) = child.page_scroll;
         canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
-        rabbithole_layout::paint(&child.display_list, &mut canvas, &child.fonts, sx, sy);
+        rabbithole_layout::paint(list, &mut canvas, &child.fonts, sx, sy);
         canvas.pop_transform();
         Image::new(pw, ph, canvas.to_rgba8())
+    }
+
+    /// (old, new) images of the frames of `page` changed since they were
+    /// last rasterized, painted now from their current content.
+    pub(crate) fn frame_swaps(&self, page: &Page) -> Vec<(Arc<Image>, Arc<Image>)> {
+        let mut swaps = Vec::new();
+        if !frames_unpainted(page) {
+            return swaps;
+        }
+        for c in &page.frames.children {
+            let (Some(old), Some(child)) = (c.image.as_ref(), c.page.as_ref()) else { continue };
+            if !c.unpainted && !frames_unpainted(child) {
+                continue;
+            }
+            let list = self.display_list_to_paint(child);
+            let natural = attr_size(&page.doc, c.node);
+            let img = self.render_frame(child, &list, c.size).with_natural_size(natural.0.round() as u32, natural.1.round() as u32);
+            swaps.push((old.clone(), Arc::new(img)));
+        }
+        swaps
     }
 
     /// Frame work for one tick: build arrived documents, tick children,
@@ -1248,6 +1337,12 @@ impl Engine {
 fn c_dirty_paint(engine: &Engine, page: &mut Page) {
     engine.paint_frames(page);
 }
+
+/// Some frame below `page` changed since it was last rasterized.
+pub(crate) fn frames_unpainted(page: &Page) -> bool {
+    page.frames.children.iter().any(|c| c.unpainted || c.page.as_ref().is_some_and(|p| frames_unpainted(p)))
+}
+
 
 impl Engine {
     /// Keyboard input for a page without an embedder's editing machinery

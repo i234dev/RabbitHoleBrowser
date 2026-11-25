@@ -19,6 +19,7 @@ pub use service_worker_navigation::PendingServiceWorkerNavigation;
 pub mod images;
 pub mod incremental;
 pub mod pointer;
+mod present;
 pub mod reftest;
 pub mod scripting;
 pub mod select;
@@ -1777,18 +1778,21 @@ impl Engine {
     /// Paint with a device scale (HiDPI / zoom): the page is laid out in
     /// CSS pixels for a viewport of `canvas size / scale` and painted
     /// magnified by `scale`. Scroll offsets are in CSS pixels.
+    /// Child frames changed since [`Engine::present`] are painted from
+    /// their current content (slower than presenting first).
     pub fn render_scaled(&self, page: &Page, canvas: &mut Canvas, scroll_x: f32, scroll_y: f32, scale: f32) {
         canvas.clear(Color::WHITE);
         if page.background.a > 0 {
             let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
             canvas.fill_rect(full, page.background);
         }
+        let list = self.display_list_to_paint(page);
         if (scale - 1.0).abs() > 1e-3 {
             canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
-            rabbithole_layout::paint(&page.display_list, canvas, &page.fonts, scroll_x, scroll_y);
+            rabbithole_layout::paint(&list, canvas, &page.fonts, scroll_x, scroll_y);
             canvas.pop_transform();
         } else {
-            rabbithole_layout::paint(&page.display_list, canvas, &page.fonts, scroll_x, scroll_y);
+            rabbithole_layout::paint(&list, canvas, &page.fonts, scroll_x, scroll_y);
         }
     }
 }
@@ -1857,12 +1861,13 @@ impl rabbithole_gfx::image::VectorRender for SvgImageRender {
 }
 
 /// Rasterize inline `<svg>` elements of a document into images keyed by
-/// node, so layout/paint treat them as replaced images.
+/// node, so layout/paint treat them as replaced images (the pixels are
+/// drawn when the page is presented, see [`present`]).
 /// Rasterize the rendered outermost `<svg>` elements of the document (or
 /// only the elements `only`) that have no image yet.
 /// Roots using filters are added to `filtered` (they are rasterized again
 /// when their content changes).
-fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContext, images: &mut HashMap<NodeId, Arc<Image>>, only: Option<&[NodeId]>, filtered: &mut std::collections::HashSet<NodeId>) {
+fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, images: &mut HashMap<NodeId, Arc<Image>>, only: Option<&[NodeId]>, filtered: &mut std::collections::HashSet<NodeId>, pending: &mut Vec<present::PendingSvg>) {
     let mut roots = Vec::new();
     let candidates: Vec<NodeId> = match only {
         None => doc.shadow_including_descendants(Document::ROOT),
@@ -1919,12 +1924,16 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
         // Without a viewBox (and both width and height), the laid-out size
         // is the viewport: percentages resolve against it and user units
         // are CSS px.
-        if tree.viewport_dependent() {
+        let p = if tree.viewport_dependent() {
             let tree = rabbithole_svg::SvgTree::from_dom_in(doc, n, &style_of, (w, h)).unwrap_or(tree);
-            images.insert(n, Arc::new(tree.rasterize_viewport(fonts, w, h, pw as f32 / w)));
-            continue;
-        }
-        images.insert(n, Arc::new(tree.rasterize(fonts, pw, ph)));
+            present::PendingSvg::new(n, tree, present::SvgRaster::Viewport(w, h, pw as f32 / w))
+        } else {
+            present::PendingSvg::new(n, tree, present::SvgRaster::Fixed(pw, ph))
+        };
+        // Layout sees the raster's size now; the pixels are drawn when
+        // the page is presented.
+        images.insert(n, p.placeholder.clone());
+        pending.push(p);
     }
 }
 

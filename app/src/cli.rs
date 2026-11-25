@@ -176,6 +176,7 @@ pub fn capture(session: &mut Session, url: &str, opts: &CaptureOptions) -> Resul
     };
     let scroll_y = if opts.full_page { 0.0 } else { wanted.clamp(0.0, max_scroll) };
     session.engine.set_page_scroll(&mut page, 0.0, scroll_y);
+    session.engine.present(&mut page);
     session.engine.render_scaled(&page, &mut canvas, 0.0, scroll_y, scale);
     Ok(Capture { rgba: canvas.to_rgba8(), width: px_w, height: px_h, title: page.title.clone() })
 }
@@ -495,7 +496,7 @@ pub fn consent(args: &[String]) -> Result<(), String> {
     let mut page = session.load_request(&Request::get(parsed), viewport)?;
     let save = |session: &Session, page: &mut Page, name: &str| {
         if let Some(prefix) = &shot {
-            session.engine.flush_display_list(page);
+            session.engine.present(page);
             let mut canvas = rabbithole_engine::gfx::Canvas::new(viewport.width as u32, viewport.height as u32);
             session.engine.render(page, &mut canvas, 0.0, 0.0);
             let path = format!("{prefix}-{name}.png");
