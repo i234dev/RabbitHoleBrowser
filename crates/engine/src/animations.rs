@@ -1548,6 +1548,11 @@ impl AnimationState {
         self.with_transitions.iter().filter_map(|n| self.base.get(n).cloned().or_else(|| styles.get(*n).cloned()).map(|s| (*n, s))).collect()
     }
 
+    /// The style of `node` without animation effects, when it has any.
+    pub(crate) fn base_style(&self, node: NodeId) -> Option<Rc<ComputedStyle>> {
+        self.base.get(&node).cloned()
+    }
+
     fn has_effects(&self, node: NodeId) -> bool {
         self.transitions.iter().any(|t| t.node == node) || self.animations.iter().any(|a| a.node == node) || self.script_nodes.contains(&node)
     }

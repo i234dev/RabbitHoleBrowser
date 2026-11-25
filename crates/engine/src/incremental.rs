@@ -385,15 +385,18 @@ impl Engine {
         // Elements restyled (only collected while filtered SVGs exist).
         let mut restyled: Vec<NodeId> = Vec::new();
         let anim_snapshot = page.anim.snapshot(&page.styles);
+        // Element styles before a full recomputation.
+        let mut previous_styles: Vec<Option<std::rc::Rc<rabbithole_style::ComputedStyle>>> = Vec::new();
         if fresh {
             let mut se = StyleEngine::new(&page.sheets, &env);
-            page.styles = se.full(&page.doc, &page.sheets, &opts);
+            previous_styles = std::mem::replace(&mut page.styles, se.full(&page.doc, &page.sheets, &opts)).styles;
             incr.style = Some(se);
             incr.stats.style_full += 1;
             incr.layout_full = true;
         } else {
             let se = incr.style.as_mut().expect("style engine");
-            let out = se.update(&page.doc, &mut page.styles, &log, &opts, &page.sheets);
+            let mut out = se.update(&page.doc, &mut page.styles, &log, &opts, &page.sheets);
+            previous_styles = std::mem::take(&mut out.previous);
             if debug_enabled() {
                 eprintln!("[incr] style: full={} recomputed={} changed={} mutations={}", out.full, out.recomputed, out.changes.len(), log.entries.len());
             }
@@ -496,10 +499,23 @@ impl Engine {
         if anim_full {
             // A full restyle lists no changes: compare the elements with
             // transitions against their styles before it.
+            let snapshotted: HashSet<NodeId> = anim_snapshot.iter().map(|c| c.0).collect();
             for (n, old) in anim_snapshot {
                 let new = page.styles.get(n).cloned();
                 if new.as_ref().map(|s| **s != *old).unwrap_or(true) {
                     anim_changes.push((n, Some(old), new));
+                }
+            }
+            // Elements that only gained transitions in this restyle: their
+            // after-change style decides (CSS Transitions §3).
+            for (n, new) in page.styles.styles.iter().enumerate() {
+                let Some(new) = new.as_ref().filter(|s| !s.transitions.is_empty()) else { continue };
+                if snapshotted.contains(&n) {
+                    continue;
+                }
+                let old = page.anim.base_style(n).or_else(|| previous_styles.get(n).cloned().flatten());
+                if let Some(old) = old.filter(|o| **o != **new) {
+                    anim_changes.push((n, Some(old), Some(new.clone())));
                 }
             }
         }
