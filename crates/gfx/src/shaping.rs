@@ -37,6 +37,26 @@ pub(crate) struct UnitRun {
     pub upem: f32,
 }
 
+/// A rustybuzz face over SFNT bytes it keeps alive.
+pub(crate) struct ShaperFace {
+    // Declared first: dropped before the bytes it borrows.
+    face: rustybuzz::Face<'static>,
+    _data: Rc<Vec<u8>>,
+}
+
+impl ShaperFace {
+    fn new(data: Rc<Vec<u8>>) -> Option<ShaperFace> {
+        // SAFETY: the face borrows the heap buffer of `data`, which is
+        // never mutated, does not move when the `Rc` moves, and lives as
+        // long as this struct (the face field is dropped first).
+        let bytes: &'static [u8] = unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
+        let face = rustybuzz::Face::from_slice(bytes, 0)?;
+        Some(ShaperFace { face, _data: data })
+    }
+}
+
+type PlanKey = (usize, rustybuzz::Direction, Option<rustybuzz::Script>, Option<rustybuzz::Language>, Vec<(u32, u32)>);
+
 /// Per-face data needed by the shaper.
 #[derive(Default)]
 pub(crate) struct ShapingState {
@@ -47,6 +67,12 @@ pub(crate) struct ShapingState {
     cache: RefCell<HashMap<(usize, u8), HashMap<Box<str>, Rc<UnitRun>>>>,
     /// Runs in `cache`.
     cache_len: std::cell::Cell<usize>,
+    /// Parsed shaper faces (their GSUB/GPOS accelerators are costly to
+    /// build), by base face.
+    faces: RefCell<HashMap<usize, Rc<ShaperFace>>>,
+    /// Shape plans by base face, direction, script, language and features
+    /// (building a plan compiles the face's feature lookups).
+    plans: RefCell<HashMap<PlanKey, Rc<rustybuzz::ShapePlan>>>,
     /// Faces that are another face shaped with OpenType features (CSS
     /// `font-feature-settings` / `font-variant-*`): face → (base, features).
     pub(crate) variants: RefCell<HashMap<usize, (usize, Rc<[FontFeature]>)>>,
@@ -366,8 +392,20 @@ impl FontContext {
         if let Some(r) = self.shaping.cache.borrow().get(&key).and_then(|m| m.get(text)) {
             return Some(Rc::clone(r));
         }
-        let (data, _, _) = self.shaping_data(idx)?;
-        let face = rustybuzz::Face::from_slice(&data, 0)?;
+        let base = self.variant_base(idx);
+        let shaper = {
+            let cached = self.shaping.faces.borrow().get(&base).cloned();
+            match cached {
+                Some(f) => f,
+                None => {
+                    let (data, _, _) = self.shaping_data(idx)?;
+                    let f = Rc::new(ShaperFace::new(data)?);
+                    self.shaping.faces.borrow_mut().insert(base, Rc::clone(&f));
+                    f
+                }
+            }
+        };
+        let face = &shaper.face;
         let mut buf = rustybuzz::UnicodeBuffer::new();
         buf.push_str(text);
         buf.guess_segment_properties();
@@ -419,7 +457,26 @@ impl FontContext {
         if features.no_kerning {
             feats.push(rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"kern"), 0, ..));
         }
-        let out = rustybuzz::shape(&face, &feats, buf);
+        // The buffer has no script when it found none (`script()` reports
+        // that as UNKNOWN).
+        let script = Some(buf.script()).filter(|s| *s != rustybuzz::script::UNKNOWN);
+        let plan_key: PlanKey = (base, buf.direction(), script, buf.language(), feats.iter().map(|f| (f.tag.as_u32(), f.value)).collect());
+        let plan = {
+            let cached = self.shaping.plans.borrow().get(&plan_key).cloned();
+            match cached {
+                Some(p) => p,
+                None => {
+                    let p = Rc::new(rustybuzz::ShapePlan::new(face, plan_key.1, plan_key.2, plan_key.3.as_ref(), &feats));
+                    let mut plans = self.shaping.plans.borrow_mut();
+                    if plans.len() > 512 {
+                        plans.clear();
+                    }
+                    plans.insert(plan_key, Rc::clone(&p));
+                    p
+                }
+            }
+        };
+        let out = rustybuzz::shape_with_plan(face, &plan, buf);
         let glyphs = out
             .glyph_infos()
             .iter()
