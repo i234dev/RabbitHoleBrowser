@@ -2966,11 +2966,6 @@ function moveCaretOutOfLinkEdge() {
     if (!link || !link.hasAttribute("href") || !isEditable(link) || !link.parentNode) {
         return;
     }
-    // Only where formatting elements are involved (in or around the link);
-    // otherwise typing continues the link.
-    if (node.parentNode == link && !isHtmlElement(link.parentNode, formattingElementNames)) {
-        return;
-    }
     // Nor right after typing there.
     if (lastTypedPoint && lastTypedPoint[0] == node && lastTypedPoint[1] == offset) {
         return;
@@ -2984,6 +2979,25 @@ function moveCaretOutOfLinkEdge() {
     var atStart = before.toString() == "", atEnd = after.toString() == "";
     if (atStart == atEnd) {
         return;
+    }
+    // A plain link followed (or preceded) by text in its line continues,
+    // unless formatting elements are involved (in or around the link).
+    if (node.parentNode == link && !isHtmlElement(link.parentNode, formattingElementNames)) {
+        var block = link.parentNode;
+        while (block && !isBlockNode(block) && !isEditingHost(block)) {
+            block = block.parentNode;
+        }
+        var rest = document.createRange();
+        if (atEnd) {
+            rest.setStartAfter(link);
+            rest.setEnd(block, block.childNodes.length);
+        } else {
+            rest.setStart(block, 0);
+            rest.setEndBefore(link);
+        }
+        if (/[^\t\n\r ]/.test(rest.toString())) {
+            return;
+        }
     }
     var inside = recordStatesAndValuesOf(node, []);
     var atLink = recordStatesAndValuesOf(link, []);
