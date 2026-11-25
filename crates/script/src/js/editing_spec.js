@@ -2909,6 +2909,17 @@ function splitAncestorsAround(node, top) {
     return branch;
 }
 
+// RabbitHole: editable, or a non-editable inline element in editable
+// content, which block commands move with the line it is in, as other
+// browsers do.
+function isEditableOrInlineIsland(node) {
+    return isEditable(node)
+        || (node.nodeType == Node.ELEMENT_NODE
+            && isInlineNode(node)
+            && node.parentNode
+            && (isEditable(node.parentNode) || isEditingHost(node.parentNode)));
+}
+
 // RabbitHole: whether node starts (or with atEnd, ends) ancestor, ignoring
 // empty Text nodes.
 function isAtEdgeOf(node, ancestor, atEnd) {
@@ -4251,7 +4262,7 @@ function getSelectionListState() {
     // editable; node is not an indentation element; and node is either an ol
     // or ul, or the child of an ol or ul, or an allowed child of "li"."
     var nodeList = getContainedNodes(newRange, function(node) {
-        return isEditable(node)
+        return isEditableOrInlineIsland(node)
             && !isIndentationElement(node)
             && (isHtmlElement(node, ["ol", "ul"])
             || isHtmlElement(node.parentNode, ["ol", "ul"])
@@ -6372,7 +6383,7 @@ function toggleLists(tagName) {
     // parent is an ol or ul, or it is an allowed child of "li"; then append
     // node to node list."
     var nodeList = getContainedNodes(newRange, function(node) {
-        return isEditable(node)
+        return isEditableOrInlineIsland(node)
         && !isIndentationElement(node)
         && (isHtmlElement(node, ["OL", "UL"])
         || isHtmlElement(node.parentNode, ["OL", "UL"])
@@ -6625,7 +6636,7 @@ function justifySelection(alignment) {
     // is editable; node is an allowed child of "div"; and node's alignment
     // value is not alignment."
     nodeList = getContainedNodes(newRange, function(node) {
-        return isEditable(node)
+        return isEditableOrInlineIsland(node)
             && isAllowedChild(node, "div")
             && getAlignmentValue(node) != alignment;
     });
@@ -7203,7 +7214,7 @@ commands.formatblock = {
         // container or an allowed child of "p" or a dd or dt, and node is not
         // the ancestor of a prohibited paragraph child."
         var nodeList = getContainedNodes(newRange, function(node) {
-            return isEditable(node)
+            return isEditableOrInlineIsland(node)
                 && (isNonListSingleLineContainer(node)
                 || isAllowedChild(node, "p")
                 || isHtmlElement(node, ["dd", "dt"]))
@@ -7236,6 +7247,7 @@ commands.formatblock = {
         // "While node list is not empty:"
         while (nodeList.length) {
             var sublist;
+            var attributesFrom = null;
 
             // "If the first member of node list is a single-line
             // container:"
@@ -7244,6 +7256,15 @@ commands.formatblock = {
                 // list."
                 sublist = [].slice.call(nodeList[0].childNodes);
 
+                // RabbitHole: like other browsers, the new element gets the
+                // attributes of a replaced div or p (and with them its
+                // values).
+                if (nodeList[0].attributes.length
+                && isHtmlElement(nodeList[0], ["div", "p"])
+                && sublist.length) {
+                    attributesFrom = nodeList[0];
+                    removePreservingDescendants(nodeList[0]);
+                } else {
                 // "Record the values of sublist, and let values be the
                 // result."
                 var values = recordValues(sublist);
@@ -7254,6 +7275,7 @@ commands.formatblock = {
 
                 // "Restore the values from values."
                 restoreValues(values);
+                }
 
                 // "Remove the first member from node list."
                 nodeList.shift();
@@ -7288,10 +7310,18 @@ commands.formatblock = {
             // createElement(value) on the context object. Then fix disallowed
             // ancestors of the result."
             fixDisallowedAncestors(wrap(sublist,
-                ["div", "p"].indexOf(value) == - 1
+                ["div", "p"].indexOf(value) == - 1 && !attributesFrom
                     ? function(node) { return isHtmlElement(node, value) && !node.attributes.length }
                     : function() { return false },
-                function() { return document.createElement(value) }));
+                function() {
+                    var element = document.createElement(value);
+                    if (attributesFrom) {
+                        for (var i = 0; i < attributesFrom.attributes.length; i++) {
+                            element.setAttribute(attributesFrom.attributes[i].name, attributesFrom.attributes[i].value);
+                        }
+                    }
+                    return element;
+                }));
         }
 
         // "Return true."
@@ -7396,7 +7426,11 @@ commands.formatblock = {
         // lowercase."
         if (isEditable(node)
         && isHtmlElement(node, formattableBlockNames)
-        && !getDescendants(node).some(isProhibitedParagraphChild)) {
+        && !getDescendants(node).some(function(descendant) {
+            // RabbitHole: an xmp or listing element nested in it by
+            // formatBlock (as in other browsers) does not count.
+            return isProhibitedParagraphChild(descendant) && !isHtmlElement(descendant, ["xmp", "listing"]);
+        })) {
             return node.tagName.toLowerCase();
         }
 
@@ -7683,7 +7717,7 @@ commands.indent = {
         // is an allowed child of "div" or "ol" and if the last member of node
         // list (if any) is not an ancestor of node, append node to node list."
         nodeList = getContainedNodes(newRange, function(node) {
-            return isEditable(node)
+            return isEditableOrInlineIsland(node)
                 && (isAllowedChild(node, "div")
                 || isAllowedChild(node, "ol"));
         });

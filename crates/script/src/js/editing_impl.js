@@ -1695,12 +1695,19 @@
     // inside a link splits it; lists inside table cells and sublists keep
     // their boundaries: the implementation above does these as browsers do.
     if (cmd === 'removeformat' || (cmd === 'createlink' && t.range.collapsed)) return false;
+    const el = n => n.nodeType === 1 ? n : n.parentElement;
     if (listCommands.has(cmd)) {
-      const el = n => n.nodeType === 1 ? n : n.parentElement;
       const inCell = n => el(n)?.closest('td,th,caption');
       const nested = n => el(n)?.closest('li')?.parentElement?.closest('li') || el(n)?.closest('li')?.querySelector('ol,ul');
-      if (inCell(t.range.startContainer) || inCell(t.range.endContainer) || nested(t.range.startContainer)) return false;
+      const inTable = el(t.range.commonAncestorContainer)?.closest('table,thead,tbody,tfoot,tr');
+      if (inCell(t.range.startContainer) || inCell(t.range.endContainer) || (inTable && t.host.contains(inTable)) ||
+          nested(t.range.startContainer)) return false;
     }
+    // Formatting the block of an xmp or listing element nests it in the new
+    // block, and text directly in a list is indented with its item, as in
+    // other browsers.
+    if (cmd === 'formatblock' && value && (el(t.range.startContainer)?.closest('xmp,listing') || el(t.range.endContainer)?.closest('xmp,listing'))) return false;
+    if (cmd === 'indent' && t.range.startContainer.nodeType === 3 && /^(ol|ul)$/.test(t.range.startContainer.parentElement?.localName)) return false;
     // Spaces typed before text that preserves white-space end in a
     // nonbreaking space, as the implementation above does.
     if (cmd === 'inserttext' && /^[ \u00a0]+$/.test(value) && t.range.collapsed) {
@@ -1808,7 +1815,27 @@
     if (valueFormats.has(cmd)) return normalizeFormat(cmd, value);
     return null;
   }
+  // Like other browsers, a list command ignores the block where a selection
+  // ends at its start.
+  function excludeEndBlock(t) {
+    const { range, host, sel } = t;
+    if (range.collapsed) return;
+    let block = range.endContainer.nodeType === 1 ? range.endContainer : range.endContainer.parentElement;
+    while (block && block !== host && !isBlock(block)) block = block.parentElement;
+    if (!block || block === host || !host.contains(block) || block.contains(range.startContainer)) return;
+    const before = host.ownerDocument.createRange();
+    before.setStart(block, 0);
+    before.setEnd(range.endContainer, range.endOffset);
+    if (before.toString() !== '' || before.cloneContents().querySelector('img,br,hr,input,iframe,video,canvas,svg')) return;
+    const backward = sel.direction === 'backward';
+    const start = [range.startContainer, range.startOffset];
+    const end = [block.parentNode, Array.prototype.indexOf.call(block.parentNode.childNodes, block)];
+    if (backward) sel.setBaseAndExtent(end[0], end[1], start[0], start[1]);
+    else sel.setBaseAndExtent(start[0], start[1], end[0], end[1]);
+    t.range = sel.getRangeAt(0);
+  }
   function specExecute(doc, state, t, cmd, value) {
+    if (listCommands.has(cmd)) excludeEndBlock(t);
     const name = cmd === 'backcolor' && state.name === 'hilitecolor' ? 'hilitecolor' : cmd;
     const observer = new Observer(() => {});
     observer.observe(doc, { childList: true, subtree: true, characterData: true, attributes: true });
