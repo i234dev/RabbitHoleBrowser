@@ -274,7 +274,10 @@ impl Collector {
     }
 
     fn text(&mut self, text: &str, ws: WhiteSpace, transform: TextTransform, lang: &str) {
-        let text = apply_transform(text, transform, lang);
+        // (Capitalization continues words from the preceding text, which
+        // may come from other elements: "a<span>b</span>c" stays "abc".)
+        let in_word = matches!(self.items.last(), Some(Item::Char(c, false)) if continues_word(*c));
+        let text = apply_transform(text, transform, lang, in_word);
         let collapse_spaces = matches!(ws, WhiteSpace::Normal | WhiteSpace::Nowrap | WhiteSpace::PreLine);
         let collapse_newlines = matches!(ws, WhiteSpace::Normal | WhiteSpace::Nowrap);
         for c in text.chars() {
@@ -293,7 +296,38 @@ impl Collector {
     }
 }
 
-fn apply_transform(text: &str, transform: TextTransform, lang: &str) -> String {
+/// Does a word go on after `c` (for capitalization)? Letters, digits and
+/// the characters that join them inside words (UAX #29 MidLetter,
+/// MidNumLet and ExtendNumLet: apostrophes, periods, colons, underscores)
+/// do; white space and other punctuation (hyphens) start a new word.
+fn continues_word(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '\'' | '\u{2019}' | '.' | ':' | '_' | '\u{b7}' | '\u{2018}' | '\u{2024}' | '\u{fe52}' | '\u{ff07}' | '\u{ff0e}' | '\u{203f}' | '\u{2040}')
+}
+
+/// Unicode titlecase mapping of `c` (the first letter of a capitalized
+/// word): the uppercase mapping except where they differ (Georgian
+/// Mkhedruli has no titlecase form, digraphs and ligatures take only their
+/// first letter capitalized).
+fn titlecase(c: char, out: &mut String) {
+    match c {
+        '\u{10d0}'..='\u{10fa}' | '\u{10fd}'..='\u{10ff}' => out.push(c),
+        '\u{1c4}'..='\u{1c6}' => out.push('\u{1c5}'),
+        '\u{1c7}'..='\u{1c9}' => out.push('\u{1c8}'),
+        '\u{1ca}'..='\u{1cc}' => out.push('\u{1cb}'),
+        '\u{1f1}'..='\u{1f3}' => out.push('\u{1f2}'),
+        '\u{df}' => out.push_str("Ss"),
+        '\u{fb00}' => out.push_str("Ff"),
+        '\u{fb01}' => out.push_str("Fi"),
+        '\u{fb02}' => out.push_str("Fl"),
+        '\u{fb03}' => out.push_str("Ffi"),
+        '\u{fb04}' => out.push_str("Ffl"),
+        '\u{fb05}' | '\u{fb06}' => out.push_str("St"),
+        '\u{587}' => out.push_str("\u{535}\u{582}"),
+        _ => out.extend(c.to_uppercase()),
+    }
+}
+
+fn apply_transform(text: &str, transform: TextTransform, lang: &str, in_word: bool) -> String {
     let turkic = lang == "tr" || lang.starts_with("tr-") || lang == "az" || lang.starts_with("az-");
     match transform {
         TextTransform::None => text.to_string(),
@@ -303,18 +337,14 @@ fn apply_transform(text: &str, transform: TextTransform, lang: &str) -> String {
         TextTransform::Lowercase => text.to_lowercase(),
         TextTransform::Capitalize => {
             let mut out = String::with_capacity(text.len());
-            let mut word_start = true;
+            let mut word_start = !in_word;
             for c in text.chars() {
                 if word_start && c.is_alphanumeric() {
-                    out.extend(c.to_uppercase());
+                    titlecase(c, &mut out);
                     word_start = false;
                 } else {
                     out.push(c);
-                    if c.is_whitespace() {
-                        word_start = true;
-                    } else if c.is_alphanumeric() {
-                        word_start = false;
-                    }
+                    word_start = !continues_word(c);
                 }
             }
             out
@@ -519,8 +549,14 @@ mod tests {
 
     #[test]
     fn text_transform() {
-        assert_eq!(apply_transform("Ma\u{df}", TextTransform::Uppercase, ""), "MASS");
-        assert_eq!(apply_transform("i \u{131}", TextTransform::Uppercase, "tr"), "\u{130} I");
-        assert_eq!(apply_transform("hello world", TextTransform::Capitalize, ""), "Hello World");
+        assert_eq!(apply_transform("Ma\u{df}", TextTransform::Uppercase, "", false), "MASS");
+        assert_eq!(apply_transform("i \u{131}", TextTransform::Uppercase, "tr", false), "\u{130} I");
+        assert_eq!(apply_transform("hello world", TextTransform::Capitalize, "", false), "Hello World");
+        assert_eq!(apply_transform("foo-bar john's foo_bar", TextTransform::Capitalize, "", false), "Foo-Bar John's Foo_bar");
+        // Inside a word begun by the preceding text: unchanged.
+        assert_eq!(apply_transform("bc d", TextTransform::Capitalize, "", true), "bc D");
+        // Titlecase, not uppercase: Mkhedruli stays, digraphs and ß.
+        assert_eq!(apply_transform("\u{10d0} \u{1c6}a \u{df}", TextTransform::Capitalize, "ka", false), "\u{10d0} \u{1c5}a Ss");
+        assert_eq!(apply_transform("\u{10d0}", TextTransform::Uppercase, "ka", false), "\u{1c90}");
     }
 }

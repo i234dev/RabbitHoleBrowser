@@ -27,7 +27,9 @@
 
   // -------------------------------------------------------------- colors
   const NAMED = { black: '000000', white: 'ffffff', red: 'ff0000', green: '008000', blue: '0000ff', yellow: 'ffff00', cyan: '00ffff', aqua: '00ffff', magenta: 'ff00ff', fuchsia: 'ff00ff', gray: '808080', grey: '808080', silver: 'c0c0c0', maroon: '800000', olive: '808000', lime: '00ff00', navy: '000080', purple: '800080', teal: '008080', orange: 'ffa500', pink: 'ffc0cb', brown: 'a52a2a', gold: 'ffd700', indigo: '4b0082', violet: 'ee82ee', coral: 'ff7f50', salmon: 'fa8072', tomato: 'ff6347', crimson: 'dc143c', darkgray: 'a9a9a9', lightgray: 'd3d3d3', darkblue: '00008b', darkred: '8b0000', darkgreen: '006400', lightblue: 'add8e6', lightgreen: '90ee90', beige: 'f5f5dc', khaki: 'f0e68c', turquoise: '40e0d0', chocolate: 'd2691e', tan: 'd2b48c', skyblue: '87ceeb', steelblue: '4682b4', slategray: '708090', whitesmoke: 'f5f5f5', ivory: 'fffff0', lavender: 'e6e6fa', plum: 'dda0dd', orchid: 'da70d6', royalblue: '4169e1', dodgerblue: '1e90ff', firebrick: 'b22222', seagreen: '2e8b57', forestgreen: '228b22', hotpink: 'ff69b4', deeppink: 'ff1493', midnightblue: '191970', darkorange: 'ff8c00', rebeccapurple: '663399' };
-  function parseColor(str) {
+  // `noContext`: no style context (OffscreenCanvas), where colors
+  // depending on one (font-relative lengths) are invalid.
+  function parseColor(str, noContext) {
     let s = String(str).trim().toLowerCase();
     if (s === 'transparent') return [0, 0, 0, 0];
     if (NAMED[s]) s = '#' + NAMED[s];
@@ -55,7 +57,22 @@
       if (out.every((v) => v === v)) return out;
     }
     // Every other CSS color (named, Color 4/5 functions), gamut mapped.
-    return N.canvasColor(s);
+    return N.canvasColor(s, !!noContext);
+  }
+  // Parsed colors by source text: [serialization, rgba] or null. Pages
+  // set the same few colors over and over.
+  const colorCache = new Map();
+  function parseColorCached(v, noContext) {
+    const s = String(v);
+    const key = noContext ? '\u0001' + s : s;
+    let e = colorCache.get(key);
+    if (e === undefined) {
+      const c = parseColor(s, noContext);
+      e = c ? [serializeColor(c), Object.freeze(c)] : null;
+      if (colorCache.size >= 512) colorCache.clear();
+      colorCache.set(key, e);
+    }
+    return e;
   }
   function serializeColor(c) {
     const hex = (v) => v.toString(16).padStart(2, '0');
@@ -70,7 +87,7 @@
     addColorStop(offset, color) {
       offset = +offset;
       if (!(offset >= 0 && offset <= 1)) throw domError(`Failed to execute 'addColorStop' on 'CanvasGradient': The provided value (${offset}) is outside the range (0.0, 1.0).`, 'IndexSizeError');
-      const c = parseColor(color);
+      const c = parseColor(color, this[S].noContext);
       if (!c) throw new SyntaxError(`Failed to execute 'addColorStop' on 'CanvasGradient': The value provided ('${color}') could not be parsed as a color.`);
       const stops = this[S].stops;
       let i = stops.length;
@@ -529,9 +546,9 @@
       N.canvasDrawImage(sf.id, src.data, src.width, src.height, F64([sx, sy, sw, sh]), F64([dx, dy, dw, dh]), F64(st.m), params(this), st.imageSmoothingEnabled);
       markDirty(sf);
     }
-    createLinearGradient(x0, y0, x1, y1) { if (!ok(x0, y0, x1, y1)) throw new TypeError("Failed to execute 'createLinearGradient': The provided double value is non-finite."); const gr = Object.create(CanvasGradient.prototype); hidden(gr, S, { type: 'linear', x0: +x0, y0: +y0, x1: +x1, y1: +y1, stops: [] }); return gr; }
-    createRadialGradient(x0, y0, r0, x1, y1, r1) { if (r0 < 0 || r1 < 0) throw domError(`The ${r0 < 0 ? 'r0' : 'r1'} provided is less than 0.`, 'IndexSizeError'); const gr = Object.create(CanvasGradient.prototype); hidden(gr, S, { type: 'radial', x0: +x0, y0: +y0, r0: +r0, x1: +x1, y1: +y1, r1: +r1, stops: [] }); return gr; }
-    createConicGradient(angle, x, y) { const gr = Object.create(CanvasGradient.prototype); hidden(gr, S, { type: 'conic', angle: +angle, x0: +x, y0: +y, stops: [] }); return gr; }
+    createLinearGradient(x0, y0, x1, y1) { if (!ok(x0, y0, x1, y1)) throw new TypeError("Failed to execute 'createLinearGradient': The provided double value is non-finite."); const gr = Object.create(CanvasGradient.prototype); hidden(gr, S, { type: 'linear', x0: +x0, y0: +y0, x1: +x1, y1: +y1, stops: [], noContext: !this[S].el }); return gr; }
+    createRadialGradient(x0, y0, r0, x1, y1, r1) { if (r0 < 0 || r1 < 0) throw domError(`The ${r0 < 0 ? 'r0' : 'r1'} provided is less than 0.`, 'IndexSizeError'); const gr = Object.create(CanvasGradient.prototype); hidden(gr, S, { type: 'radial', x0: +x0, y0: +y0, r0: +r0, x1: +x1, y1: +y1, r1: +r1, stops: [], noContext: !this[S].el }); return gr; }
+    createConicGradient(angle, x, y) { const gr = Object.create(CanvasGradient.prototype); hidden(gr, S, { type: 'conic', angle: +angle, x0: +x, y0: +y, stops: [], noContext: !this[S].el }); return gr; }
     createPattern(image, repetition) {
       const src = sourcePixels(image);
       if (!src) return null;
@@ -614,7 +631,7 @@
         if (k === 'shadowBlur') { v = +v; if (v >= 0 && isFinite(v)) st[k] = v; return; }
         if (k === 'lineDashOffset' || k === 'shadowOffsetX' || k === 'shadowOffsetY') { v = +v; if (isFinite(v)) st[k] = v; return; }
         if (k === 'imageSmoothingEnabled') { st[k] = !!v; return; }
-        if (k === 'shadowColor') { const c = parseColor(v); if (c) { st[k] = serializeColor(c); st.shadow = c; } return; }
+        if (k === 'shadowColor') { const e = parseColorCached(v, !this[S].el); if (e) { st[k] = e[0]; st.shadow = e[1]; } return; }
         if (k === 'font') { v = String(v).trim(); if (N.canvasValidFont(v)) st[k] = v; return; }
         st[k] = String(v);
       },
@@ -627,8 +644,8 @@
       set(v) {
         const st = this[S].state;
         if (v instanceof CanvasGradient || v instanceof CanvasPattern) { st[k] = v; return; }
-        const c = parseColor(v);
-        if (c) { st[k] = serializeColor(c); st[slot] = c; }
+        const e = parseColorCached(v, !this[S].el);
+        if (e) { st[k] = e[0]; st[slot] = e[1]; }
       },
       configurable: true, enumerable: true,
     });

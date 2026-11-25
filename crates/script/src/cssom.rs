@@ -1431,12 +1431,22 @@ pub(crate) fn editing_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsRe
     })
 }
 
+/// Font-relative length units (CSS Values 4 §6.1).
+fn font_relative_unit(u: &str) -> bool {
+    ["em", "rem", "ex", "rex", "cap", "rcap", "ch", "rch", "ic", "ric", "lh", "rlh"].iter().any(|k| u.eq_ignore_ascii_case(k))
+}
+
 /// A canvas color: `[r, g, b, a]` with sRGB bytes, colors outside sRGB
 /// gamut mapped (CSS Color 4 §13.2); null when invalid.
 pub(crate) fn canvas_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     use rabbithole_style::color_model::{gamut_map_srgb, Spec};
     let text = arg_str(realm, args, 0)?;
     let tokens = rabbithole_css::Tokenizer::tokenize(&text);
+    // Without a style context (OffscreenCanvas), colors depending on one
+    // are invalid: font-relative lengths have nothing to resolve against.
+    if realm.to_boolean(&arg(args, 1)) && tokens.iter().any(|t| matches!(t, Token::Dimension(_, u) if font_relative_unit(u))) {
+        return Ok(Value::Null);
+    }
     let parts = rabbithole_style::values::components(&tokens);
     let [c] = parts.as_slice() else { return Ok(Value::Null) };
     let Some(spec) = Spec::parse(c) else { return Ok(Value::Null) };
