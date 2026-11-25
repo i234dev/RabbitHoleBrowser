@@ -20,9 +20,11 @@ mod imp {
 
     const DEPTH: usize = 48;
     const MAX: usize = 1 << 17;
-    static mut SAMPLES: [[u64; DEPTH]; MAX] = [[0; DEPTH]; MAX];
-    /// CLOCK_REALTIME of each sample in nanoseconds (written to `<file>.times`).
-    static mut TIMES: [u64; MAX] = [0; MAX];
+    /// Sample stacks and their CLOCK_REALTIME in nanoseconds (written to
+    /// `<file>.times`). Allocated only when profiling starts: static arrays
+    /// would reserve ~50 MB of address space in every process.
+    static SAMPLES: AtomicUsize = AtomicUsize::new(0);
+    static TIMES: AtomicUsize = AtomicUsize::new(0);
     static COUNT: AtomicUsize = AtomicUsize::new(0);
     /// Set on every tick; the VM takes a JavaScript-level sample at its
     /// next safe point (`RH_JSPROF`).
@@ -86,6 +88,10 @@ mod imp {
         let greg = |n: usize| unsafe { *(ctx.add(40 + n * 8) as *const u64) };
         JS_PENDING.store(true, Ordering::Relaxed);
         let (rip, mut rbp, rsp) = (greg(16), greg(10), greg(15));
+        let (samples, times) = (SAMPLES.load(Ordering::Acquire) as *mut [u64; DEPTH], TIMES.load(Ordering::Acquire) as *mut u64);
+        if samples.is_null() || times.is_null() {
+            return;
+        }
         let i = COUNT.fetch_add(1, Ordering::Relaxed);
         if i >= MAX {
             return;
@@ -94,7 +100,7 @@ mod imp {
         // SAFETY: async-signal-safe; each index is written once.
         unsafe {
             clock_gettime(0, &mut ts);
-            TIMES[i] = ts.sec as u64 * 1_000_000_000 + ts.nsec as u64;
+            *times.add(i) = ts.sec as u64 * 1_000_000_000 + ts.nsec as u64;
         }
         let mut chain = [0u64; DEPTH];
         chain[0] = rip;
@@ -115,7 +121,7 @@ mod imp {
             rbp = next;
         }
         // SAFETY: each index is written once (atomic counter).
-        unsafe { SAMPLES[i] = chain };
+        unsafe { *samples.add(i) = chain };
     }
 
     extern "C" fn dump() {
@@ -130,11 +136,15 @@ mod imp {
                 timer_settime(wall, 0, &zero, std::ptr::null_mut());
             }
         }
+        let (samples, times) = (SAMPLES.load(Ordering::Acquire) as *const [u64; DEPTH], TIMES.load(Ordering::Acquire) as *const u64);
+        if samples.is_null() || times.is_null() {
+            return;
+        }
         let n = COUNT.load(Ordering::Relaxed).min(MAX);
         let mut out = format!("marker {:x}\n", rh_sampler_marker as *const () as usize);
         for i in 0..n {
             // SAFETY: the timer is stopped.
-            let s = unsafe { SAMPLES[i] };
+            let s = unsafe { *samples.add(i) };
             let line: Vec<String> = s.iter().take_while(|a| **a != 0).map(|a| format!("{:x}", a)).collect();
             out.push_str(&line.join(" "));
             out.push('\n');
@@ -145,14 +155,14 @@ mod imp {
             p.set_extension("maps");
             let _ = std::fs::write(p, maps);
         }
-        let mut times = String::new();
+        let mut times_text = String::new();
         for i in 0..n {
             // SAFETY: the timer is stopped.
-            times.push_str(&format!("{}\n", unsafe { TIMES[i] }));
+            times_text.push_str(&format!("{}\n", unsafe { *times.add(i) }));
         }
         let mut p = std::path::PathBuf::from(&path);
         p.set_extension("times");
-        let _ = std::fs::write(p, times);
+        let _ = std::fs::write(p, times_text);
     }
 
     pub fn start_from_env() {
@@ -160,6 +170,10 @@ mod imp {
             return;
         }
         STARTED.call_once(|| {
+            let samples = Box::leak(vec![[0u64; DEPTH]; MAX].into_boxed_slice());
+            let times = Box::leak(vec![0u64; MAX].into_boxed_slice());
+            SAMPLES.store(samples.as_mut_ptr() as usize, Ordering::Release);
+            TIMES.store(times.as_mut_ptr() as usize, Ordering::Release);
             let act = SigAction { handler: on_prof as *const () as usize, mask: [0; 16], flags: 4 | 0x1000_0000, restorer: 0 };
             // SAFETY: installs a handler that only writes to static storage.
             unsafe {
