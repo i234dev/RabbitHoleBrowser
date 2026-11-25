@@ -117,6 +117,13 @@ pub trait HostEnv {
     }
     /// A canvas bitmap to render for `node` (straight RGBA), or `None`.
     fn set_canvas_image(&mut self, _node: NodeId, _width: u32, _height: u32, _rgba: Option<Vec<u8>>) {}
+    /// Render 2D surface `surface` (`width`×`height`) for `node`; the
+    /// embedder takes its pixels when it shows them
+    /// ([`ScriptHost::canvas_pixels`]). False: not supported (the caller
+    /// hands over the pixels with `set_canvas_image`).
+    fn set_canvas_surface(&mut self, _node: NodeId, _surface: u32, _width: u32, _height: u32) -> bool {
+        false
+    }
     /// The engine's fonts (canvas text); `None` = bundled fonts.
     fn font_context(&mut self) -> Option<std::rc::Rc<rabbithole_gfx::FontContext>> {
         None

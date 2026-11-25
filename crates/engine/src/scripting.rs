@@ -469,7 +469,12 @@ impl HostEnv for EngineEnv<'_> {
     fn image_pixels(&mut self, node: NodeId) -> Option<(u32, u32, Vec<u8>)> {
         self.page.images.get(&node).filter(|img| !img.broken).map(|img| (img.width, img.height, img.pixels().to_vec()))
     }
+    fn set_canvas_surface(&mut self, node: NodeId, surface: u32, width: u32, height: u32) -> bool {
+        crate::present::canvas_surface_shown(self.page, node, surface, width, height);
+        true
+    }
     fn set_canvas_image(&mut self, node: NodeId, width: u32, height: u32, rgba: Option<Vec<u8>>) {
+        self.page.incr.pending_canvases.retain(|c| c.0 != node);
         match rgba {
             Some(rgba) => {
                 self.page.images.insert(node, std::sync::Arc::new(rabbithole_gfx::Image::new(width, height, rgba)));
@@ -1371,6 +1376,10 @@ impl Engine {
             out.relayout = true;
         }
         if !page.frames.children.is_empty() && self.sync_dirty_frames(page) {
+            out.relayout = true;
+        }
+        // A canvas drew something to show.
+        if std::mem::take(&mut page.incr.canvas_drawn) {
             out.relayout = true;
         }
         if self.sync_selection(page) {

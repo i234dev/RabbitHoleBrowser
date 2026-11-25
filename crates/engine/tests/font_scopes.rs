@@ -231,6 +231,7 @@ fn canvas_font_pixels(engine: &Engine, page: &mut Page, font: &str, stroke: bool
     );
     assert_eq!(engine.eval_in_page(page, &code), "true");
     let canvas = page.doc.element_by_id("canvas").unwrap();
+    engine.present(page);
     page.images.get(&canvas).expect("Canvas text pixels").pixels().to_vec()
 }
 

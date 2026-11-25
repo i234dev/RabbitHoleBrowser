@@ -81,6 +81,11 @@ pub struct IncrementalState {
     filtered_svgs: HashSet<NodeId>,
     /// Inline `<svg>` roots rasterized when the page is presented.
     pub(crate) pending_svgs: Vec<crate::present::PendingSvg>,
+    /// Canvases (element, 2D surface) whose drawing is taken when the
+    /// page is presented.
+    pub(crate) pending_canvases: Vec<(NodeId, u32)>,
+    /// A canvas drew since the last script task ended.
+    pub(crate) canvas_drawn: bool,
     /// Inputs of the last layout, to detect changes made behind our back.
     images_seen: HashMap<NodeId, usize>,
     bg_seen: Vec<(String, usize)>,
