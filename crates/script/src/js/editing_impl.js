@@ -1737,13 +1737,6 @@
       const sublist = item && Array.prototype.find.call(item.children, c => c.localName === 'ol' || c.localName === 'ul');
       if (sublist && sublist.compareDocumentPosition(t.range.startContainer) & Node.DOCUMENT_POSITION_FOLLOWING && !sublist.contains(t.range.startContainer)) return false;
     }
-    // Spaces typed before text that preserves white-space end in a
-    // nonbreaking space, as the implementation above does.
-    if (cmd === 'inserttext' && /^[ \u00a0]+$/.test(value) && t.range.collapsed) {
-      const n = t.range.startContainer, o = t.range.startOffset;
-      const next = n.nodeType === 3 ? (o === n.length ? n.nextSibling : null) : n.childNodes[o];
-      if (next?.nodeType === 1 && getComputedStyle(next).whiteSpace !== 'normal' && getComputedStyle(next).whiteSpace !== 'nowrap') return false;
-    }
     // A deletion from a line into a child block keeps the block's first line
     // in it (as in other browsers), which the implementation above does.
     if ((cmd === 'delete' || cmd === 'forwarddelete' || cmd === 'inserttext') && endsInChildBlock(t)) return false;
