@@ -32,6 +32,19 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.2.47 is **1.162× faster than 0.2.46 on Speedometer 3.1** (8 of 8
+paired runs; chart and SVG suites 1.3–1.5×,
+[record](docs/benchmarks/speedometer-2026-11-25-v0.2.47.md)). Child frames,
+inline SVG and canvas 2D are rasterized when the page is presented, not inside
+script work, and canvas 2D records its drawing until pixels are needed. Network
+work leaves the main thread: `navigator.sendBeacon` sends in the background
+with its body, module graphs download in parallel, and the Cache API stores
+bodies as bytes indexed by URL. Text shaping reuses faces and plans, compiled
+page scripts are shared between frames, and ordered lists renumber only after
+a changed item. Loading a large repository page drops from 2.3 s to 0.96 s and
+a long encyclopedia article from 1.6 s to 0.99 s. Web platform and CSS results
+are unchanged from 0.2.46.
+
 Version 0.2.46 completes several areas of the web platform. WPT testharness
 rises to **89.8 %** (1,578,581 / 1,757,120 subtests on 38,226 pages;
 [record](docs/benchmarks/wpt-apis-2026-11-25-v0.2.46.md)): HTML DOM 99.0 %,
