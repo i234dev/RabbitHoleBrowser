@@ -258,6 +258,10 @@ enum Stub {
     /// cache's entry for (shape, `key`), when it holds an own or prototype
     /// record, becomes the record (`rcx`, kind in `r9`) at `checked`.
     MegaGet { from: Label, checked: Label, miss: Label, l: super::layout::Layout, key: u64 },
+    /// `CallR` through `h_call` (packed static operands in `args`).
+    Call { from: Label, pc: usize, args: u64 },
+    /// `ReturnR` through `h_return` (never continues in line).
+    Return { from: Label, slot: u16 },
 }
 
 struct Gen<'a> {
@@ -271,7 +275,12 @@ struct Gen<'a> {
     rc: bool,
     /// Object layout for inline property access ([`super::layout`]).
     lay: Option<super::layout::Layout>,
+    /// Frame and closure layout for native calls and returns.
+    cl: Option<super::layout::CallLayout>,
 }
+
+/// Calls with more arguments than this take `h_call`.
+const MAX_INLINE_ARGS: u16 = 8;
 
 impl Gen<'_> {
     fn lbl(&self, pc: usize) -> Label {
@@ -1191,6 +1200,341 @@ impl Gen<'_> {
         self.release_if_counted(RCX);
     }
 
+    /// `CallR` of a plain closure with native code ([`crate::bytecode::CALL_SIMPLE`]
+    /// code, a scope, this realm): the frame is pushed here exactly as
+    /// `Realm::push_simple_frame` pushes it, and execution continues at the
+    /// callee's native entry without leaving native code. Anything else
+    /// (natives, closures needing a scope object or an `arguments`, code
+    /// without native code, full stacks, a `this` with a reference count)
+    /// takes `slow` (`h_call`). Nothing is written before every check
+    /// passed.
+    fn call_inline(&mut self, pc: usize, b: u16, argc: u16, slow: Label) {
+        use crate::bytecode::{CALL_ARROW, CALL_SIMPLE, CALL_STRICT};
+        let (Some(l), Some(c)) = (self.lay, self.cl) else {
+            self.a.jmp(slow);
+            return;
+        };
+        if !self.rc || argc > MAX_INLINE_ARGS || b as usize + 2 + argc as usize > self.code.frame_size() {
+            self.a.jmp(slow);
+            return;
+        }
+        let a = &mut self.a;
+        let scr = |i: i32| Mem::base(CTX, CTX_SCRATCH + 8 * i);
+        // r8 = realm; native code enabled
+        a.load64(R8, Mem::base(CTX, CTX_REALM));
+        a.test_mi8(Mem::base(R8, c.jit_on), 1);
+        a.jcc(CC_E, slow);
+        // r11 = the callee's id (an object)
+        a.load64(RAX, slot(b));
+        a.mov_rr64(RDX, RAX);
+        a.shr_ri64(RDX, 32);
+        a.alu_ri32(Alu::Cmp, RDX, (TAG_OBJECT >> 32) as u32 as i32);
+        a.jcc(CC_NE, slow);
+        a.alu_rr32(Alu::Or, RAX, RAX);
+        a.mov_rr64(R11, RAX);
+        self.object_at(&l, RAX, RAX, slow);
+        let a = &mut self.a;
+        // a closure: r9 = the `Closure`, r10 = its code
+        if l.tag_niche {
+            a.mov_imm64(RDX, c.fn_tag_value);
+            a.alu_rm64(Alu::Cmp, RDX, Mem::base(RAX, l.scope_tag));
+        } else {
+            a.movzx8(RDX, Mem::base(RAX, l.scope_tag));
+            a.alu_ri32(Alu::Cmp, RDX, c.fn_tag_value as i32);
+        }
+        a.jcc(CC_NE, slow);
+        a.load64(R9, Mem::base(RAX, c.closure_box));
+        a.load64(R10, Mem::base(R9, c.cl_code));
+        a.lea(R10, Mem::base(R10, c.code_adj));
+        a.test_mi8(Mem::base(R10, c.fc_flags), CALL_SIMPLE);
+        a.jcc(CC_E, slow);
+        a.alu_mi64(Alu::Cmp, Mem::base(R10, c.fc_entry), 0);
+        a.jcc(CC_E, slow);
+        a.movzx16(RCX, Mem::base(R10, c.fc_realm));
+        a.movzx16(RDX, Mem::base(R8, c.current_realm));
+        a.alu_rr32(Alu::Cmp, RCX, RDX);
+        a.jcc(CC_NE, slow);
+        a.alu_mi32(Alu::Cmp, Mem::base(R9, c.cl_scope_tag), c.some_id as i32);
+        a.jcc(CC_NE, slow);
+        // rax = this, rcx = new.target
+        let (arrow, strict, obj, have, both) = (a.label(), a.label(), a.label(), a.label(), a.label());
+        a.test_mi8(Mem::base(R10, c.fc_flags), CALL_ARROW);
+        a.jcc(CC_NE, arrow);
+        a.load64(RAX, slot(b + 1));
+        a.test_mi8(Mem::base(R10, c.fc_flags), CALL_STRICT);
+        a.jcc(CC_NE, strict);
+        // sloppy: undefined, null or the hole is the global object
+        a.mov_rr64(RCX, RAX);
+        a.alu_rr64(Alu::Sub, RCX, TAGMIN);
+        a.alu_ri64(Alu::Cmp, RCX, EMPTY);
+        a.jcc(CC_A, obj);
+        a.load32(RAX, Mem::base(R8, c.global));
+        a.mov_imm64(RCX, TAG_OBJECT);
+        a.alu_rr64(Alu::Or, RAX, RCX);
+        a.jmp(have);
+        a.bind(obj);
+        a.mov_rr64(RCX, RAX);
+        a.shr_ri64(RCX, 32);
+        a.alu_ri32(Alu::Cmp, RCX, (TAG_OBJECT >> 32) as u32 as i32);
+        a.jcc(CC_NE, slow);
+        a.jmp(have);
+        // strict: the value itself (the hole reads as undefined)
+        a.bind(strict);
+        let ok = a.label();
+        a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+        a.alu_rr64(Alu::Cmp, RAX, RCX);
+        a.jcc(CC_NE, ok);
+        a.mov_rr64(RAX, TAGMIN);
+        a.bind(ok);
+        a.cmp_rr64(RAX, RCMIN);
+        a.jcc(CC_AE, slow);
+        a.bind(have);
+        a.mov_rr64(RCX, TAGMIN);
+        a.jmp(both);
+        // arrows: the lexical `this` and `new.target` (no lexical `arguments`)
+        a.bind(arrow);
+        let (t1, t2) = (a.label(), a.label());
+        a.alu_mi64(Alu::Cmp, Mem::base(R9, c.cl_args_tag), c.some_value as i32);
+        a.jcc(CC_E, slow);
+        a.mov_rr64(RAX, TAGMIN);
+        a.alu_mi64(Alu::Cmp, Mem::base(R9, c.cl_this_tag), c.some_value as i32);
+        a.jcc(CC_NE, t1);
+        a.load64(RAX, Mem::base(R9, c.cl_this_val));
+        a.bind(t1);
+        a.cmp_rr64(RAX, RCMIN);
+        a.jcc(CC_AE, slow);
+        a.mov_rr64(RCX, TAGMIN);
+        a.alu_mi64(Alu::Cmp, Mem::base(R9, c.cl_nt_tag), c.some_value as i32);
+        a.jcc(CC_NE, t2);
+        a.load64(RCX, Mem::base(R9, c.cl_nt_val));
+        a.bind(t2);
+        a.cmp_rr64(RCX, RCMIN);
+        a.jcc(CC_AE, slow);
+        a.bind(both);
+        a.store64(scr(0), RAX);
+        a.store64(scr(1), RCX);
+        a.load32(RAX, Mem::base(R9, c.cl_scope_id));
+        a.store64(scr(2), RAX);
+        // room for the frame: rcx = frames.len(), rsi = frame size, rdi = base
+        a.load64(RCX, Mem::base(R8, l.frames_len));
+        a.alu_rm64(Alu::Cmp, RCX, Mem::base(R8, c.max_frames));
+        a.jcc(CC_AE, slow);
+        a.alu_rm64(Alu::Cmp, RCX, Mem::base(R8, c.frames_cap));
+        a.jcc(CC_AE, slow);
+        a.load32(RSI, Mem::base(R10, c.fc_nregs));
+        a.alu_rm32(Alu::Add, RSI, Mem::base(R10, c.fc_max_depth));
+        a.jcc(CC_B, slow);
+        a.load64(RDI, Mem::base(R8, c.vs_len));
+        a.lea(RDX, Mem::index(RDI, RSI, 1, 0));
+        a.alu_rm64(Alu::Cmp, RDX, Mem::base(R8, c.vs_cap));
+        a.jcc(CC_A, slow);
+        a.mov_imm64(RAX, u32::MAX as u64);
+        a.cmp_rr64(RDX, RAX);
+        a.jcc(CC_AE, slow);
+        // ---- from here on, the call happens ----
+        // rdx = the new frame's place; the caller resumes after the call
+        a.imul_rri64(RDX, RCX, l.frame_size);
+        a.alu_rm64(Alu::Add, RDX, Mem::base(R8, l.frames_ptr));
+        a.store64_imm(Mem::base(RDX, c.f_pc - l.frame_size), (pc + 1) as i32);
+        // rax = the new slots; the arguments move into the parameters
+        a.load64(RAX, Mem::base(R8, c.vs_ptr));
+        a.lea(RAX, Mem::index(RAX, RDI, 8, 0));
+        a.load64(RCX, Mem::base(R10, c.fc_params));
+        let moved = a.label();
+        for i in 0..argc {
+            a.alu_ri64(Alu::Cmp, RCX, i as i32);
+            a.jcc(CC_BE, moved);
+            a.load64(R9, slot(b + 2 + i));
+            a.store64(Mem::base(RAX, 8 * i as i32), R9);
+            a.store64(slot(b + 2 + i), TAGMIN);
+        }
+        a.bind(moved);
+        // rcx = min(parameters, argc): the remaining slots are undefined
+        let (low, fill, filled) = (a.label(), a.label(), a.label());
+        a.alu_ri64(Alu::Cmp, RCX, argc as i32);
+        a.jcc(CC_BE, low);
+        a.mov_imm32(RCX, argc as u32);
+        a.bind(low);
+        a.bind(fill);
+        a.cmp_rr64(RCX, RSI);
+        a.jcc(CC_AE, filled);
+        a.store64(Mem::index(RAX, RCX, 8, 0), TAGMIN);
+        a.alu_ri64(Alu::Add, RCX, 1);
+        a.jmp(fill);
+        a.bind(filled);
+        a.lea(RCX, Mem::index(RDI, RSI, 1, 0));
+        a.store64(Mem::base(R8, c.vs_len), RCX);
+        // the frame
+        a.store64(Mem::base(RDX, c.f_code), R10);
+        a.store64_imm(Mem::base(RDX, c.f_pc), 0);
+        a.store32(Mem::base(RDX, c.f_base), RDI);
+        a.store32_imm(Mem::base(RDX, c.f_argc), 0);
+        a.load64(RCX, scr(2));
+        a.store32(Mem::base(RDX, c.f_scope), RCX);
+        a.store32_imm(Mem::base(RDX, c.f_scope_depth), 0);
+        a.load64(RCX, scr(0));
+        a.store64(Mem::base(RDX, c.f_this), RCX);
+        a.store32(Mem::base(RDX, c.f_func_id), R11);
+        a.store32_imm(Mem::base(RDX, c.f_func_tag), c.some_id);
+        a.load64(RCX, scr(1));
+        a.store64(Mem::base(RDX, c.f_new_target), RCX);
+        a.store32_imm(Mem::base(RDX, c.f_ret_slot), b as u32);
+        a.store8_imm(Mem::base(RDX, c.f_is_construct), 0);
+        a.store8_imm(Mem::base(RDX, c.f_entry), 0);
+        a.store64_imm(Mem::base(RDX, c.f_extra), 0);
+        a.alu_mi64(Alu::Add, Mem::base(R8, l.frames_len), 1);
+        self.count_switch(&c);
+        let a = &mut self.a;
+        // the callee's context; enter its code at instruction 0
+        a.store64(Mem::base(CTX, CTX_SLOTS), RAX);
+        a.load64(RCX, Mem::base(R10, c.fc_consts));
+        a.store64(Mem::base(CTX, CTX_CONSTS), RCX);
+        a.store64(Mem::base(CTX, CTX_CODE), R10);
+        a.store32_imm(Mem::base(CTX, CTX_PC), 0);
+        a.load64(RAX, Mem::base(R10, c.fc_entry));
+        a.alu_ri64(Alu::Add, RAX, INNER_ENTRY as i32);
+        a.mov_imm32(RSI, 0);
+        a.jmp_r(RAX);
+    }
+
+    /// `ReturnR` from a frame pushed by a plain call (not an entry, not a
+    /// constructor, nothing extra, no counted `this`) to a caller with
+    /// native code in this realm: the frame is popped here as
+    /// `Realm::return_r` pops it and execution continues at the caller's
+    /// resume point. Anything else takes `slow` (`h_return`).
+    fn return_inline(&mut self, s: u16, slow: Label) {
+        let (Some(l), Some(c)) = (self.lay, self.cl) else {
+            self.a.jmp(slow);
+            return;
+        };
+        if !self.rc {
+            self.a.jmp(slow);
+            return;
+        }
+        let fs = l.frame_size;
+        let a = &mut self.a;
+        let scr = |i: i32| Mem::base(CTX, CTX_SCRATCH + 8 * i);
+        a.load64(R8, Mem::base(CTX, CTX_REALM));
+        a.test_mi8(Mem::base(R8, c.jit_on), 1);
+        a.jcc(CC_E, slow);
+        // rdx = the returning frame (the last), with a caller
+        a.load64(RCX, Mem::base(R8, l.frames_len));
+        a.alu_ri64(Alu::Cmp, RCX, 2);
+        a.jcc(CC_B, slow);
+        a.imul_rri64(RDX, RCX, fs);
+        a.alu_rm64(Alu::Add, RDX, Mem::base(R8, l.frames_ptr));
+        a.lea(RDX, Mem::base(RDX, -fs));
+        a.test_mi8(Mem::base(RDX, c.f_entry), 1);
+        a.jcc(CC_NE, slow);
+        a.test_mi8(Mem::base(RDX, c.f_is_construct), 1);
+        a.jcc(CC_NE, slow);
+        a.alu_mi64(Alu::Cmp, Mem::base(RDX, c.f_extra), 0);
+        a.jcc(CC_NE, slow);
+        a.load64(RAX, Mem::base(RDX, c.f_this));
+        a.cmp_rr64(RAX, RCMIN);
+        a.jcc(CC_AE, slow);
+        a.load64(RAX, Mem::base(RDX, c.f_new_target));
+        a.cmp_rr64(RAX, RCMIN);
+        a.jcc(CC_AE, slow);
+        // the caller has native code for this realm
+        a.load64(R10, Mem::base(RDX, c.f_code - fs));
+        a.alu_mi64(Alu::Cmp, Mem::base(R10, c.fc_entry), 0);
+        a.jcc(CC_E, slow);
+        a.movzx16(RCX, Mem::base(R10, c.fc_realm));
+        a.movzx16(RAX, Mem::base(R8, c.current_realm));
+        a.alu_rr32(Alu::Cmp, RCX, RAX);
+        a.jcc(CC_NE, slow);
+        // ---- from here on, the return happens ----
+        // the value (moved out; the hole returns undefined), the caller's slot
+        let v_ok = a.label();
+        a.load64(RAX, slot(s));
+        a.store64(slot(s), TAGMIN);
+        a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+        a.cmp_rr64(RAX, RCX);
+        a.jcc(CC_NE, v_ok);
+        a.mov_rr64(RAX, TAGMIN);
+        a.bind(v_ok);
+        a.store64(scr(0), RAX);
+        a.load32(RAX, Mem::base(RDX, c.f_ret_slot));
+        a.store64(scr(1), RAX);
+        // pop the frame (none of its fields owns anything: checked above)
+        a.alu_mi64(Alu::Sub, Mem::base(R8, l.frames_len), 1);
+        // truncate the value stack to the frame's bottom, releasing values
+        a.load32(RDI, Mem::base(RDX, c.f_base));
+        a.load32(RCX, Mem::base(RDX, c.f_argc));
+        a.alu_rr64(Alu::Sub, RDI, RCX);
+        a.load64(RSI, Mem::base(R8, c.vs_len));
+        a.store64(Mem::base(R8, c.vs_len), RDI);
+        a.load64(RAX, Mem::base(R8, c.vs_ptr));
+        a.lea(RDI, Mem::index(RAX, RDI, 8, 0));
+        a.lea(RSI, Mem::index(RAX, RSI, 8, 0));
+        let (top, done) = (a.label(), a.label());
+        a.bind(top);
+        a.cmp_rr64(RDI, RSI);
+        a.jcc(CC_AE, done);
+        a.load64(RAX, Mem::base(RDI, 0));
+        a.alu_ri64(Alu::Add, RDI, 8);
+        a.cmp_rr64(RAX, RCMIN);
+        a.jcc(CC_B, top);
+        a.mov_rr64(RCX, RAX);
+        a.shl_ri64(RCX, 16);
+        a.shr_ri64(RCX, 16);
+        a.alu_mi64(Alu::Sub, Mem::base(RCX, -16), 1);
+        a.jcc(CC_NE, top);
+        // last reference: restore the count and let Rust free it
+        a.alu_mi64(Alu::Add, Mem::base(RCX, -16), 1);
+        a.store64(scr(2), RDI);
+        a.store64(scr(3), RSI);
+        a.mov_rr64(RDI, RAX);
+        a.call_abs(h_drop as *const () as usize, "h_drop");
+        a.load64(RDI, scr(2));
+        a.load64(RSI, scr(3));
+        a.jmp(top);
+        a.bind(done);
+        // rdx = the caller (now the last frame); rcx = &its receiving slot
+        a.load64(R8, Mem::base(CTX, CTX_REALM));
+        self.count_switch(&c);
+        let a = &mut self.a;
+        a.load64(RCX, Mem::base(R8, l.frames_len));
+        a.imul_rri64(RDX, RCX, fs);
+        a.alu_rm64(Alu::Add, RDX, Mem::base(R8, l.frames_ptr));
+        a.lea(RDX, Mem::base(RDX, -fs));
+        a.load32(RCX, Mem::base(RDX, c.f_base));
+        a.load64(RAX, Mem::base(R8, c.vs_ptr));
+        a.lea(RSI, Mem::index(RAX, RCX, 8, 0));
+        a.store64(Mem::base(CTX, CTX_SLOTS), RSI);
+        a.alu_rm64(Alu::Add, RCX, scr(1));
+        a.lea(RCX, Mem::index(RAX, RCX, 8, 0));
+        a.load64(RAX, scr(0));
+        a.load64(R9, Mem::base(RCX, 0));
+        a.store64(Mem::base(RCX, 0), RAX);
+        // the caller's context
+        a.load64(R10, Mem::base(RDX, c.f_code));
+        a.load64(RCX, Mem::base(R10, c.fc_consts));
+        a.store64(Mem::base(CTX, CTX_CONSTS), RCX);
+        a.store64(Mem::base(CTX, CTX_CODE), R10);
+        a.load64(RSI, Mem::base(RDX, c.f_pc));
+        a.store32(Mem::base(CTX, CTX_PC), RSI);
+        a.load64(RAX, Mem::base(R10, c.fc_entry));
+        a.store64(scr(0), RAX);
+        // release the slot's old value (may call out), then continue there
+        self.release_if_counted(R9);
+        let a = &mut self.a;
+        a.load64(RAX, scr(0));
+        a.alu_ri64(Alu::Add, RAX, INNER_ENTRY as i32);
+        a.load32(RSI, Mem::base(CTX, CTX_PC));
+        a.jmp_r(RAX);
+    }
+
+    /// Count a native frame switch when statistics are on (`r8` = realm).
+    fn count_switch(&mut self, c: &super::layout::CallLayout) {
+        let skip = self.a.label();
+        self.a.test_mi8(Mem::base(R8, c.stats_on), 1);
+        self.a.jcc(CC_E, skip);
+        self.a.alu_mi64(Alu::Add, Mem::base(R8, c.switches), 1);
+        self.a.bind(skip);
+    }
+
     fn emit(&mut self, pc: usize, op: Op) {
         match op {
             Op::Mov(d, s) => self.mov(pc, d, s, true, false),
@@ -1440,10 +1784,9 @@ impl Gen<'_> {
                 // frame switch reloads SLOTS at INNER_ENTRY; every other
                 // outcome exits through the status stub. No old-frame slot
                 // reload or fall-through test is needed here.
-                self.a.mov_rr64(RDI, CTX);
-                self.a.mov_imm32(RSI, slot as u32);
-                self.a.call_abs(h_return as *const () as usize, "h_return");
-                self.a.jmp(self.status);
+                let from = self.a.label();
+                self.stubs.push(Stub::Return { from, slot });
+                self.return_inline(slot, from);
             }
             Op::CallR(..) | Op::NewR(..) => {
                 // The call's safe point precedes both helpers; packing static
@@ -1453,8 +1796,9 @@ impl Gen<'_> {
                 self.a.bind(here);
                 if let Op::CallR(base, argc, ic, _) = op {
                     let args = base as u64 | ((argc as u64) << 16) | ((ic as u64) << 32);
-                    self.a.mov_imm64(RDX, args);
-                    self.call_helper(h_call as *const () as usize, "h_call", pc as u32);
+                    let from = self.a.label();
+                    self.stubs.push(Stub::Call { from, pc, args });
+                    self.call_inline(pc, base, argc, from);
                 } else {
                     self.call_helper(h_new as *const () as usize, "h_new", pc as u32);
                 }
@@ -1531,7 +1875,10 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
     let dispatch_jump = a.pos();
     a.jmp_r(RAX);
 
-    let mut g = Gen { a, code, labels, stubs: Vec::new(), status, rc: super::rc_inline(), lay: if super::rc_inline() { super::layout::get() } else { None } };
+    let rc = super::rc_inline();
+    let lay = if rc { super::layout::get() } else { None };
+    let cl = if lay.is_some() { super::layout::call_layout() } else { None };
+    let mut g = Gen { a, code, labels, stubs: Vec::new(), status, rc, lay, cl };
     for (pc, op) in code.ops.iter().enumerate() {
         g.a.bind(g.labels[pc]);
         if g.a.listing_enabled() {
@@ -1626,6 +1973,20 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
                     g.a.jcc(CC_E, checked);
                 }
                 g.a.jmp(miss);
+            }
+            Stub::Call { from, pc, args } => {
+                g.a.bind(from);
+                g.a.mov_imm64(RDX, args);
+                g.call_helper(h_call as *const () as usize, "h_call", pc as u32);
+                let next = g.lbl(pc + 1);
+                g.a.jmp(next);
+            }
+            Stub::Return { from, slot } => {
+                g.a.bind(from);
+                g.a.mov_rr64(RDI, CTX);
+                g.a.mov_imm32(RSI, slot as u32);
+                g.a.call_abs(h_return as *const () as usize, "h_return");
+                g.a.jmp(g.status);
             }
             Stub::Release { from, reg, resume } => {
                 // Last reference: restore the count and let Rust free it.

@@ -510,6 +510,54 @@ out.join(",")
 }
 
 #[test]
+fn native_calls_and_returns_between_compiled_functions() {
+    // Calls and returns that stay in native code (plain closures with a
+    // scope and native code): `this` binding (sloppy, strict, arrows),
+    // fewer and more arguments than parameters, counted arguments and
+    // return values, the hole, receiver slots of every kind.
+    check(r#"
+        var log = [];
+        function sloppy() { return this === globalThis; }
+        function strict() { 'use strict'; return this; }
+        function pair(a, b) { return [a, b].join('|'); }
+        function many(a, b, c, d, e, f, g, h, i) { return [a, b, c, d, e, f, g, h, i].join(''); }
+        var o = { m: function (x) { return this.k + x; }, k: 'k:' };
+        function outer() {
+            var s = [sloppy(), sloppy.call(null), strict(), strict.call(5), o.m('x')];
+            var arrow = () => this === globalThis;
+            s.push(arrow(), pair(1), pair(1, 2, 3), many(1, 2, 3, 4, 5, 6, 7, 8, 9), many('a'));
+            var str = 'abc', t = '';
+            for (var i = 0; i < 50; i++) t = pair(str + i, t.length);
+            s.push(t);
+            return s.join(',');
+        }
+        outer()
+    "#, "true,true,,5,k:x,true,1|,1|2,123456789,a,abc49|7");
+    // Strict functions called with string receivers (a counted `this`),
+    // returning strings that are the last reference.
+    check(r#"
+        String.prototype.twice = function () { 'use strict'; return this + this; };
+        function f(n) { var r = ''; for (var i = 0; i < n; i++) r = ('x' + i).twice(); return r; }
+        f(30)
+    "#, "x29x29");
+    // Exceptions thrown by a callee entered natively unwind to the
+    // caller's handler; recursion keeps the interpreter's limit.
+    check(r#"
+        function thrower(n) { if (n % 3 === 0) throw new Error('e' + n); return n; }
+        function catcher() { var s = 0, m = ''; for (var i = 0; i < 10; i++) { try { s += thrower(i); } catch (e) { m += e.message; } } return s + m; }
+        catcher()
+    "#, "27e0e3e6e9");
+    same("var d = 0; function r(a, b) { d++; return r(a, b) + 1; } try { r(1, 2) } catch (e) { String(e) + d }");
+    // Closures of one function with different scopes, called from one site.
+    check(r#"
+        function mk(k) { return function (x) { return x + k; }; }
+        var fs = [mk(1), mk(10), mk(100)];
+        function run() { var s = 0; for (var i = 0; i < 30; i++) s += fs[i % 3](i); return s; }
+        run()
+    "#, "1545");
+}
+
+#[test]
 fn calls_with_wide_static_operands_and_return_slots() {
     // Exercise call operands beyond the low byte, rather than only
     // the low byte used by small hand-written functions.

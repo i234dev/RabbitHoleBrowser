@@ -27,6 +27,9 @@ pub(crate) struct Ctx {
     pub code: *const FunctionCode,
     /// Instruction to continue at after [`ST_JUMP`].
     pub pc: u32,
+    /// Spill space of native calls and returns (values kept across a
+    /// helper call, which clobbers every scratch register).
+    pub scratch: [u64; 4],
 }
 
 pub(crate) const CTX_SLOTS: i32 = 0;
@@ -34,6 +37,9 @@ pub(crate) const CTX_CONSTS: i32 = 8;
 pub(crate) const CTX_REALM: i32 = 16;
 pub(crate) const CTX_TICK: i32 = 24;
 pub(crate) const CTX_PC: i32 = 40;
+pub(crate) const CTX_CODE: i32 = 32;
+pub(crate) const CTX_SCRATCH: i32 = 48;
+const _: () = assert!(std::mem::offset_of!(Ctx, code) == CTX_CODE as usize && std::mem::offset_of!(Ctx, pc) == CTX_PC as usize && std::mem::offset_of!(Ctx, scratch) == CTX_SCRATCH as usize && std::mem::offset_of!(Ctx, slots) == CTX_SLOTS as usize && std::mem::offset_of!(Ctx, consts) == CTX_CONSTS as usize && std::mem::offset_of!(Ctx, realm) == CTX_REALM as usize && std::mem::offset_of!(Ctx, tick) == CTX_TICK as usize);
 
 /// Continue with the instruction's continuation in native code.
 pub(crate) const ST_NEXT: usize = 0;
@@ -140,6 +146,7 @@ impl Realm {
                 tick: unsafe { std::ptr::addr_of_mut!((*realm).tick) },
                 code,
                 pc: 0,
+                scratch: [0; 4],
             };
             // SAFETY: `entry` is the native code of `code` (kept alive by
             // the frame's code), entered at an instruction of it; until it

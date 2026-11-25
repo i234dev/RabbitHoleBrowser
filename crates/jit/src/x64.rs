@@ -309,6 +309,26 @@ impl Asm {
         self.d32(v as i32);
         self.note(at, || format!("mov dword {}, {v:#x}", mem_str(m)));
     }
+    /// `mov qword [m], imm32` (sign-extended)
+    pub fn store64_imm(&mut self, m: Mem, v: i32) {
+        let at = self.pos();
+        self.op_mem(None, true, &[0xc7], 0, m);
+        self.d32(v);
+        self.note(at, || format!("mov qword {}, {v:#x}", mem_str(m)));
+    }
+    /// `mov byte [m], imm8`
+    pub fn store8_imm(&mut self, m: Mem, v: u8) {
+        let at = self.pos();
+        self.op_mem(None, false, &[0xc6], 0, m);
+        self.b(v);
+        self.note(at, || format!("mov byte {}, {v:#x}", mem_str(m)));
+    }
+    /// `movzx r32, word [m]`
+    pub fn movzx16(&mut self, r: u8, m: Mem) {
+        let at = self.pos();
+        self.op_mem(None, false, &[0x0f, 0xb7], r, m);
+        self.note(at, || format!("movzx {}, word {}", r32(r), mem_str(m)));
+    }
     pub fn mov_rr64(&mut self, dst: u8, src: u8) {
         let at = self.pos();
         self.op_rr(None, true, &[0x89], src, dst);
@@ -695,5 +715,11 @@ mod tests {
         // imul rax, rdx, 0x100 ; imul r9, r10, 24
         assert_eq!(enc(|a| a.imul_rri64(RAX, RDX, 0x100)), [0x48, 0x69, 0xc2, 0x00, 0x01, 0x00, 0x00]);
         assert_eq!(enc(|a| a.imul_rri64(R9, R10, 24)), [0x4d, 0x69, 0xca, 0x18, 0x00, 0x00, 0x00]);
+        // mov byte [rdx+0x41], 0 ; mov byte [r8+0x10], 1
+        assert_eq!(enc(|a| a.store8_imm(Mem::base(RDX, 0x41), 0)), [0xc6, 0x42, 0x41, 0x00]);
+        assert_eq!(enc(|a| a.store8_imm(Mem::base(R8, 0x10), 1)), [0x41, 0xc6, 0x40, 0x10, 0x01]);
+        // mov qword [rdx+8], 0 ; movzx ecx, word [r10+0x20]
+        assert_eq!(enc(|a| a.store64_imm(Mem::base(RDX, 8), 0)), [0x48, 0xc7, 0x42, 0x08, 0, 0, 0, 0]);
+        assert_eq!(enc(|a| a.movzx16(RCX, Mem::base(R10, 0x20))), [0x41, 0x0f, 0xb7, 0x4a, 0x20]);
     }
 }
