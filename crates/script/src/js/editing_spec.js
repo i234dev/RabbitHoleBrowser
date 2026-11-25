@@ -2733,6 +2733,7 @@ function pushDownValues(node, command, newValue) {
     // parent."
     while (isEditable(currentAncestor)
     && currentAncestor.nodeType == Node.ELEMENT_NODE
+    && !(keepBlockValues && command == "fontsize" && isBlockNode(currentAncestor))
     && !areLooselyEquivalentValues(command, getEffectiveCommandValue(currentAncestor, command), newValue)) {
         ancestorList.push(currentAncestor);
         currentAncestor = currentAncestor.parentNode;
@@ -2854,6 +2855,10 @@ function pushDownValues(node, command, newValue) {
     }
 }
 
+
+// RabbitHole: set while joined blocks get their values back, which leaves the
+// font size of block ancestors alone.
+var keepBlockValues = false;
 
 // RabbitHole: splits the ancestors of node up to top so that node is the
 // only child of each; returns them, node's parent first.
@@ -5539,7 +5544,15 @@ function deleteSelection(flags) {
     }
 
     // "Restore the values from values."
-    restoreValues(values);
+    //
+    // RabbitHole: like other browsers, keeping the font size of the blocks
+    // (see pushDownValues).
+    keepBlockValues = true;
+    try {
+        restoreValues(values);
+    } finally {
+        keepBlockValues = false;
+    }
 
     // "If start block has no children, call createElement("br") on the context
     // object and append the result as the last child of start block."
