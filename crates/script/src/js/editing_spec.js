@@ -2941,6 +2941,111 @@ function isEditableOrInlineIsland(node) {
             && (isEditable(node.parentNode) || isEditingHost(node.parentNode)));
 }
 
+// RabbitHole: moves a collapsed active range in the text at the start or end
+// of the content of an editable link to before or after the link, keeping as
+// overrides the formatting of the elements inside the link there.
+var typingLinkEdgeHandled = false;
+var lastTypedPoint = null;
+function moveCaretOutOfLinkEdge() {
+    var range = getActiveRange();
+    if (!range || !range.collapsed) {
+        return;
+    }
+    var node = range.startContainer, offset = range.startOffset;
+    // A caret in the link element itself (between its children) stays.
+    if (isHtmlElement(node, "a")) {
+        return;
+    }
+    var link = node.nodeType == Node.ELEMENT_NODE ? node : node.parentNode;
+    while (link && !isHtmlElement(link, "a")) {
+        if (isBlockNode(link) || isEditingHost(link)) {
+            return;
+        }
+        link = link.parentNode;
+    }
+    if (!link || !link.hasAttribute("href") || !isEditable(link) || !link.parentNode) {
+        return;
+    }
+    // Only where formatting elements are involved (in or around the link);
+    // otherwise typing continues the link.
+    if (node.parentNode == link && !isHtmlElement(link.parentNode, formattingElementNames)) {
+        return;
+    }
+    // Nor right after typing there.
+    if (lastTypedPoint && lastTypedPoint[0] == node && lastTypedPoint[1] == offset) {
+        return;
+    }
+    var before = document.createRange();
+    before.setStart(link, 0);
+    before.setEnd(node, offset);
+    var after = document.createRange();
+    after.setStart(node, offset);
+    after.setEnd(link, link.childNodes.length);
+    var atStart = before.toString() == "", atEnd = after.toString() == "";
+    if (atStart == atEnd) {
+        return;
+    }
+    var inside = recordStatesAndValuesOf(node, []);
+    var atLink = recordStatesAndValuesOf(link, []);
+    var carried = inside.filter(function(pair, i) {
+        return pair[0] != "createlink" && pair[1] !== atLink[i][1];
+    });
+    var parent = link.parentNode, index = getNodeIndex(link) + (atEnd ? 1 : 0);
+    getSelection().collapse(parent, index);
+    range.setStart(parent, index);
+    range.setEnd(parent, index);
+    carried.forEach(function(pair) {
+        if (typeof pair[1] == "boolean") {
+            setStateOverride(pair[0], pair[1]);
+        } else if (pair[1] !== null) {
+            setValueOverride(pair[0], pair[1]);
+        }
+    });
+}
+
+// RabbitHole: moves the collapsed active range out of the editable inline
+// formatting elements (other than links) around it, splitting them.
+function moveInsertionPointOutOfInlineElements() {
+    var range = getActiveRange();
+    var node = range.startContainer, offset = range.startOffset;
+    if (node.nodeType == Node.TEXT_NODE) {
+        if (!isHtmlElement(node.parentNode, formattingElementNames) || isHtmlElement(node.parentNode, "a")) {
+            return;
+        }
+        if (offset > 0 && offset < node.length) {
+            node.splitText(offset);
+            offset = 1 + getNodeIndex(node);
+        } else {
+            offset = getNodeIndex(node) + (offset ? 1 : 0);
+        }
+        node = node.parentNode;
+    }
+    while (isHtmlElement(node, formattingElementNames)
+    && !isHtmlElement(node, "a")
+    && isEditable(node)
+    && node.parentNode
+    && (isEditable(node.parentNode) || isEditingHost(node.parentNode))) {
+        var parent = node.parentNode, index = getNodeIndex(node);
+        if (offset == 0) {
+            offset = index;
+        } else if (offset >= node.childNodes.length) {
+            offset = index + 1;
+        } else {
+            var clone = node.cloneNode(false);
+            clone.removeAttribute("id");
+            parent.insertBefore(clone, node.nextSibling);
+            while (node.childNodes.length > offset) {
+                clone.insertBefore(node.lastChild, clone.firstChild);
+            }
+            offset = index + 1;
+        }
+        node = parent;
+    }
+    getSelection().collapse(node, offset);
+    range.setStart(node, offset);
+    range.setEnd(node, offset);
+}
+
 // RabbitHole: moves a collapsed active range at the end (or start) of
 // editable inline formatting elements to after (or before) them.
 function moveCaretOutOfInlineEdges() {
@@ -8004,6 +8109,17 @@ commands.inserthtml = {
         // "Let descendants be all descendants of frag."
         var descendants = getDescendants(frag);
 
+        // RabbitHole: like other browsers, content with its own inline
+        // formatting does not take the formatting of the insertion point:
+        // it goes outside (splitting) the inline elements there.
+        var significant = [].filter.call(frag.childNodes, function(node) {
+            return node.nodeType != Node.TEXT_NODE || /[^\t\n\r ]/.test(node.data);
+        });
+        if (significant.length
+        && significant.every(function(node) { return isHtmlElement(node, formattingElementNames) && !isHtmlElement(node, "a") })) {
+            moveInsertionPointOutOfInlineElements();
+        }
+
         // "If the active range's start node is a block node:"
         if (isBlockNode(getActiveRange().startContainer)) {
             // "Let collapsed block props be all editable collapsed block prop
@@ -8658,6 +8774,13 @@ commands.insertparagraph = {
 //@{
 commands.inserttext = {
     action: function(value) {
+        // RabbitHole: like other browsers, text typed at a caret at the start
+        // or end of the text of a link goes outside it (not when it replaces
+        // a selection, or for each code point of the value).
+        if (!typingLinkEdgeHandled && getActiveRange() && getActiveRange().collapsed) {
+            moveCaretOutOfLinkEdge();
+        }
+
         // RabbitHole: a line break right after the selection stays, as in
         // other browsers (see below).
         var keptBreak = null;
@@ -8687,8 +8810,13 @@ commands.inserttext = {
         if (codePoints.length > 1) {
             // "For each element el in value, take the action for the
             // insertText command, with value equal to el."
-            for (var i = 0; i < codePoints.length; i++) {
-                commands.inserttext.action(codePoints[i]);
+            typingLinkEdgeHandled = true;
+            try {
+                for (var i = 0; i < codePoints.length; i++) {
+                    commands.inserttext.action(codePoints[i]);
+                }
+            } finally {
+                typingLinkEdgeHandled = false;
             }
 
             // "Return true."
@@ -8706,6 +8834,7 @@ commands.inserttext = {
             commands.insertparagraph.action();
             return true;
         }
+
 
         // "Let node and offset be the active range's start node and offset."
         var node = getActiveRange().startContainer;
@@ -8823,6 +8952,7 @@ commands.inserttext = {
         // throws, which we don't want.
         try { getSelection().collapseToEnd(); } catch(e) {}
         getActiveRange().collapse(false);
+        lastTypedPoint = [getActiveRange().startContainer, getActiveRange().startOffset];
 
         // "Return true."
         return true;

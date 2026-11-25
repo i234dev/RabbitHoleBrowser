@@ -1380,8 +1380,17 @@
     const range = sel.getRangeAt(0);
     const touchedSpace = /[ \u00a0]/.test(range.toString());
     range.deleteContents();
-    const caret = range.startContainer, offset = range.startOffset;
+    let caret = range.startContainer, offset = range.startOffset;
     if (touchedSpace) rebalanceSpaces(caret,offset,host,true);
+    // A caret left right before a child block is in its first line, as in
+    // other browsers (typing goes there).
+    const following = caret.nodeType === 1 ? caret.childNodes[offset] : null;
+    if (following?.nodeType === 1 && isBlock(following) && following.isContentEditable &&
+        (!caret.childNodes[offset - 1] || caret.childNodes[offset - 1].localName === 'br') &&
+        !['table','hr','ul','ol','dl'].includes(following.localName)) {
+      caret = following;
+      offset = 0;
+    }
     sel.collapse(caret,offset);
     return true;
   }

@@ -652,8 +652,7 @@ impl Engine {
                         let url = Url::parse("about:srcdoc").unwrap_or_else(|| page.url.clone());
                         let base = page.base_url.clone();
                         std::thread::spawn(move || {
-                            let mut l = loader.load_html(&html, url, vp);
-                            l.base_url = base;
+                            let l = loader.load_srcdoc(&html, url, base, vp);
                             let _ = tx.send(Ok(Loaded::Page(l)));
                         });
                     }

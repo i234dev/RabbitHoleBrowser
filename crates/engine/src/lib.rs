@@ -371,18 +371,31 @@ impl Loader {
         self.load_document(doc, url, viewport)
     }
 
+    /// Prepare a page from HTML source of an `iframe srcdoc` document: its
+    /// URL is about:srcdoc and its fallback base URL the parent's, so that
+    /// relative subresource URLs resolve (HTML "fallback base URL").
+    pub fn load_srcdoc(&self, html: &str, url: Url, fallback_base: Url, viewport: Viewport) -> LoadedPage {
+        let doc = rabbithole_html::parse_with_scripting(html, self.load_scripts);
+        self.load_document_with_base(doc, url, Some(fallback_base), viewport)
+    }
+
     /// Prepare a page from a parsed document (HTML or XML).
     pub fn load_document(&self, doc: Document, url: Url, viewport: Viewport) -> LoadedPage {
+        self.load_document_with_base(doc, url, None, viewport)
+    }
+
+    fn load_document_with_base(&self, doc: Document, url: Url, fallback_base: Option<Url>, viewport: Viewport) -> LoadedPage {
         if self.initiator.as_ref() != Some(&url) {
             let bound = Loader { initiator: Some(url.clone()), ..self.clone() };
-            return bound.load_document(doc, url, viewport);
+            return bound.load_document_with_base(doc, url, fallback_base, viewport);
         }
         let title = doc.title().unwrap_or_default();
+        let fallback = fallback_base.unwrap_or_else(|| url.clone());
         let base_url = doc
             .find_element("base")
             .and_then(|b| doc.attr(b, "href"))
-            .and_then(|h| url.join(h))
-            .unwrap_or_else(|| url.clone());
+            .and_then(|h| fallback.join(h))
+            .unwrap_or(fallback);
 
         let debug = std::env::var("RH_DEBUG_FETCH").is_ok();
         let t = std::time::Instant::now();
