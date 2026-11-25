@@ -1088,6 +1088,11 @@ pub fn set_current_color(c: Option<Color>) {
     CURRENT_COLOR.with(|v| v.set(c));
 }
 
+/// The current color while a cascade applies declarations.
+pub fn current_color() -> Option<Color> {
+    CURRENT_COLOR.with(|v| v.get())
+}
+
 /// A color value with `currentcolor` replaced by the current color, when
 /// known.
 pub fn resolve_current(v: ColorValue) -> Option<Color> {
@@ -1115,8 +1120,8 @@ pub fn parse_color_component(c: &[Token]) -> Option<ColorValue> {
                 return crate::color_spaces::relative(&lf, c).map(ColorValue::Color);
             }
             match lf.as_str() {
-                "rgb" | "rgba" => parse_rgb(c).map(ColorValue::Color),
-                "hsl" | "hsla" => parse_hsl(c).map(ColorValue::Color),
+                "rgb" | "rgba" => parse_rgb(c).map(ColorValue::Color).or_else(|| crate::color_spaces::parse_function(&lf, c)),
+                "hsl" | "hsla" => parse_hsl(c).map(ColorValue::Color).or_else(|| crate::color_spaces::parse_function(&lf, c)),
                 other => crate::color_spaces::parse_function(other, c),
             }
         }
@@ -1200,39 +1205,9 @@ fn parse_hsl(c: &[Token]) -> Option<Color> {
     let s = pct(vals[1])?.clamp(0.0, 1.0);
     let l = pct(vals[2])?.clamp(0.0, 1.0);
     let a = alpha_value(alpha)?;
-    let (r, g, b) = hsl_to_rgb(h, s, l);
-    Some(Color::rgba(to_u8(r * 255.0), to_u8(g * 255.0), to_u8(b * 255.0), to_u8(a * 255.0)))
-}
-
-pub(crate) fn hsl_to_rgb_pub(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
-    hsl_to_rgb(h, s, l)
-}
-
-fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
-    let h = h.rem_euclid(360.0) / 360.0;
-    if s == 0.0 {
-        return (l, l, l);
-    }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
-    let p = 2.0 * l - q;
-    let f = |mut t: f32| {
-        if t < 0.0 {
-            t += 1.0;
-        }
-        if t > 1.0 {
-            t -= 1.0;
-        }
-        if t < 1.0 / 6.0 {
-            p + (q - p) * 6.0 * t
-        } else if t < 0.5 {
-            q
-        } else if t < 2.0 / 3.0 {
-            p + (q - p) * (2.0 / 3.0 - t) * 6.0
-        } else {
-            p
-        }
-    };
-    (f(h + 1.0 / 3.0), f(h), f(h - 1.0 / 3.0))
+    let [r, g, b] = crate::color_model::hsl_rgb(f64::from(h), f64::from(s) * 100.0, f64::from(l) * 100.0);
+    let byte = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    Some(Color::rgba(byte(r), byte(g), byte(b), to_u8(a * 255.0)))
 }
 
 /// CSS named colors (lower-case name → RGB).

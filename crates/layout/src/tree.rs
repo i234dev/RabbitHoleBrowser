@@ -86,6 +86,9 @@ pub enum InlineItem {
     Float(usize),
     Absolute(usize),
     Break,
+    /// A line break with `clear` (`<br clear>`): the next line goes below
+    /// the floats on that side.
+    ClearBreak(rabbithole_style::Clear),
 }
 
 /// Emphasis marks over (or under) each typographic character of a text
@@ -273,8 +276,9 @@ pub struct LayoutBox {
     pub marker_text: Option<Rc<str>>,
     /// Baseline offset from `rect.y` (for inline-block alignment), if known.
     pub baseline: Option<f32>,
-    /// The children whose baselines are a flex container's (first, last)
-    /// baselines, set by its layout (CSS Flexbox §8.5).
+    /// The children whose baselines are a flex or grid container's (first,
+    /// last) baselines, set by its layout (CSS Flexbox §8.5, CSS Grid 2
+    /// §10.7).
     /// ([`FLEX_BASELINE_UNSET`] until then, [`FLEX_BASELINE_NONE`] for
     /// none.)
     pub(crate) flex_baselines: [u32; 2],
@@ -342,6 +346,10 @@ pub struct LayoutBox {
     /// Used per-axis subgrid inputs. Computed styles retain the CSS request.
     pub(crate) grid_columns: Option<crate::grid::subgrid::AxisInheritance>,
     pub(crate) grid_rows: Option<crate::grid::subgrid::AxisInheritance>,
+    /// The row baseline-sharing group members of a row subgrid, its own
+    /// items' and its nested row subgrids', for its parent to share its
+    /// groups with them (Grid2 §9). Set by the subgrid's layout.
+    pub(crate) subgrid_baselines: Option<Box<Vec<crate::grid::subgrid::SharedBaseline>>>,
     /// CSSOM data from final layout, in this Grid box's own logical axes.
     pub(crate) used_grid_tracks: [Option<Rc<rabbithole_style::UsedGridTrackList>>; 2],
     /// `position: relative` offset currently applied to the box.
@@ -387,6 +395,14 @@ pub struct LayoutBox {
     pub(crate) wm_background: Option<Rc<ComputedStyle>>,
     /// Ruby layout role: 1 = a base/annotation pair box, 2 = its base.
     pub(crate) ruby: u8,
+    /// A box of a multi-column flow broken across columns: its fragments
+    /// (`rect` is then their union; see `multicol.rs`).
+    pub(crate) col_pieces: Option<Box<crate::multicol::ColPieces>>,
+    /// A multi-column container's column rules (line boxes).
+    pub(crate) col_rules: Option<Box<Vec<Rect>>>,
+    /// A multi-column container broken by an enclosing one: its rows of
+    /// columns, one per fragment of the enclosing flow.
+    pub(crate) col_rows: Option<Box<crate::multicol::ColRows>>,
 }
 
 /// Orientation of a writing-mode wrapper's contents relative to the space
@@ -450,6 +466,7 @@ impl LayoutBox {
             contents_fp: std::cell::Cell::new(None),
             grid_columns: None,
             grid_rows: None,
+            subgrid_baselines: None,
             used_grid_tracks: [None, None],
             rel_applied: (0.0, 0.0),
             reused_layout: false,
@@ -467,7 +484,61 @@ impl LayoutBox {
             motion_transform: std::cell::Cell::new(None),
             wm_kind: WmKind::Cw,
             wm_background: None,
+            col_pieces: None,
+            col_rows: None,
+            col_rules: None,
         }
+    }
+
+    /// The border box of a box broken across columns as if it were not,
+    /// at its first fragment (`None` when unbroken).
+    pub fn unfragmented_rect(&self) -> Option<Rect> {
+        let p = self.col_pieces.as_ref()?;
+        let first = p.pieces.first()?.rect;
+        Some(Rect::new(first.x, first.y, p.border.w, p.border.h))
+    }
+
+    /// The scrolling area size of a box broken across columns, as if it
+    /// were not: its unbroken padding box united with its descendants
+    /// mapped back from their columns into the flow (`None` when unbroken).
+    pub fn unfragmented_scroll_size(&self) -> Option<(f32, f32)> {
+        use rabbithole_style::{Direction, WritingMode};
+        let p = self.col_pieces.as_deref()?;
+        let pad = p.padding;
+        let mut u = (pad.x, pad.y, pad.right(), pad.bottom());
+        fn walk(b: &LayoutBox, pieces: &crate::multicol::ColPieces, u: &mut (f32, f32, f32, f32)) {
+            for c in &b.children {
+                if c.fixed {
+                    continue;
+                }
+                let flow = match &c.col_pieces {
+                    Some(cp) => cp.border,
+                    None => {
+                        let Some(piece) = pieces.pieces.iter().find(|q| q.rect.contains(c.rect.x, c.rect.y)).or(pieces.pieces.first()) else { continue };
+                        c.rect.translate(-piece.dx, -piece.dy)
+                    }
+                };
+                if flow.w > 0.0 || flow.h > 0.0 {
+                    u.0 = u.0.min(flow.x);
+                    u.1 = u.1.min(flow.y);
+                    u.2 = u.2.max(flow.right());
+                    u.3 = u.3.max(flow.bottom());
+                }
+                if !c.clips && c.col_pieces.is_none() {
+                    walk(c, pieces, u);
+                }
+            }
+        }
+        if !self.clips {
+            walk(self, p, &mut u);
+        }
+        let s = &self.style;
+        let vertical = matches!(s.writing_mode, WritingMode::VerticalRl | WritingMode::VerticalLr | WritingMode::SidewaysLr);
+        let from_right = (!vertical && s.direction == Direction::Rtl) || s.writing_mode == WritingMode::VerticalRl;
+        let from_bottom = vertical && s.direction == Direction::Rtl;
+        let w = if from_right { pad.right() - u.0 } else { u.2 - pad.x };
+        let h = if from_bottom { pad.bottom() - u.1 } else { u.3 - pad.y };
+        Some((w.max(pad.w), h.max(pad.h)))
     }
 
     /// Is this an inline-level box (participates in a line)?
@@ -734,6 +805,19 @@ impl LayoutBox {
         self.rect = self.rect.translate(dx, dy);
         self.content_rect = self.content_rect.translate(dx, dy);
         self.static_pos = (self.static_pos.0 + dx, self.static_pos.1 + dy);
+        if let Some(p) = &mut self.col_pieces {
+            p.translate(dx, dy);
+        }
+        if let Some(r) = &mut self.col_rules {
+            for r in r.iter_mut() {
+                *r = r.translate(dx, dy);
+            }
+        }
+        if let Some(rows) = &mut self.col_rows {
+            for r in rows.rows.iter_mut() {
+                r.0 += dy;
+            }
+        }
         if let Some(m) = &mut self.wm_transform {
             // The contents stay in their logical space.
             m[4] += dx;
@@ -764,7 +848,7 @@ impl LayoutBox {
             // lines are in its own, logical, space): one is synthesized.
             return None;
         }
-        if self.formatting == Formatting::Flex && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
+        if matches!(self.formatting, Formatting::Flex | Formatting::Grid) && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
             // An item without a baseline has one synthesized from its
             // border box's bottom edge.
             return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(self.synthesized_baseline_of(c)));
@@ -806,7 +890,7 @@ impl LayoutBox {
         if self.wm_wrapper {
             return None;
         }
-        if self.formatting == Formatting::Flex && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
+        if matches!(self.formatting, Formatting::Flex | Formatting::Grid) && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
             return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(self.synthesized_baseline_of(c)));
         }
         if let Some(l) = self.lines.last() {
@@ -902,6 +986,9 @@ impl LayoutBox {
         if self.style.position == Position::Sticky {
             let _ = write!(out, " sticky");
         }
+        if let Some(p) = &self.col_pieces {
+            let _ = write!(out, " pieces[{}]", p.pieces.iter().map(|p| format!("{:.1},{:.1} {:.1}x{:.1}", p.rect.x, p.rect.y, p.rect.w, p.rect.h)).collect::<Vec<_>>().join("; "));
+        }
         let _ = writeln!(out);
         if let Some(m) = &self.marker {
             let _ = writeln!(out, "{pad}  marker {:?} @ {:.1}", m.text, m.x);
@@ -946,6 +1033,8 @@ pub struct LayoutTree {
     /// Box construction used CSS counters or quotes (document-order
     /// state), so boxes cannot be rebuilt piecemeal.
     pub(crate) uses_counters: bool,
+    /// Some box is broken across columns (computed when first asked).
+    pub(crate) fragmented: std::cell::OnceCell<bool>,
 }
 
 impl LayoutTree {
@@ -964,6 +1053,7 @@ impl LayoutTree {
             viewport: (0.0, 0.0),
             uses_counters: true,
             resolved_anchor_styles: Default::default(),
+            fragmented: Default::default(),
         }
     }
 
@@ -1165,6 +1255,38 @@ impl LayoutTree {
     pub fn box_in_document(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<(&LayoutBox, Rect)> {
         let (b,coordinates) = self.box_and_coordinates(doc,node)?;
         Some((b,physical_rect(coordinates,b.rect)))
+    }
+
+    /// The border boxes of the fragments of `node`'s box when it is broken
+    /// across columns, in document coordinates (`None` when unbroken).
+    pub fn fragment_rects(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<Vec<Rect>> {
+        if !self.has_fragments() {
+            return None;
+        }
+        let (b, coordinates) = self.box_and_coordinates(doc, node)?;
+        let p = b.col_pieces.as_deref()?;
+        Some(p.pieces.iter().map(|p| physical_rect(coordinates, p.rect)).collect())
+    }
+
+    /// Is some box broken across columns?
+    pub fn has_fragments(&self) -> bool {
+        fn any(b: &LayoutBox) -> bool {
+            b.col_pieces.is_some() || b.children.iter().any(any)
+        }
+        *self.fragmented.get_or_init(|| any(&self.root))
+    }
+
+    /// The border box of `node`'s box broken across columns as if it were
+    /// not (its unfragmented size, at its first fragment), which CSSOM
+    /// offset, client and scroll sizes report; `None` when unbroken.
+    pub fn unfragmented_rect(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<Rect> {
+        if !self.has_fragments() {
+            return None;
+        }
+        let (b, coordinates) = self.box_and_coordinates(doc, node)?;
+        let p = b.col_pieces.as_deref()?;
+        let first = p.pieces.first()?.rect;
+        Some(physical_rect(coordinates, Rect::new(first.x, first.y, p.border.w, p.border.h)))
     }
 
     /// The used motion-path transform, including the element's other CSS
@@ -1410,7 +1532,7 @@ pub fn layout_document(ctx: &LayoutContext) -> LayoutTree {
     layouter.layout_document()
 }
 
-fn physical_rect(coordinates: Option<Matrix>, rect: Rect) -> Rect {
+pub(crate) fn physical_rect(coordinates: Option<Matrix>, rect: Rect) -> Rect {
     coordinates.map_or(rect, |matrix| rabbithole_gfx::path::transform_rect_bounds(&matrix, rect))
 }
 

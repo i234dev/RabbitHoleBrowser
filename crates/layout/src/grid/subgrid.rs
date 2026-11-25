@@ -96,6 +96,19 @@ pub(crate) struct SharedTracks {
     pub(super) flipped: bool,
 }
 
+/// A baseline-aligned item of a row subgrid: its path of child indices from
+/// the subgrid, its group (first track of a first-baseline group, last
+/// track of a last-baseline one, in the subgrid's lines), its ascent from
+/// the group's aligned edge, and the shim it is currently placed with.
+#[derive(Clone, Debug)]
+pub(crate) struct SharedBaseline {
+    pub(super) path: Vec<u32>,
+    pub(super) track: usize,
+    pub(super) end: bool,
+    pub(super) ascent: f32,
+    pub(super) shim: f32,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum AxisInheritance {
     Tracks(Arc<SharedTracks>),
@@ -403,6 +416,21 @@ pub(super) fn item_layer_source(mut source:AxisInheritance,item:&GridItem,style:
     source
 }
 
+/// The rows of a standalone axis with a definite size, as known before the
+/// columns are sized: flexible rows divide the free space (with empty
+/// contents) and become fixed, so orthogonal items in them can be measured
+/// against a definite area. Other rows keep their sizing functions.
+pub(super) fn flexible_estimate(rows:&TrackList,block:Option<f32>,gap:f32)->Option<TrackList> {
+    let block=block?;
+    if rows.inherited.is_some()||!rows.tracks.iter().any(|t|t.is_flex()) {return None;}
+    let mut estimate=rows.clone();
+    size_tracks_with_space(&mut estimate.tracks,&[],GridSpace::Definite(block),gap,false);
+    for t in &mut estimate.tracks {
+        if t.is_flex() {let size=t.base;*t=Track::new(Sizing::Fixed(size),Sizing::Fixed(size));t.base=size;t.limit=Some(size);}
+    }
+    Some(estimate)
+}
+
 /// Shared-axis sizing and alignment are ignored, including automatic margins.
 /// The subgrid's margin box must fill exactly the inherited grid area.
 pub(super) fn stretch_item(b:&LayoutBox,it:&mut GridItem) {
@@ -418,13 +446,16 @@ pub(super) fn stretch_item(b:&LayoutBox,it:&mut GridItem) {
 /// of each intrinsic contribution. Compact in place before walking another
 /// subgrid level; hypothetical edge items must not duplicate exponentially.
 pub(super) fn compact_contributions(items:&mut Vec<Contribution>) {
-    items.sort_unstable_by_key(|c|(c.start,c.end));
+    items.sort_unstable_by_key(|c|(c.start,c.end,c.baseline.is_some()));
     let mut write=0;
     for read in 0..items.len() {
         let item=items[read];
-        if write>0&&items[write-1].start==item.start&&items[write-1].end==item.end {
+        // Baseline-aligned items keep their own groups and shims.
+        if write>0&&items[write-1].start==item.start&&items[write-1].end==item.end&&item.baseline.is_none()&&items[write-1].baseline.is_none() {
             items[write-1].min=items[write-1].min.max(item.min);
             items[write-1].max=items[write-1].max.max(item.max);
+            items[write-1].minimum=items[write-1].minimum.max(item.minimum);
+            items[write-1].auto_min&=item.auto_min;
         } else {items[write]=item;write+=1;}
     }
     items.truncate(write);
@@ -439,40 +470,36 @@ pub(super) fn automatic_contributions(budget:&mut WorkBudget,items:Vec<Contribut
     for item in items {
         let span=item.end.saturating_sub(item.start).max(1).min(count);
         let positions=count-span+1;budget.charge(positions);
-        for start in 0..positions {out.push(Contribution{start,end:start+span,min:item.min,max:item.max});}
+        for start in 0..positions {out.push(Contribution{start,end:start+span,..item});}
     }
     compact_contributions(&mut out);out
 }
 
-/// Grid2 §9 accounts for an edge with empty adjacent tracks using a
-/// hypothetical item spanning those tracks. An entirely empty subgrid is a
-/// hypothetical empty item spanning all of its tracks, so its accumulated
-/// margin, border and padding still size them. Real items touching the edge
-/// already carry its layer.
-pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,gap:f32,items:&mut Vec<Contribution>) {
+/// Grid2 §9 edge placeholders: real items spanning an edge track already
+/// carry the subgrid's margin/border/padding layer at that edge. When that
+/// edge track is empty, a hypothetical empty item occupies it alone and
+/// contributes only that layer, so empty interior tracks stay collapsed.
+/// An entirely empty subgrid is a hypothetical empty item spanning all of
+/// its tracks, so its accumulated layers still size them.
+pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,_gap:f32,items:&mut Vec<Contribution>) {
     compact_contributions(items);
     let Some(axis)=shared(b,rows) else {return;};
+    let count=axis.sizes.len();
+    if count==0 {return;}
     let Some(first)=items.iter().map(|c|c.start).min() else {
         let size=(axis.inset_start+axis.inset_end).max(0.);
-        if !axis.sizes.is_empty()&&size>0. {
-            items.push(Contribution{start:0,end:axis.sizes.len(),min:size,max:size});
+        if size>0. {
+            items.push(Contribution{start:0,end:count,min:size,max:size,auto_min:false,minimum:size,baseline:None});
         }
         return;
     };
     let last=items.iter().map(|c|c.end).max().unwrap();
-    let count=items.len();
-    let internal=(gap-axis.gap)*0.5;
-    for i in 0..count {
-        let item=items[i];
-        if first>0&&item.start==first {
-            let delta=axis.inset_start-axis.edge_before[item.start]-internal;
-            items.push(Contribution{start:0,end:item.end,min:item.min+delta,max:item.max+delta});
-        }
-        if last<axis.sizes.len()&&item.end==last {
-            let delta=axis.inset_end-axis.edge_after[item.end-1]-internal;
-            items.push(Contribution{start:item.start,end:axis.sizes.len(),min:item.min+delta,max:item.max+delta});
-        }
-    }
+    let mut placeholder=|start:usize,size:f32| {
+        let size=size.max(0.);
+        if size>0. {items.push(Contribution{start,end:start+1,min:size,max:size,auto_min:false,minimum:size,baseline:None});}
+    };
+    if first>0 {placeholder(0,axis.inset_start);}
+    if last<count {placeholder(count-1,axis.inset_end);}
     compact_contributions(items);
 }
 
@@ -566,6 +593,8 @@ impl<'a> Layouter<'a> {
             let Some(inner)=b.children.first_mut() else {return Vec::new();};
             let inner_inline=shared(inner,false).filter(|axis|axis.definite).map(|axis|(axis.extent()-axis.inset_start-axis.inset_end).max(0.));
             let mut result=self.subgrid_axis_contributions(inner,!rows,inner_inline,phase);
+            // Orthogonal items do not share the parent's baseline groups.
+            for c in &mut result {c.baseline=None;}
             if reverse {for c in &mut result {let start=c.start;c.start=count.saturating_sub(c.end);c.end=count.saturating_sub(start);}}
             return result;
         }
@@ -580,7 +609,8 @@ impl<'a> Layouter<'a> {
         let (items,mut cols,row_tracks)=self.place_items(b,&style,inline_size,block,col_gap,row_gap,0.,0.);
         let flipped=(!rows).then(||shared(b,false)).flatten().filter(|t|t.flipped).map(|t|t.sizes.len());
         let mut result=if !rows {
-            self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase)
+            let estimate=flexible_estimate(&row_tracks,block,row_gap);
+            self.projected_columns(b,&items,&cols,Some(estimate.as_ref().unwrap_or(&row_tracks)),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase)
         } else {
             if cols.inherited.is_none() {
                 let contributions=self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase);
@@ -798,23 +828,23 @@ mod tests {
         let parent=parent();let mut b=child();let mut saved=Vec::new();
         install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
         let mut items=vec![];empty_edge_contributions(&b,false,50.,&mut items);
-        assert_eq!(items,[Contribution{start:0,end:2,min:20.,max:20.}]);
+        assert_eq!(items,[Contribution{start:0,end:2,min:20.,max:20.,auto_min:false,minimum:20.,baseline:None}]);
     }
 
     #[test]
-    fn hypothetical_edge_items_cover_empty_tracks_without_moving_the_real_item() {
+    fn an_empty_edge_track_gets_a_placeholder_with_only_the_edge_layer() {
         let parent=parent();let mut b=child();let mut saved=Vec::new();
         install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
-        let real=Contribution{start:1,end:2,min:30.,max:50.};let mut items=vec![real];
+        let real=Contribution{start:1,end:2,min:30.,max:50.,auto_min:false,minimum:30.,baseline:None};let mut items=vec![real];
         empty_edge_contributions(&b,false,50.,&mut items);
-        assert_eq!(items,[Contribution{start:0,end:2,min:40.,max:60.},real]);
+        assert_eq!(items,[Contribution{start:0,end:1,min:10.,max:10.,auto_min:false,minimum:10.,baseline:None},real]);
     }
 
     #[test]
     fn virtual_items_with_the_same_span_keep_both_independent_maxima() {
-        let mut items=vec![Contribution{start:1,end:3,min:10.,max:100.},Contribution{start:0,end:1,min:5.,max:5.},Contribution{start:1,end:3,min:20.,max:50.}];
+        let mut items=vec![Contribution{start:1,end:3,min:10.,max:100.,auto_min:false,minimum:10.,baseline:None},Contribution{start:0,end:1,min:5.,max:5.,auto_min:false,minimum:5.,baseline:None},Contribution{start:1,end:3,min:20.,max:50.,auto_min:false,minimum:20.,baseline:None}];
         compact_contributions(&mut items);
-        assert_eq!(items,[Contribution{start:0,end:1,min:5.,max:5.},Contribution{start:1,end:3,min:20.,max:100.}]);
+        assert_eq!(items,[Contribution{start:0,end:1,min:5.,max:5.,auto_min:false,minimum:5.,baseline:None},Contribution{start:1,end:3,min:20.,max:100.,auto_min:false,minimum:20.,baseline:None}]);
     }
 
     #[test]
@@ -854,8 +884,8 @@ mod tests {
     #[test]
     fn automatic_parent_positions_ignore_the_subitems_local_placement() {
         let mut budget=WorkBudget::default();
-        let out=automatic_contributions(&mut budget,vec![Contribution{start:1,end:2,min:40.,max:40.}],2);
-        assert_eq!(out,[Contribution{start:0,end:1,min:40.,max:40.},Contribution{start:1,end:2,min:40.,max:40.}]);
+        let out=automatic_contributions(&mut budget,vec![Contribution{start:1,end:2,min:40.,max:40.,auto_min:false,minimum:40.,baseline:None}],2);
+        assert_eq!(out,[Contribution{start:0,end:1,min:40.,max:40.,auto_min:false,minimum:40.,baseline:None},Contribution{start:1,end:2,min:40.,max:40.,auto_min:false,minimum:40.,baseline:None}]);
     }
 
     #[test]

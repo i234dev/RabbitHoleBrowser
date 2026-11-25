@@ -499,7 +499,9 @@ impl<'a> Builder<'a> {
             || matches!(style.display, Display::FlowRoot | Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid)
             // A block container with `align-content` other than normal
             // is an independent formatting context (CSS Align §5.4).
-            || (style.align_content != rabbithole_style::ContentDistribution::Stretch && style.display.is_block_level());
+            || (style.align_content != rabbithole_style::ContentDistribution::Stretch && style.display.is_block_level())
+            // A multi-column container (Multicol 1 §2).
+            || (style.multicol && !matches!(style.display, Display::Inline | Display::Contents));
         let contained = !matches!(style.display, Display::Inline | Display::Contents) && !matches!(tag, "html" | "body");
         b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && (!matches!(tag, "html" | "body") || (tag == "body" && contained_root_or_body));
         if contained && (style.contain_paint || style.contain_layout) {
@@ -522,7 +524,11 @@ impl<'a> Builder<'a> {
         // Form controls get synthesized text content. Generated content
         // (`::before` / `::after`) wraps the element's children; counters
         // created by the children live in this element's scope.
-        self.counters.borrow_mut().enter();
+        if style.contain_style || style.container_size || style.container_inline {
+            self.counters.borrow_mut().enter_contained();
+        } else {
+            self.counters.borrow_mut().enter();
+        }
         // Text fields, text areas and menus show no generated content (like
         // Blink: only buttons, checkboxes and radios render it).
         let no_generated = match tag {
@@ -1475,6 +1481,7 @@ fn flatten_one(mut c: LayoutBox, elem: Option<NodeId>, items: &mut Vec<InlineIte
                 });
             }
         }
+        BoxKind::LineBreak if c.style.clear != rabbithole_style::Clear::None => items.push(InlineItem::ClearBreak(c.style.clear)),
         BoxKind::LineBreak => items.push(InlineItem::Break),
         BoxKind::Inline => {
             let node = c.node;

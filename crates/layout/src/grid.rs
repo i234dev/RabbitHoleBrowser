@@ -25,6 +25,7 @@ mod estimate;
 mod pass;
 mod item_measure;
 mod traversal;
+mod baseline;
 pub(crate) mod subgrid;
 #[cfg(test)]
 mod tests;
@@ -89,6 +90,9 @@ struct Track {
     auto_fit: bool,
     collapsed: bool,
     infinitely_growable: bool,
+    /// A sizing function with percentages of an indefinite size (sized as
+    /// `auto` until the container's size is known).
+    deferred: Option<Box<TrackSize>>,
 }
 
 impl Track {
@@ -101,7 +105,19 @@ impl Track {
             auto_fit: false,
             collapsed: false,
             infinitely_growable: false,
+            deferred: None,
         }
+    }
+
+    /// A track of `size`; percentages of an indefinite `avail` are kept to
+    /// resolve once the container size is known (Grid2 §7.2.1).
+    fn of(size: &TrackSize, avail: Option<f32>) -> Track {
+        let (min, max) = sizing_of(size, avail);
+        let mut t = Track::new(min, max);
+        if avail.is_none() && track_size_has_percent(size) {
+            t.deferred = Some(Box::new(size.clone()));
+        }
+        t
     }
     fn is_flex(&self) -> bool {
         matches!(self.max, Sizing::Flex(_))
@@ -109,6 +125,46 @@ impl Track {
     fn limit_or_base(&self) -> f32 {
         self.limit.unwrap_or(self.base)
     }
+}
+
+/// Where the explicit grid sits among the tracks of the last placement:
+/// the leading implicit tracks and the explicit line counts, which
+/// absolutely positioned children resolve their lines against.
+#[derive(Clone, Copy, Default)]
+struct Placement {
+    row_off: i32,
+    col_off: i32,
+    row_lines: i32,
+    col_lines: i32,
+}
+
+thread_local! {
+    static LAST_PLACEMENT: std::cell::Cell<Placement> = const { std::cell::Cell::new(Placement { row_off: 0, col_off: 0, row_lines: 1, col_lines: 1 }) };
+}
+
+/// Physical horizontal padding and border of an orthogonal item, which its
+/// writing-mode wrapper holds in the item's logical block axis.
+fn wrapped_padding_border(wrapper: &LayoutBox, cbw: f32) -> f32 {
+    wrapper.children.first().map_or(0.0, |r| {
+        let s = &r.style;
+        s.padding.top.resolve_or_zero(cbw) + s.padding.bottom.resolve_or_zero(cbw) + s.border_width.top + s.border_width.bottom
+    })
+}
+
+/// Physical vertical padding and border of an orthogonal item, which its
+/// writing-mode wrapper holds in the item's logical inline axis.
+fn wrapped_padding_border_v(wrapper: &LayoutBox, cbw: f32) -> f32 {
+    wrapper.children.first().map_or(0.0, |r| {
+        let s = &r.style;
+        s.padding.left.resolve_or_zero(cbw) + s.padding.right.resolve_or_zero(cbw) + s.border_width.left + s.border_width.right
+    })
+}
+
+/// Whether an in-flow child has a negative (or possibly negative) margin,
+/// which can pull it over its siblings.
+pub(crate) fn negative_item_margins(b: &LayoutBox) -> bool {
+    let negative = |l: Length| match l { Length::Px(v) => v < 0.0, Length::Percent(p) => p < 0.0, Length::Auto => false, _ => true };
+    b.children.iter().any(|c| c.flow == Flow::InFlow && [c.style.margin.top, c.style.margin.bottom, c.style.margin.left, c.style.margin.right].into_iter().any(negative))
 }
 
 /// Resolved placement of an item: [start, end) track indices per axis.
@@ -125,6 +181,15 @@ struct Contribution {
     end: usize,
     min: f32,
     max: f32,
+    /// `min` is a content-based automatic minimum, which is zero for an
+    /// item spanning flexible tracks among others (§6.6).
+    auto_min: bool,
+    /// The minimum contribution (§6.6), when it differs from `min`.
+    minimum: f32,
+    /// The baseline-sharing group of a baseline-aligned item and the shim
+    /// already included in `min`, `max` and `minimum` (§11.5 step 1).
+    /// Subgrid items keep it so their parent can share its groups.
+    baseline: Option<baseline::BaselineTag>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -178,14 +243,22 @@ fn sizing_of(ts: &TrackSize, avail: Option<f32>) -> (Sizing, Sizing) {
     }
 }
 
+fn track_size_has_percent(ts: &TrackSize) -> bool {
+    match ts {
+        TrackSize::Length(l) | TrackSize::FitContent(l) => l.has_percent(),
+        TrackSize::Calc(..) => true,
+        TrackSize::MinMax(a, b) => track_size_has_percent(a) || track_size_has_percent(b),
+        TrackSize::Fr(_) => false,
+    }
+}
+
 /// Repeat the auto-track pattern after explicitly sized tracks, and backwards
 /// before the explicit grid (§7.6). The track immediately before it has index -1.
 fn auto_track(sizes: &[TrackSize], index: i32, avail: Option<f32>) -> Track {
     let Some(size) = sizes.get(index.rem_euclid(sizes.len().max(1) as i32) as usize) else {
         return Track::new(Sizing::Auto, Sizing::Auto);
     };
-    let (min, max) = sizing_of(size, avail);
-    Track::new(min, max)
+    Track::of(size, avail)
 }
 
 /// Fixed size of a track for `repeat(auto-fill)` computations (§7.2.3.2).
@@ -311,8 +384,7 @@ fn expand_tracks_sized(list: &[TrackListItem], avail: Option<f32>, gap: f32, siz
     let mut names: Vec<Vec<String>> = vec![Vec::new()];
     let push_track = |tracks: &mut Vec<Track>, names: &mut Vec<Vec<String>>, pre: &[String], size: &TrackSize, auto_fit: bool| {
         names.last_mut().unwrap().extend(pre.iter().cloned());
-        let (min, max) = sizing_of(size, avail);
-        let mut t = Track::new(min, max);
+        let mut t = Track::of(size, avail);
         t.auto_fit = auto_fit;
         tracks.push(t);
         names.push(Vec::new());
@@ -831,12 +903,54 @@ fn resolve_intrinsic_tracks(tracks: &mut [Track], contribs: &[Contribution], gap
             }
         }
     }
+    // §12.5 step 4: items spanning several tracks, some flexible, all
+    // together: their contributions grow only the flexible tracks with
+    // intrinsic minimums, in proportion to the flex factors (equally for
+    // the part of a total below one).
+    let crossing: Vec<&Contribution> = sorted.iter().copied().filter(|c| c.end - c.start > 1 && c.end <= tracks.len() && (c.start..c.end).any(|i| tracks[i].is_flex()) && !(c.start..c.end).any(|i| tracks[i].collapsed)).collect();
+    if !crossing.is_empty() {
+        for max_content in [false, true] {
+            planned.iter_mut().for_each(|p| *p = 0.0);
+            for c in &crossing {
+                let affected: Vec<usize> = (c.start..c.end).filter(|&i| {
+                    let t = &tracks[i];
+                    t.is_flex() && if max_content { matches!(t.min, Sizing::MaxContent) } else { t.min.is_intrinsic() }
+                }).collect();
+                if affected.is_empty() {
+                    continue;
+                }
+                let gaps = gap * ((c.end - c.start) as f32 - 1.0);
+                let contribution = if max_content { c.max } else if c.auto_min { 0.0 } else { c.minimum.min(c.min) };
+                let space = contribution - (c.start..c.end).map(|i| tracks[i].base).sum::<f32>() - gaps;
+                if space <= 0.0 {
+                    continue;
+                }
+                let flex = |i: usize| match tracks[i].max { Sizing::Flex(f) => f, _ => 0.0 };
+                let total: f32 = affected.iter().map(|&i| flex(i)).sum();
+                for &i in &affected {
+                    let share = if total >= 1.0 {
+                        space * flex(i) / total
+                    } else {
+                        space * flex(i) + space * (1.0 - total) / affected.len() as f32
+                    };
+                    planned[i] = planned[i].max(share);
+                }
+            }
+            for (i, t) in tracks.iter_mut().enumerate() {
+                if planned[i] > 0.0 {
+                    t.base += planned[i];
+                    if let Some(l) = t.limit {
+                        if l < t.base {
+                            t.limit = Some(t.base);
+                        }
+                    }
+                }
+            }
+        }
+    }
     for t in tracks.iter_mut() {
         t.infinitely_growable = false;
     }
-    // §12.5 step 4 (items spanning flexible tracks) contributes nothing
-    // here: such items' automatic minimum size is zero (§6.6), and the
-    // contributions do not carry an explicit min-width separately.
     for t in tracks.iter_mut() {
         if t.limit.is_none() {
             t.limit = Some(t.base);
@@ -1187,6 +1301,7 @@ impl<'a> Layouter<'a> {
     pub(crate) fn layout_grid(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
         self.grid_layouts += 1;
         if self.grid_publication.enabled() { b.used_grid_tracks = [None, None]; }
+        b.subgrid_baselines = None;
         if b.style.grid_lanes || subgrid::inherits_stacking(b) {
             return self.layout_grid_lanes(b, cb);
         }
@@ -1198,6 +1313,7 @@ impl<'a> Layouter<'a> {
         let row_gap = subgrid::gap(b,true,cb.height.unwrap_or(0.0));
 
         let (mut items, mut cols, mut rows) = self.place_items(b, &style, Some(cbw), cb.height, col_gap, row_gap, content_x, content_y);
+        let placement = LAST_PLACEMENT.with(|p| p.get());
 
         let project=b.children.iter().any(|child|subgrid::requests(child)!=(false,false));
         let col_stretch=stretches_tracks(&style,false);
@@ -1205,6 +1321,7 @@ impl<'a> Layouter<'a> {
         let ordinary_axis_consumer=traversal::ordinary_orthogonal_grid(b);
         let mirror=mirrored(b,&cols);
         let mut row_avail=cb.height;
+        let mut content_height: Option<f32> = None;
         let mut col_pos;
         if ordinary_axis_consumer {
             let spaces=[phases::AvailableSpace::Definite(cbw),cb.height.map(phases::AvailableSpace::Definite).unwrap_or(phases::AvailableSpace::Indefinite)];
@@ -1214,6 +1331,13 @@ impl<'a> Layouter<'a> {
         } else {
             let mut col_contribs=Vec::new();
             let mut row_contribs=Vec::new();
+            // Items whose min-content contribution can change with the
+            // row sizes (percentages of the area's height inside).
+            let pct_h=|c:&LayoutBox|c.style.height.has_percent()||c.style.min_height.has_percent()||c.style.max_height.has_percent();
+            let row_dependent:Vec<usize>=if project||cols.inherited.is_some()||rows.inherited.is_some() {Vec::new()} else {
+                (0..items.len()).filter(|&k|{let c=&b.children[items[k].idx];c.is_in_flow()&&(pct_h(c)||crate::flex::depends_on_definite_height(c))}).collect()
+            };
+            let templates=(!row_dependent.is_empty()).then(||(cols.clone(),rows.clone()));
             // Column sizing.
             if cols.inherited.is_none() {
                 col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw,Some((&cols,col_gap)),Some((&rows,row_gap)))};
@@ -1231,6 +1355,23 @@ impl<'a> Layouter<'a> {
                 // stretched tracks.
                 if cb.height.is_none() && space == GridSpace::MaxContent {
                     row_avail = resize_rows_to_limits(&mut rows.tracks, &row_contribs, &style, cbw, row_gap, row_stretch).or(row_avail);
+                }
+                // Grid2 §7.2.1: percentage rows of an indefinite height
+                // sized the grid as `auto`; they then resolve against the
+                // resulting content height for laying out the items.
+                if cb.height.is_none() && row_avail.is_none() && rows.tracks.iter().any(|t| t.deferred.is_some()) {
+                    let height = subgrid::positions(&rows, row_gap, row_avail, style.align_content).1;
+                    for t in rows.tracks.iter_mut() {
+                        if let Some(size) = t.deferred.take() {
+                            (t.min, t.max) = sizing_of(&size, Some(height));
+                        }
+                        t.base = 0.0;
+                        t.limit = None;
+                        t.infinitely_growable = false;
+                    }
+                    size_tracks_with_space(&mut rows.tracks, &row_contribs, GridSpace::Definite(height), row_gap, row_stretch);
+                    row_avail = Some(height);
+                    content_height = Some(height);
                 }
             }
             // Grid2 §12.1 steps 3-4: at most one adjustment of each axis.
@@ -1252,12 +1393,46 @@ impl<'a> Layouter<'a> {
                     }
                 }
             }
+            // Grid2 §12.1 steps 3-4: once, re-resolve the columns when a
+            // min-content contribution changes with the row sizes, then
+            // the rows with the new columns.
+            if let Some((col_template,row_template))=templates.filter(|_|content_height.is_none()&&!rows.tracks.iter().any(|t|t.deferred.is_some())) {
+                let used_rows=TrackList{tracks:rows.tracks.iter().map(|t|{let mut f=Track::new(Sizing::Fixed(t.base),Sizing::Fixed(t.base));f.base=t.base;f.limit=Some(t.base);f.collapsed=t.collapsed;f}).collect(),names:rows.names.clone(),css_names:rows.css_names.clone(),inherited:None};
+                let mut adjusted=col_contribs.clone();
+                let mut changed=false;
+                for &k in &row_dependent {
+                    let it=&items[k];
+                    let c=self.column_contribution(&mut b.children[it.idx],it,cbw,ItemBases::new(it,Some((&cols,col_gap)),Some((&used_rows,row_gap))));
+                    if let Some(old)=adjusted.get_mut(k) {
+                        if old.min!=c.min {changed=true;}
+                        *old=c;
+                    }
+                }
+                if changed&&adjusted.len()==items.len() {
+                    self.column_baseline_shims(b,&items,&mut adjusted,cbw,Some(&col_template),Some((&used_rows,row_gap)));
+                    cols=col_template;
+                    size_tracks(&mut cols.tracks,&adjusted,Some(cbw),col_gap,col_stretch);
+                    col_pos=subgrid::positions(&cols,col_gap,Some(cbw),style.justify_content).0;
+                    rows=row_template;
+                    row_contribs=self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,&rows,row_gap);
+                    let space=subgrid::standalone_space(b,true,cb.height);
+                    size_tracks_with_space(&mut rows.tracks,&row_contribs,space,row_gap,row_stretch);
+                    if cb.height.is_none() && space == GridSpace::MaxContent {
+                        row_avail = resize_rows_to_limits(&mut rows.tracks, &row_contribs, &style, cbw, row_gap, row_stretch).or(cb.height);
+                    }
+                }
+            }
         }
         let (mut row_pos, rows_extent) = subgrid::positions(&rows, row_gap, row_avail, style.align_content);
+        let rows_extent = content_height.unwrap_or(rows_extent);
         // A percentage row gap of an indefinite height is zero for sizing,
         // then resolves against the resulting height for layout (CSS Align 3 §8.1).
         let row_gap = if cb.height.is_none() && rows.inherited.is_none() && !style.row_gap_normal && matches!(style.row_gap, Length::Percent(_) | Length::Calc(..) | Length::Math(_)) {
-            let used = style.row_gap.resolve_or_zero(rows_extent).max(0.0);
+            // (Against the content height the container takes: the rows'
+            // extent within its definite min-/max-height.)
+            let min_h = definite_height_limit(&style, cbw, false).unwrap_or(0.0);
+            let max_h = definite_height_limit(&style, cbw, true).unwrap_or(f32::INFINITY);
+            let used = style.row_gap.resolve_or_zero(rows_extent.min(max_h).max(min_h)).max(0.0);
             if used != row_gap {
                 row_pos = subgrid::positions(&rows, used, row_avail, style.align_content).0;
             }
@@ -1296,19 +1471,11 @@ impl<'a> Layouter<'a> {
                 it.justify=justify;it.align=align;it.edges.auto=auto;
             });
         }
-        // Baseline self-alignment (§10.6): items aligned `baseline` that
-        // start in the same row line up their first baselines.
-        let mut rows_seen: Vec<i32> = items.iter().filter(|it| it.align == ItemAlign::Baseline).map(|it| it.area.row.0).collect();
-        rows_seen.sort_unstable();
-        rows_seen.dedup();
-        for row in rows_seen {
-            let group: Vec<usize> = items.iter().filter(|it| it.align == ItemAlign::Baseline && it.area.row.0 == row).map(|it| it.idx).collect();
-            let bls: Vec<f32> = group.iter().map(|&i| Self::item_baseline(&b.children[i])).collect();
-            let max = bls.iter().cloned().fold(f32::MIN, f32::max);
-            for (k, &i) in group.iter().enumerate() {
-                b.children[i].translate(0.0, max - bls[k]);
-            }
+        // Baseline self-alignment (§10.6).
+        if items.iter().any(|it| baseline::participates(it, true) || baseline::participates(it, false) || b.children[it.idx].subgrid_baselines.is_some()) {
+            self.align_item_baselines(b, &items, (&cols.tracks, &col_pos), (&rows.tracks, &row_pos), (content_x, content_y), mirror, &[true, false]);
         }
+        b.flex_baselines = baseline::container_baselines(&style, &items, &b.children);
 
         // Absolutely positioned children: with a positioned grid container
         // the grid area of their line placement is the containing block
@@ -1321,23 +1488,26 @@ impl<'a> Layouter<'a> {
             let content_h = cb.height.unwrap_or(rows_extent);
             let (px0, px1) = (content_x - pad.left, content_x + cbw + pad.right);
             let (py0, py1) = (content_y - pad.top, content_y + content_h + pad.bottom);
-            let line_x = |pos: &[f32], tracks: &[Track], i: i32| -> f32 {
+            // A line's position as a start edge (after any gutter before it)
+            // or as an end edge (before the gutter after the previous track).
+            let line_x = |pos: &[f32], tracks: &[Track], i: i32, end: bool| -> f32 {
                 if tracks.is_empty() {
                     return 0.0;
                 }
                 let i = i.clamp(0, tracks.len() as i32) as usize;
-                if i < tracks.len() {
-                    pos[i]
+                if (end && i > 0) || i == tracks.len() {
+                    pos[i - 1] + tracks[i - 1].base
                 } else {
-                    pos[tracks.len() - 1] + tracks[tracks.len() - 1].base
+                    pos[i]
                 }
             };
-            let n_cols = cols.tracks.len() as i32 + 1;
-            let n_rows = rows.tracks.len() as i32 + 1;
             let rtl = mirror;
             // The grid area of a line placement (None when all lines are auto).
             let area_of = |s: &ComputedStyle| -> Option<Rect> {
-                let axis = |start: &rabbithole_style::GridLine, end: &rabbithole_style::GridLine, names: &[Vec<String>], n: i32| -> (Option<i32>, Option<i32>) {
+                // Lines resolve against the explicit grid, which starts after
+                // the leading implicit tracks.
+                let axis = |start: &rabbithole_style::GridLine, end: &rabbithole_style::GridLine, names: &[Vec<String>], off: i32, n: i32| -> (Option<i32>, Option<i32>) {
+                    let names = &names[(off.max(0) as usize).min(names.len())..];
                     let (start, end) = line_specs(start, end, names, n);
                     let a = match start {
                         LineSpec::Line(l) => Some(l),
@@ -1352,26 +1522,35 @@ impl<'a> Layouter<'a> {
                         (None, LineSpec::Span(k)) => e.map(|e| e - k),
                         (a, _) => a,
                     };
-                    (a, e)
+                    // Reversed lines swap; an end line equal to the start
+                    // line is removed (§8.3.1), leaving it auto.
+                    let (a, e) = match (a, e) {
+                        (Some(x), Some(y)) if y < x => (Some(y), Some(x)),
+                        (Some(x), Some(y)) if y == x => (Some(x), None),
+                        other => other,
+                    };
+                    (a.map(|l| l + off), e.map(|l| l + off))
                 };
                 // Lines outside the grid are auto for absolutely positioned
                 // boxes (§9.1): the padding edge.
+                let n_cols = cols.tracks.len() as i32 + 1;
+                let n_rows = rows.tracks.len() as i32 + 1;
                 let inside = |n: i32| move |l: &i32| (0..n).contains(l);
-                let (c0, c1) = axis(&s.grid_column_start, &s.grid_column_end, &cols.names, n_cols);
-                let (r0, r1) = axis(&s.grid_row_start, &s.grid_row_end, &rows.names, n_rows);
+                let (c0, c1) = axis(&s.grid_column_start, &s.grid_column_end, &cols.names, placement.col_off, placement.col_lines);
+                let (r0, r1) = axis(&s.grid_row_start, &s.grid_row_end, &rows.names, placement.row_off, placement.row_lines);
                 let (c0, c1, r0, r1) = (c0.filter(inside(n_cols)), c1.filter(inside(n_cols)), r0.filter(inside(n_rows)), r1.filter(inside(n_rows)));
                 if c0.is_none() && c1.is_none() && r0.is_none() && r1.is_none() {
                     return None;
                 }
                 let (x0, x1) = if mirror {
-                    let x = |l| content_x + cbw - line_x(&col_pos, &cols.tracks, l);
-                    (c1.map(x).unwrap_or(px0), c0.map(x).unwrap_or(px1))
+                    let x = |l, end| content_x + cbw - line_x(&col_pos, &cols.tracks, l, end);
+                    (c1.map(|l| x(l, true)).unwrap_or(px0), c0.map(|l| x(l, false)).unwrap_or(px1))
                 } else {
-                    let x = |l| content_x + line_x(&col_pos, &cols.tracks, l);
-                    (c0.map(x).unwrap_or(px0), c1.map(x).unwrap_or(px1))
+                    let x = |l, end| content_x + line_x(&col_pos, &cols.tracks, l, end);
+                    (c0.map(|l| x(l, false)).unwrap_or(px0), c1.map(|l| x(l, true)).unwrap_or(px1))
                 };
-                let y0 = r0.map(|l| content_y + line_x(&row_pos, &rows.tracks, l)).unwrap_or(py0);
-                let y1 = r1.map(|l| content_y + line_x(&row_pos, &rows.tracks, l)).unwrap_or(py1);
+                let y0 = r0.map(|l| content_y + line_x(&row_pos, &rows.tracks, l, false)).unwrap_or(py0);
+                let y1 = r1.map(|l| content_y + line_x(&row_pos, &rows.tracks, l, true)).unwrap_or(py1);
                 Some(Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)))
             };
             for c in b.children.iter_mut() {
@@ -1382,8 +1561,14 @@ impl<'a> Layouter<'a> {
                     static_align_factor(c.style.justify_self, c.style.justify_self_flags, style.justify_items, style.justify_items_flags, rtl, c.style.direction == rabbithole_style::Direction::Rtl),
                     static_align_factor(c.style.align_self, c.style.align_self_flags, style.align_items, style.align_items_flags, false, false),
                 );
-                let content = (content_x, content_y, cbw, content_h);
-                let area = c.abs_node().filter(|_| positioned).and_then(|node| area_of(&c.style).map(|area| (node, area)));
+                // With the grid as containing block, auto lines are the
+                // padding edges (§9.1); otherwise the static position is
+                // the content box's.
+                // (A fixed box's containing block is this grid only when
+                // the grid establishes one for fixed boxes.)
+                let cb_here = positioned && (c.style.position != rabbithole_style::Position::Fixed || style.establishes_fixed_containing_block());
+                let content = if cb_here { (px0, py0, px1 - px0, py1 - py0) } else { (content_x, content_y, cbw, content_h) };
+                let area = c.abs_node().filter(|_| cb_here).and_then(|node| area_of(&c.style).map(|area| (node, area)));
                 let Some((node, area)) = area else {
                     c.static_pos = (content.0, content.1);
                     c.static_align = Some(crate::tree::StaticAlign { size: (content.2, content.3), factor });
@@ -1725,13 +1910,47 @@ impl<'a> Layouter<'a> {
         for (k, p) in pending.iter().enumerate() {
             let area = placed[k].unwrap_or(Area { row: (0, 1), col: (0, 1) });
             let cs = b.children[p.idx].style.clone();
-            let justify = match cs.justify_self {
-                ItemAlign::Auto => justify_for_pass(style.justify_items, style.justify_items_flags, cs.direction == rabbithole_style::Direction::Rtl, mirror),
-                a => justify_for_pass(a, cs.justify_self_flags, cs.direction == rabbithole_style::Direction::Rtl, mirror),
+            // `self-start`/`self-end` use the item's own start side in each
+            // physical axis: its inline or block start, by writing mode.
+            // (Containers with a vertical writing mode are laid out in their
+            // own logical coordinates, where only the direction counts.)
+            // An orthogonal item's own mode is that of the box its
+            // writing-mode wrapper holds.
+            use rabbithole_style::WritingMode as Wm;
+            let own = b.children[p.idx].children.first().filter(|_| b.children[p.idx].wm_wrapper).map_or(&cs, |inner| &inner.style);
+            let item_rtl = own.direction == rabbithole_style::Direction::Rtl;
+            // The item's start sides, physically: (right, bottom).
+            let (x_right, y_bottom) = match own.writing_mode {
+                Wm::HorizontalTb => (item_rtl, false),
+                Wm::VerticalRl => (true, item_rtl),
+                Wm::VerticalLr => (false, item_rtl),
+                Wm::SidewaysLr => (false, !item_rtl),
             };
-            let align = match cs.align_self {
-                ItemAlign::Auto => style.align_items,
-                a => a,
+            // ... at the logical ends of the container's axes: its inline
+            // axis runs down a vertical container, its block axis right
+            // (`vertical-lr`, `sideways-lr`) or left (`vertical-rl`).
+            let (start_right, start_bottom) = match style.writing_mode {
+                Wm::HorizontalTb => (x_right, y_bottom),
+                Wm::VerticalLr => (y_bottom, x_right),
+                Wm::VerticalRl => (y_bottom, !x_right),
+                Wm::SidewaysLr => (!y_bottom, x_right),
+            };
+            let justify = match cs.justify_self {
+                ItemAlign::Auto => justify_for_pass(style.justify_items, style.justify_items_flags, start_right, mirror),
+                a => justify_for_pass(a, cs.justify_self_flags, start_right, mirror),
+            };
+            let (align, align_flags) = match cs.align_self {
+                ItemAlign::Auto => (style.align_items, style.align_items_flags),
+                a => (a, cs.align_self_flags),
+            };
+            let align = if start_bottom && align_flags.has(rabbithole_style::AlignFlags::SELF) {
+                match align {
+                    ItemAlign::FlexStart => ItemAlign::FlexEnd,
+                    ItemAlign::FlexEnd => ItemAlign::FlexStart,
+                    a => a,
+                }
+            } else {
+                align
             };
             let mut item=GridItem {
                 idx: p.idx,
@@ -1746,12 +1965,15 @@ impl<'a> Layouter<'a> {
             subgrid::item_edges(b,&mut item,col_gap,row_gap);
             items.push(item);
         }
+        LAST_PLACEMENT.with(|p| p.set(Placement { row_off, col_off, row_lines: n_row_lines, col_lines: n_col_lines }));
         (items, cols, rows)
     }
 
     /// Column contributions: min-/max-content widths incl. margins/padding/border.
     fn column_contributions(&mut self,b:&mut LayoutBox,items:&[GridItem],cbw:f32,cols:Option<(&TrackList,f32)>,rows:Option<(&TrackList,f32)>)->Vec<Contribution> {
-        items.iter().map(|it|self.column_contribution(&mut b.children[it.idx],it,cbw,ItemBases::new(it,cols,rows))).collect()
+        let mut out:Vec<Contribution>=items.iter().map(|it|self.column_contribution(&mut b.children[it.idx],it,cbw,ItemBases::new(it,cols,rows))).collect();
+        self.column_baseline_shims(b,items,&mut out,cbw,cols.map(|c|c.0),rows);
+        out
     }
 
     /// Shared-axis items are empty for this sizing pass: their descendants
@@ -1760,6 +1982,7 @@ impl<'a> Layouter<'a> {
     fn projected_columns(&mut self,b:&mut LayoutBox,items:&[GridItem],cols:&TrackList,rows:Option<&TrackList>,col_gap:f32,row_gap:f32,cbw:f32,geometry:GridGeometry,phase:MeasurePhase)->Vec<Contribution> {
         let _probe = self.grid_publication.probe_grid();
         let style=b.style.clone();
+        let lanes=style.grid_lanes||subgrid::inherits_stacking(b);
         let mut out=Vec::new();
         for it in items {
             let child=&mut b.children[it.idx];
@@ -1775,7 +1998,8 @@ impl<'a> Layouter<'a> {
             let item=subgrid::rebase_item(it,&child.style,cbw,reference);let it=&item;
             let row_source=if !row_request {None} else {rows.map_or(Some(subgrid::AxisInheritance::Stacking),|rows| {
                 self.grid_work.tracks(rows);
-                if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,geometry.block,style.align_content)}
+                // Rows of unknown sizes still give the span and line names.
+                if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,geometry.block,style.align_content).or_else(||(!lanes).then(||subgrid::sizing_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,geometry.block,style.align_content)))}
                 else {let (positions,_)=subgrid::positions(rows,row_gap,geometry.block,style.align_content);Some(subgrid::section(rows,&positions,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names))}
             })};
             if column_request {
@@ -1794,6 +2018,8 @@ impl<'a> Layouter<'a> {
                 out.extend(self.column_contributions(b,std::slice::from_ref(it),cbw,Some((cols,col_gap)),rows.map(|r|(r,row_gap))));
             }
         }
+        // (Only when every item contributed exactly once.)
+        self.column_baseline_shims(b,items,&mut out,cbw,Some(cols),rows.map(|r|(r,row_gap)));
         out
     }
 
@@ -1815,11 +2041,19 @@ impl<'a> Layouter<'a> {
             _=>None,
         };
         let (min,max)=match resolve_size(child.style.width,Some(cbw),bb,it.edges.pb_h) {
+            Some(w) if !pct(child.style.width)&&child.wm_wrapper&&!bb&&it.edges.pb_h==0. =>{let w=w+wrapped_padding_border(child,cbw);(w,w)},
             Some(w) if !pct(child.style.width)=>(w,w),
             _ if ratio_width.is_some()=>{let w=ratio_width.unwrap_or(0.);(w,w)},
             // A percentage of the (still indefinite) grid area behaves as auto.
-            _ if child.kind==BoxKind::Image=>{let cyclic=pct(child.style.width);let(w,_)=self.replaced_size(child,(!cyclic).then_some(cbw),bases.row_basis,it.edges.pb_h);(w,w)},
-            _=>{let(min,max)=self.intrinsic(child);match child.style.width {Length::MinContent=>(min,min),Length::MaxContent=>(max,max),_=>(min,max)}}
+            // A compressible replaced item with a cyclic percentage width has
+            // a zero min-content contribution (CSS Sizing 3 §5.2.2).
+            _ if child.kind==BoxKind::Image=>{let cyclic=pct(child.style.width);let(w,_)=self.replaced_size(child,(!cyclic).then_some(cbw),bases.row_basis,it.edges.pb_h);(if cyclic {0.} else {w},w)},
+            // Percentage heights inside resolve against fixed rows of the
+            // area (Grid2 §12.3, contributions with the rows' sizes).
+            // An orthogonal item takes the definite height of its rows as
+            // its available inline size (CSS Writing Modes 3 §7.3).
+            _ if child.wm_wrapper&&bases.row_basis.is_some()=>self.wm_wrapper_intrinsic_in(child,bases.row_basis),
+            _=>{let(min,max)=if bases.row_basis.is_some() {self.intrinsic_in(child,bases.row_basis)} else {self.intrinsic(child)};match child.style.width {Length::MinContent=>(min,min),Length::MaxContent=>(max,max),_=>(min,max)}}
         };
         let min=match child.style.min_width {
             Length::Px(m) if child.kind!=BoxKind::Image=>if bb {(m-it.edges.pb_h).max(0.).min(min)} else {m.min(min)},
@@ -1828,7 +2062,8 @@ impl<'a> Layouter<'a> {
             Length::Auto if child.style.width.is_auto()||pct(child.style.width)=>match bases.min_limit {Some(limit)=>min.min((limit-extras).max(0.)),None=>min},
             _=>min,
         };
-        Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras}
+        let auto_min=child.kind!=BoxKind::Image&&child.style.min_width.is_auto()&&(child.style.width.is_auto()||pct(child.style.width))&&ratio_width.is_none();
+        Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras,auto_min,minimum:min+extras,baseline:None}
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1855,10 +2090,16 @@ impl<'a> Layouter<'a> {
                 let inner_w=this.grid_item_width(child,&item,aw,cbw);
                 this.subgrid_axis_contributions(child,true,Some(inner_w),phase)
             });
-            for c in &mut nested {c.start+=it.area.row.0 as usize;c.end+=it.area.row.0 as usize;}
+            for c in &mut nested {
+                c.start+=it.area.row.0 as usize;c.end+=it.area.row.0 as usize;
+                if let Some(tag)=&mut c.baseline {*tag=tag.shifted(it.area.row.0 as usize);}
+            }
             self.grid_work.charge(nested.len());
             out.extend(nested);
         }
+        // Items of row subgrids take part in this grid's baseline-sharing
+        // groups (Grid2 §9, §11.5 step 1).
+        baseline::reshare(&mut out);
         out
     }
 
@@ -1867,15 +2108,17 @@ impl<'a> Layouter<'a> {
     fn row_contributions(&mut self, b: &mut LayoutBox, items: &[GridItem], cols: &TrackList, col_pos: &[f32], col_gap: f32, cbw: f32, rows: &TrackList, row_gap: f32) -> Vec<Contribution> {
         let _probe = self.grid_publication.probe_grid();
         let mut out = Vec::with_capacity(items.len());
-        // (contribution, row, baseline offset) of baseline-aligned items.
-        let mut baselines: Vec<(usize, i32, f32)> = Vec::new();
+        // (contribution, baseline) of baseline-aligned items.
+        let mut baselines: Vec<(usize, baseline::ItemBaseline)> = Vec::new();
+        let container = b.style.clone();
         for it in items {
             let (_, aw) = span_size(&cols.tracks, col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
             let item=if subgrid::requests(&b.children[it.idx])!=(false,false)||percent_edges(&b.children[it.idx].style) {subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw)} else {*it};let it=&item;
             let child = &mut b.children[it.idx];
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
-            let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column);
-            let baseline = it.align == ItemAlign::Baseline;
+            // (An orthogonal item's padding and border are its inner box's.)
+            let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column) + if child.wm_wrapper { wrapped_padding_border_v(child, cbw) } else { 0.0 };
+            let baseline = baseline::eligible(child, it, &rows.tracks, true);
             // Percentages of the block size resolve against the grid area
             // only when its rows have fixed sizes; otherwise they are cyclic.
             let cbh = if rows.sized() { fixed_span(&rows.tracks, it.area.row.0, it.area.row.1, row_gap) } else { None };
@@ -1894,27 +2137,37 @@ impl<'a> Layouter<'a> {
                 }
             };
             if baseline {
-                baselines.push((out.len(), it.area.row.0, Self::item_baseline(child)));
+                baselines.push((out.len(), baseline::measure(&container, child, it, true)));
             }
             // The automatic minimum fits an area of fixed maximum tracks.
+            // (A cyclic percentage height behaves as `auto`: its automatic
+            // minimum in `auto` minimum tracks is clamped as well.)
+            let auto_minimum_tracks = rows.tracks.get(it.area.row.0.max(0) as usize..(it.area.row.1.max(0) as usize).min(rows.tracks.len())).is_some_and(|t| t.iter().all(|t| t.min == Sizing::Auto));
+            let auto_height = child.style.height.is_auto() || (auto_minimum_tracks && resolve_size(child.style.height, cbh, bb, it.edges.pb_v).is_none());
             let min = match fixed_max_span(&rows.tracks, it.area.row.0, it.area.row.1, row_gap).filter(|_| rows.sized()) {
-                Some(limit) if child.style.height.is_auto() && child.style.min_height.is_auto() && !crate::flex::is_scroll_container(&child.style) => h.min(limit.max(extras_v)),
+                Some(limit) if auto_height && child.style.min_height.is_auto() && !crate::flex::is_scroll_container(&child.style) => h.min(limit.max(extras_v)),
                 _ => h,
+            };
+            // With an automatic preferred height, an explicit minimum height
+            // is the minimum contribution (Grid2 §6.6), which items spanning
+            // flexible tracks contribute.
+            let minimum = match resolve_size(child.style.min_height, cbh, bb, it.edges.pb_v) {
+                Some(m) if child.style.height.is_auto() && !child.style.min_height.is_auto() && !baseline => (m + extras_v).min(min),
+                _ => min,
             };
             out.push(Contribution {
                 start: it.area.row.0.max(0) as usize,
                 end: it.area.row.1.max(1) as usize,
                 min,
                 max: h,
+                auto_min: child.style.height.is_auto() && child.style.min_height.is_auto(),
+                minimum,
+                baseline: None,
             });
         }
         // Baseline-aligned items of a row are shifted to share a baseline:
-        // their contributions include the shift (§11.5 step 2).
-        for &(k, row, bl) in &baselines {
-            let max = baselines.iter().filter(|b| b.1 == row).map(|b| b.2).fold(f32::MIN, f32::max);
-            out[k].min += max - bl;
-            out[k].max += max - bl;
-        }
+        // their contributions include the shift (§11.5 step 1).
+        baseline::add_shims(&baselines, &mut out);
         out
     }
 
@@ -1929,8 +2182,13 @@ impl<'a> Layouter<'a> {
     fn grid_item_width(&mut self, child: &mut LayoutBox, it: &GridItem, aw: f32, cbw: f32) -> f32 {
         let bb = child.style.box_sizing == BoxSizing::BorderBox;
         let avail_inner = (aw - it.edges.pb_h - it.edges.margin_sum(Axis::Row)).max(0.0);
-        let _ = cbw;
         match resolve_size(child.style.width, Some(aw), bb, it.edges.pb_h) {
+            // An orthogonal item's wrapper carries no padding or border of
+            // its own: a content-box width adds the item's (Grid2 §6.6).
+            Some(w) if child.wm_wrapper && !bb && it.edges.pb_h == 0.0 => {
+                let w = self.clamp_width(&child.style.clone(), w, aw, it.edges.pb_h);
+                w + wrapped_padding_border(child, cbw)
+            }
             Some(w) => self.clamp_width(&child.style.clone(), w, aw, it.edges.pb_h),
             None if matches!(child.style.width, Length::FitContent | Length::MinContent | Length::MaxContent) && child.kind != BoxKind::Image => {
                 let (min, max) = self.intrinsic(child);
@@ -1961,7 +2219,20 @@ impl<'a> Layouter<'a> {
     /// Final layout of one item inside its grid area (§10.3 / §10.5).
     #[allow(clippy::too_many_arguments)]
     fn layout_grid_item(&mut self, child: &mut LayoutBox, it: &mut GridItem, ax: f32, ay: f32, aw: f32, ah: f32, cbw: f32) {
-        let inner_w = self.grid_item_width(child, it, aw, cbw);
+        // A non-stretched item with an aspect ratio and a height that
+        // resolves against its area takes its width from them.
+        let ratio_w = match child.style.aspect_ratio {
+            Some(r) if r > 0.0 && child.kind != BoxKind::Image && child.style.width.is_auto()
+                && !matches!(it.justify, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto) => {
+                let bb = child.style.box_sizing == BoxSizing::BorderBox;
+                resolve_size(child.style.height, Some(ah), bb, it.edges.pb_v).map(|h| {
+                    let w = if bb { ((h + it.edges.pb_v) * r - it.edges.pb_h).max(0.0) } else { h * r };
+                    self.clamp_width(&child.style.clone(), w, aw, it.edges.pb_h)
+                })
+            }
+            _ => None,
+        };
+        let inner_w = match ratio_w { Some(w) => w, None => self.grid_item_width(child, it, aw, cbw) };
         self.layout_grid_item_with_inline(child,it,ax,ay,aw,ah,inner_w);
     }
 

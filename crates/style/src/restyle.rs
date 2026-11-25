@@ -586,6 +586,9 @@ pub struct RestyleOutcome {
     /// their own child list (shadow root attached, slot assignment
     /// changed): their boxes must be rebuilt with their children's.
     pub flat_changed: Vec<NodeId>,
+    /// Element styles before a full recomputation (empty otherwise), so
+    /// callers can still tell what changed (CSS transitions).
+    pub previous: Vec<Option<Rc<ComputedStyle>>>,
 }
 
 /// Persistent style resolution state for one document.
@@ -837,8 +840,8 @@ impl StyleEngine {
     /// dynamic state change to `opts.state`.
     pub fn update(&mut self, doc: &Document, tree: &mut StyledTree, log: &MutationLog, opts: &StyleOptions, author: &[Stylesheet]) -> RestyleOutcome {
         if !self.ready || log.overflow {
-            *tree = self.full(doc, author, opts);
-            return RestyleOutcome { full: true, ..Default::default() };
+            let previous = std::mem::replace(tree, self.full(doc, author, opts)).styles;
+            return RestyleOutcome { full: true, previous, ..Default::default() };
         }
         if self.aux_dirty {
             self.collect_aux(tree, author, opts);
@@ -862,13 +865,13 @@ impl StyleEngine {
         self.state = opts.state.clone();
         self.state_chains = new_chains;
         if global {
-            *tree = self.full(doc, author, opts);
-            return RestyleOutcome { full: true, ..Default::default() };
+            let previous = std::mem::replace(tree, self.full(doc, author, opts)).styles;
+            return RestyleOutcome { full: true, previous, ..Default::default() };
         }
         let mut changes = Vec::new();
         crate::props::text::set_feature_values(self.feature_values.clone());
         let recomputed = self.walk(doc, tree, opts, false, &mut changes);
-        RestyleOutcome { full: false, changes, recomputed, flat_changed }
+        RestyleOutcome { full: false, changes, recomputed, flat_changed, previous: Vec::new() }
     }
 
     /// Turn mutations and state changes into restyle marks; returns true

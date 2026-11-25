@@ -1179,6 +1179,8 @@ fn apply_declarations(
     // backgrounds, shadows...) is the element's final color, whatever the
     // declaration order. (In `color` itself it is the parent's.)
     crate::values::set_current_color(Some(parent.color));
+    crate::color_model::set_current(parent.color_components.as_ref().map(|c| c.0));
+    crate::color_model::set_font_size(len.font_size);
     for (name, value, base) in &resolved {
         if matches!(*name, "color" | "writing-mode" | "-webkit-writing-mode" | "direction") {
             let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
@@ -1186,6 +1188,7 @@ fn apply_declarations(
         }
     }
     crate::values::set_current_color(Some(style.color));
+    crate::color_model::set_current(style.color_components.as_ref().map(|c| c.0));
     // `border-*-color` is not inherited; its initial value is currentcolor.
     // `border-*-width` starts as `medium`; the computed width is zero
     // where the style is none/hidden (resolved after all declarations).
@@ -1223,6 +1226,7 @@ fn apply_declarations(
         }
     }
     crate::values::set_current_color(None);
+    crate::color_model::set_current(None);
     // `text-align: match-parent` on the root computes to `start`.
     if is_root && style.text_align != TextAlign::Start && resolved.iter().any(|(n, v, _)| *n == "text-align" && values::components(v).first().is_some_and(|c| values::is_ident(c, "match-parent"))) {
         style.text_align = TextAlign::Start;
@@ -1422,7 +1426,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
         match d.name.as_str() {
             "font-family" => {
                 let names = props::text::family_names(&comps);
-                family = names.into_iter().next().or_else(|| {
+                family = names.into_iter().next().map(|n| n.trim_matches('"').to_string()).or_else(|| {
                     comps.first().and_then(|c| match c {
                         [Token::String(s)] | [Token::Ident(s)] => Some(s.clone()),
                         _ => None,
@@ -1434,8 +1438,15 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
                     let mut url = None;
                     let mut format = None;
                     let mut local = false;
+                    let mut credentials = false;
+                    let mut integrity = None;
                     for c in &item {
                         if let Some(u) = url_of(c) {
+                            credentials = c.windows(2).any(|w| matches!(w, [Token::Function(f), Token::Ident(k)] if f.eq_ignore_ascii_case("cross-origin") && k.eq_ignore_ascii_case("use-credentials")));
+                            integrity = c.windows(2).find_map(|w| match w {
+                                [Token::Function(f), Token::String(v)] if f.eq_ignore_ascii_case("integrity") => Some(v.clone()),
+                                _ => None,
+                            });
                             url = Some(u);
                         } else if let Some(f) = props::fn_name(c) {
                             match f.as_str() {
@@ -1457,7 +1468,7 @@ fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Op
                     }
                     if let Some(u) = url {
                         let abs = (opts.resolve_url)(base, &u).unwrap_or(u);
-                        sources.push(FontSource { url: abs, format });
+                        sources.push(FontSource { url: abs, format, credentials, integrity });
                     }
                 }
             }
@@ -1939,6 +1950,20 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     if let Some(c) = el.attr("bgcolor") {
         css.push_str(&format!("background-color:{};", legacy_color(c)));
     }
+    // `<br clear>` (HTML §15.3.10).
+    if tag == "br" {
+        if let Some(c) = el.attr("clear") {
+            let side = match c.trim().to_ascii_lowercase().as_str() {
+                "left" => "left",
+                "right" => "right",
+                "all" | "both" => "both",
+                _ => "",
+            };
+            if !side.is_empty() {
+                css.push_str(&format!("clear:{side};"));
+            }
+        }
+    }
     // The content language (inherited through `ComputedStyle::lang`).
     if let Some(l) = el.attr("lang").or_else(|| el.attr("xml:lang")) {
         css.push_str(&format!("-rh-lang:{};", lang_code(l)));
@@ -2208,7 +2233,7 @@ fn is_inherited(name: &str) -> bool {
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
             | "font-synthesis" | "font-synthesis-style" | "font-synthesis-small-caps" | "text-justify" | "hyphenate-character" | "text-decoration-skip-ink"
-            | "writing-mode" | "-webkit-writing-mode" | "text-orientation" | "-webkit-text-orientation" | "text-combine-upright" | "-webkit-text-combine"
+            | "orphans" | "widows" | "writing-mode" | "-webkit-writing-mode" | "text-orientation" | "-webkit-text-orientation" | "text-combine-upright" | "-webkit-text-combine"
     )
 }
 
@@ -2404,7 +2429,41 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "font-synthesis-style" => to.font_synthesis_style = from.font_synthesis_style,
         "font-synthesis-small-caps" => to.font_synthesis_small_caps = from.font_synthesis_small_caps,
         "line-break" => to.line_break = from.line_break,
-        "columns" | "column-count" | "column-width" => to.multicol = from.multicol,
+        "columns" | "column-count" | "column-width" | "-webkit-columns" | "-moz-columns" | "-webkit-column-count" | "-moz-column-count"
+        | "-webkit-column-width" | "-moz-column-width" => {
+            to.multicol = from.multicol;
+            to.column_count = from.column_count;
+            to.column_width = from.column_width;
+            if prop.contains("columns") {
+                to.column_height = from.column_height;
+                to.column_wrap = from.column_wrap;
+            }
+        }
+        "column-height" => to.column_height = from.column_height,
+        "column-wrap" => to.column_wrap = from.column_wrap,
+        "column-fill" | "-webkit-column-fill" | "-moz-column-fill" => to.column_fill_auto = from.column_fill_auto,
+        "column-span" | "-webkit-column-span" => to.column_span_all = from.column_span_all,
+        "column-rule" | "-webkit-column-rule" | "-moz-column-rule" => {
+            to.column_rule_width = from.column_rule_width;
+            to.column_rule_style = from.column_rule_style;
+            to.column_rule_style_kw = from.column_rule_style_kw;
+            to.column_rule_color = from.column_rule_color;
+            to.column_rule_list = from.column_rule_list;
+        }
+        "column-rule-width" | "-webkit-column-rule-width" | "-moz-column-rule-width" => {
+            to.column_rule_width = from.column_rule_width;
+            to.column_rule_list = from.column_rule_list;
+        }
+        "column-rule-style" | "-webkit-column-rule-style" | "-moz-column-rule-style" => {
+            to.column_rule_style = from.column_rule_style;
+            to.column_rule_style_kw = from.column_rule_style_kw;
+        }
+        "column-rule-color" | "-webkit-column-rule-color" | "-moz-column-rule-color" => to.column_rule_color = from.column_rule_color,
+        "break-before" | "page-break-before" | "-webkit-column-break-before" => to.break_before = from.break_before,
+        "break-after" | "page-break-after" | "-webkit-column-break-after" => to.break_after = from.break_after,
+        "break-inside" | "page-break-inside" | "-webkit-column-break-inside" => to.break_inside = from.break_inside,
+        "orphans" => to.orphans = from.orphans,
+        "widows" => to.widows = from.widows,
         "text-underline-position" => to.text_underline_position = from.text_underline_position,
         "text-decoration-inset" => to.text_decoration_inset = from.text_decoration_inset,
         "text-decoration-line" => to.text_decoration = from.text_decoration,
@@ -2983,7 +3042,7 @@ pub(crate) fn family_of(comps: &[&[Token]]) -> Option<Family> {
         if matches!(
             n.as_str(),
             "sans-serif" | "system-ui" | "ui-sans-serif" | "arial" | "helvetica" | "verdana" | "tahoma" | "roboto" | "inter"
-                | "segoe ui" | "-apple-system" | "blinkmacsystemfont" | "helvetica neue" | "open sans" | "lato"
+                | "segoe ui" | "-apple-system" | "helvetica neue" | "open sans" | "lato"
                 | "ubuntu" | "noto sans" | "dejavu sans" | "cursive" | "fantasy" | "emoji"
         ) || n.contains("sans")
         {
@@ -3791,10 +3850,10 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "opacity" => {
-            if let Some(n) = values::number(c0) {
-                style.opacity = n.clamp(0.0, 1.0);
-            } else if let [Token::Percentage(p)] = c0 {
-                style.opacity = (p / 100.0).clamp(0.0, 1.0);
+            if comps.len() == 1 {
+                if let Some(n) = crate::color_model::alpha_value(c0).or_else(|| values::number(c0).map(f64::from)) {
+                    style.opacity = if n.is_nan() { 0.0 } else { n.clamp(0.0, 1.0) as f32 };
+                }
             }
         }
         "font-weight" => {
@@ -4006,6 +4065,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.vertical_align = match l {
                     Length::Px(v) => VerticalAlign::Length(v),
                     Length::Percent(p) => VerticalAlign::Length(style.line_height_px() * p / 100.0),
+                    Length::Calc(v, p) => VerticalAlign::Length(v + style.line_height_px() * p / 100.0),
                     _ => return,
                 };
             }
@@ -4128,6 +4188,8 @@ const SUPPORTS_PROBE: &[(&str, &str)] = &[
     ("white-space", "pre"), ("text-transform", "uppercase"), ("font-style", "italic"), ("font-weight", "300"),
     ("flex-direction", "column"), ("flex-wrap", "wrap"), ("border-top-width", "7px"), ("border-top-style", "dotted"),
     ("border-top-color", "rgb(1, 2, 3)"),
+    ("columns", "7px 3 / 7px"), ("column-wrap", "wrap"), ("column-fill", "auto"), ("column-span", "all"), ("column-rule", "7px dotted rgb(1, 2, 3)"),
+    ("break-before", "column"), ("break-after", "column"), ("break-inside", "avoid-column"), ("orphans", "7"), ("widows", "7"),
 ];
 
 /// Properties every value of which `SUPPORTS_PROBE` detects.
@@ -4138,6 +4200,8 @@ const SUPPORTS_CHECKED: &[&str] = &[
     "padding-top", "padding-right", "padding-bottom", "padding-left", "top", "right", "bottom", "left", "width", "height", "min-width",
     "min-height", "max-width", "max-height", "color", "background-color", "opacity", "z-index", "box-sizing", "text-align", "white-space",
     "text-transform", "font-style", "font-weight", "flex-direction", "flex-wrap", "border-top-width", "border-top-style", "border-top-color",
+    "columns", "column-count", "column-width", "column-height", "column-wrap", "column-fill", "column-span", "column-rule", "column-rule-width", "column-rule-style",
+    "column-rule-color", "break-before", "break-after", "break-inside", "orphans", "widows",
 ];
 
 fn probe_apply(base: &ComputedStyle, name: &str, value: &[Token]) -> ComputedStyle {
@@ -4179,6 +4243,14 @@ pub fn supports_declaration(name: &str, value: &[Token]) -> Option<bool> {
     }
     if let Some(result) = props::anchor_length::specified(name,value,&|_| String::new()) {
         return Some(result.is_some());
+    }
+    if matches!(name, "color" | "background-color" | "border-top-color" | "border-right-color" | "border-bottom-color" |
+        "border-left-color" | "outline-color" | "text-decoration-color" | "caret-color" | "accent-color" | "column-rule-color") {
+        if let [c @ [Token::Function(f), ..]] = values::components(value).as_slice() {
+            if !f.eq_ignore_ascii_case("color-layers") {
+                return Some(crate::color_model::Spec::parse(c).is_some());
+            }
+        }
     }
     if name == "anchor-scope" { return Some(props::anchor::AnchorScope::parse(&values::components(value)).is_some()); }
     if name == "anchor-name" { return Some(props::anchor::names(&values::components(value)).is_some()); }

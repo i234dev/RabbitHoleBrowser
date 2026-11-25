@@ -221,3 +221,34 @@ pub(crate) fn install(realm: &mut Realm, internals: ObjectId) {
     realm.define_method(internals, "pbkdfStart", 5, pbkdf_start);
     realm.define_method(internals, "pbkdfStep", 1, pbkdf_step);
 }
+
+/// Subresource Integrity (SRI §3.3.5): whether `data` matches the strongest
+/// hashes of `metadata` ("sha256-…" items). Unknown algorithms are ignored;
+/// metadata without a known hash matches.
+pub fn integrity_matches(metadata: &str, data: &[u8]) -> bool {
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let encode = |bytes: &[u8]| -> String {
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(B64[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    };
+    let items: Vec<(usize, &str)> = metadata.split_whitespace().filter_map(|item| {
+        let item = item.split('?').next().unwrap_or(item);
+        let (alg, value) = item.split_once('-')?;
+        let rank = match alg.to_ascii_lowercase().as_str() { "sha256" => 1, "sha384" => 2, "sha512" => 3, _ => return None };
+        Some((rank, value))
+    }).collect();
+    let Some(best) = items.iter().map(|(r, _)| *r).max() else { return true };
+    let alg = match best { 1 => &digest::SHA256, 2 => &digest::SHA384, _ => &digest::SHA512 };
+    let actual = encode(digest::digest(alg, data).as_ref());
+    items.iter().filter(|(r, _)| *r == best).any(|(_, v)| v.trim_end_matches('=') == actual.trim_end_matches('='))
+}

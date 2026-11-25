@@ -10,11 +10,14 @@ use rabbithole_style::ListStyleType;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Counters {
     frames: Vec<Vec<(String, i32)>>,
+    /// Frames of style-contained elements (CSS Contain 2 §3.3): counter
+    /// changes inside do not reach counters outside.
+    contained: Vec<usize>,
 }
 
 impl Counters {
     pub fn new() -> Self {
-        Counters { frames: vec![Vec::new()] }
+        Counters { frames: vec![Vec::new()], contained: Vec::new() }
     }
 
     /// Enter an element (its children's resets go into the new frame).
@@ -22,8 +25,17 @@ impl Counters {
         self.frames.push(Vec::new());
     }
 
+    /// Enter a style-contained element.
+    pub fn enter_contained(&mut self) {
+        self.frames.push(Vec::new());
+        self.contained.push(self.frames.len() - 1);
+    }
+
     pub fn leave(&mut self) {
         if self.frames.len() > 1 {
+            if self.contained.last() == Some(&(self.frames.len() - 1)) {
+                self.contained.pop();
+            }
             self.frames.pop();
         }
     }
@@ -42,11 +54,17 @@ impl Counters {
 
     /// `counter-increment: name by`.
     pub fn increment(&mut self, name: &str, by: i32) {
-        for frame in self.frames.iter_mut().rev() {
+        let floor = self.contained.last().copied().unwrap_or(0);
+        for frame in self.frames[floor..].iter_mut().rev() {
             if let Some(entry) = frame.iter_mut().rev().find(|(n, _)| n == name) {
                 entry.1 = entry.1.saturating_add(by);
                 return;
             }
+        }
+        // Inside style containment, a new counter is created there.
+        if floor > 0 {
+            self.frames[floor].push((name.to_string(), by));
+            return;
         }
         // No instance in scope: implicitly reset to 0 on the current frame.
         if let Some(top) = self.frames.last_mut() {

@@ -78,7 +78,12 @@ impl<'a> Layouter<'a> {
             && b.kind != BoxKind::Image
         {
             let w = style.contain_intrinsic_width.unwrap_or(0.0);
-            (w, w)
+            if style.multicol && style.contain_intrinsic_width.is_none() {
+                // Columns of nothing: their widths and gaps still count.
+                crate::multicol::intrinsic(&style, (0.0, 0.0))
+            } else {
+                (w, w)
+            }
         } else if b.kind == BoxKind::Image {
             let pct = style.height.has_percent() || style.max_height.has_percent() || style.min_height.has_percent();
             reads_outer |= pct;
@@ -130,6 +135,18 @@ impl<'a> Layouter<'a> {
     /// (min, max) of a box's contents by formatting context.
     #[inline]
     fn intrinsic_contents(&mut self, b: &mut LayoutBox) -> (f32, f32) {
+        if b.style.multicol && matches!(b.formatting, Formatting::Inline | Formatting::Block) {
+            if let Some(r) = crate::multicol::spanner_intrinsic(self, b) {
+                return r;
+            }
+            let r = self.intrinsic_flow(b);
+            return crate::multicol::intrinsic(&b.style, r);
+        }
+        self.intrinsic_flow(b)
+    }
+
+    #[inline]
+    fn intrinsic_flow(&mut self, b: &mut LayoutBox) -> (f32, f32) {
         {
             match b.formatting {
                 Formatting::Inline => self.inline_intrinsic(b),
@@ -398,7 +415,7 @@ impl<'a> Layouter<'a> {
                     trail = 0.0;
                     space_trail = 0.0;
                 }
-                Piece::Break => {
+                Piece::Break | Piece::ClearBreak(_) => {
                     lead = false;
                     min = min.max(run - trail - space_trail);
                     run = forced_indent;

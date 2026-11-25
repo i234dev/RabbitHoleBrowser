@@ -10,8 +10,10 @@ pub mod content;
 pub mod effects;
 pub mod flex;
 pub mod grid;
+pub mod grid_css;
 pub mod misc;
 pub mod motion;
+pub mod multicol;
 pub mod text;
 
 use crate::computed::*;
@@ -56,6 +58,8 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         || text::apply(name, comps, value, style, parent, ctx)
         || content::apply(name, comps, style, ctx)
         || misc::apply(name, comps, style, ctx)
+        // (Last: other properties do not pay for its name match.)
+        || multicol::apply(name, comps, style, ctx)
 }
 
 // ------------------------------------------------------------ shared helpers

@@ -51,9 +51,11 @@
       const a = p[3] === undefined ? 1 : p[3].endsWith('%') ? parseFloat(p[3]) / 100 : parseFloat(p[3]);
       const q = l < 0.5 ? l * (1 + sat) : l + sat - l * sat, pp = 2 * l - q;
       const hue = (t) => { t = (t + 1) % 1; return t < 1 / 6 ? pp + (q - pp) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? pp + (q - pp) * (2 / 3 - t) * 6 : pp; };
-      return [hue(h + 1 / 3), hue(h), hue(h - 1 / 3)].map((v) => Math.round(v * 255)).concat([a]);
+      const out = [hue(h + 1 / 3), hue(h), hue(h - 1 / 3)].map((v) => Math.round(v * 255)).concat([a]);
+      if (out.every((v) => v === v)) return out;
     }
-    return null;
+    // Every other CSS color (named, Color 4/5 functions), gamut mapped.
+    return N.canvasColor(s);
   }
   function serializeColor(c) {
     const hex = (v) => v.toString(16).padStart(2, '0');

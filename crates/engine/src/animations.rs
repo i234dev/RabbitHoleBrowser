@@ -63,7 +63,6 @@ enum Prop {
     Visibility,
     LetterSpacing,
     FontSize,
-    BorderRadius,
     Filter,
     BackdropFilter,
     ClipPath,
@@ -86,6 +85,49 @@ enum Prop {
     AnchorScope,
     GridTemplateColumns,
     GridTemplateRows,
+    GridTemplateAreas,
+    GridAutoColumns,
+    GridAutoRows,
+    GridAutoFlow,
+    GridRowStart,
+    GridRowEnd,
+    GridColumnStart,
+    GridColumnEnd,
+    FitTolerance,
+    ColumnCount,
+    ColumnWidth,
+    ColumnRuleWidth,
+    ColumnRuleColor,
+    ColumnRuleStyle,
+    ColumnFill,
+    ColumnSpan,
+    ColumnHeight,
+    ColumnWrap,
+    ColumnGap,
+    Orphans,
+    Widows,
+    BreakBefore,
+    BreakAfter,
+    BreakInside,
+    ZIndex,
+    Order,
+    LineHeight,
+    VerticalAlign,
+    Perspective,
+    BorderTopWidth,
+    BorderRightWidth,
+    BorderBottomWidth,
+    BorderLeftWidth,
+    OutlineWidth,
+    OutlineOffset,
+    WordSpacing,
+    TextIndent,
+    FlexGrow,
+    FlexShrink,
+    BorderTopLeftRadius,
+    BorderTopRightRadius,
+    BorderBottomRightRadius,
+    BorderBottomLeftRadius,
 }
 
 const ALL: &[Prop] = &[
@@ -121,7 +163,6 @@ const ALL: &[Prop] = &[
     Prop::Visibility,
     Prop::LetterSpacing,
     Prop::FontSize,
-    Prop::BorderRadius,
     Prop::Filter,
     Prop::BackdropFilter,
     Prop::ClipPath,
@@ -144,6 +185,49 @@ const ALL: &[Prop] = &[
     Prop::AnchorScope,
     Prop::GridTemplateColumns,
     Prop::GridTemplateRows,
+    Prop::GridTemplateAreas,
+    Prop::GridAutoColumns,
+    Prop::GridAutoRows,
+    Prop::GridAutoFlow,
+    Prop::GridRowStart,
+    Prop::GridRowEnd,
+    Prop::GridColumnStart,
+    Prop::GridColumnEnd,
+    Prop::FitTolerance,
+    Prop::ColumnCount,
+    Prop::ColumnWidth,
+    Prop::ColumnRuleWidth,
+    Prop::ColumnRuleColor,
+    Prop::ColumnRuleStyle,
+    Prop::ColumnFill,
+    Prop::ColumnSpan,
+    Prop::ColumnHeight,
+    Prop::ColumnWrap,
+    Prop::ColumnGap,
+    Prop::Orphans,
+    Prop::Widows,
+    Prop::BreakBefore,
+    Prop::BreakAfter,
+    Prop::BreakInside,
+    Prop::ZIndex,
+    Prop::Order,
+    Prop::LineHeight,
+    Prop::VerticalAlign,
+    Prop::Perspective,
+    Prop::BorderTopWidth,
+    Prop::BorderRightWidth,
+    Prop::BorderBottomWidth,
+    Prop::BorderLeftWidth,
+    Prop::OutlineWidth,
+    Prop::OutlineOffset,
+    Prop::WordSpacing,
+    Prop::TextIndent,
+    Prop::FlexGrow,
+    Prop::FlexShrink,
+    Prop::BorderTopLeftRadius,
+    Prop::BorderTopRightRadius,
+    Prop::BorderBottomRightRadius,
+    Prop::BorderBottomLeftRadius,
 ];
 
 impl Prop {
@@ -181,7 +265,6 @@ impl Prop {
             Prop::Visibility => "visibility",
             Prop::LetterSpacing => "letter-spacing",
             Prop::FontSize => "font-size",
-            Prop::BorderRadius => "border-radius",
             Prop::Filter => "filter",
             Prop::BackdropFilter => "backdrop-filter",
             Prop::ClipPath => "clip-path",
@@ -204,6 +287,49 @@ impl Prop {
             Prop::AnchorScope => "anchor-scope",
             Prop::GridTemplateRows => "grid-template-rows",
             Prop::GridTemplateColumns => "grid-template-columns",
+            Prop::GridTemplateAreas => "grid-template-areas",
+            Prop::GridAutoColumns => "grid-auto-columns",
+            Prop::GridAutoRows => "grid-auto-rows",
+            Prop::GridAutoFlow => "grid-auto-flow",
+            Prop::GridRowStart => "grid-row-start",
+            Prop::GridRowEnd => "grid-row-end",
+            Prop::GridColumnStart => "grid-column-start",
+            Prop::GridColumnEnd => "grid-column-end",
+            Prop::FitTolerance => "fit-tolerance",
+            Prop::ColumnCount => "column-count",
+            Prop::ColumnWidth => "column-width",
+            Prop::ColumnRuleWidth => "column-rule-width",
+            Prop::ColumnRuleColor => "column-rule-color",
+            Prop::ColumnRuleStyle => "column-rule-style",
+            Prop::ColumnFill => "column-fill",
+            Prop::ColumnSpan => "column-span",
+            Prop::ColumnHeight => "column-height",
+            Prop::ColumnWrap => "column-wrap",
+            Prop::ColumnGap => "column-gap",
+            Prop::Orphans => "orphans",
+            Prop::Widows => "widows",
+            Prop::BreakBefore => "break-before",
+            Prop::BreakAfter => "break-after",
+            Prop::BreakInside => "break-inside",
+            Prop::ZIndex => "z-index",
+            Prop::Order => "order",
+            Prop::LineHeight => "line-height",
+            Prop::VerticalAlign => "vertical-align",
+            Prop::Perspective => "perspective",
+            Prop::BorderTopWidth => "border-top-width",
+            Prop::BorderRightWidth => "border-right-width",
+            Prop::BorderBottomWidth => "border-bottom-width",
+            Prop::BorderLeftWidth => "border-left-width",
+            Prop::OutlineWidth => "outline-width",
+            Prop::OutlineOffset => "outline-offset",
+            Prop::WordSpacing => "word-spacing",
+            Prop::TextIndent => "text-indent",
+            Prop::FlexGrow => "flex-grow",
+            Prop::FlexShrink => "flex-shrink",
+            Prop::BorderTopLeftRadius => "border-top-left-radius",
+            Prop::BorderTopRightRadius => "border-top-right-radius",
+            Prop::BorderBottomRightRadius => "border-bottom-right-radius",
+            Prop::BorderBottomLeftRadius => "border-bottom-left-radius",
         }
     }
 
@@ -221,20 +347,35 @@ impl Prop {
         use Prop::*;
         match n {
             "offset" => matches!(self, OffsetPath | OffsetDistance | OffsetPosition | OffsetRotate | OffsetAnchor),
-            "grid" | "grid-template" => matches!(self, GridTemplateRows | GridTemplateColumns),
+            "grid-template" => matches!(self, GridTemplateRows | GridTemplateColumns | GridTemplateAreas),
+            "grid" => matches!(self, GridTemplateRows | GridTemplateColumns | GridTemplateAreas | GridAutoColumns | GridAutoRows | GridAutoFlow),
+            "grid-area" => matches!(self, GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd),
+            "grid-row" => matches!(self, GridRowStart | GridRowEnd),
+            "grid-column" => matches!(self, GridColumnStart | GridColumnEnd),
             "place-content" => matches!(self, AlignContent | JustifyContent),
             "place-items" => matches!(self, AlignItems | JustifyItems),
             "place-self" => matches!(self, AlignSelf | JustifySelf),
             "margin" => matches!(self, MarginTop | MarginRight | MarginBottom | MarginLeft),
             "padding" => matches!(self, PaddingTop | PaddingRight | PaddingBottom | PaddingLeft),
-            "border-color" | "border" => matches!(self, BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor),
-            "border-top" => self == BorderTopColor,
-            "border-right" => self == BorderRightColor,
-            "border-bottom" => self == BorderBottomColor,
-            "border-left" => self == BorderLeftColor,
+            "border-color" => matches!(self, BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor),
+            "border" => matches!(self, BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor | BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth),
+            "border-width" => matches!(self, BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth),
+            "border-top" => matches!(self, BorderTopColor | BorderTopWidth),
+            "border-right" => matches!(self, BorderRightColor | BorderRightWidth),
+            "border-bottom" => matches!(self, BorderBottomColor | BorderBottomWidth),
+            "border-left" => matches!(self, BorderLeftColor | BorderLeftWidth),
+            "border-radius" => matches!(self, BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius),
+            "outline" => self == OutlineWidth,
+            "flex" => matches!(self, FlexGrow | FlexShrink),
             "inset" => matches!(self, Top | Right | Bottom | Left),
             "background" => self == BackgroundColor,
-            "font" => self == FontSize,
+            "font" => matches!(self, FontSize | LineHeight),
+            "columns" => matches!(self, ColumnCount | ColumnWidth | ColumnHeight | ColumnWrap),
+            "gap" | "grid-gap" | "grid-column-gap" => self == ColumnGap,
+            "page-break-before" => self == BreakBefore,
+            "page-break-after" => self == BreakAfter,
+            "page-break-inside" => self == BreakInside,
+            "column-rule" => matches!(self, ColumnRuleWidth | ColumnRuleColor | ColumnRuleStyle),
             _ => false,
         }
     }
@@ -249,23 +390,46 @@ enum Val {
     PositionArea(rabbithole_style::props::anchor::PositionArea),
     AnchorScope(rabbithole_style::props::anchor::AnchorScope),
     Tracks(Vec<TrackListItem>),
+    /// Values that only animate discretely.
+    AutoTracks(Vec<rabbithole_style::TrackSize>),
+    AutoFlow(rabbithole_style::GridAutoFlow),
+    Line(rabbithole_style::GridLine),
+    Areas(Vec<Vec<String>>),
+    /// `fit-tolerance`: `normal` (None) or a length-percentage.
+    Tolerance(Option<Length>),
     Distribution(ContentDistribution, AlignFlags),
     ItemAlignment(ItemAlign, AlignFlags),
     F(f32),
     C(Color),
+    /// A color that is not a legacy sRGB color (CSS Color 4 §12.1).
+    Cw(rabbithole_style::color_model::Abs),
     L(Length),
     T(Vec<TransformOp>),
     V(Visibility),
     Fl(Vec<FilterOp>),
     Cp(Option<std::sync::Arc<ClipPath>>, bool),
+    /// `column-count` (`None` = `auto`, discrete).
+    Count(Option<u32>),
+    /// `column-width` (`None` = `auto`, discrete).
+    OptPx(Option<f32>),
+    /// Values that only animate discretely (keyword indices).
+    Keyword(u8),
+    /// An `<integer>` that may be negative (`None` = `auto`, discrete).
+    Int(Option<i32>),
+    /// `line-height`: `normal` (None), a length (px) or a number (the
+    /// multiplier); lengths and numbers do not interpolate together.
+    LineHeight(Option<f32>, Option<f32>),
+    VerticalAlign(rabbithole_style::VerticalAlign),
+    /// A corner radius (horizontal, vertical).
+    Radius((Length, Length)),
 }
 
 fn get(s: &ComputedStyle, p: Prop) -> Val {
     use Prop::*;
     match p {
         Opacity => Val::F(s.opacity),
-        Color => Val::C(s.color),
-        BackgroundColor => Val::C(s.background_color),
+        Color => s.color_components.as_ref().filter(|c| !c.0.legacy).map_or(Val::C(s.color), |c| Val::Cw(c.0)),
+        BackgroundColor => s.background_color_components.as_ref().filter(|c| !c.0.legacy).map_or(Val::C(s.background_color), |c| Val::Cw(c.0)),
         BorderTopColor => Val::C(s.border_color.top),
         BorderRightColor => Val::C(s.border_color.right),
         BorderBottomColor => Val::C(s.border_color.bottom),
@@ -295,7 +459,6 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         Visibility => Val::V(s.visibility),
         LetterSpacing => Val::F(s.letter_spacing),
         FontSize => Val::F(s.font_size),
-        BorderRadius => Val::F(s.border_radius),
         Filter => Val::Fl(s.filters.clone()),
         BackdropFilter => Val::Fl(s.backdrop_filters.clone()),
         ClipPath => Val::Cp(s.clip_path.clone(), false),
@@ -317,7 +480,62 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         AnchorScope => Val::AnchorScope(s.anchor_scope.clone()),
         GridTemplateRows => Val::Tracks(s.grid_template_rows.clone()),
         GridTemplateColumns => Val::Tracks(s.grid_template_columns.clone()),
+        GridTemplateAreas => Val::Areas(s.grid_template_areas.clone()),
+        GridAutoColumns => Val::AutoTracks(s.grid_auto_columns.clone()),
+        GridAutoRows => Val::AutoTracks(s.grid_auto_rows.clone()),
+        GridAutoFlow => Val::AutoFlow(s.grid_auto_flow),
+        GridRowStart => Val::Line(s.grid_row_start.clone()),
+        GridRowEnd => Val::Line(s.grid_row_end.clone()),
+        GridColumnStart => Val::Line(s.grid_column_start.clone()),
+        GridColumnEnd => Val::Line(s.grid_column_end.clone()),
+        FitTolerance => Val::Tolerance(s.fit_tolerance),
+        ColumnCount => Val::Count(s.column_count),
+        ColumnWidth => Val::OptPx(s.column_width),
+        ColumnRuleWidth => Val::F(s.column_rule_width),
+        ColumnRuleColor => Val::C(s.column_rule_color.unwrap_or(s.color)),
+        ColumnRuleStyle => Val::Keyword(s.column_rule_style_kw),
+        ColumnFill => Val::Keyword(s.column_fill_auto as u8),
+        ColumnSpan => Val::Keyword(s.column_span_all as u8),
+        ColumnHeight => Val::OptPx(s.column_height),
+        ColumnWrap => Val::Keyword(s.column_wrap),
+        ColumnGap => Val::Tolerance((!s.column_gap_normal).then_some(s.column_gap)),
+        Orphans => Val::Count(Some(s.orphans as u32)),
+        Widows => Val::Count(Some(s.widows as u32)),
+        BreakBefore => Val::Keyword(s.break_before),
+        BreakAfter => Val::Keyword(s.break_after),
+        BreakInside => Val::Keyword(s.break_inside),
         JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
+        ZIndex => Val::Int(s.z_index),
+        Order => Val::Int(Some(s.order)),
+        LineHeight => Val::LineHeight(s.line_height, s.line_height_number),
+        VerticalAlign => Val::VerticalAlign(s.vertical_align),
+        Perspective => Val::OptPx(s.perspective()),
+        BorderTopWidth => Val::F(s.border_width.top),
+        BorderRightWidth => Val::F(s.border_width.right),
+        BorderBottomWidth => Val::F(s.border_width.bottom),
+        BorderLeftWidth => Val::F(s.border_width.left),
+        OutlineWidth => Val::F(s.outline_width),
+        OutlineOffset => Val::F(s.outline_offset),
+        WordSpacing => Val::F(s.word_spacing),
+        TextIndent => Val::L(s.text_indent),
+        FlexGrow => Val::F(s.flex_grow),
+        FlexShrink => Val::F(s.flex_shrink),
+        BorderTopLeftRadius => Val::Radius(s.border_radii[0]),
+        BorderTopRightRadius => Val::Radius(s.border_radii[1]),
+        BorderBottomRightRadius => Val::Radius(s.border_radii[2]),
+        BorderBottomLeftRadius => Val::Radius(s.border_radii[3]),
+    }
+}
+
+/// A used border / outline width: whole pixels, at least 1px when not
+/// zero (as the cascade computes them).
+fn snap_line_width(w: f32) -> f32 {
+    if w <= 0.0 {
+        0.0
+    } else if w < 1.0 {
+        1.0
+    } else {
+        (w + 0.01).floor()
     }
 }
 
@@ -330,6 +548,57 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         (AnchorScope, Val::AnchorScope(value)) => s.anchor_scope.clone_from(value),
         (GridTemplateRows, Val::Tracks(tracks)) => s.grid_template_rows.clone_from(tracks),
         (GridTemplateColumns, Val::Tracks(tracks)) => s.grid_template_columns.clone_from(tracks),
+        (GridTemplateAreas, Val::Areas(a)) => s.grid_template_areas.clone_from(a),
+        (GridAutoColumns, Val::AutoTracks(t)) => s.grid_auto_columns.clone_from(t),
+        (GridAutoRows, Val::AutoTracks(t)) => s.grid_auto_rows.clone_from(t),
+        (GridAutoFlow, Val::AutoFlow(f)) => s.grid_auto_flow = *f,
+        (GridRowStart, Val::Line(l)) => s.grid_row_start.clone_from(l),
+        (GridRowEnd, Val::Line(l)) => s.grid_row_end.clone_from(l),
+        (GridColumnStart, Val::Line(l)) => s.grid_column_start.clone_from(l),
+        (GridColumnEnd, Val::Line(l)) => s.grid_column_end.clone_from(l),
+        (FitTolerance, Val::Tolerance(l)) => s.fit_tolerance = *l,
+        (ColumnCount, Val::Count(n)) => {
+            s.column_count = *n;
+            s.multicol = s.column_count.is_some() || s.column_width.is_some() || s.column_height.is_some();
+        }
+        (ColumnWidth, Val::OptPx(w)) => {
+            s.column_width = w.map(|w| w.max(0.0));
+            s.multicol = s.column_count.is_some() || s.column_width.is_some() || s.column_height.is_some();
+        }
+        (ColumnRuleWidth, Val::F(w)) => s.column_rule_width = w.max(0.0),
+        (ColumnRuleColor, Val::C(c)) => s.column_rule_color = Some(*c),
+        (ColumnRuleColor, Val::Cw(c)) => s.column_rule_color = Some(c.to_gfx()),
+        (ColumnRuleStyle, Val::Keyword(k)) => {
+            s.column_rule_style_kw = *k;
+            s.column_rule_style = match rabbithole_style::props::multicol::rule_style_css(*k) {
+                "none" => rabbithole_style::BorderStyle::None,
+                "hidden" => rabbithole_style::BorderStyle::Hidden,
+                "dotted" => rabbithole_style::BorderStyle::Dotted,
+                "dashed" => rabbithole_style::BorderStyle::Dashed,
+                "double" => rabbithole_style::BorderStyle::Double,
+                _ => rabbithole_style::BorderStyle::Solid,
+            };
+        }
+        (ColumnFill, Val::Keyword(k)) => s.column_fill_auto = *k != 0,
+        (ColumnSpan, Val::Keyword(k)) => s.column_span_all = *k != 0,
+        (ColumnHeight, Val::OptPx(h)) => {
+            s.column_height = h.map(|h| h.max(0.0));
+            s.multicol = s.column_count.is_some() || s.column_width.is_some() || s.column_height.is_some();
+        }
+        (ColumnWrap, Val::Keyword(k)) => s.column_wrap = *k,
+        (ColumnGap, Val::Tolerance(l)) => {
+            s.column_gap_normal = l.is_none();
+            s.column_gap = match l.unwrap_or(Length::ZERO) {
+                Length::Px(v) => Length::Px(v.max(0.0)),
+                Length::Percent(v) => Length::Percent(v.max(0.0)),
+                other => other,
+            };
+        }
+        (Orphans, Val::Count(Some(n))) => s.orphans = (*n).clamp(1, u16::MAX as u32) as u16,
+        (Widows, Val::Count(Some(n))) => s.widows = (*n).clamp(1, u16::MAX as u32) as u16,
+        (BreakBefore, Val::Keyword(k)) => s.break_before = *k,
+        (BreakAfter, Val::Keyword(k)) => s.break_after = *k,
+        (BreakInside, Val::Keyword(k)) => s.break_inside = *k,
         (AlignContent, Val::Distribution(value, flags)) => (s.align_content, s.align_content_flags) = (*value, *flags),
         (JustifyContent, Val::Distribution(value, flags)) => (s.justify_content, s.justify_content_flags) = (*value, *flags),
         (AlignSelf, Val::ItemAlignment(value, flags)) => (s.align_self, s.align_self_flags) = (*value, *flags),
@@ -345,6 +614,18 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
             s.background_color = *c;
             s.background_color_components = None;
         }
+        (Color, Val::Cw(c)) => {
+            s.color = c.to_gfx();
+            s.color_components = Some(std::rc::Rc::new(rabbithole_style::ComputedColor(*c)));
+        }
+        (BackgroundColor, Val::Cw(c)) => {
+            s.background_color = c.to_gfx();
+            s.background_color_components = Some(std::rc::Rc::new(rabbithole_style::ComputedColor(*c)));
+        }
+        (BorderTopColor, Val::Cw(c)) => s.border_color.top = c.to_gfx(),
+        (BorderRightColor, Val::Cw(c)) => s.border_color.right = c.to_gfx(),
+        (BorderBottomColor, Val::Cw(c)) => s.border_color.bottom = c.to_gfx(),
+        (BorderLeftColor, Val::Cw(c)) => s.border_color.left = c.to_gfx(),
         (BorderTopColor, Val::C(c)) => s.border_color.top = *c,
         (BorderRightColor, Val::C(c)) => s.border_color.right = *c,
         (BorderBottomColor, Val::C(c)) => s.border_color.bottom = *c,
@@ -385,7 +666,48 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
             s.font_size = f.max(0.0);
             s.resolve_spacing_pct();
         }
-        (BorderRadius, Val::F(f)) => s.border_radius = f.max(0.0),
+        (BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius, Val::Radius((h, v))) => {
+            let clamp = |l: Length| match l {
+                Length::Px(x) => Length::Px(x.max(0.0)),
+                Length::Percent(x) => Length::Percent(x.max(0.0)),
+                other => other,
+            };
+            let i = match p {
+                BorderTopLeftRadius => 0,
+                BorderTopRightRadius => 1,
+                BorderBottomRightRadius => 2,
+                _ => 3,
+            };
+            s.border_radii[i] = (clamp(*h), clamp(*v));
+            // The legacy single radius: the largest px corner.
+            s.border_radius = s.border_radii.iter().flat_map(|(h, v)| [*h, *v]).map(|l| if let Length::Px(x) = l { x } else { 0.0 }).fold(0.0, f32::max);
+        }
+        (ZIndex, Val::Int(z)) => s.z_index = *z,
+        (Order, Val::Int(Some(o))) => s.order = *o,
+        (LineHeight, Val::LineHeight(px, number)) => {
+            s.line_height_number = number.map(|n| n.max(0.0));
+            s.line_height = match s.line_height_number {
+                Some(n) => Some(n * s.font_size),
+                None => px.map(|v| v.max(0.0)),
+            };
+        }
+        (VerticalAlign, Val::VerticalAlign(v)) => s.vertical_align = *v,
+        (Perspective, Val::OptPx(d)) => {
+            let d = d.map(|d| d.max(0.0));
+            if d.is_some() || s.transform3d.is_some() {
+                s.transform3d_mut().perspective = d;
+            }
+        }
+        (BorderTopWidth, Val::F(w)) => s.border_width.top = if s.border_style.top.is_visible() { snap_line_width(*w) } else { 0.0 },
+        (BorderRightWidth, Val::F(w)) => s.border_width.right = if s.border_style.right.is_visible() { snap_line_width(*w) } else { 0.0 },
+        (BorderBottomWidth, Val::F(w)) => s.border_width.bottom = if s.border_style.bottom.is_visible() { snap_line_width(*w) } else { 0.0 },
+        (BorderLeftWidth, Val::F(w)) => s.border_width.left = if s.border_style.left.is_visible() { snap_line_width(*w) } else { 0.0 },
+        (OutlineWidth, Val::F(w)) => s.outline_width = snap_line_width(*w),
+        (OutlineOffset, Val::F(o)) => s.outline_offset = *o,
+        (WordSpacing, Val::F(w)) => s.word_spacing = *w,
+        (TextIndent, Val::L(l)) => s.text_indent = *l,
+        (FlexGrow, Val::F(g)) => s.flex_grow = g.max(0.0),
+        (FlexShrink, Val::F(g)) => s.flex_shrink = g.max(0.0),
         (Filter, Val::Fl(f)) => {
             s.filters = f.clone();
             if !f.is_empty() {
@@ -962,19 +1284,63 @@ fn lerp_matrix(a: [f32; 6], b: [f32; 6], t: f32) -> [f32; 6] {
     [(r0x * sc[0]) as f32, (r0y * sc[0]) as f32, (r1x * sc[1]) as f32, (r1y * sc[1]) as f32, tr[0] as f32, tr[1] as f32]
 }
 
+/// CSS Color 4 §12.1: legacy sRGB colors interpolate in premultiplied
+/// sRGB; once either is not legacy, in Oklab, and the result keeps its
+/// Oklab components.
+fn interpolate_colors(a: &Val, b: &Val, t: f32) -> Val {
+    use rabbithole_style::color_model::{interpolate, Abs, Space};
+    let abs = |v: &Val| match v {
+        Val::Cw(c) => (*c, true),
+        Val::C(c) => (Abs::from_gfx(*c), false),
+        _ => (Abs::from_gfx(Color::TRANSPARENT), false),
+    };
+    if let (Val::C(p), Val::C(q)) = (a, b) {
+        // Premultiplied, in byte units as engines do.
+        let (pa, qa) = (f32::from(p.a) / 255.0, f32::from(q.a) / 255.0);
+        let alpha = lerp(pa, qa, t).clamp(0.0, 1.0);
+        let ch = |x: u8, y: u8| {
+            let v = lerp(f32::from(x) * pa, f32::from(y) * qa, t);
+            (if alpha > 0.0 { v / alpha } else { 0.0 }).round().clamp(0.0, 255.0) as u8
+        };
+        return Val::C(Color { r: ch(p.r, q.r), g: ch(p.g, q.g), b: ch(p.b, q.b), a: (alpha * 255.0).round() as u8 });
+    }
+    let ((x, _), (y, _)) = (abs(a), abs(b));
+    let t = f64::from(t);
+    let mut mixed = interpolate(&x.convert(Space::Oklab), &y.convert(Space::Oklab), t, rabbithole_style::HueMethod::Shorter);
+    mixed.c[0] = mixed.c[0].clamp(0.0, 1.0);
+    Val::Cw(mixed)
+}
+
 fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
         (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(t).tracks(x, y).map(Val::Tracks).unwrap_or_else(discrete),
+        // Finite tolerances interpolate as non-negative lengths.
+        (Val::Tolerance(Some(x)), Val::Tolerance(Some(y))) if !matches!(x, Length::Px(v) if v.is_infinite()) && !matches!(y, Length::Px(v) if v.is_infinite()) => {
+            match lerp_lp(x, y, t) {
+                Some(Length::Px(v)) => Val::Tolerance(Some(Length::Px(v.max(0.0)))),
+                Some(Length::Percent(v)) => Val::Tolerance(Some(Length::Percent(v.max(0.0)))),
+                Some(l) => Val::Tolerance(Some(l)),
+                None => discrete(),
+            }
+        }
         (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
             lerp_pair(&(*x,*y),&(*u,*v),t).map(|(x,y)| Val::MotionPosition(MotionPosition::Coordinates(x,y))).unwrap_or_else(discrete),
         (Val::MotionRotation(a), Val::MotionRotation(b)) if a.follows_path == b.follows_path =>
             Val::MotionRotation(MotionRotation { follows_path: a.follows_path, degrees: lerp(a.degrees,b.degrees,t) }),
         (Val::F(x), Val::F(y)) => Val::F(lerp(*x, *y, t)),
-        (Val::C(x), Val::C(y)) => {
-            let ch = |p: u8, q: u8| lerp(p as f32, q as f32, t).round().clamp(0.0, 255.0) as u8;
-            Val::C(Color { r: ch(x.r, y.r), g: ch(x.g, y.g), b: ch(x.b, y.b), a: ch(x.a, y.a) })
+        // Integers round to the nearest, halves towards positive infinity.
+        (Val::Int(Some(x)), Val::Int(Some(y))) => Val::Int(Some((lerp(*x as f32, *y as f32, t) + 0.5).floor() as i32)),
+        (Val::LineHeight(Some(x), None), Val::LineHeight(Some(y), None)) => Val::LineHeight(Some(lerp(*x, *y, t).max(0.0)), None),
+        (Val::LineHeight(_, Some(x)), Val::LineHeight(_, Some(y))) => Val::LineHeight(None, Some(lerp(*x, *y, t).max(0.0))),
+        (Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(x)), Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(y))) => {
+            Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(lerp(*x, *y, t)))
         }
+        (Val::Radius(x), Val::Radius(y)) => lerp_pair(x, y, t).map(Val::Radius).unwrap_or_else(discrete),
+        // Integers interpolate rounded to the nearest (CSS Values 4 §3.1).
+        (Val::Count(Some(x)), Val::Count(Some(y))) => Val::Count(Some((lerp(*x as f32, *y as f32, t) + 0.5 + 1e-4).floor().max(1.0) as u32)),
+        (Val::OptPx(Some(x)), Val::OptPx(Some(y))) => Val::OptPx(Some(lerp(*x, *y, t).max(0.0))),
+        (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) => interpolate_colors(a, b, t),
         (Val::L(x), Val::L(y)) => lerp_lp(x, y, t).map(Val::L).unwrap_or_else(discrete),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, t).map(Val::T).unwrap_or_else(discrete),
         (Val::Fl(x), Val::Fl(y)) => {
@@ -1326,6 +1692,11 @@ impl AnimationState {
     /// restyle.
     pub(crate) fn snapshot(&self, styles: &rabbithole_style::StyledTree) -> Vec<(NodeId, Rc<ComputedStyle>)> {
         self.with_transitions.iter().filter_map(|n| self.base.get(n).cloned().or_else(|| styles.get(*n).cloned()).map(|s| (*n, s))).collect()
+    }
+
+    /// The style of `node` without animation effects, when it has any.
+    pub(crate) fn base_style(&self, node: NodeId) -> Option<Rc<ComputedStyle>> {
+        self.base.get(&node).cloned()
     }
 
     fn has_effects(&self, node: NodeId) -> bool {
@@ -2039,9 +2410,24 @@ fn add_values(under: &Val, v: &Val) -> Val {
     match (under, v) {
         (Val::Tracks(a), Val::Tracks(b)) => GridOperation::Add.tracks(a, b).map(Val::Tracks).unwrap_or_else(|| v.clone()),
         (Val::F(a), Val::F(b)) => Val::F(a + b),
+        (Val::Count(Some(a)), Val::Count(Some(b))) => Val::Count(Some(a + b)),
+        (Val::Int(Some(a)), Val::Int(Some(b))) => Val::Int(Some(a.saturating_add(*b))),
+        (Val::LineHeight(Some(a), None), Val::LineHeight(Some(b), None)) => Val::LineHeight(Some(a + b), None),
+        (Val::LineHeight(_, Some(a)), Val::LineHeight(_, Some(b))) => Val::LineHeight(None, Some(a + b)),
+        (Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(a)), Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(b))) => {
+            Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(a + b))
+        }
+        (Val::Radius(a), Val::Radius(b)) => match (add_lp(a.0, b.0), add_lp(a.1, b.1)) {
+            (Some(h), Some(v)) => Val::Radius((h, v)),
+            _ => v.clone(),
+        },
+        (Val::Tolerance(Some(a)), Val::Tolerance(Some(b))) => add_lp(*a, *b).map(|l| Val::Tolerance(Some(l))).unwrap_or_else(|| v.clone()),
+        (Val::OptPx(Some(a)), Val::OptPx(Some(b))) => Val::OptPx(Some(a + b)),
         (Val::L(a), Val::L(b)) => add_lp(*a, *b).map(Val::L).unwrap_or_else(|| v.clone()),
         (Val::T(a), Val::T(b)) => Val::T(a.iter().chain(b.iter()).cloned().collect()),
-        (Val::C(a), Val::C(b)) => {
+        (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) => {
+            let gfx = |v: &Val| match v { Val::Cw(c) => c.to_gfx(), Val::C(c) => *c, _ => Color::TRANSPARENT };
+            let (a, b) = (gfx(under), gfx(v));
             let ch = |p: u8, q: u8| (p as u16 + q as u16).min(255) as u8;
             Val::C(Color { r: ch(a.r, b.r), g: ch(a.g, b.g), b: ch(a.b, b.b), a: ch(a.a, b.a) })
         }
@@ -2126,11 +2512,16 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
 /// Can `a` and `b` be interpolated (not just swapped at 50%)?
 fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
-        (Val::F(_), Val::F(_)) | (Val::C(_), Val::C(_)) | (Val::V(_), Val::V(_)) => true,
+        (Val::F(_), Val::F(_)) | (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) | (Val::V(_), Val::V(_)) => true,
+        (Val::Count(Some(_)), Val::Count(Some(_))) | (Val::OptPx(Some(_)), Val::OptPx(Some(_))) | (Val::Int(Some(_)), Val::Int(Some(_))) => true,
+        (Val::LineHeight(Some(_), None), Val::LineHeight(Some(_), None)) | (Val::LineHeight(_, Some(_)), Val::LineHeight(_, Some(_))) => true,
+        (Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(_)), Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(_))) => true,
+        (Val::Radius(x), Val::Radius(y)) => lerp_pair(x, y, 0.5).is_some(),
         (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
             lerp_pair(&(*x,*y),&(*u,*v),0.5).is_some(),
         (Val::MotionRotation(a), Val::MotionRotation(b)) => a.follows_path == b.follows_path,
         (Val::Tracks(x), Val::Tracks(y)) => GridOperation::Interpolate(0.5).tracks(x, y).is_some(),
+        (Val::Tolerance(Some(x)), Val::Tolerance(Some(y))) => lerp_lp(x, y, 0.5).is_some() && !matches!(x, Length::Px(v) if v.is_infinite()) && !matches!(y, Length::Px(v) if v.is_infinite()),
         (Val::L(x), Val::L(y)) => lerp_lp(x, y, 0.5).is_some(),
         (Val::T(x), Val::T(y)) => lerp_transforms(x, y, 0.5).is_some(),
         (Val::Cp(Some(x), _), Val::Cp(Some(y), _)) => lerp_clip(x, y, 0.5).is_some(),
@@ -2293,6 +2684,16 @@ mod tests {
         // Lists padded with identity functions.
         let t = interpolate(&Val::T(vec![TransformOp::Scale(2.0, 2.0)]), &Val::T(vec![TransformOp::Scale(4.0, 4.0), TransformOp::Rotate(1.0)]), 0.5);
         assert_eq!(t, Val::T(vec![TransformOp::Scale(3.0, 3.0), TransformOp::Rotate(0.5)]));
+        // Progress outside [0, 1] extrapolates; integers round, halves up.
+        assert_eq!(interpolate(&Val::Int(Some(-2)), &Val::Int(Some(4)), 1.5), Val::Int(Some(7)));
+        assert_eq!(interpolate(&Val::Int(Some(0)), &Val::Int(Some(5)), -0.3), Val::Int(Some(-1)));
+        assert_eq!(interpolate(&Val::Int(None), &Val::Int(Some(5)), 0.3), Val::Int(None));
+        assert_eq!(interpolate(&Val::LineHeight(None, Some(1.0)), &Val::LineHeight(None, Some(2.0)), -2.0), Val::LineHeight(None, Some(0.0)));
+        assert_eq!(interpolate(&Val::LineHeight(Some(10.0), None), &Val::LineHeight(None, Some(2.0)), 0.6), Val::LineHeight(None, Some(2.0)));
+        let r = |h: f32, v: f32| Val::Radius((Length::Px(h), Length::Px(v)));
+        assert_eq!(interpolate(&r(10.0, 20.0), &r(20.0, 40.0), 2.0), r(30.0, 60.0));
+        assert_eq!(snap_line_width(0.4), 1.0);
+        assert_eq!(snap_line_width(2.98), 2.0);
     }
 
     #[test]

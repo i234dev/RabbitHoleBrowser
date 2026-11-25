@@ -3,7 +3,7 @@
 //! path until their separate consumer is ready.
 use std::collections::HashMap;
 
-use super::{subgrid,GridItem,GridSpace,TrackList};
+use super::{subgrid,Contribution,GridItem,GridSpace,TrackList};
 use super::estimate::ItemSpace;
 use super::pass::{Frame,Measurements,Target};
 use super::phases::{AvailableSpace,AxisLayout,GridAxis,GridOperation,MeasureInputs,MeasurePoint,MinContentProbe,OperationKind,PerpendicularEstimate};
@@ -111,17 +111,41 @@ impl<'a> Layouter<'a> {
                 bases[index]=AvailableSpace::Indefinite;
             }
             let space=ItemSpace::new(constraints,bases,bases[0]);
-            let measurement=self.measure_ordinary_item(&mut b.children[item.idx],item,axis,kind,space,old_reference);
+            let mut measurement=self.measure_ordinary_item(&mut b.children[item.idx],item,axis,kind,space,old_reference);
+            // The automatic minimum fits an area of fixed maximum tracks
+            // (Grid2 §6.6).
+            if let Some(limit)=super::fixed_max_span(&tracks.tracks,start,end,frame.inputs.gaps[index]).filter(|_|tracks.sized()) {
+                let child=&b.children[item.idx];let s=&child.style;
+                let rows=axis==GridAxis::Rows;
+                let (size,min)=if rows {(s.height,s.min_height)} else {(s.width,s.min_width)};
+                if size.is_auto()&&min.is_auto()&&!crate::flex::is_scroll_container(s) {
+                    let extras=if rows {item.edges.pb_v+item.edges.margin_sum(crate::flex::Axis::Column)} else {item.edges.pb_h+item.edges.margin_sum(crate::flex::Axis::Row)};
+                    let c=&mut measurement.contribution;
+                    c.min=c.min.min(limit.max(extras));
+                    c.minimum=c.minimum.min(c.min);
+                }
+            }
             if axis==GridAxis::Rows&&item.align==ItemAlign::Baseline {
                 if let Some(baseline)=measurement.baseline {
                     if let Some(max)=baselines.get_mut(&item.area.row.0) {*max=max.max(baseline);}
                     else {self.grid_work.charge(1);baselines.insert(item.area.row.0,baseline);}
                 }
             }
-            measured.push((item,measurement));
+            measured.push((item,measurement,area_basis(&opposite).definite()));
+        }
+        // Column-axis baseline groups shim their items' contributions.
+        if axis==GridAxis::Columns&&items.iter().any(|it|super::baseline::participates(it,false)) {
+            let mut contributions:Vec<Contribution>=measured.iter().map(|m|m.1.contribution).collect();
+            let heights:Vec<Option<f32>>=measured.iter().map(|m|m.2).collect();
+            self.column_baseline_shims_in(b,items,&mut contributions,old_reference,Some(tracks),&heights);
+            for ((_,measurement,_),c) in measured.iter_mut().zip(contributions) {
+                let shim=c.max-measurement.contribution.max;
+                measurement.true_min_content+=shim;
+                measurement.contribution=c;
+            }
         }
         let mut out=Measurements::default();
-        for (item,mut measurement) in measured {
+        for (item,mut measurement,_) in measured {
             if axis==GridAxis::Rows&&item.align==ItemAlign::Baseline {
                 if let Some(baseline)=measurement.baseline {
                     let shift=baselines[&item.area.row.0]-baseline;

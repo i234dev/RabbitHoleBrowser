@@ -52,50 +52,13 @@ pub(crate) fn srgb_args(c: &[Token]) -> Option<(Vec<&[Token]>, Option<&[Token]>)
     Some((v, p.get(6).copied()))
 }
 
-/// A number, a percentage (scaled so 100% = `pct_ref`) or `none` (0).
-fn num(c: &[Token], pct_ref: f64) -> Option<f64> {
-    match c {
-        [Token::Number(n)] => Some(*n as f64),
-        [Token::Percentage(p)] => Some(*p as f64 / 100.0 * pct_ref),
-        [Token::Ident(s)] if s.eq_ignore_ascii_case("none") => Some(0.0),
-        [Token::Function(_), ..] => crate::values::number(c).map(f64::from),
-        _ => None,
-    }
-}
-
-/// A hue in degrees.
-fn hue(c: &[Token]) -> Option<f64> {
-    match c {
-        [Token::Number(n)] => Some(*n as f64),
-        [Token::Dimension(n, u)] => {
-            let n = *n as f64;
-            match u.to_ascii_lowercase().as_str() {
-                "deg" => Some(n),
-                "rad" => Some(n.to_degrees()),
-                "grad" => Some(n * 0.9),
-                "turn" => Some(n * 360.0),
-                _ => None,
-            }
-        }
-        [Token::Ident(s)] if s.eq_ignore_ascii_case("none") => Some(0.0),
-        _ => None,
-    }
-}
-
-fn alpha(c: Option<&[Token]>) -> Option<f64> {
-    match c {
-        None => Some(1.0),
-        Some(c) => num(c, 1.0).map(|a| a.clamp(0.0, 1.0)),
-    }
-}
-
-fn gamma_encode(x: f64) -> f64 {
+pub(crate) fn gamma_encode(x: f64) -> f64 {
     let s = x.signum();
     let x = x.abs();
     s * if x <= 0.0031308 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
 }
 
-fn gamma_decode(x: f64) -> f64 {
+pub(crate) fn gamma_decode(x: f64) -> f64 {
     let s = x.signum();
     let x = x.abs();
     s * if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
@@ -122,7 +85,7 @@ const D65_TO_D50: [f64; 9] = [
     0.015055191490298152, 0.7518742814281371,
 ];
 
-fn to_color(lin: Rgb, a: f64) -> Color {
+pub(crate) fn to_color(lin: Rgb, a: f64) -> Color {
     // (A small bias keeps halves that went through linear light rounding
     // up, as they do when computed in 8-bit sRGB.)
     let c = |v: f64| (gamma_encode(v).clamp(0.0, 1.0) * 255.0 + 1e-4).round() as u8;
@@ -133,31 +96,36 @@ fn linear_of(c: Color) -> Rgb {
     [gamma_decode(c.r as f64 / 255.0), gamma_decode(c.g as f64 / 255.0), gamma_decode(c.b as f64 / 255.0)]
 }
 
-fn oklab_to_linear(l: f64, a: f64, b: f64) -> Rgb {
-    let l_ = l + 0.3963377773761749 * a + 0.2158037573099136 * b;
-    let m_ = l - 0.1055613458156586 * a - 0.0638541728258133 * b;
-    let s_ = l - 0.0894841775298119 * a - 1.2914855480194092 * b;
-    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
-    [
-        4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3,
-        -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3,
-        -0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3,
-    ]
+// OKLab through XYZ D65 with the CSS Color 4 matrices (more precise than
+// the original linear-sRGB ones, which matters for hues of near-grays).
+const XYZ_TO_LMS: [f64; 9] = [
+    0.8190224379967030, 0.3619062600528904, -0.1288737815209879, 0.0329836539323885, 0.9292868615863434, 0.0361446663506424,
+    0.0481771893596242, 0.2642395317527308, 0.6335478284694309,
+];
+const LMS_TO_OKLAB: [f64; 9] = [
+    0.2104542683093140, 0.7936177747023054, -0.0040720430116193, 1.9779985324311684, -2.4285922420485799, 0.4505937096174110,
+    0.0259040424655478, 0.7827717124575296, -0.8086757549230774,
+];
+const OKLAB_TO_LMS: [f64; 9] = [
+    1.0, 0.3963377773761749, 0.2158037573099136, 1.0, -0.1055613458156586, -0.0638541728258133, 1.0, -0.0894841775298119,
+    -1.2914855480194092,
+];
+const LMS_TO_XYZ: [f64; 9] = [
+    1.2268798758459243, -0.5578149944602171, 0.2813910456659647, -0.0405757452148008, 1.1122868032803170, -0.0717110580655164,
+    -0.0763729366746601, -0.4214933324022432, 1.5869240198367816,
+];
+
+pub(crate) fn oklab_to_linear(l: f64, a: f64, b: f64) -> Rgb {
+    let lms = mul(&OKLAB_TO_LMS, [l, a, b]).map(|v| v * v * v);
+    mul(&XYZ65_TO_LSRGB, mul(&LMS_TO_XYZ, lms))
 }
 
-fn linear_to_oklab(c: Rgb) -> Rgb {
-    let l = 0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2];
-    let m = 0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2];
-    let s = 0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2];
-    let (l, m, s) = (l.cbrt(), m.cbrt(), s.cbrt());
-    [
-        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
-        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
-        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
-    ]
+pub(crate) fn linear_to_oklab(c: Rgb) -> Rgb {
+    let lms = mul(&XYZ_TO_LMS, mul(&LSRGB_TO_XYZ65, c));
+    mul(&LMS_TO_OKLAB, lms.map(f64::cbrt))
 }
 
-fn lab_to_linear(l: f64, a: f64, b: f64) -> Rgb {
+pub(crate) fn lab_to_linear(l: f64, a: f64, b: f64) -> Rgb {
     let fy = (l + 16.0) / 116.0;
     let fx = fy + a / 500.0;
     let fz = fy - b / 200.0;
@@ -167,7 +135,7 @@ fn lab_to_linear(l: f64, a: f64, b: f64) -> Rgb {
     mul(&XYZ65_TO_LSRGB, mul(&D50_TO_D65, xyz50))
 }
 
-fn linear_to_lab(c: Rgb) -> Rgb {
+pub(crate) fn linear_to_lab(c: Rgb) -> Rgb {
     let xyz = mul(&D65_TO_D50, mul(&LSRGB_TO_XYZ65, c));
     let white = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
     let f = |t: f64| if t > 216.0 / 24389.0 { t.cbrt() } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
@@ -195,7 +163,7 @@ const fn inverse(m: [f64; 9]) -> [f64; 9] {
      (d*h-e*g)/det,(b*g-a*h)/det,(a*e-b*d)/det]
 }
 
-fn predefined_coordinates(space: &str, linear: Rgb) -> Option<Rgb> {
+pub(crate) fn predefined_coords(space: &str, linear: Rgb) -> Option<Rgb> {
     const TO_P3: [f64; 9] = inverse(P3_TO_XYZ65);
     const TO_A98: [f64; 9] = inverse(A98_TO_XYZ65);
     const TO_REC2020: [f64; 9] = inverse(REC2020_TO_XYZ65);
@@ -221,7 +189,7 @@ fn predefined_coordinates(space: &str, linear: Rgb) -> Option<Rgb> {
 }
 
 /// `color(<space> r g b)`: linear-light sRGB of the color.
-fn predefined(space: &str, v: Rgb) -> Option<Rgb> {
+pub(crate) fn predefined_linear(space: &str, v: Rgb) -> Option<Rgb> {
     let rgb_space = |m: &[f64; 9], decode: &dyn Fn(f64) -> f64| mul(&XYZ65_TO_LSRGB, mul(m, [decode(v[0]), decode(v[1]), decode(v[2])]));
     Some(match space {
         "srgb" => [gamma_decode(v[0]), gamma_decode(v[1]), gamma_decode(v[2])],
@@ -345,55 +313,12 @@ pub fn alpha_parts(tokens: &[Token]) -> Option<(&[Token], &[Token])> {
     crate::values::is_ident(from, "from").then_some((*origin, a?))
 }
 
-fn replace_alpha(tokens: &[Token]) -> Option<(Color, ComputedColor)> {
-    let (origin, expr) = alpha_parts(tokens)?;
-    let (paint, mut css) = if matches!(origin.first(), Some(Token::Function(f)) if f.eq_ignore_ascii_case("alpha")) {
-        replace_alpha(origin)?
-    } else {
-        let paint = crate::values::resolve_current(crate::values::parse_color_component(origin)?)?;
-        let css = ComputedColor::parse(origin).map_or_else(|| {
-            let origin_alpha = if let Some(Token::Function(f)) = origin.first() {
-                let parsed = match f.to_ascii_lowercase().as_str() {
-                    "rgb" | "rgba" | "hsl" | "hsla" => srgb_args(origin),
-                    "hwb" => args(origin),
-                    _ => None,
-                };
-                parsed.and_then(|(_, a)| alpha(a)).map(|a| a as f32)
-            } else { None };
-            ComputedColor { space: "srgb", channels: [paint.r, paint.g, paint.b].map(|v| Some(f32::from(v) / 255.0)),
-                alpha: Some(origin_alpha.unwrap_or(f32::from(paint.a) / 255.0)) }
-        }, |c| (*c).clone());
-        (paint, css)
-    };
-    css.alpha = match expr {
-        t if crate::values::is_ident(t, "alpha") => css.alpha,
-        t if crate::values::is_ident(t, "none") => None,
-        t => {
-            let replaced: Vec<_> = t.iter().map(|token| match token {
-                Token::Ident(k) if k.eq_ignore_ascii_case("alpha") => Token::Number(css.alpha.unwrap_or(0.0)),
-                t => t.clone(),
-            }).collect();
-            Some(alpha(Some(&replaced))? as f32)
-        }
-    };
-    Some((paint.with_alpha((255.0 * css.alpha.unwrap_or(0.0)).round() as u8), css))
-}
-
 /// A color of one of the newer notations, or `None` when `c` is not one
 /// (or is invalid).
 pub fn parse_function(f: &str, c: &[Token]) -> Option<ColorValue> {
     if f == "color-layers" { return layer_color(c).map(ColorValue::Color); }
-    if f == "alpha" { return replace_alpha(c).map(|(color, _)| ColorValue::Color(color)); }
-    if f == "light-dark" {
-        // The light scheme is the one we render.
-        let parts = split_top_commas(strip(c));
-        if parts.len() != 2 {
-            return None;
-        }
-        return crate::values::parse_color(parts[0]);
-    }
-    let (lin, a) = parse_linear(f, c)?;
-    Some(ColorValue::Color(to_color(lin, a)))
+    let (_, abs) = crate::color_model::resolve_tokens(c)?;
+    Some(ColorValue::Color(abs.to_gfx()))
 }
 
 /// The unclipped color of a component in one of the CSS Color 4/5
@@ -402,142 +327,35 @@ pub fn parse_function(f: &str, c: &[Token]) -> Option<ColorValue> {
 pub fn parse_wide(c: &[Token]) -> Option<Wide> {
     let [Token::Function(f), ..] = c else { return None };
     let f = f.to_ascii_lowercase();
-    if matches!(f.as_str(), "rgb" | "rgba" | "hsl" | "hsla" | "hwb" | "light-dark") {
+    if matches!(f.as_str(), "rgb" | "rgba" | "hsl" | "hsla" | "hwb" | "light-dark" | "color-layers") {
         return None;
     }
-    let (lin, a) = parse_linear(&f, c)?;
-    Some([lin[0] as f32, lin[1] as f32, lin[2] as f32, a as f32])
+    let (_, abs) = crate::color_model::resolve_tokens(c)?;
+    if abs.legacy {
+        return None;
+    }
+    let lin = abs.linear();
+    Some([lin[0] as f32, lin[1] as f32, lin[2] as f32, abs.alpha_value() as f32])
 }
 
-/// Components retained for CSSOM when painting an 8-bit sRGB color loses
-/// the original coordinate system, precision or missing components.
+/// A computed color kept at full precision for CSSOM, when an 8-bit sRGB
+/// color would lose its coordinate system, precision or missing
+/// components.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ComputedColor {
-    space: &'static str,
-    channels: [Option<f32>; 3],
-    alpha: Option<f32>,
-}
+pub struct ComputedColor(pub crate::color_model::Abs);
 
 impl ComputedColor {
     pub fn to_css(&self) -> String {
-        let polar_srgb = matches!(self.space, "hsl" | "hwb");
-        let mut out = match self.space {
-            "hsl" | "hwb" | "lab" | "lch" | "oklab" | "oklch" => format!("{}(", self.space),
-            name => format!("color({name} "),
-        };
-        for (i, channel) in self.channels.iter().enumerate() {
-            if i != 0 {
-                out.push(' ');
-            }
-            match channel {
-                Some(v) => {
-                    out.push_str(&v.to_string());
-                    if polar_srgb && i != 0 {
-                        out.push('%');
-                    }
-                }
-                None => out.push_str("none"),
-            }
-        }
-        if self.alpha != Some(1.0) {
-            out.push_str(" / ");
-            out.push_str(&self.alpha.map_or_else(|| "none".into(), |v| v.to_string()));
-        }
-        out.push(')');
-        out
+        self.0.to_css()
     }
 
     pub fn parse(c: &[Token]) -> Option<std::rc::Rc<Self>> {
-        let [Token::Function(f), rest @ ..] = c else { return None };
-        let f = f.to_ascii_lowercase();
-        if f == "alpha" { return replace_alpha(c).map(|(_, color)| std::rc::Rc::new(color)); }
-        if f == "color-mix" {
-            let (linear, alpha, mut space) = color_mix(c)?;
-            // Polar sRGB mixes have an sRGB computed value. Other spaces
-            // retain their coordinates, including values outside the gamut.
-            if matches!(space, InterpSpace::Hsl | InterpSpace::Hwb) { space = InterpSpace::Srgb; }
-            let (hue, v) = to_interp(linear, space);
-            let mut channels = v.map(|n| Some(n as f32));
-            if matches!(space, InterpSpace::Lch | InterpSpace::Oklch) { channels[2] = hue.map(|h| h as f32); }
-            return Some(std::rc::Rc::new(Self { space: space.css_name(), channels, alpha: Some(alpha as f32) }));
+        let [Token::Function(_), ..] = c else { return None };
+        let (spec, abs) = crate::color_model::resolve_tokens(c)?;
+        if spec.is_simple_legacy() {
+            return None;
         }
-        let relative = rest.iter().find(|t| !matches!(t, Token::Whitespace))
-            .is_some_and(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from")));
-        let resolved;
-        let c = if relative {
-            resolved = relative_components(&f, c)?;
-            resolved.as_slice()
-        } else {
-            c
-        };
-        let (mut vals, a) = args(c)?;
-        let missing = |v: &[Token]| crate::values::is_ident(v, "none");
-        let has_missing = vals.iter().any(|v| missing(v)) || a.is_some_and(missing);
-        let space = match f.as_str() {
-            "rgb" | "rgba" if relative || has_missing => "srgb",
-            "hsl" | "hsla" if relative || has_missing => "hsl",
-            "hwb" if relative || has_missing => "hwb",
-            "lab" => "lab",
-            "lch" => "lch",
-            "oklab" => "oklab",
-            "oklch" => "oklch",
-            "color" if vals.len() == 4 => match crate::values::ident(vals.remove(0))?.as_str() {
-                "xyz" | "xyz-d65" => "xyz-d65",
-                "xyz-d50" => "xyz-d50",
-                "srgb" => "srgb",
-                "srgb-linear" => "srgb-linear",
-                "display-p3" => "display-p3",
-                "display-p3-linear" => "display-p3-linear",
-                "a98-rgb" => "a98-rgb",
-                "prophoto-rgb" => "prophoto-rgb",
-                "rec2020" => "rec2020",
-                _ => return None,
-            },
-            _ => return None,
-        };
-        let [x, y, z] = vals.as_slice() else { return None };
-        let lab = matches!(space, "lab" | "oklab" | "lch" | "oklch");
-        let cylindrical = matches!(space, "lch" | "oklch");
-        let polar_srgb = matches!(space, "hsl" | "hwb");
-        let lightness_max = if space.starts_with("ok") { 1.0 } else { 100.0 };
-        let mut channels = [None; 3];
-        for (i, t) in [*x, *y, *z].into_iter().enumerate() {
-            if missing(t) {
-                continue;
-            }
-            let n = if (polar_srgb && i == 0) || (cylindrical && i == 2) {
-                hue(t)?.rem_euclid(360.0)
-            } else if polar_srgb {
-                num(t, 100.0)?.clamp(0.0, 100.0)
-            } else if lab && i == 0 {
-                num(t, lightness_max)?.clamp(0.0, lightness_max)
-            } else if lab {
-                let scale = if space.starts_with("ok") { 0.4 } else if cylindrical { 150.0 } else { 125.0 };
-                let n = num(t, scale)?;
-                if cylindrical { n.max(0.0) } else { n }
-            } else if matches!(f.as_str(), "rgb" | "rgba") {
-                let v = num(t, 255.0)? / 255.0;
-                if relative { v } else { v.clamp(0.0, 1.0) }
-            } else {
-                num(t, 1.0)?
-            };
-            channels[i] = Some(if n == 0.0 || n.is_nan() { 0.0 } else { n as f32 });
-        }
-        let alpha = if a.is_some_and(missing) { None } else { Some(alpha(a)? as f32) };
-        let mut color = Self { space, channels, alpha };
-        if relative && polar_srgb && !has_missing {
-            let [h, s, l] = color.channels.map(|v| f64::from(v.unwrap()));
-            let rgb = if space == "hsl" {
-                hsl_to_rgb(h, s / 100.0, l / 100.0)
-            } else if s + l >= 100.0 {
-                [s / (s + l); 3]
-            } else {
-                hsl_to_rgb(h, 1.0, 0.5).map(|v| v * (1.0 - (s + l) / 100.0) + s / 100.0)
-            };
-            color.space = "srgb";
-            color.channels = rgb.map(|v| Some(v as f32));
-        }
-        Some(std::rc::Rc::new(color))
+        Some(std::rc::Rc::new(Self(abs)))
     }
 }
 
@@ -545,7 +363,7 @@ impl ComputedColor {
 /// except at the ends of the lightness range, where gamut mapping (CSS
 /// Color 4 §13.2) gives white and black whatever the chroma. Lightness
 /// within rounding of an end counts as that end.
-fn lightness_ends(lin: Rgb, l: f64, max: f64) -> Rgb {
+pub(crate) fn lightness_ends(lin: Rgb, l: f64, max: f64) -> Rgb {
     let out = lin.iter().any(|v| !(-1e-4..=1.0001).contains(v));
     if out && l >= max * (1.0 - 1e-5) {
         [1.0; 3]
@@ -556,173 +374,10 @@ fn lightness_ends(lin: Rgb, l: f64, max: f64) -> Rgb {
     }
 }
 
-fn parse_linear(f: &str, c: &[Token]) -> Option<(Rgb, f64)> {
-    if f == "color-mix" { return color_mix(c).map(|(color,alpha,_)| (color,alpha)); }
-    let (vals, a) = args(c)?;
-    Some(match f {
-        "hwb" => {
-            if vals.len() != 3 {
-                return None;
-            }
-            let h = hue(vals[0])?;
-            let w = num(vals[1], 1.0).map(|v| if matches!(vals[1], [Token::Number(_)]) { v / 100.0 } else { v })?;
-            let bl = num(vals[2], 1.0).map(|v| if matches!(vals[2], [Token::Number(_)]) { v / 100.0 } else { v })?;
-            let (r, g, b) = if w + bl >= 1.0 {
-                let gray = w / (w + bl);
-                (gray, gray, gray)
-            } else {
-                let (r, g, b) = crate::values::hsl_to_rgb_pub(h as f32, 1.0, 0.5);
-                let f = |x: f32| x as f64 * (1.0 - w - bl) + w;
-                (f(r), f(g), f(b))
-            };
-            ([gamma_decode(r), gamma_decode(g), gamma_decode(b)], alpha(a)?)
-        }
-        "lab" | "oklab" => {
-            if vals.len() != 3 {
-                return None;
-            }
-            let ok = f == "oklab";
-            let max = if ok { 1.0 } else { 100.0 };
-            let l = num(vals[0], max)?;
-            let ab_ref = if ok { 0.4 } else { 125.0 };
-            let (x, y) = (num(vals[1], ab_ref)?, num(vals[2], ab_ref)?);
-            let l = l.clamp(0.0, max);
-            let lin = if ok { oklab_to_linear(l, x, y) } else { lab_to_linear(l, x, y) };
-            (lightness_ends(lin, l, max), alpha(a)?)
-        }
-        "lch" | "oklch" => {
-            if vals.len() != 3 {
-                return None;
-            }
-            let ok = f == "oklch";
-            let max = if ok { 1.0 } else { 100.0 };
-            let l = num(vals[0], max)?;
-            let ch = num(vals[1], if ok { 0.4 } else { 150.0 })?.max(0.0);
-            let (x, y) = polar(ch, hue(vals[2])?);
-            let l = l.clamp(0.0, max);
-            let lin = if ok { oklab_to_linear(l, x, y) } else { lab_to_linear(l, x, y) };
-            (lightness_ends(lin, l, max), alpha(a)?)
-        }
-        "color" => {
-            let space = match vals.first()? {
-                [Token::Ident(s)] => s.to_ascii_lowercase(),
-                _ => return None,
-            };
-            if vals.len() != 4 {
-                return None;
-            }
-            let v = [num(vals[1], 1.0)?, num(vals[2], 1.0)?, num(vals[3], 1.0)?];
-            (predefined(&space, v)?, alpha(a)?)
-        }
-        "contrast-color" => {
-            // White or black, whichever contrasts more (WCAG 2.1; white on
-            // ties), CSS Color 5 §7.
-            let parts = split_top_commas(strip(c));
-            let [arg] = parts.as_slice() else { return None };
-            let comps: Vec<&[Token]> = components(arg).into_iter().filter(|c| !matches!(c, [Token::Whitespace])).collect();
-            let [comp] = comps.as_slice() else { return None };
-            let lin = match parse_wide(comp) {
-                Some(w) => [w[0] as f64, w[1] as f64, w[2] as f64],
-                None => linear_of(crate::values::resolve_current(crate::values::parse_color_component(comp)?)?),
-            };
-            let lin = lin.map(|v| v.clamp(0.0, 1.0));
-            let y = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
-            let (with_white, with_black) = (1.05 / (y + 0.05), (y + 0.05) / 0.05);
-            (if with_white >= with_black { [1.0; 3] } else { [0.0; 3] }, 1.0)
-        }
-        _ => return None,
-    })
-}
-
-/// A color in relative color syntax (CSS Color 5 §4): the origin color's
-/// channels in the function's space become numbers named `r g b`, `h s l`,
-/// `l a b`, `x y z`, ... (and `alpha`) usable in its channel arguments,
-/// `calc()` included. `None` for an unsupported origin (`currentcolor`)
-/// or space.
-pub fn relative(f: &str, c: &[Token]) -> Option<Color> {
-    let out = relative_components(f, c)?;
-    crate::values::resolve_current(crate::values::parse_color_component(&out)?)
-}
-
-fn relative_components(f: &str, c: &[Token]) -> Option<Vec<Token>> {
-    let inner = strip(c);
-    let comps: Vec<&[Token]> = components(inner).into_iter().filter(|c| !matches!(c, [Token::Whitespace])).collect();
-    let [from, origin, rest @ ..] = comps.as_slice() else { return None };
-    if !matches!(from, [Token::Ident(k)] if k.eq_ignore_ascii_case("from")) {
-        return None;
-    }
-    let (lin, alpha) = match parse_wide(origin) {
-        Some(w) => ([w[0] as f64, w[1] as f64, w[2] as f64], w[3] as f64),
-        None => {
-            let col = crate::values::resolve_current(crate::values::parse_color_component(origin)?)?;
-            (linear_of(col), col.a as f64 / 255.0)
-        }
-    };
-    let srgb = lin.map(gamma_encode);
-    let polar = |lab: Rgb| {
-        let c = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
-        let h = if c < 1e-6 { 0.0 } else { lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0) };
-        [lab[0], c, h]
-    };
-    let (names, values, rest): ([&str; 3], Rgb, &[&[Token]]) = match f {
-        "rgb" | "rgba" => (["r", "g", "b"], srgb.map(|v| v * 255.0), rest),
-        "hsl" | "hsla" => {
-            let (h, s, l) = rgb_to_hsl(srgb);
-            (["h", "s", "l"], [h.unwrap_or(0.0), s * 100.0, l * 100.0], rest)
-        }
-        "hwb" => {
-            let (h, _, _) = rgb_to_hsl(srgb);
-            let w = srgb[0].min(srgb[1]).min(srgb[2]);
-            let b = 1.0 - srgb[0].max(srgb[1]).max(srgb[2]);
-            (["h", "w", "b"], [h.unwrap_or(0.0), w * 100.0, b * 100.0], rest)
-        }
-        "lab" => (["l", "a", "b"], linear_to_lab(lin), rest),
-        "oklab" => (["l", "a", "b"], linear_to_oklab(lin), rest),
-        "lch" => (["l", "c", "h"], polar(linear_to_lab(lin)), rest),
-        "oklch" => (["l", "c", "h"], polar(linear_to_oklab(lin)), rest),
-        "color" => {
-            let [[Token::Ident(space)], rest @ ..] = rest else { return None };
-            let space = space.to_ascii_lowercase();
-            let v = predefined_coordinates(&space,lin)?;
-            let names = if space.starts_with("xyz") { ["x", "y", "z"] } else { ["r", "g", "b"] };
-            (names, v, rest)
-        }
-        _ => return None,
-    };
-    // Substitute the channel keywords, then fold math functions into
-    // plain numbers for the ordinary parser.
-    let channel = |t: &Token| -> Option<Token> {
-        let Token::Ident(k) = t else { return None };
-        let k = k.to_ascii_lowercase();
-        if k == "alpha" {
-            return Some(Token::Number(alpha as f32));
-        }
-        names.iter().position(|n| *n == k).map(|i| Token::Number(values[i] as f32))
-    };
-    let mut out = vec![Token::Function(f.to_string())];
-    if f == "color" {
-        if let [[Token::Ident(space)], ..] = &comps[2..] {
-            out.push(Token::Ident(space.clone()));
-            out.push(Token::Whitespace);
-        }
-    }
-    for comp in rest {
-        let subst: Vec<Token> = comp.iter().map(|t| channel(t).unwrap_or_else(|| t.clone())).collect();
-        match subst.first() {
-            Some(Token::Function(name)) if matches!(name.to_ascii_lowercase().as_str(), "calc" | "min" | "max" | "clamp" | "abs" | "sign" | "round" | "mod" | "rem") => {
-                let n = crate::values::number(&subst)?;
-                out.push(Token::Number(n));
-            }
-            _ => out.extend(subst),
-        }
-        out.push(Token::Whitespace);
-    }
-    if !rest.iter().any(|t| matches!(*t, [Token::Delim('/')])) {
-        out.push(Token::Delim('/'));
-        out.push(Token::Number(alpha as f32));
-    }
-    out.push(Token::CloseParen);
-    Some(out)
+/// A color in relative color syntax (CSS Color 5 §4); `None` when invalid
+/// or when its origin needs an unknown `currentcolor`.
+pub fn relative(_f: &str, c: &[Token]) -> Option<Color> {
+    crate::color_model::resolve_tokens(c).map(|(_, abs)| abs.to_gfx())
 }
 
 /// Split function arguments at top-level commas.
@@ -874,7 +529,7 @@ fn to_interp(linear: Rgb, space: InterpSpace) -> (Option<f64>, Rgb) {
     let lin = || linear;
     match space {
         InterpSpace::DisplayP3 | InterpSpace::DisplayP3Linear | InterpSpace::A98Rgb | InterpSpace::ProPhotoRgb | InterpSpace::Rec2020 | InterpSpace::XyzD50 =>
-            (None, predefined_coordinates(space.css_name(),linear).expect("predefined interpolation profile")),
+            (None, predefined_coords(space.css_name(),linear).expect("predefined interpolation profile")),
         InterpSpace::Srgb => (None, srgb),
         InterpSpace::SrgbLinear => (None, lin()),
         InterpSpace::Oklab => (None, linear_to_oklab(lin())),
@@ -903,7 +558,7 @@ fn to_interp(linear: Rgb, space: InterpSpace) -> (Option<f64>, Rgb) {
 fn from_interp(h: f64, v: Rgb, space: InterpSpace) -> Rgb {
     let lin = match space {
         InterpSpace::DisplayP3 | InterpSpace::DisplayP3Linear | InterpSpace::A98Rgb | InterpSpace::ProPhotoRgb | InterpSpace::Rec2020 | InterpSpace::XyzD50 =>
-            predefined(space.css_name(),v).expect("predefined interpolation profile"),
+            predefined_linear(space.css_name(),v).expect("predefined interpolation profile"),
         InterpSpace::Srgb => [gamma_decode(v[0]), gamma_decode(v[1]), gamma_decode(v[2])],
         InterpSpace::SrgbLinear => v,
         InterpSpace::Oklab => oklab_to_linear(v[0], v[1], v[2]),
@@ -1029,52 +684,6 @@ fn interpolate_linear(a: (Rgb, f64), b: (Rgb, f64), t: f64, m: ColorInterp) -> (
     (from_interp(h, v, m.space), alpha.clamp(0.0, 1.0))
 }
 
-fn color_mix(c: &[Token]) -> Option<(Rgb, f64, InterpSpace)> {
-    let parts = split_top_commas(strip(c));
-    if parts.len() != 3 {
-        return None;
-    }
-    let space: Vec<String> = components(parts[0]).into_iter().map(crate::values::ident).collect::<Option<_>>()?;
-    if space.first().map(String::as_str) != Some("in") || space.len() < 2 {
-        return None;
-    }
-    let interp = ColorInterp::parse(&space)?;
-    let item = |toks: &[Token]| -> Option<((Rgb, f64), Option<f64>)> {
-        let comps: Vec<&[Token]> = components(toks).into_iter().filter(|c| !matches!(c, [Token::Whitespace])).collect();
-        let mut color = None;
-        let mut pct = None;
-        for comp in comps {
-            if let [Token::Percentage(p)] = comp {
-                if pct.is_some() || !(0.0..=100.0).contains(p) { return None; }
-                pct = Some(*p as f64 / 100.0);
-            } else if color.is_some() {
-                return None;
-            } else if let Some(w) = parse_wide(comp) {
-                color = Some(([w[0] as f64, w[1] as f64, w[2] as f64], w[3] as f64));
-            } else {
-                let c = crate::values::resolve_current(crate::values::parse_color_component(comp)?)?;
-                color = Some((linear_of(c), c.a as f64 / 255.0));
-            }
-        }
-        Some((color?, pct))
-    };
-    let (c1, p1) = item(parts[1])?;
-    let (c2, p2) = item(parts[2])?;
-    let (p1, p2) = match (p1, p2) {
-        (None, None) => (0.5, 0.5),
-        (Some(a), None) => (a, 1.0 - a),
-        (None, Some(b)) => (1.0 - b, b),
-        (Some(a), Some(b)) => (a, b),
-    };
-    let sum = p1 + p2;
-    if sum <= 0.0 {
-        return None;
-    }
-    let alpha_mult = sum.min(1.0);
-    let (lin, alpha) = interpolate_linear(c1, c2, p2 / sum, interp);
-    Some((lin, alpha * alpha_mult, interp.space))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::values::{parse_color, ColorValue};
@@ -1086,14 +695,13 @@ mod tests {
         for space in ["display-p3","display-p3-linear","a98-rgb","rec2020","prophoto-rgb","xyz-d50"] {
             let input = format!("color-mix(in {space}, color({space} 0.2 0.3 1.2), color({space} 0.6 0.7 1.4))");
             let css = super::ComputedColor::parse(&Tokenizer::tokenize(&input)).unwrap();
-            assert_eq!(css.space,space);
-            for (actual,expected) in css.channels.into_iter().zip([0.4,0.5,1.3]) {
-                assert!((actual.unwrap() - expected).abs() < 0.0001,"{input}: {css:?}");
+            assert_eq!(css.0.space.name(),space);
+            for (actual,expected) in css.0.c.into_iter().zip([0.4,0.5,1.3]) {
+                assert!((actual - expected).abs() < 0.0001,"{input}: {css:?}");
             }
         }
         let polar = super::ComputedColor::parse(&Tokenizer::tokenize("color-mix(in hsl, red, lime)")).unwrap();
-        assert_eq!(polar.space,"srgb");
-        assert!(polar.channels[0].unwrap() > 0.999 && polar.channels[1].unwrap() > 0.999 && polar.channels[2].unwrap() < 0.001);
+        assert_eq!(polar.to_css(),"color(srgb 1 1 0)");
         for bad in ["color-mix(in srgb 3, red, blue)", "color-mix(in srgb, red red, blue)",
                     "color-mix(in srgb, red 20% 30%, blue)", "color-mix(in srgb, red 120%, blue)"] {
             assert!(color(bad).is_none(),"{bad}");

@@ -79,7 +79,11 @@ fn containing_node(ctx: &LayoutContext, node: NodeId, style: &ComputedStyle) -> 
 }
 
 fn container(ctx: &LayoutContext, tree: &LayoutTree, parent: Option<NodeId>) -> (Rect,Writing) {
-    if let Some((s, border)) = parent.and_then(|id| Some((ctx.styles.get(id)?,tree.box_in_document(ctx.doc,id)?.1))) {
+    // A containing block broken across columns is the box as if it were
+    // not, at its first fragment.
+    let border_of = |id| tree.box_and_coordinates(ctx.doc,id).map(|(b,coordinates)|
+        crate::tree::physical_rect(coordinates,b.unfragmented_rect().unwrap_or(b.rect)));
+    if let Some((s, border)) = parent.and_then(|id| Some((ctx.styles.get(id)?,border_of(id)?))) {
         let bounds = Rect::new(border.x+s.border_width.left,border.y+s.border_width.top,
             (border.w-s.border_width.left-s.border_width.right).max(0.),
             (border.h-s.border_width.top-s.border_width.bottom).max(0.));
@@ -399,8 +403,25 @@ pub(crate) fn placements(ctx: &LayoutContext, tree: &LayoutTree, choices: &HashM
         });
         let s = trial.as_ref().unwrap_or(base);
         let cb_node = containing_node(ctx,id,s);
+        // The fragments of a containing block broken across columns: its
+        // anchors are then placed in its unfragmented flow, translated to
+        // its first fragment (as `container` places it).
+        let cb_pieces = cb_node.and_then(|n| tree.box_of(ctx.doc,n)).and_then(|b| b.col_pieces.as_deref());
         let bounds = |a| {
             if ctx.doc.is_shadow_including_inclusive_ancestor(id,a) { return None; }
+            if let Some(cb_pieces) = cb_pieces {
+                if let Some((b,coordinates)) = tree.box_and_coordinates(ctx.doc,a) {
+                    let first = cb_pieces.pieces.first()?;
+                    let flow = match &b.col_pieces {
+                        Some(p) => p.border,
+                        None => {
+                            let piece = cb_pieces.pieces.iter().find(|p| p.rect.contains(b.rect.x,b.rect.y)).unwrap_or(first);
+                            b.rect.translate(-piece.dx,-piece.dy)
+                        }
+                    };
+                    return Some(crate::tree::physical_rect(coordinates,flow.translate(first.dx,first.dy)));
+                }
+            }
             tree.box_in_document(ctx.doc,a).map(|(_,r)| r).or_else(|| tree.inline_rect(ctx.doc,a))
         };
         let lookup = |name: Option<&str>| if let Some(name) = name.or(s.position_anchor.as_deref()) {

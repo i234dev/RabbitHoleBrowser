@@ -156,13 +156,39 @@ pub(crate) fn cssom_expand_place(realm: &mut Realm, _: Value, args: &[Value]) ->
     Ok(realm.new_array_value(vec![Value::str(a),Value::str(&av),Value::str(b),Value::str(&bv)]))
 }
 
+/// The longhand values of a grid shorthand (CSS-wide keywords apply to
+/// every longhand).
+fn expand_grid(name: &str, value: &str) -> Option<Vec<(&'static str,String)>> {
+    let longhands = rabbithole_style::props::grid_css::longhands(name)?;
+    if css_wide(value) { return Some(longhands.iter().map(|l| (*l, value.to_string())).collect()); }
+    rabbithole_style::props::grid_css::expand(name, &rabbithole_css::Tokenizer::tokenize(value))
+}
+
 impl DeclList {
     fn push(&mut self, name: String, value: String, important: bool) {
         if let Some(longhands) = expand_place(&name,&value) {
             self.items.extend(longhands.into_iter().map(|(k,v)| (k.into(),v,important)));
+        } else if let Some(longhands) = expand_grid(&name,&value) {
+            for (k,v) in longhands {
+                self.items.retain(|(n,_,_)| n != k);
+                self.items.push((k.into(),v,important));
+            }
         } else {
             self.items.push((name,value,important));
         }
+    }
+
+    /// A grid shorthand from its longhands, when they can form one.
+    fn grid_shorthand(&self, prop: &str) -> Option<(String,bool)> {
+        let longhands = rabbithole_style::props::grid_css::longhands(prop)?;
+        let values: Vec<(&str,bool)> = longhands.iter().map(|l| self.direct(l)).collect::<Option<_>>()?;
+        let important = values[0].1;
+        if values.iter().any(|(_,imp)| *imp != important) { return None; }
+        if values.iter().any(|(v,_)| css_wide(v)) {
+            return values.iter().all(|(v,_)| *v == values[0].0).then(|| (values[0].0.to_string(),important));
+        }
+        let get = |name: &str| longhands.iter().position(|l| *l == name).map(|i| values[i].0.to_string());
+        rabbithole_style::props::grid_css::shorthand(prop, &get).map(|v| (v,important))
     }
 
     fn direct(&self, prop: &str) -> Option<(&str,bool)> {
@@ -172,7 +198,15 @@ impl DeclList {
     }
 
     fn value(&self, prop: &str) -> (String,bool) {
-        if let Some((v,imp)) = self.direct(prop) { return (v.into(),imp); }
+        if let Some((v,imp)) = self.direct(prop) {
+            if keeps_source_text(prop, v) {
+                if let Some(serialized) = specified_color(prop, &rabbithole_css::Tokenizer::tokenize(v)) { return (serialized,imp); }
+            }
+            return (v.into(),imp);
+        }
+        if rabbithole_style::props::grid_css::longhands(prop).is_some() {
+            return self.grid_shorthand(prop).unwrap_or_default();
+        }
         if let Some([a,b]) = paired_longhands(prop) {
             if let (Some((a,pa)),Some((b,pb))) = (self.direct(a),self.direct(b)) {
                 if pa==pb {
@@ -216,7 +250,9 @@ impl DeclList {
 
     fn remove(&mut self, prop: &str) {
         let longhands = paired_longhands(prop);
-        self.items.retain(|(k,_,_)| k != prop && !longhands.is_some_and(|pair| pair.contains(&k.as_str())));
+        let grid = rabbithole_style::props::grid_css::longhands(prop);
+        self.items.retain(|(k,_,_)| k != prop && !longhands.is_some_and(|pair| pair.contains(&k.as_str()))
+            && !grid.is_some_and(|l| l.contains(&k.as_str())));
     }
 }
 
@@ -251,7 +287,7 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
     }
     // Keep expressions in the specified value until their variables, units
     // and origin color can be resolved in the element's computed style.
-    if let [Token::Function(f), rest @ ..] = *c {
+    if let [Token::Function(f), ..] = *c {
         if f.eq_ignore_ascii_case("color-layers") {
             let (mode, layers) = rabbithole_style::layer_parts(c)?;
             let mut items = Vec::new();
@@ -259,42 +295,38 @@ fn specified_color(name: &str, tokens: &[Token]) -> Option<String> {
             for layer in layers { items.push(specified_color(name, layer)?); }
             return Some(format!("color-layers({})", items.join(", ")));
         }
-        if f.eq_ignore_ascii_case("alpha") {
-            let (origin, component) = rabbithole_style::alpha_parts(c)?;
-            let origin = specified_color(name, origin)?;
-            let valid = match component {
-                [Token::Number(_) | Token::Percentage(_)] => true,
-                [Token::Ident(k)] => k.eq_ignore_ascii_case("alpha") || k.eq_ignore_ascii_case("none"),
-                [Token::Function(k), ..] => {
-                    let math = ["calc","min","max","clamp"].iter().any(|name| k.eq_ignore_ascii_case(name));
-                    let deferred = component.iter().any(|t| matches!(t, Token::Function(f)
-                        if ["var","env","attr","sibling-index","sibling-count"].iter().any(|name| f.eq_ignore_ascii_case(name))));
-                    let replaced: Vec<_> = component.iter().map(|t| match t {
-                        Token::Ident(k) if k.eq_ignore_ascii_case("alpha") => Token::Number(1.0),
-                        t => t.clone(),
-                    }).collect();
-                    deferred || (math && rabbithole_style::values::number(&replaced).is_some())
-                }
-                _ => false,
-            };
-            if !valid { return None; }
-            return Some(format!("alpha(from {origin} / {})", tokens_to_css(component)));
-        }
-        let deferred = rest.iter().any(|t| matches!(t, Token::Function(_))) ||
-            rest.iter().any(|t| matches!(t, Token::Ident(k) if k.eq_ignore_ascii_case("from"))) ||
-            ["var", "env", "attr", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
+        let deferred = c.iter().any(|t| matches!(t, Token::Function(f)
+            if ["var", "env", "attr", "sibling-index", "sibling-count", "random", "progress", "if"].iter().any(|k| f.eq_ignore_ascii_case(k))));
         if deferred {
-            let known = ["var", "env", "attr", "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab",
+            let known = ["var", "env", "attr", "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "alpha",
                 "oklch", "color", "light-dark", "color-mix", "contrast-color"].iter().any(|k| f.eq_ignore_ascii_case(k));
             return known.then(|| tokens_to_css(c));
         }
     }
+    if let Some(spec) = rabbithole_style::color_model::Spec::parse(c) {
+        return Some(spec.to_css());
+    }
     let ColorValue::Color(rgb) = parse_color_component(c)? else { return None };
-    Some(rabbithole_style::ComputedColor::parse(c).map_or_else(|| color_css(rgb), |wide| wide.to_css()))
+    Some(color_css(rgb))
+}
+
+/// Colors computed from other colors (relative colors, mixes, ...) keep
+/// their source text in the declaration block: their serialization rounds
+/// nested legacy colors to bytes, which must not change the computed value.
+fn keeps_source_text(name: &str, value: &str) -> bool {
+    use rabbithole_style::color_model::Spec;
+    if !single_color_property(name) || !value.contains('(') { return false; }
+    let tokens = rabbithole_css::Tokenizer::tokenize(value);
+    let parts = rabbithole_style::values::components(&tokens);
+    matches!(parts.as_slice(), [c] if matches!(Spec::parse(c), Some(Spec::Relative { .. } | Spec::Mix { .. } | Spec::Alpha(..) | Spec::LightDark(..) | Spec::Contrast(..))))
+}
+
+fn grid_property(name: &str) -> bool {
+    rabbithole_style::props::grid_css::is_longhand(name) || rabbithole_style::props::grid_css::longhands(name).is_some()
 }
 
 fn checked_property(name: &str) -> bool {
-    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::motion::property(name) || single_color_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::motion::property(name) || single_color_property(name) || name == "opacity" || grid_property(name) || rabbithole_style::props::flex::alignment_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
@@ -322,6 +354,32 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
         }
     }
     if single_color_property(name) { return specified_color(name, tokens); }
+    if grid_property(name) {
+        let parts = rabbithole_style::values::components(tokens);
+        if let [c] = parts.as_slice() {
+            if let Some(k) = rabbithole_style::values::ident(c).filter(|k| css_wide(k)) { return Some(k); }
+        }
+        if tokens.iter().any(|t| matches!(t, Token::Function(f) if ["var","env","attr"].iter().any(|n| f.eq_ignore_ascii_case(n)))) {
+            return Some(tokens_to_css(tokens));
+        }
+        if rabbithole_style::props::grid_css::is_longhand(name) {
+            return rabbithole_style::props::grid_css::specified(name, tokens);
+        }
+        return rabbithole_style::props::grid_css::expand(name, tokens).map(|_| tokens_to_css(tokens));
+    }
+    if name == "opacity" {
+        let parts = rabbithole_style::values::components(tokens);
+        let [c] = parts.as_slice() else { return None };
+        if let Some(k) = rabbithole_style::values::ident(c).filter(|k| matches!(k.as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer")) {
+            return Some(k);
+        }
+        // Functions resolved later (variables, tree counting, random
+        // values, progress) keep their text.
+        if c.iter().any(|t| matches!(t, Token::Function(f) if !rabbithole_style::color_calc::is_math_function(f))) {
+            return Some(tokens_to_css(tokens));
+        }
+        return rabbithole_style::color_model::alpha_specified(c);
+    }
     if matches!(name, "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::flex::alignment_property(name) {
         let parts = rabbithole_style::values::components(tokens);
         if let [value] = parts.as_slice() {
@@ -405,7 +463,11 @@ fn parse_style(n: NodeRef) -> DeclList {
     let decls: Vec<Declaration> = parse_declaration_list(&text);
     let mut list = DeclList { items: Vec::with_capacity(decls.len()) };
     for d in decls {
-        if let Some(value) = specified_value(&d.name, &d.value) { list.push(d.name,value,d.important); }
+        if let Some(value) = specified_value(&d.name, &d.value) {
+            let source = tokens_to_css(&d.value);
+            let value = if keeps_source_text(&d.name, &source) { source } else { value };
+            list.push(d.name,value,d.important);
+        }
     }
     list
 }
@@ -469,7 +531,7 @@ fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
     let serialized;
     let value = if !value.is_empty() && (checked_property(prop) || might_use_anchor(value)) {
         let Some(v) = specified_value(prop, &rabbithole_css::Tokenizer::tokenize(value)) else { return };
-        serialized = v;
+        serialized = if keeps_source_text(prop, value) { value.to_string() } else { v };
         serialized.as_str()
     } else { value };
     let mut list = parse_style(n);
@@ -711,6 +773,18 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
             .map(|tracks| grid::used(&tracks))
             .unwrap_or_else(|| grid::computed(if rows { &s.grid_template_rows } else { &s.grid_template_columns })));
     }
+    // Percentage margins and paddings resolve to their used values (of
+    // grid items, against the grid area).
+    let edge = match prop {
+        "margin-top" => Some((true, 0)), "margin-right" => Some((true, 1)), "margin-bottom" => Some((true, 2)), "margin-left" => Some((true, 3)),
+        "padding-top" => Some((false, 0)), "padding-right" => Some((false, 1)), "padding-bottom" => Some((false, 2)), "padding-left" => Some((false, 3)),
+        _ => None,
+    };
+    if let Some((margin, i)) = edge.filter(|_| needs_box) {
+        if let Some((m, p)) = with_env(|env| env.used_box_edges(n.node)) {
+            return Some(px(if margin { m[i] } else { p[i] }));
+        }
+    }
     let r = if needs_box { with_env(|env| env.node_rect(n.node)).unwrap_or_default() } else { Default::default() };
     let pct_padding = [&s.padding.top, &s.padding.right, &s.padding.bottom, &s.padding.left].into_iter().any(|l| pct(l));
     let cb = if needs_box && prop != "transform" && (!matches!(prop, "width" | "height" | "inline-size" | "block-size") || pct_padding) {
@@ -814,7 +888,62 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
     match prop {
         "grid-template-columns" => grid::computed(&s.grid_template_columns),
         "grid-template-rows" => grid::computed(&s.grid_template_rows),
+        "grid-auto-columns" => grid::auto_tracks(&s.grid_auto_columns),
+        "grid-auto-rows" => grid::auto_tracks(&s.grid_auto_rows),
+        "grid-auto-flow" => rabbithole_style::props::grid_css::auto_flow_css(s.grid_auto_flow).into(),
+        "grid-template-areas" => rabbithole_style::props::grid_css::areas_computed(&s.grid_template_areas),
+        "grid-row-start" => rabbithole_style::props::grid_css::line_css(&s.grid_row_start),
+        "grid-row-end" => rabbithole_style::props::grid_css::line_css(&s.grid_row_end),
+        "grid-column-start" => rabbithole_style::props::grid_css::line_css(&s.grid_column_start),
+        "grid-column-end" => rabbithole_style::props::grid_css::line_css(&s.grid_column_end),
+        "grid-lanes-direction" => rabbithole_style::props::grid_css::lanes_direction_css(&s.grid_lanes_direction),
+        "grid-lanes-pack" => if s.grid_lanes_dense { "dense" } else { "normal" }.into(),
+        "fit-tolerance" | "flow-tolerance" => match s.fit_tolerance {
+            None => "normal".into(),
+            Some(rabbithole_style::Length::Px(v)) if v.is_infinite() => "infinite".into(),
+            Some(l) => position_css(&l),
+        },
+        "grid-row" | "grid-column" | "grid-area" | "grid-lanes" | "grid-template" | "grid" => {
+            let get = |l: &str| Some(computed_from_style(s, l, r, cb));
+            rabbithole_style::props::grid_css::shorthand(prop, &get).unwrap_or_default()
+        }
         "display" => display_css(s.display).to_string(),
+        "column-count" => s.column_count.map_or_else(|| "auto".into(), |n| n.to_string()),
+        "column-width" => s.column_width.map_or_else(|| "auto".into(), px),
+        "columns" => {
+            let wc = match (s.column_width, s.column_count) {
+                (None, None) => "auto".into(),
+                (Some(w), None) => px(w),
+                (None, Some(n)) => n.to_string(),
+                (Some(w), Some(n)) => format!("{} {n}", px(w)),
+            };
+            match s.column_height {
+                Some(h) => format!("{wc} / {}", px(h)),
+                None => wc,
+            }
+        }
+        "column-height" => s.column_height.map_or_else(|| "auto".into(), px),
+        "column-wrap" => ["auto", "nowrap", "wrap"][s.column_wrap.min(2) as usize].into(),
+        "column-fill" => if s.column_fill_auto { "auto" } else { "balance" }.into(),
+        "column-span" => if s.column_span_all { "all" } else { "none" }.into(),
+        "column-rule-width" => px(s.column_rule_width),
+        "column-rule-style" => rabbithole_style::props::multicol::rule_style_css(s.column_rule_style_kw).into(),
+        "column-rule-color" => color_css(s.column_rule_color.unwrap_or(s.color)),
+        // (Lists of gap decorations have no shorthand form.)
+        "column-rule" if s.column_rule_list != 0 => String::new(),
+        "column-rule" => {
+            let kw = rabbithole_style::props::multicol::rule_style_css(s.column_rule_style_kw);
+            let color = color_css(s.column_rule_color.unwrap_or(s.color));
+            if kw == "none" { format!("{} {color}", px(s.column_rule_width)) } else { format!("{} {kw} {color}", px(s.column_rule_width)) }
+        }
+        "break-before" => rabbithole_style::props::multicol::break_css(s.break_before).into(),
+        "break-after" => rabbithole_style::props::multicol::break_css(s.break_after).into(),
+        "break-inside" => rabbithole_style::props::multicol::break_css(s.break_inside).into(),
+        "orphans" => s.orphans.to_string(),
+        "widows" => s.widows.to_string(),
+        "column-gap" => {
+            if s.column_gap_normal { "normal".into() } else { length_css(&s.column_gap, cb.w) }
+        }
         "shape-outside" => shapes::computed(s.shape_outside.as_deref(), s.shape_outside_position_explicit, rabbithole_style::ShapeBox::Margin),
         "shape-margin" => position_css(&s.shape_margin),
         "offset-path" => shapes::computed(s.motion().path.as_deref(),s.motion().explicit_center,rabbithole_style::ShapeBox::Border),
@@ -1268,6 +1397,22 @@ pub(crate) fn editing_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsRe
         Some(rabbithole_style::values::ColorValue::Color(c)) => Value::str(&color_css(c)),
         _ => Value::Null,
     })
+}
+
+/// A canvas color: `[r, g, b, a]` with sRGB bytes, colors outside sRGB
+/// gamut mapped (CSS Color 4 §13.2); null when invalid.
+pub(crate) fn canvas_color(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    use rabbithole_style::color_model::{gamut_map_srgb, Spec};
+    let text = arg_str(realm, args, 0)?;
+    let tokens = rabbithole_css::Tokenizer::tokenize(&text);
+    let parts = rabbithole_style::values::components(&tokens);
+    let [c] = parts.as_slice() else { return Ok(Value::Null) };
+    let Some(spec) = Spec::parse(c) else { return Ok(Value::Null) };
+    let current = rabbithole_style::color_model::Abs::from_gfx(rabbithole_gfx::Color::BLACK);
+    let Some(abs) = spec.resolve(Some(&current)) else { return Ok(Value::Null) };
+    let rgb = if abs.legacy { let g = abs.to_gfx(); [g.r, g.g, g.b].map(|v| f64::from(v) / 255.0) } else { gamut_map_srgb(&abs) };
+    let byte = |v: f64| Value::Number((v * 255.0).round().clamp(0.0, 255.0));
+    Ok(realm.new_array_value(vec![byte(rgb[0]), byte(rgb[1]), byte(rgb[2]), Value::Number(abs.alpha_value().clamp(0.0, 1.0))]))
 }
 
 fn css_supports(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {

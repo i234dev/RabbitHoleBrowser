@@ -251,8 +251,13 @@ impl<'a> Layouter<'a> {
             let explicit = |v: ItemAlign| matches!(v, ItemAlign::FlexStart | ItemAlign::FlexEnd | ItemAlign::Center);
             let fx = if end.0 && !explicit(justify.0) { 1.0 } else { static_align_factor(justify.0, justify.1, justify.0, justify.1, rtl, s.direction == rabbithole_style::Direction::Rtl) };
             let fy = if end.1 && !explicit(align.0) { 1.0 } else { static_align_factor(align.0, align.1, align.0, align.1, false, false) };
-            let (s0, s1) = (lo.unwrap_or(0.0), hi.unwrap_or(extent));
-            let (rect_x, rect_y) = if rows { ((0.0, size.0), (s0, s1)) } else { ((s0, s1), (0.0, size.1)) };
+            // With the container as containing block, auto lines are its
+            // padding edges, as in grid layout (Grid2 §9.1).
+            let (px, py) = if positioned { ((pad.left, pad.right), (pad.top, pad.bottom)) } else { ((0.0, 0.0), (0.0, 0.0)) };
+            let (grid_pad, other_pad, other_size) = if rows { (py, px, size.0) } else { (px, py, size.1) };
+            let (s0, s1) = (lo.unwrap_or(-grid_pad.0), hi.unwrap_or(extent + grid_pad.1));
+            let other = (-other_pad.0, other_size + other_pad.1);
+            let (rect_x, rect_y) = if rows { (other, (s0, s1)) } else { ((s0, s1), other) };
             c.static_pos = (cx + rect_x.0, cy + rect_y.0);
             c.static_align = Some(crate::tree::StaticAlign { size: ((rect_x.1 - rect_x.0).max(0.0), (rect_y.1 - rect_y.0).max(0.0)), factor: (fx, fy) });
             if positioned && (lo.is_some() || hi.is_some()) {
@@ -507,7 +512,8 @@ impl<'a> Layouter<'a> {
             let (columns,rows)=subgrid::requests(child);
             let start=it.fixed.unwrap_or(0);
             if rows {self.grid_work.tracks(tl);}
-            let rows=if !rows {None} else if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(tl,start,start+it.span,row_gap,it.fixed.is_some(),row_available,align)}
+            // Rows of unknown sizes still give the span and line names.
+            let rows=if !rows {None} else if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(tl,start,start+it.span,row_gap,it.fixed.is_some(),row_available,align).or_else(||Some(subgrid::sizing_section_aligned(tl,start,start+it.span,row_gap,it.fixed.is_some(),row_available,align)))}
                 else {let (positions,_)=subgrid::positions(tl,row_gap,row_available,align);Some(subgrid::section(tl,&positions,start,start+it.span,row_gap,it.fixed.is_some()))};
             self.with_subgrid(child,columns.then_some(subgrid::AxisInheritance::Stacking),rows,cbw,|this,child|this.lane_item_width(child,it,cbw,available))
         }).collect()
@@ -526,7 +532,42 @@ impl<'a> Layouter<'a> {
         let _probe = self.grid_publication.probe_grid();
         let align=b.style.align_content;
         let mut contribs = Vec::new();
+        // Baseline-aligned items' contributions include their shims; those
+        // of subgrid items share the groups too (Grid2 §11.5 step 1).
+        let dir=b.style.grid_lanes_direction;
+        let baselines_apply=!dir.fill_reverse&&!dir.track_reverse;
+        let container=b.style.clone();
+        let mut baselines:Vec<(usize,baseline::ItemBaseline)>=Vec::new();
         for (it, &w) in items.iter().zip(widths) {
+            if !subgrid::requests(&b.children[it.idx]).1&&baselines_apply&&it.align==ItemAlign::Baseline {
+                // Laid out once: positions differ only in the edge layers.
+                let mut inner:Option<f32>=None;
+                for s in Self::lane_positions(it,&tl.tracks) {
+                    let mut gi=Self::lane_grid_item(it,s,true);
+                    subgrid::item_edges(b,&mut gi,0.,gap);
+                    let child=&mut b.children[it.idx];
+                    if !baseline::eligible(child,&gi,&tl.tracks,true) {break;}
+                    let mv=gi.edges.margin_sum(Axis::Column);
+                    let h=match inner {
+                        Some(inner)=>inner+mv,
+                        None=>{
+                            let mut lane=*it;lane.edges=gi.edges;
+                            let h=self.lane_item_height(child,&lane,w,cbw);
+                            if resolve_size(child.style.height,None,child.style.box_sizing==BoxSizing::BorderBox,it.edges.pb_v).is_some() {
+                                let cb=Cb{x:0.0,width:cbw,height:None};
+                                let mut bfc=Bfc::new();
+                                self.forced_content_height=None;
+                                self.layout_block(child,&cb,0.0,&mut bfc,WidthMode::Fixed(w));
+                            }
+                            inner=Some(h-mv);
+                            h
+                        }
+                    };
+                    baselines.push((contribs.len(),baseline::measure(&container,child,&gi,true)));
+                    contribs.push(Contribution{start:s,end:s+it.span.min(tl.tracks.len()),min:h,max:h,auto_min:false,minimum:h,baseline:None});
+                }
+                if inner.is_some() {continue;}
+            }
             if tl.inherited.is_none()&&subgrid::requests(&b.children[it.idx])==(false,false) {
                 let h=self.lane_item_height(&mut b.children[it.idx],it,w,cbw);
                 let st=&b.children[it.idx].style;
@@ -536,7 +577,10 @@ impl<'a> Layouter<'a> {
                     let end=s+it.span.min(tl.tracks.len());
                     // The automatic minimum fits an area of fixed maximum tracks.
                     let min=match fixed_max_span(&tl.tracks,s as i32,end as i32,gap) {Some(limit) if auto_min=>h.min(limit.max(extras)),_=>h};
-                    contribs.push(Contribution{start:s,end,min,max:h});
+                    // An explicit minimum height with an automatic height is
+                    // the minimum contribution (Grid2 §6.6).
+                    let minimum=match st.min_height {Length::Px(m) if st.height.is_auto()=>{let bb=st.box_sizing==BoxSizing::BorderBox;let m=if bb {(m-it.edges.pb_v).max(0.)} else {m};(m+extras).min(min)},_=>min};
+                    contribs.push(Contribution{start:s,end,min,max:h,auto_min,minimum,baseline:None});
                 }
                 continue;
             }
@@ -555,20 +599,28 @@ impl<'a> Layouter<'a> {
                 let rows=rows.then(||subgrid::item_layer_source(subgrid::sizing_section_aligned(tl,s,s+it.span,gap,it.fixed.is_some(),row_available,align),&item,&child.style,true,cbw));
                 let mut nested=self.with_subgrid(child,columns,rows,cbw,|this,child| {
                     if subgrid::shared(child,true).is_some() {this.subgrid_axis_contributions(child,true,Some(w),phase)}
-                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h}]}
+                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h,auto_min:false,minimum:h,baseline:None}]}
                 });
                 if it.fixed.is_none() {nested=subgrid::automatic_contributions(&mut self.grid_work,nested,it.span);}
-                for c in &mut nested {c.start+=s;c.end+=s;}
+                for c in &mut nested {
+                    c.start+=s;c.end+=s;
+                    if let Some(tag)=&mut c.baseline {if baselines_apply {*tag=tag.shifted(s);} else {c.baseline=None;}}
+                }
                 self.grid_work.charge(nested.len());
                 contribs.extend(nested);
             }
         }
+        baseline::add_shims(&baselines,&mut contribs);
+        baseline::reshare(&mut contribs);
         contribs
     }
 
     /// Lay out a grid lanes container's items; returns the content height.
     pub(crate) fn layout_grid_lanes(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
         self.grid_layouts += 1;
+        // Negative margins can stack items over earlier ones: items then
+        // paint atomically, like inline blocks (Grid2 §9.5).
+        b.grid_items_overlap = negative_item_margins(b);
         if self.grid_publication.enabled() { b.used_grid_tracks = [None, None]; }
         let style = b.style.clone();
         let rows = row_lanes(b);
@@ -621,7 +673,7 @@ impl<'a> Layouter<'a> {
                 placed[i].1
             });
             let extent = cb.height.unwrap_or(pl.range);
-            let shift = stacking_shift(style.align_content, extent - pl.range);
+            let shift = stacking_shift(style.align_content, style.align_content_flags, extent - pl.range, dir.fill_reverse);
             let limits = stacking_limits(&items, &pl, row_gap, extent - shift);
             for (i, it) in items.iter().enumerate() {
                 let (x, mut outer) = placed[i];
@@ -655,6 +707,12 @@ impl<'a> Layouter<'a> {
                     child.translate(2.0 * cx + cbw - 2.0 * x - w - m.right + m.left, 0.0);
                 }
             }
+            // Baseline self-alignment in the lanes (the grid axis); reversed
+            // lanes keep the start fallback.
+            if !mirror && !dir.fill_reverse && !dir.track_reverse && items.iter().any(|it| it.justify == ItemAlign::Baseline) {
+                let lane_items: Vec<GridItem> = items.iter().enumerate().map(|(i, it)| { let mut gi = Self::lane_grid_item(it, pl.start[i], false); subgrid::item_edges(b, &mut gi, col_gap, row_gap); gi }).collect();
+                self.align_item_baselines(b, &lane_items, (&tl.tracks, &col_pos), (&[], &[]), (cx, cy), false, &[false]);
+            }
             if self.grid_publication.enabled() {
                 b.used_grid_tracks[0] = resolved::capture(b, false, &tl, GridSpace::Definite(cbw), &mut self.grid_work);
             }
@@ -673,6 +731,23 @@ impl<'a> Layouter<'a> {
         if avail.is_none() && tl.inherited.is_none() {
             row_avail = resize_rows_to_limits(&mut tl.tracks, &contribs, &style, cbw, row_gap, stretch);
         }
+        // Percentage rows of an indefinite height resolve against the
+        // height they sized as `auto` (as in grid layout, Grid2 §7.2.1).
+        let mut content_height = None;
+        if avail.is_none() && row_avail.is_none() && tl.inherited.is_none() && tl.tracks.iter().any(|t| t.deferred.is_some()) {
+            let height = subgrid::positions(&tl, row_gap, row_avail, style.align_content).1;
+            for t in tl.tracks.iter_mut() {
+                if let Some(size) = t.deferred.take() {
+                    (t.min, t.max) = super::sizing_of(&size, Some(height));
+                }
+                t.base = 0.0;
+                t.limit = None;
+                t.infinitely_growable = false;
+            }
+            super::size_tracks_with_space(&mut tl.tracks, &contribs, GridSpace::Definite(height), row_gap, stretch);
+            row_avail = Some(height);
+            content_height = Some(height);
+        }
         if items.iter().any(|it|subgrid::requests(&b.children[it.idx]).1) {
             let adjusted=self.row_lane_widths(b,&tl,&items,row_gap,avail,cbw,Some(cbw),MeasurePhase::Adjusted);
             if adjusted!=widths {
@@ -682,10 +757,15 @@ impl<'a> Layouter<'a> {
             }
         }
         let (mut row_pos, rows_extent) = subgrid::positions(&tl, row_gap, row_avail, style.align_content);
+        let rows_extent = content_height.unwrap_or(rows_extent);
         // A percentage row gap of an indefinite height is zero for sizing,
         // then resolves against the resulting height (CSS Align 3 §8.1).
         let row_gap = if avail.is_none() && tl.inherited.is_none() && !style.row_gap_normal && matches!(style.row_gap, Length::Percent(_) | Length::Calc(..) | Length::Math(_)) {
-            let used = style.row_gap.resolve_or_zero(rows_extent).max(0.0);
+            // (Against the content height the container takes: the rows'
+            // extent within its definite min-/max-height.)
+            let min_h = definite_height_limit(&style, cbw, false).unwrap_or(0.0);
+            let max_h = definite_height_limit(&style, cbw, true).unwrap_or(f32::INFINITY);
+            let used = style.row_gap.resolve_or_zero(rows_extent.min(max_h).max(min_h)).max(0.0);
             if used != row_gap {
                 row_pos = subgrid::positions(&tl, used, row_avail, style.align_content).0;
             }
@@ -731,7 +811,7 @@ impl<'a> Layouter<'a> {
         });
         let extent = cbw;
         let rtl = style.direction == rabbithole_style::Direction::Rtl;
-        let shift = stacking_shift(style.justify_content, extent - pl.range);
+        let shift = stacking_shift(style.justify_content, style.justify_content_flags, extent - pl.range, dir.fill_reverse);
         let limits = stacking_limits(&items, &pl, col_gap, extent - shift);
         for (i, it) in items.iter().enumerate() {
             let (y, mut outer) = placed[i];
@@ -760,6 +840,11 @@ impl<'a> Layouter<'a> {
             let child = &mut b.children[it.idx];
             let (nx, ny) = (cx + x + child.margin.left, cy + y);
             child.translate(nx - child.rect.x, ny - child.rect.y);
+        }
+        // Baseline self-alignment in the lanes (the grid axis).
+        if !dir.fill_reverse && !dir.track_reverse && items.iter().any(|it| it.align == ItemAlign::Baseline || b.children[it.idx].subgrid_baselines.is_some()) {
+            let lane_items: Vec<GridItem> = items.iter().enumerate().map(|(i, it)| { let mut gi = Self::lane_grid_item(it, pl.start[i], true); subgrid::item_edges(b, &mut gi, col_gap, row_gap); gi }).collect();
+            self.align_item_baselines(b, &lane_items, (&[], &[]), (&tl.tracks, &row_pos), (cx, cy), false, &[true]);
         }
         if self.grid_publication.enabled() {
             b.used_grid_tracks[1] = resolved::capture(b, true, &tl, subgrid::standalone_space(b, true, avail), &mut self.grid_work);
@@ -878,11 +963,17 @@ fn last_baseline_as_end((align, flags): (ItemAlign, rabbithole_style::AlignFlags
 }
 
 /// Content distribution of the stacking range (§6.3): only start, center
-/// and end differ.
-fn stacking_shift(d: ContentDistribution, free: f32) -> f32 {
-    match d {
+/// and end differ. The result is the space before the stacking start,
+/// which a reversed fill places at the physical end. `start` and `end`
+/// keep naming the container's own sides there; `flex-start`, `flex-end`
+/// and `normal` follow the reversed fill.
+fn stacking_shift(d: ContentDistribution, flags: rabbithole_style::AlignFlags, free: f32, fill_reverse: bool) -> f32 {
+    use rabbithole_style::AlignFlags as F;
+    let shift = match d {
         ContentDistribution::FlexEnd => free,
         ContentDistribution::Center | ContentDistribution::SpaceAround | ContentDistribution::SpaceEvenly => free / 2.0,
         _ => 0.0,
-    }
+    };
+    let physical = matches!(d, ContentDistribution::FlexStart | ContentDistribution::FlexEnd) && !flags.has(F::FLEX) && !flags.has(F::NORMAL);
+    if fill_reverse && physical { free - shift } else { shift }
 }

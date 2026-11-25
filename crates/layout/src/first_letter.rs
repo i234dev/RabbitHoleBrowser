@@ -96,7 +96,7 @@ fn scan_inline(b: &mut LayoutBox, fl: &Rc<ComputedStyle>, origin: &Rc<ComputedSt
         let (text, style) = match &b.items[i] {
             InlineItem::Text { text, style, .. } => (text, style),
             InlineItem::Open { .. } | InlineItem::Close | InlineItem::Float(_) | InlineItem::Absolute(_) => continue,
-            InlineItem::Atomic(_) | InlineItem::Break => return Scan::Stop,
+            InlineItem::Atomic(_) | InlineItem::Break | InlineItem::ClearBreak(_) => return Scan::Stop,
         };
         match letter_range(text, style.white_space) {
             Extent::Skip => continue,
@@ -182,7 +182,9 @@ enum Extent {
 fn is_punct(c: char) -> bool {
     matches!(
         c.general_category(),
-        GeneralCategory::OpenPunctuation
+        GeneralCategory::ConnectorPunctuation
+            | GeneralCategory::DashPunctuation
+            | GeneralCategory::OpenPunctuation
             | GeneralCategory::ClosePunctuation
             | GeneralCategory::InitialPunctuation
             | GeneralCategory::FinalPunctuation
@@ -245,6 +247,10 @@ fn letter_range(text: &str, ws: WhiteSpace) -> Extent {
     // Combining marks of the letter, then following punctuation.
     let rest = &text[end..];
     let mut in_marks = true;
+    // Typographic spaces (Zs other than word separators) between the
+    // letter and following punctuation belong to it (CSS Pseudo 4 §2.3).
+    let typographic_space = |c: char| c.general_category() == GeneralCategory::SpaceSeparator && !matches!(c, ' ' | '\u{a0}' | '\u{1361}');
+    let mut pending = 0;
     for c in rest.chars() {
         if in_marks && is_mark(c) {
             end += c.len_utf8();
@@ -252,7 +258,10 @@ fn letter_range(text: &str, ws: WhiteSpace) -> Extent {
         }
         in_marks = false;
         if is_punct(c) {
-            end += c.len_utf8();
+            end += pending + c.len_utf8();
+            pending = 0;
+        } else if typographic_space(c) {
+            pending += c.len_utf8();
         } else {
             break;
         }
@@ -275,8 +284,12 @@ mod tests {
         assert_eq!(letter_range("\u{639}\u{627}", WhiteSpace::Normal), Extent::Stop);
         assert_eq!(letter_range("\u{201C}", WhiteSpace::Normal), Extent::Punct(0, 3));
         assert_eq!(letter_range("\nx", WhiteSpace::Pre), Extent::Stop);
-        // A dash is not first-letter punctuation.
-        assert_eq!(letter_range("-x", WhiteSpace::Normal), Extent::Letter(0, 1));
+        // Dash and connector punctuation (Pd, Pc) belong to the first
+        // letter too (CSS Pseudo 4 §2.3), as do typographic spaces before
+        // following punctuation.
+        assert_eq!(letter_range("-x", WhiteSpace::Normal), Extent::Letter(0, 2));
+        assert_eq!(letter_range("x\u{2001}!", WhiteSpace::Normal), Extent::Letter(0, 5));
+        assert_eq!(letter_range("x !", WhiteSpace::Normal), Extent::Letter(0, 1));
         // Combining marks stay with their letter.
         assert_eq!(letter_range("e\u{301}t", WhiteSpace::Normal), Extent::Letter(0, 3));
     }

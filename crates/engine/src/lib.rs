@@ -854,6 +854,13 @@ impl Loader {
     // ------------------------------------------------------------- fonts
 
     fn load_fonts(&self, doc: &Document, styles: &StyledTree) -> Vec<LoadedFont> {
+        self.load_fonts_for(doc, styles, None)
+    }
+
+    /// [`Loader::load_fonts`]; `also` are families to load even when no
+    /// text uses them yet (rules added by scripts, which canvases and
+    /// later styles may use).
+    fn load_fonts_for(&self, doc: &Document, styles: &StyledTree, also: Option<&HashSet<String>>) -> Vec<LoadedFont> {
         if styles.font_faces.is_empty() {
             return Vec::new();
         }
@@ -917,12 +924,16 @@ impl Loader {
             .chain(styles.after.iter().flatten())
         {
             for f in &s.font_family_list {
-                used.insert(f.to_ascii_lowercase());
+                used.insert(f.trim_matches('"').to_ascii_lowercase());
             }
         }
         let mut picked: Vec<(FontFace, Url)> = Vec::new();
+        let mut credentialed: HashSet<String> = HashSet::new();
+        let mut integrity: HashMap<String, String> = HashMap::new();
         for face in &styles.font_faces {
-            if !used.contains(&face.family.to_ascii_lowercase()) || !covers(&face.unicode_range) {
+            let family = face.family.to_ascii_lowercase();
+            let forced = also.is_some_and(|a| a.contains(&family));
+            if !forced && (!used.contains(&family) || !covers(&face.unicode_range)) {
                 continue;
             }
             // Prefer woff2, then woff, then ttf/otf; skip eot/svg.
@@ -953,6 +964,12 @@ impl Loader {
             }
             if let Some((_, url)) = best {
                 if let Some(u) = Url::parse_absolute(url) {
+                    if face.sources.iter().any(|s| s.url == url && s.credentials) {
+                        credentialed.insert(u.to_string());
+                    }
+                    if let Some(meta) = face.sources.iter().find(|s| s.url == url).and_then(|s| s.integrity.clone()) {
+                        integrity.insert(u.to_string(), meta);
+                    }
                     picked.push((face.clone(), u));
                 }
             }
@@ -970,9 +987,26 @@ impl Loader {
             fetcher.max_body = 8 * 1024 * 1024;
             let results = fetcher.fetch_many_for(&to_fetch, 6, Destination::Font, self.initiator.as_ref());
             let mut caches = self.caches.lock().unwrap();
+            // Fonts are fetched in CORS mode (CSS Fonts 4 §4.9): a
+            // cross-origin font needs the server's permission.
+            let origin = self.initiator.as_ref().map(|u| u.origin());
+            let cors_ok = |u: &Url, resp: &rabbithole_net::Response| -> bool {
+                let Some(origin) = &origin else { return true };
+                if u.origin() == *origin || u.scheme == "data" {
+                    return true;
+                }
+                let header = |name: &str| resp.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string());
+                let allowed = header("access-control-allow-origin");
+                if credentialed.contains(&u.to_string()) {
+                    allowed.as_deref() == Some(origin.as_str()) && header("access-control-allow-credentials").as_deref() == Some("true")
+                } else {
+                    matches!(allowed.as_deref(), Some(a) if a == "*" || a == origin)
+                }
+            };
             for (u, r) in to_fetch.iter().zip(results) {
                 let data = match r {
-                    Ok(resp) if resp.status < 400 && !resp.body.is_empty() => Some(Arc::new(resp.body)),
+                    Ok(resp) if resp.status < 400 && !resp.body.is_empty() && cors_ok(u, &resp)
+                        && integrity.get(&u.to_string()).is_none_or(|meta| rabbithole_script::integrity_matches(meta, &resp.body)) => Some(Arc::new(resp.body)),
                     _ => None,
                 };
                 caches.fonts.insert(u.to_string(), data);
@@ -1317,15 +1351,80 @@ impl Engine {
         page.incr.visited_key = Some(key);
     }
 
+    /// Fonts of `@font-face` rules that appeared after the page loaded
+    /// (inserted style sheets, CSSOM edits) load like the initial ones.
+    pub(crate) fn load_added_fonts(&self, page: &mut Page, uses_unloaded: bool) {
+        if !self.loader.load_fonts {
+            return;
+        }
+        let sig = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for f in &page.styles.font_faces {
+                f.family.hash(&mut h);
+                for s in &f.sources {
+                    s.url.hash(&mut h);
+                }
+                f.weight.hash(&mut h);
+                f.italic.hash(&mut h);
+            }
+            h.finish()
+        };
+        let first = page.incr.font_faces_seen().is_none();
+        if page.incr.font_faces_seen() == Some(sig) && !uses_unloaded {
+            return;
+        }
+        page.incr.set_font_faces_seen(sig);
+        if page.styles.font_faces.is_empty() {
+            return;
+        }
+        // Families of rules that appeared since the last flush load at once.
+        let previous = page.incr.known_families();
+        let current: HashSet<String> = page.styles.font_faces.iter().map(|f| f.family.to_ascii_lowercase()).collect();
+        let fresh_families: HashSet<String> = current.difference(&previous).cloned().collect();
+        page.incr.set_known_families(current);
+        let loaded = if first {
+            Vec::new()
+        } else {
+            let bound = Loader { initiator: Some(page.url.clone()), ..self.loader.clone() };
+            bound.load_fonts_for(&page.doc, &page.styles, Some(&fresh_families))
+        };
+        let mut added = false;
+        for f in &loaded {
+            let key = format!("{:?}", (f.face.family.to_ascii_lowercase(), f.face.weight, f.face.italic, f.face.stretch, &f.face.unicode_range, f.data.len()));
+            if page.incr.register_web_font(key) {
+                let ids = page.fonts.add_font_face_with_metrics(&f.face.family, f.face.weight, f.face.italic, f.face.stretch, f.face.unicode_range.as_deref(), f.face.metric_overrides, &f.data);
+                if !f.face.feature_settings.is_empty() {
+                    for id in ids {
+                        page.fonts.set_face_features(id, &f.face.feature_settings);
+                    }
+                }
+                added = true;
+            }
+        }
+        if !first {
+            page.doc.css_font_faces = css_font_faces(&page.styles.font_faces, &loaded);
+        }
+        let unloaded: HashSet<String> = page.styles.font_faces.iter()
+            .filter(|f| !page.doc.css_font_faces.iter().any(|c| c.family == f.family && c.status == "loaded"))
+            .map(|f| f.family.to_ascii_lowercase()).collect();
+        page.incr.set_unloaded_families(unloaded);
+        if added {
+            page.incr.mark_layout_full();
+        }
+    }
+
     pub fn build_page_unscripted(&self, loaded: LoadedPage, viewport: Viewport) -> Page {
         self.visited.borrow_mut().insert(loaded.url.without_fragment().to_string());
         let fonts = Rc::new(self.fonts.document_scope());
         let mut registered = HashSet::new();
+        let mut initial_web_fonts = Vec::new();
         for f in &loaded.fonts {
             // Faces that differ only in unicode-range (the subsets of a
             // hosted font) are all needed: each covers its own characters.
             let key = (f.face.family.to_ascii_lowercase(), f.face.weight, f.face.italic, f.face.stretch, f.face.unicode_range.clone());
-            if registered.insert(key) {
+            if registered.insert(key.clone()) {
+                initial_web_fonts.push(format!("{:?}", (key.0, key.1, key.2, key.3, &key.4, f.data.len())));
                 let ids = fonts.add_font_face_with_metrics(&f.face.family, f.face.weight, f.face.italic, f.face.stretch, f.face.unicode_range.as_deref(), f.face.metric_overrides, &f.data);
                 if !f.face.feature_settings.is_empty() {
                     for id in ids {
@@ -1371,6 +1470,9 @@ impl Engine {
             frames: frames::Frames::default(),
             anim: animations::AnimationState::default(),
         };
+        for key in initial_web_fonts {
+            page.incr.register_web_font(key);
+        }
         if page.frame_depth == 0 {
             if let Some(context) = &self.window_context {
                 if page.url.scheme == "about" && page.url.path == "blank" {
@@ -1586,6 +1688,11 @@ impl Engine {
     /// box that does not clip reports its padding box (nothing scrolled).
     pub fn element_scroll(&self, page: &Page, node: NodeId) -> Option<((f32, f32), (f32, f32))> {
         let b = page.layout.box_of(&page.doc, node)?;
+        if let Some(size) = b.unfragmented_scroll_size().filter(|_| !b.clips) {
+            // Broken across columns: its scrolling area is that of the
+            // unbroken box (CSSOM View in fragmentation, as browsers do).
+            return Some(((0.0, 0.0), size));
+        }
         let area = scrolling_area(b);
         if b.clips {
             Some((b.scroll_offset, (area.0.max(b.scroll_width), area.1.max(b.scroll_height))))
@@ -2538,9 +2645,19 @@ impl Page {
                 }
             }
             if !rects.is_empty() {
-                rects.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+                // Fragments in line order: lines stack in the block direction.
+                use rabbithole_style::WritingMode as Wm;
+                match self.styles.get(node).map(|s| s.writing_mode) {
+                    Some(Wm::VerticalLr | Wm::SidewaysLr) => rects.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y))),
+                    Some(Wm::VerticalRl) => rects.sort_by(|a, b| b.x.total_cmp(&a.x).then(a.y.total_cmp(&b.y))),
+                    _ => rects.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x))),
+                }
                 return rects.into_iter().map(|r| self.client_fragment_rect(node, r)).collect();
             }
+        }
+        if let Some(rects) = self.layout.fragment_rects(&self.doc, node) {
+            // A box broken across columns: one rect per fragment.
+            return rects.into_iter().map(|r| self.client_fragment_rect(node, r)).collect();
         }
         self.client_rect_of(node).into_iter().collect()
     }
@@ -2705,7 +2822,7 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
         u.2 = u.2.max(r.x + r.w + dx);
         u.3 = u.3.max(r.y + r.h + dy);
     }
-    fn walk(bx: &rabbithole_layout::LayoutBox, u: &mut (f32, f32, f32, f32), dx: f32, dy: f32) {
+    fn walk(bx: &rabbithole_layout::LayoutBox, u: &mut (f32, f32, f32, f32), dx: f32, dy: f32, columns: bool) {
         for line in &bx.lines {
             for f in &line.fragments {
                 add(u, &f.rect, dx, dy);
@@ -2723,14 +2840,20 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
                 add(u, &b, dx, dy);
                 continue;
             }
+            // Inside a box (not the multi-column container itself), a
+            // descendant broken across columns counts unbroken.
+            if let Some(r) = c.unfragmented_rect().filter(|_| !columns) {
+                add(u, &r, dx, dy);
+                continue;
+            }
             add(u, &c.rect, dx, dy);
             let clamp_cut = c.style.line_clamp.is_some() && c.children.iter().any(|x| x.clamped);
             if !c.clips && !clamp_cut {
-                walk(c, u, dx, dy);
+                walk(c, u, dx, dy, columns || c.style.multicol);
             }
         }
     }
-    walk(b, &mut u, ox, oy);
+    walk(b, &mut u, ox, oy, b.style.multicol);
     let s = &b.style;
     let vertical = matches!(s.writing_mode, WritingMode::VerticalRl | WritingMode::VerticalLr | WritingMode::SidewaysLr);
     let rtl = s.direction == Direction::Rtl;

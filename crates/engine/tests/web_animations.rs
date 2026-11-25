@@ -317,3 +317,26 @@ fn css_keyframe_composition_uses_the_underlying_value_at_each_endpoint() {
         </script>"#);
     assert_eq!(logs(&mut page), ["add 49"]);
 }
+
+#[test]
+fn transitions_start_when_a_stylesheet_change_restyles_everything() {
+    // The element gains its transition and its new value in the same
+    // restyle, which a new style sheet turns into a full recomputation.
+    let mut e = engine();
+    let mut p = load(
+        &mut e,
+        &format!(
+            "{BOX}<script>
+            const t = document.getElementById('t');
+            getComputedStyle(t).width;
+            t.style.transition = 'all 100s -50s linear';
+            t.style.width = '200px';
+            const s = document.createElement('style');
+            s.textContent = '#unused {{ color: red }}';
+            document.body.append(s);
+            console.log(getComputedStyle(t).width, document.getAnimations().length);
+            </script>"
+        ),
+    );
+    assert_eq!(logs(&mut p), vec!["150px 1"]);
+}

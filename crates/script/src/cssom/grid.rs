@@ -46,6 +46,9 @@ pub(super) fn used(value: &UsedGridTrackList) -> String {
 
 fn size(value: &TrackSize) -> String {
     match value {
+        // Track sizes are non-negative: computed calc() results clamp.
+        TrackSize::Length(rabbithole_style::Length::Px(v)) if *v < 0.0 => "0px".into(),
+        TrackSize::FitContent(rabbithole_style::Length::Px(v)) if *v < 0.0 => "fit-content(0px)".into(),
         TrackSize::Length(l) => super::position_css(l),
         TrackSize::Fr(f) => format!("{}fr", super::fmt_num(*f)),
         TrackSize::MinMax(min, max) => format!("minmax({}, {})", size(min), size(max)),
@@ -58,6 +61,12 @@ fn size(value: &TrackSize) -> String {
             }
         }
     }
+}
+
+/// Computed `grid-auto-columns` / `grid-auto-rows`.
+pub(super) fn auto_tracks(list: &[TrackSize]) -> String {
+    if list.is_empty() { return "auto".into(); }
+    list.iter().map(size).collect::<Vec<_>>().join(" ")
 }
 
 pub(super) fn computed(list: &[TrackListItem]) -> String {

@@ -107,6 +107,16 @@ pub(crate) struct Layouter<'a> {
     float_band: Option<f32>,
     /// A box is being refitted beside floats (nested layouts do not refit).
     refitting: bool,
+    /// Inside the flow of a multi-column container whose columns have a
+    /// known height: (flow position where its columns start, their
+    /// height, their count). Nested multi-column containers break at its
+    /// column ends.
+    pub(crate) column_frame: Option<(f32, f32, u32)>,
+    /// The space really left for the first row of nested multi-column
+    /// containers (by element), and whether such a correcting layout is
+    /// in progress.
+    pub(crate) column_rooms: Vec<(rabbithole_dom::NodeId, f32)>,
+    pub(crate) column_retry: bool,
     /// Pooled working storage of flex layout.
     pub(crate) flex_scratch: Vec<crate::flex::FlexScratch>,
     /// Whether `FontContext::select_family` & co. are implemented.
@@ -381,7 +391,7 @@ pub(crate) fn inline_content_is_empty(b: &LayoutBox) -> bool {
                 }
             }
             InlineItem::Close | InlineItem::Float(_) | InlineItem::Absolute(_) => {}
-            InlineItem::Atomic(_) | InlineItem::Break => return false,
+            InlineItem::Atomic(_) | InlineItem::Break | InlineItem::ClearBreak(_) => return false,
         }
     }
     true
@@ -406,6 +416,9 @@ impl<'a> Layouter<'a> {
             intrinsic_forced_h: None,
             float_band: None,
             refitting: false,
+            column_frame: None,
+            column_rooms: Vec::new(),
+            column_retry: false,
             flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
@@ -583,6 +596,7 @@ impl<'a> Layouter<'a> {
             viewport: (vp_w, vp_h),
             uses_counters,
             resolved_anchor_styles: Default::default(),
+            fragmented: Default::default(),
         }
     }
 
@@ -852,7 +866,7 @@ impl<'a> Layouter<'a> {
         // Table cells are adjusted after layout (vertical-align), so their
         // contents are not where the cache expects them.
         let flex_limits = (b.formatting == Formatting::Flex && explicit_h.is_none()).then(|| self.height_limits(&style, cb.height, pb_v));
-        let cacheable = b.kind != BoxKind::TableCell && self.clamp.is_none() && b.style.line_clamp.is_none()
+        let cacheable = b.kind != BoxKind::TableCell && self.clamp.is_none() && self.column_frame.is_none() && b.style.line_clamp.is_none()
             // Percentage min/max heights of a flex container depend on its
             // containing block, which the cache entry does not record.
             && !(flex_limits.is_some() && (style.min_height.has_percent() || style.max_height.has_percent()));
@@ -1171,7 +1185,18 @@ impl<'a> Layouter<'a> {
     }
 
     fn layout_contents(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
-        if matches!(b.formatting, Formatting::Inline | Formatting::Block) && !b.style.multicol && b.style.line_clamp.is_some_and(|n| n > 0) {
+        // Monolithic boxes (and out-of-flow ones) are not broken by the
+        // columns around them: nor are multi-column containers inside.
+        if self.column_frame.is_some() && !b.style.multicol && !(b.flow == crate::tree::Flow::InFlow && crate::multicol::breaks_inside(b)) {
+            let frame = self.column_frame.take();
+            let h = self.layout_contents(b, cb, bfc, top_collapsible, bottom_collapsible);
+            self.column_frame = frame;
+            return h;
+        }
+        if matches!(b.formatting, Formatting::Inline | Formatting::Block) && (b.style.multicol || b.style.line_clamp.is_some_and(|n| n > 0)) {
+            if b.style.multicol {
+                return self.layout_multicol(b, cb);
+            }
             return self.layout_clamped(b, cb, bfc, top_collapsible, bottom_collapsible);
         }
         self.layout_contents_inner(b, cb, bfc, top_collapsible, bottom_collapsible)
@@ -1250,6 +1275,11 @@ impl<'a> Layouter<'a> {
     /// collapsed bottom margin plus those of empty blocks in between). While
     /// `at_top`, the parent's top margin chain is still open — those margins
     /// were already applied when the parent was positioned.
+    /// Lay out the block-level children of a formatting context root.
+    pub(crate) fn layout_block_children_of(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc) -> f32 {
+        self.layout_block_children(b, cb, bfc, false, false)
+    }
+
     fn layout_block_children(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         let saved = std::mem::replace(&mut self.center_blocks, b.style.text_align_webkit_center);
         let saved_rtl = std::mem::replace(&mut self.cb_rtl, b.style.direction == rabbithole_style::Direction::Rtl);
@@ -1383,8 +1413,7 @@ impl<'a> Layouter<'a> {
     #[inline(always)]
     fn compute_width(&mut self, b: &mut LayoutBox, cbw: f32, cb_h: Option<f32>, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
         let intrinsic_limit = |l: Length| l.is_intrinsic() || rabbithole_style::is_fit_content_fn(l);
-        // (Multi-column containers have no column-aware intrinsic sizes yet.)
-        if b.style.multicol || (!intrinsic_limit(b.style.min_width) && !intrinsic_limit(b.style.max_width) && !rabbithole_style::is_fit_content_fn(b.style.width)) {
+        if !intrinsic_limit(b.style.min_width) && !intrinsic_limit(b.style.max_width) && !rabbithole_style::is_fit_content_fn(b.style.width) {
             return self.compute_width_inner(b, cbw, cb_h, pb_h, ml, mr, mode);
         }
         self.compute_width_with_limits(b, cbw, cb_h, pb_h, ml, mr, mode)
@@ -2044,7 +2073,13 @@ impl<'a> Layouter<'a> {
                 // block (a grid area) widens the space up to its right edge.
                 let before = if l.is_none() && r.is_none() && c.static_align.is_none() && !static_right { (c.static_pos.0 + ml - cb.x).min(0.0) } else { 0.0 };
                 let used = l.or(r).unwrap_or(before);
-                (WidthMode::ShrinkToFit, (cb.w - used).max(0.0))
+                // A specified width resolves against the whole containing
+                // block; only shrink-to-fit uses the space past an inset.
+                // (`stretch` and other math sizes keep the inset-modified space.)
+                let specified = matches!(style.width, Length::Px(_) | Length::Percent(_) | Length::Calc(..))
+                    && !matches!(style.min_width, Length::Math(_)) && !matches!(style.max_width, Length::Math(_))
+                    && c.kind != BoxKind::Image && ratio.is_none() && !table;
+                (WidthMode::ShrinkToFit, if specified { cb.w } else { (cb.w - used).max(0.0) })
             }
         };
         if let Some(ratio) = ratio {
