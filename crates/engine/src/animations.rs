@@ -63,7 +63,6 @@ enum Prop {
     Visibility,
     LetterSpacing,
     FontSize,
-    BorderRadius,
     Filter,
     BackdropFilter,
     ClipPath,
@@ -110,6 +109,25 @@ enum Prop {
     BreakBefore,
     BreakAfter,
     BreakInside,
+    ZIndex,
+    Order,
+    LineHeight,
+    VerticalAlign,
+    Perspective,
+    BorderTopWidth,
+    BorderRightWidth,
+    BorderBottomWidth,
+    BorderLeftWidth,
+    OutlineWidth,
+    OutlineOffset,
+    WordSpacing,
+    TextIndent,
+    FlexGrow,
+    FlexShrink,
+    BorderTopLeftRadius,
+    BorderTopRightRadius,
+    BorderBottomRightRadius,
+    BorderBottomLeftRadius,
 }
 
 const ALL: &[Prop] = &[
@@ -145,7 +163,6 @@ const ALL: &[Prop] = &[
     Prop::Visibility,
     Prop::LetterSpacing,
     Prop::FontSize,
-    Prop::BorderRadius,
     Prop::Filter,
     Prop::BackdropFilter,
     Prop::ClipPath,
@@ -192,6 +209,25 @@ const ALL: &[Prop] = &[
     Prop::BreakBefore,
     Prop::BreakAfter,
     Prop::BreakInside,
+    Prop::ZIndex,
+    Prop::Order,
+    Prop::LineHeight,
+    Prop::VerticalAlign,
+    Prop::Perspective,
+    Prop::BorderTopWidth,
+    Prop::BorderRightWidth,
+    Prop::BorderBottomWidth,
+    Prop::BorderLeftWidth,
+    Prop::OutlineWidth,
+    Prop::OutlineOffset,
+    Prop::WordSpacing,
+    Prop::TextIndent,
+    Prop::FlexGrow,
+    Prop::FlexShrink,
+    Prop::BorderTopLeftRadius,
+    Prop::BorderTopRightRadius,
+    Prop::BorderBottomRightRadius,
+    Prop::BorderBottomLeftRadius,
 ];
 
 impl Prop {
@@ -229,7 +265,6 @@ impl Prop {
             Prop::Visibility => "visibility",
             Prop::LetterSpacing => "letter-spacing",
             Prop::FontSize => "font-size",
-            Prop::BorderRadius => "border-radius",
             Prop::Filter => "filter",
             Prop::BackdropFilter => "backdrop-filter",
             Prop::ClipPath => "clip-path",
@@ -276,6 +311,25 @@ impl Prop {
             Prop::BreakBefore => "break-before",
             Prop::BreakAfter => "break-after",
             Prop::BreakInside => "break-inside",
+            Prop::ZIndex => "z-index",
+            Prop::Order => "order",
+            Prop::LineHeight => "line-height",
+            Prop::VerticalAlign => "vertical-align",
+            Prop::Perspective => "perspective",
+            Prop::BorderTopWidth => "border-top-width",
+            Prop::BorderRightWidth => "border-right-width",
+            Prop::BorderBottomWidth => "border-bottom-width",
+            Prop::BorderLeftWidth => "border-left-width",
+            Prop::OutlineWidth => "outline-width",
+            Prop::OutlineOffset => "outline-offset",
+            Prop::WordSpacing => "word-spacing",
+            Prop::TextIndent => "text-indent",
+            Prop::FlexGrow => "flex-grow",
+            Prop::FlexShrink => "flex-shrink",
+            Prop::BorderTopLeftRadius => "border-top-left-radius",
+            Prop::BorderTopRightRadius => "border-top-right-radius",
+            Prop::BorderBottomRightRadius => "border-bottom-right-radius",
+            Prop::BorderBottomLeftRadius => "border-bottom-left-radius",
         }
     }
 
@@ -303,14 +357,19 @@ impl Prop {
             "place-self" => matches!(self, AlignSelf | JustifySelf),
             "margin" => matches!(self, MarginTop | MarginRight | MarginBottom | MarginLeft),
             "padding" => matches!(self, PaddingTop | PaddingRight | PaddingBottom | PaddingLeft),
-            "border-color" | "border" => matches!(self, BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor),
-            "border-top" => self == BorderTopColor,
-            "border-right" => self == BorderRightColor,
-            "border-bottom" => self == BorderBottomColor,
-            "border-left" => self == BorderLeftColor,
+            "border-color" => matches!(self, BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor),
+            "border" => matches!(self, BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor | BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth),
+            "border-width" => matches!(self, BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth),
+            "border-top" => matches!(self, BorderTopColor | BorderTopWidth),
+            "border-right" => matches!(self, BorderRightColor | BorderRightWidth),
+            "border-bottom" => matches!(self, BorderBottomColor | BorderBottomWidth),
+            "border-left" => matches!(self, BorderLeftColor | BorderLeftWidth),
+            "border-radius" => matches!(self, BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius),
+            "outline" => self == OutlineWidth,
+            "flex" => matches!(self, FlexGrow | FlexShrink),
             "inset" => matches!(self, Top | Right | Bottom | Left),
             "background" => self == BackgroundColor,
-            "font" => self == FontSize,
+            "font" => matches!(self, FontSize | LineHeight),
             "columns" => matches!(self, ColumnCount | ColumnWidth | ColumnHeight | ColumnWrap),
             "gap" | "grid-gap" | "grid-column-gap" => self == ColumnGap,
             "page-break-before" => self == BreakBefore,
@@ -355,6 +414,14 @@ enum Val {
     OptPx(Option<f32>),
     /// Values that only animate discretely (keyword indices).
     Keyword(u8),
+    /// An `<integer>` that may be negative (`None` = `auto`, discrete).
+    Int(Option<i32>),
+    /// `line-height`: `normal` (None), a length (px) or a number (the
+    /// multiplier); lengths and numbers do not interpolate together.
+    LineHeight(Option<f32>, Option<f32>),
+    VerticalAlign(rabbithole_style::VerticalAlign),
+    /// A corner radius (horizontal, vertical).
+    Radius((Length, Length)),
 }
 
 fn get(s: &ComputedStyle, p: Prop) -> Val {
@@ -392,7 +459,6 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         Visibility => Val::V(s.visibility),
         LetterSpacing => Val::F(s.letter_spacing),
         FontSize => Val::F(s.font_size),
-        BorderRadius => Val::F(s.border_radius),
         Filter => Val::Fl(s.filters.clone()),
         BackdropFilter => Val::Fl(s.backdrop_filters.clone()),
         ClipPath => Val::Cp(s.clip_path.clone(), false),
@@ -439,6 +505,37 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         BreakAfter => Val::Keyword(s.break_after),
         BreakInside => Val::Keyword(s.break_inside),
         JustifyItems => Val::ItemAlignment(s.justify_items, s.justify_items_flags),
+        ZIndex => Val::Int(s.z_index),
+        Order => Val::Int(Some(s.order)),
+        LineHeight => Val::LineHeight(s.line_height, s.line_height_number),
+        VerticalAlign => Val::VerticalAlign(s.vertical_align),
+        Perspective => Val::OptPx(s.perspective()),
+        BorderTopWidth => Val::F(s.border_width.top),
+        BorderRightWidth => Val::F(s.border_width.right),
+        BorderBottomWidth => Val::F(s.border_width.bottom),
+        BorderLeftWidth => Val::F(s.border_width.left),
+        OutlineWidth => Val::F(s.outline_width),
+        OutlineOffset => Val::F(s.outline_offset),
+        WordSpacing => Val::F(s.word_spacing),
+        TextIndent => Val::L(s.text_indent),
+        FlexGrow => Val::F(s.flex_grow),
+        FlexShrink => Val::F(s.flex_shrink),
+        BorderTopLeftRadius => Val::Radius(s.border_radii[0]),
+        BorderTopRightRadius => Val::Radius(s.border_radii[1]),
+        BorderBottomRightRadius => Val::Radius(s.border_radii[2]),
+        BorderBottomLeftRadius => Val::Radius(s.border_radii[3]),
+    }
+}
+
+/// A used border / outline width: whole pixels, at least 1px when not
+/// zero (as the cascade computes them).
+fn snap_line_width(w: f32) -> f32 {
+    if w <= 0.0 {
+        0.0
+    } else if w < 1.0 {
+        1.0
+    } else {
+        (w + 0.01).floor()
     }
 }
 
@@ -569,7 +666,48 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
             s.font_size = f.max(0.0);
             s.resolve_spacing_pct();
         }
-        (BorderRadius, Val::F(f)) => s.border_radius = f.max(0.0),
+        (BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius, Val::Radius((h, v))) => {
+            let clamp = |l: Length| match l {
+                Length::Px(x) => Length::Px(x.max(0.0)),
+                Length::Percent(x) => Length::Percent(x.max(0.0)),
+                other => other,
+            };
+            let i = match p {
+                BorderTopLeftRadius => 0,
+                BorderTopRightRadius => 1,
+                BorderBottomRightRadius => 2,
+                _ => 3,
+            };
+            s.border_radii[i] = (clamp(*h), clamp(*v));
+            // The legacy single radius: the largest px corner.
+            s.border_radius = s.border_radii.iter().flat_map(|(h, v)| [*h, *v]).map(|l| if let Length::Px(x) = l { x } else { 0.0 }).fold(0.0, f32::max);
+        }
+        (ZIndex, Val::Int(z)) => s.z_index = *z,
+        (Order, Val::Int(Some(o))) => s.order = *o,
+        (LineHeight, Val::LineHeight(px, number)) => {
+            s.line_height_number = number.map(|n| n.max(0.0));
+            s.line_height = match s.line_height_number {
+                Some(n) => Some(n * s.font_size),
+                None => px.map(|v| v.max(0.0)),
+            };
+        }
+        (VerticalAlign, Val::VerticalAlign(v)) => s.vertical_align = *v,
+        (Perspective, Val::OptPx(d)) => {
+            let d = d.map(|d| d.max(0.0));
+            if d.is_some() || s.transform3d.is_some() {
+                s.transform3d_mut().perspective = d;
+            }
+        }
+        (BorderTopWidth, Val::F(w)) => s.border_width.top = if s.border_style.top.is_visible() { snap_line_width(*w) } else { 0.0 },
+        (BorderRightWidth, Val::F(w)) => s.border_width.right = if s.border_style.right.is_visible() { snap_line_width(*w) } else { 0.0 },
+        (BorderBottomWidth, Val::F(w)) => s.border_width.bottom = if s.border_style.bottom.is_visible() { snap_line_width(*w) } else { 0.0 },
+        (BorderLeftWidth, Val::F(w)) => s.border_width.left = if s.border_style.left.is_visible() { snap_line_width(*w) } else { 0.0 },
+        (OutlineWidth, Val::F(w)) => s.outline_width = snap_line_width(*w),
+        (OutlineOffset, Val::F(o)) => s.outline_offset = *o,
+        (WordSpacing, Val::F(w)) => s.word_spacing = *w,
+        (TextIndent, Val::L(l)) => s.text_indent = *l,
+        (FlexGrow, Val::F(g)) => s.flex_grow = g.max(0.0),
+        (FlexShrink, Val::F(g)) => s.flex_shrink = g.max(0.0),
         (Filter, Val::Fl(f)) => {
             s.filters = f.clone();
             if !f.is_empty() {
@@ -1191,6 +1329,14 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
         (Val::MotionRotation(a), Val::MotionRotation(b)) if a.follows_path == b.follows_path =>
             Val::MotionRotation(MotionRotation { follows_path: a.follows_path, degrees: lerp(a.degrees,b.degrees,t) }),
         (Val::F(x), Val::F(y)) => Val::F(lerp(*x, *y, t)),
+        // Integers round to the nearest, halves towards positive infinity.
+        (Val::Int(Some(x)), Val::Int(Some(y))) => Val::Int(Some((lerp(*x as f32, *y as f32, t) + 0.5).floor() as i32)),
+        (Val::LineHeight(Some(x), None), Val::LineHeight(Some(y), None)) => Val::LineHeight(Some(lerp(*x, *y, t).max(0.0)), None),
+        (Val::LineHeight(_, Some(x)), Val::LineHeight(_, Some(y))) => Val::LineHeight(None, Some(lerp(*x, *y, t).max(0.0))),
+        (Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(x)), Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(y))) => {
+            Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(lerp(*x, *y, t)))
+        }
+        (Val::Radius(x), Val::Radius(y)) => lerp_pair(x, y, t).map(Val::Radius).unwrap_or_else(discrete),
         // Integers interpolate rounded to the nearest (CSS Values 4 §3.1).
         (Val::Count(Some(x)), Val::Count(Some(y))) => Val::Count(Some((lerp(*x as f32, *y as f32, t) + 0.5 + 1e-4).floor().max(1.0) as u32)),
         (Val::OptPx(Some(x)), Val::OptPx(Some(y))) => Val::OptPx(Some(lerp(*x, *y, t).max(0.0))),
@@ -2265,6 +2411,16 @@ fn add_values(under: &Val, v: &Val) -> Val {
         (Val::Tracks(a), Val::Tracks(b)) => GridOperation::Add.tracks(a, b).map(Val::Tracks).unwrap_or_else(|| v.clone()),
         (Val::F(a), Val::F(b)) => Val::F(a + b),
         (Val::Count(Some(a)), Val::Count(Some(b))) => Val::Count(Some(a + b)),
+        (Val::Int(Some(a)), Val::Int(Some(b))) => Val::Int(Some(a.saturating_add(*b))),
+        (Val::LineHeight(Some(a), None), Val::LineHeight(Some(b), None)) => Val::LineHeight(Some(a + b), None),
+        (Val::LineHeight(_, Some(a)), Val::LineHeight(_, Some(b))) => Val::LineHeight(None, Some(a + b)),
+        (Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(a)), Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(b))) => {
+            Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(a + b))
+        }
+        (Val::Radius(a), Val::Radius(b)) => match (add_lp(a.0, b.0), add_lp(a.1, b.1)) {
+            (Some(h), Some(v)) => Val::Radius((h, v)),
+            _ => v.clone(),
+        },
         (Val::Tolerance(Some(a)), Val::Tolerance(Some(b))) => add_lp(*a, *b).map(|l| Val::Tolerance(Some(l))).unwrap_or_else(|| v.clone()),
         (Val::OptPx(Some(a)), Val::OptPx(Some(b))) => Val::OptPx(Some(a + b)),
         (Val::L(a), Val::L(b)) => add_lp(*a, *b).map(Val::L).unwrap_or_else(|| v.clone()),
@@ -2357,7 +2513,10 @@ fn script_effect_values(frames: &[ScriptKeyframe], progress: f64, composite: Com
 fn interpolable(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::F(_), Val::F(_)) | (Val::C(_) | Val::Cw(_), Val::C(_) | Val::Cw(_)) | (Val::V(_), Val::V(_)) => true,
-        (Val::Count(Some(_)), Val::Count(Some(_))) | (Val::OptPx(Some(_)), Val::OptPx(Some(_))) => true,
+        (Val::Count(Some(_)), Val::Count(Some(_))) | (Val::OptPx(Some(_)), Val::OptPx(Some(_))) | (Val::Int(Some(_)), Val::Int(Some(_))) => true,
+        (Val::LineHeight(Some(_), None), Val::LineHeight(Some(_), None)) | (Val::LineHeight(_, Some(_)), Val::LineHeight(_, Some(_))) => true,
+        (Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(_)), Val::VerticalAlign(rabbithole_style::VerticalAlign::Length(_))) => true,
+        (Val::Radius(x), Val::Radius(y)) => lerp_pair(x, y, 0.5).is_some(),
         (Val::MotionPosition(MotionPosition::Coordinates(x,y)), Val::MotionPosition(MotionPosition::Coordinates(u,v))) =>
             lerp_pair(&(*x,*y),&(*u,*v),0.5).is_some(),
         (Val::MotionRotation(a), Val::MotionRotation(b)) => a.follows_path == b.follows_path,
@@ -2525,6 +2684,16 @@ mod tests {
         // Lists padded with identity functions.
         let t = interpolate(&Val::T(vec![TransformOp::Scale(2.0, 2.0)]), &Val::T(vec![TransformOp::Scale(4.0, 4.0), TransformOp::Rotate(1.0)]), 0.5);
         assert_eq!(t, Val::T(vec![TransformOp::Scale(3.0, 3.0), TransformOp::Rotate(0.5)]));
+        // Progress outside [0, 1] extrapolates; integers round, halves up.
+        assert_eq!(interpolate(&Val::Int(Some(-2)), &Val::Int(Some(4)), 1.5), Val::Int(Some(7)));
+        assert_eq!(interpolate(&Val::Int(Some(0)), &Val::Int(Some(5)), -0.3), Val::Int(Some(-1)));
+        assert_eq!(interpolate(&Val::Int(None), &Val::Int(Some(5)), 0.3), Val::Int(None));
+        assert_eq!(interpolate(&Val::LineHeight(None, Some(1.0)), &Val::LineHeight(None, Some(2.0)), -2.0), Val::LineHeight(None, Some(0.0)));
+        assert_eq!(interpolate(&Val::LineHeight(Some(10.0), None), &Val::LineHeight(None, Some(2.0)), 0.6), Val::LineHeight(None, Some(2.0)));
+        let r = |h: f32, v: f32| Val::Radius((Length::Px(h), Length::Px(v)));
+        assert_eq!(interpolate(&r(10.0, 20.0), &r(20.0, 40.0), 2.0), r(30.0, 60.0));
+        assert_eq!(snap_line_width(0.4), 1.0);
+        assert_eq!(snap_line_width(2.98), 2.0);
     }
 
     #[test]

@@ -4065,6 +4065,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.vertical_align = match l {
                     Length::Px(v) => VerticalAlign::Length(v),
                     Length::Percent(p) => VerticalAlign::Length(style.line_height_px() * p / 100.0),
+                    Length::Calc(v, p) => VerticalAlign::Length(v + style.line_height_px() * p / 100.0),
                     _ => return,
                 };
             }
