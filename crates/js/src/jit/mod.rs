@@ -181,6 +181,9 @@ pub(crate) struct State {
     /// Live calls of Entry, including helpers and nested JS (test evidence only).
     #[cfg(test)]
     pub live_entries: u32,
+    /// `typeof` results by kind (undefined, object, boolean, number,
+    /// string, symbol, bigint, function), read by native code.
+    pub typeof_strs: [crate::value::Value; 8],
 }
 
 #[derive(Default)]
@@ -206,7 +209,8 @@ impl Default for State {
     fn default() -> State {
         let o = options();
         debug::install_fault_reporter();
-        State { on: o.on, active: o.on || o.stats, threshold: o.threshold, panic: None, stats: Stats { enabled: o.stats, ..Default::default() }, entries: 0, #[cfg(test)] live_entries: 0 }
+        let typeof_strs = ["undefined", "object", "boolean", "number", "string", "symbol", "bigint", "function"].map(|s| crate::value::Value::String(crate::value::JsStr::intern(s)));
+        State { on: o.on, active: o.on || o.stats, threshold: o.threshold, panic: None, stats: Stats { enabled: o.stats, ..Default::default() }, entries: 0, #[cfg(test)] live_entries: 0, typeof_strs }
     }
 }
 

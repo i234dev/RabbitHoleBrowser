@@ -332,6 +332,13 @@ pub(crate) struct CallLayout {
     /// its `Box<Closure>`.
     pub fn_tag_value: u64,
     pub closure_box: i32,
+    /// Tag values of `ObjectKind::Ordinary` and `ObjectKind::Native`, and
+    /// the offset of `Object::htmldda` (a byte) in an entry.
+    pub ordinary_tag: u64,
+    pub native_tag: u64,
+    pub htmldda: i32,
+    /// In `Realm`: the `typeof` result strings (`jit.typeof_strs`).
+    pub typeof_strs: i32,
     /// In `Closure`: the code (`Rc` word; the `FunctionCode` is at that
     /// address plus `code_adj`), the scope (`Option<ObjectId>`), and the
     /// lexical `this`, `new.target` and `arguments` of arrows
@@ -378,8 +385,8 @@ fn vec_words3<T>(mut v: Vec<T>, one: T) -> Option<(usize, usize, usize)> {
 
 /// Compile-time check of the types of the `Realm` fields native calls use.
 #[allow(dead_code)]
-fn _realm_field_types(r: &Realm) -> (u16, usize, ObjectId, bool, bool, u64) {
-    (r.current_realm, r.max_frames, r.global, r.jit.on, r.jit.stats.enabled, r.jit.stats.switches)
+fn _realm_field_types(r: &Realm) -> (u16, usize, ObjectId, bool, bool, u64, &[crate::value::Value; 8], bool) {
+    (r.current_realm, r.max_frames, r.global, r.jit.on, r.jit.stats.enabled, r.jit.stats.switches, &r.jit.typeof_strs, r.heap.get(ObjectId(0)).htmldda)
 }
 
 fn call_probe() -> Result<CallLayout, u32> {
@@ -515,15 +522,36 @@ fn call_probe() -> Result<CallLayout, u32> {
     if (closure_box..closure_box + w).contains(&tag_at) {
         return Err(119);
     }
-    // Other kinds must not carry the same tag value there.
-    for other in [ObjectKind::Ordinary, ObjectKind::Arguments, ObjectKind::Error] {
-        let e = Some(crate::heap::Object::new(None, other));
+    // The tag value of a kind, at the measured place.
+    let tag_of = |k: ObjectKind| -> u64 {
+        let e = Some(crate::heap::Object::new(None, k));
         let b = &e as *const Option<crate::heap::Object> as usize;
         // SAFETY: reading within the live probe entry.
-        let v = unsafe { if l.tag_niche { std::ptr::read_unaligned((b + tag_at) as *const usize) as u64 } else { std::ptr::read((b + tag_at) as *const u8) as u64 } };
-        if v == fn_tag_value {
-            return Err(120);
+        unsafe { if l.tag_niche { std::ptr::read_unaligned((b + tag_at) as *const usize) as u64 } else { std::ptr::read((b + tag_at) as *const u8) as u64 } }
+    };
+    let ordinary_tag = tag_of(ObjectKind::Ordinary);
+    let native_tag = tag_of(ObjectKind::Native(Box::new(crate::heap::NativeFunction {
+        func: |_, _, _| Ok(Value::Undefined),
+        name: crate::value::JsStr::empty(),
+        data: None,
+        captures: Vec::new(),
+        is_constructor: false,
+        intrinsic: 0,
+        gc_safe: false,
+        realm: 0,
+    })));
+    // Kinds must not share a tag value there (the scope and array values
+    // were checked by `Layout`).
+    let tags = [fn_tag_value, ordinary_tag, native_tag, tag_of(ObjectKind::Arguments), tag_of(ObjectKind::Error), l.scope_tag_value];
+    for i in 0..tags.len() {
+        for j in i + 1..tags.len() {
+            if tags[i] == tags[j] {
+                return Err(120);
+            }
         }
+    }
+    if !l.tag_niche && [fn_tag_value, ordinary_tag, native_tag].contains(&(l.array_tag_value as u64)) {
+        return Err(134);
     }
     // Closure fields.
     let cl_code = std::mem::offset_of!(Closure, code);
@@ -608,6 +636,10 @@ fn call_probe() -> Result<CallLayout, u32> {
         some_id: a[tag_word],
         fn_tag_value,
         closure_box: i32_of(closure_box)?,
+        ordinary_tag,
+        native_tag,
+        htmldda: i32_of(obj + std::mem::offset_of!(crate::heap::Object, htmldda))?,
+        typeof_strs: i32_of(std::mem::offset_of!(Realm, jit) + std::mem::offset_of!(super::State, typeof_strs))?,
         cl_code: i32_of(cl_code)?,
         code_adj: i32_of(code_adj)?,
         cl_scope_id: i32_of(cl_scope_id)?,

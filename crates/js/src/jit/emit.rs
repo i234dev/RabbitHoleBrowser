@@ -163,11 +163,13 @@ fn classify_all(op: &Op) -> Class {
         Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Exp | Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr => exec,
         Op::Eq | Op::NotEq | Op::StrictEq | Op::StrictNotEq | Op::Lt | Op::LtEq | Op::Gt | Op::GtEq | Op::In | Op::Instanceof => exec,
         Op::WithHas(..) | Op::WithGet(..) | Op::WithSet(..) | Op::ToObject | Op::Neg | Op::Plus | Op::Not | Op::BitNot | Op::Typeof | Op::Void | Op::Inc | Op::Dec => exec,
-        Op::ToNumeric | Op::ToString | Op::ToPropertyKey | Op::PrivateIn(..) | Op::NewObject | Op::NewArray(..) | Op::ArrayPush => exec,
-        Op::ArrayHole | Op::ArraySpread | Op::NewRegExp(..) | Op::TemplateObject(..) | Op::MakeClosure(..) | Op::MakeClass(..) => exec,
+        Op::NewObject | Op::MakeClosure(..) => Helper(h_alloc_op as *const () as usize, "h_alloc_op"),
+        Op::ToNumeric | Op::ToString | Op::ToPropertyKey | Op::PrivateIn(..) | Op::NewArray(..) | Op::ArrayPush => exec,
+        Op::ArrayHole | Op::ArraySpread | Op::NewRegExp(..) | Op::TemplateObject(..) | Op::MakeClass(..) => exec,
         Op::SetClassFields | Op::NewPrivateName(..) | Op::InitFields | Op::This | Op::ThisChecked | Op::NewTarget | Op::Arguments => exec,
         Op::ArgsLength | Op::ArgsGet | Op::Callee | Op::ImportMeta | Op::DynamicImport | Op::DynamicImportWith | Op::GetIterator | Op::GetAsyncIterator => exec,
-        Op::IteratorNextResult | Op::IteratorNext | Op::IteratorClose | Op::ForInStart | Op::ForInNext | Op::IteratorStep => exec,
+        Op::ForInNext => Helper(h_for_in_next as *const () as usize, "h_for_in_next"),
+        Op::IteratorNextResult | Op::IteratorNext | Op::IteratorClose | Op::ForInStart | Op::IteratorStep => exec,
         Op::IteratorRest | Op::IteratorCloseIfNotDone | Op::IteratorCloseQuiet | Op::StoreCompletion | Op::LoadCompletion => exec,
     }
 }
@@ -257,7 +259,7 @@ enum Stub {
     /// `r8` = realm) does not have the site's shape: the megamorphic
     /// cache's entry for (shape, `key`), when it holds an own or prototype
     /// record, becomes the record (`rcx`, kind in `r9`) at `checked`.
-    MegaGet { from: Label, checked: Label, miss: Label, l: super::layout::Layout, key: u64 },
+    MegaGet { from: Label, checked: Label, absent: Label, miss: Label, l: super::layout::Layout, key: u64 },
     /// `CallR` through `h_call` (packed static operands in `args`).
     Call { from: Label, pc: usize, args: u64 },
     /// `ReturnR` through `h_return` (never continues in line).
@@ -1079,19 +1081,30 @@ impl Gen<'_> {
         // A property absent from the receiver (shape) and its prototype
         // chain (prototype `mid`, unchanged while the epoch is `mid_shape`).
         let not_absent = self.a.label();
+        let absent = self.a.label();
+        let checked = self.a.label();
+        let key = self.site_key(ic);
         self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_ABSENT as i32);
         self.a.jcc(CC_NE, not_absent);
         self.object_entry(&l, o, other);
         self.a.load32(RDX, Mem::base(RAX, l.sid));
         self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_SHAPE));
-        self.a.jcc(CC_NE, other);
+        // Another shape: the megamorphic cache's record for it, if any.
+        match key {
+            Some(key) => {
+                let from = self.a.label();
+                self.a.jcc(CC_NE, from);
+                self.stubs.push(Stub::MegaGet { from, checked, absent, miss, l, key });
+            }
+            None => self.a.jcc(CC_NE, other),
+        }
         self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_SHAPE), crate::shape::ROOT_SHAPE_ID as i32);
         self.a.jcc(CC_E, other);
         self.a.mov_imm64(RDX, crate::shape::proto_epoch_addr() as u64);
         self.a.load32(RDX, Mem::base(RDX, 0));
         self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID_SHAPE));
         self.a.jcc(CC_NE, other);
-        let (no_proto, absent) = (self.a.label(), self.a.label());
+        let no_proto = self.a.label();
         self.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
         self.a.jcc(CC_NE, no_proto);
         self.a.load32(RDX, Mem::base(RAX, l.proto_id));
@@ -1106,8 +1119,9 @@ impl Gen<'_> {
         self.a.jmp(have);
         self.a.bind(not_absent);
         // `length` of an array (strings and anything else: the helper).
+        let not_length = self.a.label();
         self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_LENGTH as i32);
-        self.a.jcc(CC_NE, other);
+        self.a.jcc(CC_NE, not_length);
         self.object_entry(&l, o, other);
         self.is_kind(&l, false);
         self.a.jcc(CC_NE, other);
@@ -1115,6 +1129,19 @@ impl Gen<'_> {
         self.a.cvtsi2sd64(XMM0, RAX);
         self.a.movq_r_x(RAX, XMM0);
         self.a.jmp(have);
+        // No usable record at the site (never filled, a dictionary): an
+        // object receiver tries the megamorphic cache directly.
+        self.a.bind(not_length);
+        match key {
+            Some(key) => {
+                self.object_entry(&l, o, other);
+                self.a.load32(RDX, Mem::base(RAX, l.sid));
+                let from = self.a.label();
+                self.a.jmp(from);
+                self.stubs.push(Stub::MegaGet { from, checked, absent, miss, l, key });
+            }
+            None => self.a.jmp(other),
+        }
         self.a.bind(recv);
         // r9 = kind; rax = the receiver's entry with the cached shape
         self.a.mov_rr64(R9, RDX);
@@ -1122,12 +1149,11 @@ impl Gen<'_> {
         self.a.load32(RDX, Mem::base(RAX, l.sid));
         self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_SHAPE));
         // Another shape: the megamorphic cache's record for it, if any.
-        let checked = self.a.label();
-        match self.site_key(ic) {
+        match key {
             Some(key) => {
                 let from = self.a.label();
                 self.a.jcc(CC_NE, from);
-                self.stubs.push(Stub::MegaGet { from, checked, miss, l, key });
+                self.stubs.push(Stub::MegaGet { from, checked, absent, miss, l, key });
             }
             None => self.a.jcc(CC_NE, miss),
         }
@@ -1526,6 +1552,98 @@ impl Gen<'_> {
         a.jmp_r(RAX);
     }
 
+    /// `typeof` of slot `s` into slot `d`: the realm's result string by
+    /// the value's tag; objects by kind (closures and natives are
+    /// functions, ordinary objects and arrays objects, not `document.all`);
+    /// anything else through `h_unr`.
+    fn type_of(&mut self, pc: usize, d: u16, s: u16) {
+        let next = self.lbl(pc + 1);
+        let slow = self.slow(h_unr as *const () as usize, "h_unr", pc, next);
+        let (Some(l), Some(c)) = (self.lay, self.cl) else {
+            self.a.jmp(slow);
+            return;
+        };
+        if !self.rc {
+            self.a.jmp(slow);
+            return;
+        }
+        let a = &mut self.a;
+        let (have, special, obj, func, object) = (a.label(), a.label(), a.label(), a.label(), a.label());
+        // edx = index of the result
+        a.load64(RAX, slot(s));
+        a.mov_imm32(RDX, 3);
+        a.cmp_rr64(RAX, TAGMIN);
+        a.jcc(CC_B, have);
+        a.mov_rr64(RCX, RAX);
+        a.shr_ri64(RCX, 48);
+        a.alu_ri32(Alu::Cmp, RCX, (TAG_MIN >> 48) as i32);
+        a.jcc(CC_E, special);
+        a.mov_imm32(RDX, 4);
+        a.alu_ri32(Alu::Cmp, RCX, (TAG_STRING >> 48) as i32);
+        a.jcc(CC_E, have);
+        a.mov_imm32(RDX, 5);
+        a.alu_ri32(Alu::Cmp, RCX, 0xFFFA);
+        a.jcc(CC_E, have);
+        a.mov_imm32(RDX, 6);
+        a.alu_ri32(Alu::Cmp, RCX, (TAG_BIGINT >> 48) as i32);
+        a.jcc(CC_E, have);
+        a.alu_ri32(Alu::Cmp, RCX, (TAG_OBJECT >> 48) as i32);
+        a.jcc(CC_E, obj);
+        a.jmp(slow);
+        // undefined (+0) and the hole (+2): 0; null (+1): 1; booleans (+4, +5): 2
+        a.bind(special);
+        a.alu_rr64(Alu::Sub, RAX, TAGMIN);
+        a.mov_imm32(RDX, 0);
+        a.alu_ri64(Alu::Cmp, RAX, 0);
+        a.jcc(CC_E, have);
+        a.alu_ri64(Alu::Cmp, RAX, EMPTY);
+        a.jcc(CC_E, have);
+        a.mov_imm32(RDX, 1);
+        a.alu_ri64(Alu::Cmp, RAX, NULL);
+        a.jcc(CC_E, have);
+        a.mov_imm32(RDX, 2);
+        a.alu_ri64(Alu::Cmp, RAX, FALSE);
+        a.jcc(CC_E, have);
+        a.alu_ri64(Alu::Cmp, RAX, TRUE);
+        a.jcc(CC_E, have);
+        a.jmp(slow);
+        // objects: rax = the entry
+        a.bind(obj);
+        a.alu_rr32(Alu::Or, RAX, RAX);
+        a.load64(R8, Mem::base(CTX, CTX_REALM));
+        self.object_at(&l, RAX, RAX, slow);
+        let a = &mut self.a;
+        a.test_mi8(Mem::base(RAX, c.htmldda), 1);
+        a.jcc(CC_NE, slow);
+        let tag_is = |a: &mut Asm, v: u64, to: Label| {
+            if l.tag_niche {
+                a.mov_imm64(RCX, v);
+                a.alu_rm64(Alu::Cmp, RCX, Mem::base(RAX, l.scope_tag));
+            } else {
+                a.movzx8(RCX, Mem::base(RAX, l.scope_tag));
+                a.alu_ri32(Alu::Cmp, RCX, v as i32);
+            }
+            a.jcc(CC_E, to);
+        };
+        tag_is(a, c.fn_tag_value, func);
+        tag_is(a, c.native_tag, func);
+        tag_is(a, c.ordinary_tag, object);
+        self.is_kind(&l, false);
+        let a = &mut self.a;
+        a.jcc(CC_NE, slow);
+        a.bind(object);
+        a.mov_imm32(RDX, 1);
+        a.jmp(have);
+        a.bind(func);
+        a.mov_imm32(RDX, 7);
+        // rax = the shared string, a new reference
+        a.bind(have);
+        a.load64(R8, Mem::base(CTX, CTX_REALM));
+        a.load64(RAX, Mem::index(R8, RDX, 8, c.typeof_strs));
+        self.retain(RAX, RCX);
+        self.store(d, slow);
+    }
+
     /// Count a native frame switch when statistics are on (`r8` = realm).
     fn count_switch(&mut self, c: &super::layout::CallLayout) {
         let skip = self.a.label();
@@ -1612,7 +1730,7 @@ impl Gen<'_> {
                         self.a.cvtsi2sd32(XMM0, RAX);
                         self.store_xmm0(d, slow);
                     }
-                    3 => self.call_helper(h_unr as *const () as usize, "h_unr", pc as u32),
+                    3 => self.type_of(pc, d, s),
                     _ => self.a.jmp(slow),
                 }
             }
@@ -1891,6 +2009,17 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
     // Out-of-line paths.
     let stubs = std::mem::take(&mut g.stubs);
     for s in stubs {
+        if g.a.listing_enabled() {
+            let what = match &s {
+                Stub::Helper { name, arg, .. } => format!("stub {name} {arg}"),
+                Stub::Release { .. } => "stub release".to_string(),
+                Stub::ProtoGet { .. } => "stub proto-get".to_string(),
+                Stub::MegaGet { .. } => "stub mega-get".to_string(),
+                Stub::Call { pc, .. } => format!("stub h_call {pc}"),
+                Stub::Return { .. } => "stub h_return".to_string(),
+            };
+            g.a.comment(|| what);
+        }
         match s {
             Stub::Helper { from, helper, name, arg, resume } => {
                 g.a.bind(from);
@@ -1944,7 +2073,7 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
         g.a.jcc(CC_NE, miss);
                 g.a.jmp(own);
             }
-            Stub::MegaGet { from, checked, miss, l, key } => {
+            Stub::MegaGet { from, checked, absent, miss, l, key } => {
                 g.a.bind(from);
                 g.a.alu_mi64(Alu::Cmp, Mem::base(R8, l.mega_len), 0);
                 g.a.jcc(CC_E, miss);
@@ -1982,7 +2111,26 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
                     g.a.alu_ri32(Alu::Cmp, R9, k as i32);
                     g.a.jcc(CC_E, checked);
                 }
-                g.a.jmp(miss);
+                // An absent key: the receiver's prototype is `mid` (none:
+                // NO_OBJ) and the chain unchanged since (prototype epoch);
+                // never for proxies or namespaces (root shape).
+                g.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_ABSENT as i32);
+                g.a.jcc(CC_NE, miss);
+                g.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_SHAPE), crate::shape::ROOT_SHAPE_ID as i32);
+                g.a.jcc(CC_E, miss);
+                let have = g.a.label();
+                g.a.load32(R10, Mem::base(RAX, l.proto_id));
+                g.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
+                g.a.jcc(CC_E, have);
+                g.a.mov_imm32(R10, crate::ic::NO_OBJ);
+                g.a.bind(have);
+                g.a.alu_rm32(Alu::Cmp, R10, Mem::base(RCX, IC_MID));
+                g.a.jcc(CC_NE, miss);
+                g.a.mov_imm64(R10, crate::shape::proto_epoch_addr() as u64);
+                g.a.load32(R10, Mem::base(R10, 0));
+                g.a.alu_rm32(Alu::Cmp, R10, Mem::base(RCX, IC_MID_SHAPE));
+                g.a.jcc(CC_NE, miss);
+                g.a.jmp(absent);
             }
             Stub::Call { from, pc, args } => {
                 g.a.bind(from);

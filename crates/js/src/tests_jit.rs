@@ -581,6 +581,62 @@ fn inline_builtins() {
 }
 
 #[test]
+fn megamorphic_reads_and_named_stores() {
+    // Receivers sharing a shape with different prototypes: absent and
+    // inherited names, then a prototype gaining the name; named element
+    // stores (existing, added, frozen, setters) through the shared cache.
+    check(r#"
+        var protos = [{ a: 1 }, { b: 2 }, { c: 3 }, Object.create({ d: 4 })];
+        var objs = []; for (var i = 0; i < 12; i++) objs.push(Object.create(protos[i % 4]));
+        var key = 'k' + 'ey';
+        function read(o) { return [o.a, o.b, o.d, o[key], o.zz].join('/'); }
+        function run() {
+            var out = [];
+            for (var r = 0; r < 3; r++) {
+                for (var i = 0; i < objs.length; i++) out.push(read(objs[i]));
+                if (r === 1) { protos[2].zz = 'late'; Object.getPrototypeOf(protos[3]).key = 'deep'; }
+            }
+            return out.slice(0, 4).join(',') + ';' + out.slice(-4).join(',');
+        }
+        run()
+    "#, "1////,/2///,////,//4//;1////,/2///,////late,//4/deep/");
+    check(r#"
+        function copy(src, dst) { for (var k in src) dst[k] = src[k]; return dst; }
+        function copyS(src, dst) { 'use strict'; for (var k in src) dst[k] = src[k]; return dst; }
+        function run() {
+            var log = [];
+            var frozen = Object.freeze({ x: 1 });
+            var withSetter = { set x(v) { log.push('set ' + v); } };
+            for (var i = 0; i < 6; i++) {
+                var d = copy({ x: i, y: 'y' + i }, i % 2 ? {} : { x: -1 });
+                log.push(d.x + d.y);
+            }
+            copy({ x: 8 }, frozen);
+            try { copyS({ x: 9 }, frozen); } catch (e) { log.push(e.constructor.name); }
+            copy({ x: 7 }, withSetter);
+            return log.join(',') + '|' + frozen.x;
+        }
+        run()
+    "#, "0y0,1y1,2y2,3y3,4y4,5y5,TypeError,set 7|1");
+}
+
+#[test]
+fn typeof_of_every_kind() {
+    check(r#"
+        function t(v) { return typeof v; }
+        function f() {
+            var vals = [undefined, null, true, false, 0, -0, NaN, 1.5, '', 'x', Symbol('s'), 10n, {}, [], function () {}, () => 1,
+                        class A {}, Math.max, Math.max.bind(null), new Proxy({}, {}), new Proxy(function () {}, {}), new Date(0), /r/, new Map()];
+            var out = [];
+            for (var i = 0; i < vals.length; i++) out.push(t(vals[i]));
+            var x; out.push(typeof x, typeof undeclaredName);
+            return out.join();
+        }
+        f()
+    "#, "undefined,object,boolean,boolean,number,number,number,number,string,string,symbol,bigint,object,object,function,function,function,function,function,object,function,object,object,object,undefined,undefined");
+}
+
+#[test]
 fn calls_with_wide_static_operands_and_return_slots() {
     // Exercise call operands beyond the low byte, rather than only
     // the low byte used by small hand-written functions.
