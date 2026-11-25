@@ -1895,6 +1895,14 @@
       if (item?.localName === 'li') spec.moveCaret(item, item === node.childNodes[offset] ? 0 : item.childNodes.length);
       return;
     }
+    // A new paragraph starting with inline formatting elements gets the
+    // caret inside them, so that typing uses that formatting.
+    if (cmd === 'insertparagraph' && offset === 0) {
+      let first = node.firstChild;
+      while (first?.nodeType === 1 && inlineContainers.has(first.localName) && first.isContentEditable && first.firstChild) first = first.firstChild;
+      if (first !== node.firstChild && first?.nodeType === 3 && first.length) spec.moveCaret(first, 0);
+      return;
+    }
     if (cmd !== 'delete' && cmd !== 'forwarddelete') return;
     let before = node.childNodes[offset - 1];
     while (before?.nodeType === 1 && inlineContainers.has(before.localName) && before.isContentEditable && before.lastChild) before = before.lastChild;

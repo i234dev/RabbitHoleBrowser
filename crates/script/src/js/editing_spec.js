@@ -1181,10 +1181,17 @@ function getActiveRange() {
 // has changed).
 var moveCaretKeepingOverrides;
 var getStateOverride, setStateOverride, unsetStateOverride,
-    getValueOverride, setValueOverride, unsetValueOverride;
+    getValueOverride, setValueOverride, unsetValueOverride,
+    getOverrideOrder, getOverrideSource, setOverrideSource;
 (function() {
     var stateOverrides = {};
     var valueOverrides = {};
+    // RabbitHole: the order in which the overrides were set (typing applies
+    // them in that order, the first outermost, as other browsers do) and the
+    // element whose formatting a deletion carried over for each command.
+    var order = {};
+    var sources = {};
+    var sequence = 0;
     var storedRange = null;
 
     function resetOverrides() {
@@ -1195,9 +1202,30 @@ var getStateOverride, setStateOverride, unsetStateOverride,
         || storedRange.endOffset != getActiveRange().endOffset) {
             stateOverrides = {};
             valueOverrides = {};
+            order = {};
+            sources = {};
             storedRange = getActiveRange().cloneRange();
         }
     }
+
+    getOverrideOrder = function(command) {
+        resetOverrides();
+        return command in order ? order[command] : 1e15;
+    };
+
+    getOverrideSource = function(command) {
+        resetOverrides();
+        return sources[command] || null;
+    };
+
+    setOverrideSource = function(command, element) {
+        resetOverrides();
+        if (element) {
+            sources[command] = element;
+        } else {
+            delete sources[command];
+        }
+    };
 
     // RabbitHole: move the caret without unsetting the overrides (the caret
     // stays at the same visible position).
@@ -1216,11 +1244,15 @@ var getStateOverride, setStateOverride, unsetStateOverride,
     setStateOverride = function(command, newState) {
         resetOverrides();
         stateOverrides[command] = newState;
+        order[command] = ++sequence;
+        delete sources[command];
     };
 
     unsetStateOverride = function(command) {
         resetOverrides();
         delete stateOverrides[command];
+        delete order[command];
+        delete sources[command];
     }
 
     getValueOverride = function(command) {
@@ -1234,16 +1266,22 @@ var getStateOverride, setStateOverride, unsetStateOverride,
     setValueOverride = function(command, newValue) {
         resetOverrides();
         valueOverrides[command] = newValue;
+        order[command] = ++sequence;
+        delete sources[command];
         if (command == "backcolor") {
             valueOverrides.hilitecolor = newValue;
+            order.hilitecolor = sequence;
         } else if (command == "hilitecolor") {
             valueOverrides.backcolor = newValue;
+            order.backcolor = sequence;
         }
     }
 
     unsetValueOverride = function(command) {
         resetOverrides();
         delete valueOverrides[command];
+        delete order[command];
+        delete sources[command];
         if (command == "backcolor") {
             delete valueOverrides.hilitecolor;
         } else if (command == "hilitecolor") {
@@ -2792,7 +2830,13 @@ function forceValue(node, command, newValue) {
         reorderModifiableDescendants(node.previousSibling, command, newValue);
 
         // "Reorder modifiable descendants of node's nextSibling."
-        reorderModifiableDescendants(node.nextSibling, command, newValue);
+        //
+        // RabbitHole: not for typed text (see below).
+        if (!typingRestore) {
+            reorderModifiableDescendants(node.nextSibling, command, newValue);
+        }
+
+        var nextOfForced = node.nextSibling;
 
         // "Wrap the one-node list consisting of node, with sibling criteria
         // returning true for a simple modifiable element whose specified
@@ -2801,7 +2845,10 @@ function forceValue(node, command, newValue) {
         // with new parent instructions returning null."
         wrap([node],
             function(node) {
-                return isSimpleModifiableElement(node)
+                // RabbitHole: typed text does not move into the formatting
+                // element after it, as in other browsers.
+                return !(typingRestore && node == nextOfForced)
+                    && isSimpleModifiableElement(node)
                     && areEquivalentValues(command, getSpecifiedCommandValue(node, command), newValue)
                     && areLooselyEquivalentValues(command, getEffectiveCommandValue(node, command), newValue);
             },
@@ -4473,11 +4520,32 @@ function recordCurrentOverrides() {
         }
     });
 
+    // RabbitHole: in the order they were set (first outermost), with the
+    // elements a deletion carried their formatting from.
+    // Like other browsers, links are outermost, then subscript and
+    // superscript, then the font element commands.
+    var rank = function(command) {
+        return command == "createlink" ? -1
+            : ["subscript", "superscript"].indexOf(command) != -1 ? 0
+            : ["fontname", "fontsize", "forecolor"].indexOf(command) != -1 ? 1 : 2;
+    };
+    var position = overrides.map(function(pair, i) { return [rank(pair[0]) * 1e16 + getOverrideOrder(pair[0]), i] });
+    var sorted = overrides.slice().sort(function(a, b) {
+        var pa = position[overrides.indexOf(a)], pb = position[overrides.indexOf(b)];
+        return pa[0] - pb[0] || pa[1] - pb[1];
+    });
+    sorted.sources = {};
+    sorted.forEach(function(pair) {
+        if (getOverrideSource(pair[0])) {
+            sorted.sources[pair[0]] = getOverrideSource(pair[0]);
+        }
+    });
+
     // "Return overrides."
-    return overrides;
+    return sorted;
 }
 
-function recordCurrentStatesAndValues() {
+function recordCurrentStatesAndValues(at) {
     // "Let overrides be a list of (string, string or boolean) ordered pairs,
     // initially empty."
     var overrides = [];
@@ -4492,6 +4560,35 @@ function recordCurrentStatesAndValues() {
         return overrides;
     }
 
+    // RabbitHole: like other browsers, a deletion keeps the formatting of
+    // the node where it starts (and a new paragraph that of the node where
+    // the selection ends), and remembers the elements that set it.
+    if (!at) {
+        return recordStatesAndValuesOf(node, overrides);
+    }
+    if (isEditable(at) || isEditingHost(at)) {
+        node = at;
+    }
+    overrides.sources = {};
+    for (var el = node.nodeType == Node.ELEMENT_NODE ? node : node.parentNode;
+    el && isEditable(el) && isInlineNode(el);
+    el = el.parentNode) {
+        if (!isHtmlElement(el, formattingElementNames)) {
+            continue;
+        }
+        ["bold", "italic", "strikethrough", "subscript", "superscript",
+        "underline", "fontname", "fontsize", "forecolor", "hilitecolor"].forEach(function(command) {
+            if (!(command in overrides.sources)
+            && getSpecifiedCommandValue(el, command) !== null) {
+                overrides.sources[command] = el;
+            }
+        });
+    }
+
+    return recordStatesAndValuesOf(node, overrides);
+}
+
+function recordStatesAndValuesOf(node, overrides) {
     // "Add ("createLink", node's effective command value for "createLink") to
     // overrides."
     overrides.push(["createlink", getEffectiveCommandValue(node, "createlink")]);
@@ -4538,12 +4635,18 @@ function restoreStatesAndValues(overrides) {
             var command = overrides[i][0];
             var override = overrides[i][1];
 
+            // RabbitHole: formatting carried over by a deletion is applied
+            // with a copy of the element that had it, as other browsers do.
+            var source = overrides.sources && overrides.sources[command];
+
             // "If override is a boolean, and queryCommandState(command)
             // returns something different from override, take the action for
             // command, with value equal to the empty string."
             if (typeof override == "boolean"
             && myQueryCommandState(command) != override) {
-                commands[command].action("");
+                if (!source || !wrapActiveRangeWithCopy(source, command)) {
+                    commands[command].action("");
+                }
 
             // "Otherwise, if override is a string, and command is neither
             // "createLink" nor "fontSize", and queryCommandValue(command)
@@ -4553,7 +4656,9 @@ function restoreStatesAndValues(overrides) {
             && command != "createlink"
             && command != "fontsize"
             && !areEquivalentValues(command, myQueryCommandValue(command), override)) {
-                commands[command].action(override);
+                if (!source || !wrapActiveRangeWithCopy(source, command)) {
+                    commands[command].action(override);
+                }
 
             // "Otherwise, if override is a string; and command is
             // "createLink"; and either there is a value override for
@@ -4596,7 +4701,9 @@ function restoreStatesAndValues(overrides) {
 
                 // "Take the action for "fontSize", with value equal to
                 // override."
-                commands.fontsize.action(override);
+                if (!source || !wrapActiveRangeWithCopy(source, command)) {
+                    commands.fontsize.action(override);
+                }
 
             // "Otherwise, continue this loop from the beginning."
             } else {
@@ -4627,8 +4734,157 @@ function restoreStatesAndValues(overrides) {
             if (typeof override == "string") {
                 setValueOverride(command, override);
             }
+
+            if (overrides.sources && overrides.sources[command]) {
+                setOverrideSource(command, overrides.sources[command]);
+            }
         }
     }
+}
+
+// RabbitHole: set while typing applies the overrides (see forceValue).
+var typingRestore = false;
+
+// RabbitHole: the overrides a command that deleted the selection carries to
+// where it leaves the caret (see preservesOverrides).
+var carriedOverrides = null;
+
+// RabbitHole: like other browsers, the outermost element created around
+// typed text merges with an identical sibling.
+function mergeTypedWrapper(typedParent) {
+    var range = getActiveRange();
+    var text = range.startContainer;
+    var start = range.startOffset, end = range.endOffset;
+    if (text.nodeType != Node.TEXT_NODE) {
+        // The range may select the elements around the typed text.
+        text = text.childNodes[start];
+        while (text && text.nodeType == Node.ELEMENT_NODE && text.childNodes.length == 1) {
+            text = text.firstChild;
+        }
+        if (!text || text.nodeType != Node.TEXT_NODE) {
+            return;
+        }
+        start = 0;
+        end = text.length;
+    } else if (range.endContainer != text) {
+        end = text.length;
+    }
+    var wrapper = text;
+    while (wrapper.parentNode
+    && wrapper.parentNode != typedParent
+    && wrapper.parentNode.childNodes.length == 1
+    && isHtmlElement(wrapper.parentNode, formattingElementNames)
+    && isEditable(wrapper.parentNode)) {
+        wrapper = wrapper.parentNode;
+    }
+    if (wrapper == text) {
+        return;
+    }
+    var identical = function(element, other) {
+        if (!other || !isHtmlElement(other) || other.localName != element.localName
+        || other.attributes.length != element.attributes.length || !isEditable(other)) {
+            return false;
+        }
+        for (var i = 0; i < element.attributes.length; i++) {
+            var attr = element.attributes[i];
+            if (other.getAttribute(attr.name) !== attr.value) {
+                return false;
+            }
+        }
+        return true;
+    };
+    var merged = false;
+    // Merge with the previous sibling and then the next one, and the same
+    // for the single child moved into it.
+    for (var element = wrapper; element && element != text && isHtmlElement(element); ) {
+        var previous = element.previousSibling;
+        while (previous && previous.nodeType == Node.TEXT_NODE && !previous.length) {
+            previous = previous.previousSibling;
+        }
+        if (!identical(element, previous)) {
+            break;
+        }
+        var child = element.firstChild;
+        while (element.firstChild) {
+            previous.appendChild(element.firstChild);
+        }
+        element.parentNode.removeChild(element);
+        if (element == wrapper) {
+            wrapper = previous;
+        }
+        merged = true;
+        element = child;
+    }
+    for (var element = wrapper; element && element != text && isHtmlElement(element); ) {
+        var next = element.nextSibling;
+        while (next && next.nodeType == Node.TEXT_NODE && !next.length) {
+            next = next.nextSibling;
+        }
+        if (!identical(element, next)) {
+            // The wrapper may now be the last child of the merged element.
+            break;
+        }
+        var child = element.lastChild;
+        while (element.lastChild) {
+            next.insertBefore(element.lastChild, next.firstChild);
+        }
+        element.parentNode.removeChild(element);
+        merged = true;
+        element = child;
+    }
+    if (merged) {
+        getSelection().collapse(text, start);
+        getSelection().extend(text, end);
+        getActiveRange().setStart(text, start);
+        getActiveRange().setEnd(text, end);
+    }
+}
+
+// RabbitHole: the current overrides that come from inline elements.
+function recordCarriedOverrides() {
+    var overrides = recordCurrentOverrides();
+    var carried = overrides.filter(function(pair) { return overrides.sources[pair[0]] });
+    carried.sources = overrides.sources;
+    return carried;
+}
+
+// RabbitHole: wraps the active range, within one Text node, in a shallow
+// copy of element (without its id), or moves it into the previous sibling if
+// that sets the same value for command; returns false if it cannot.
+function wrapActiveRangeWithCopy(element, command) {
+    var range = getActiveRange();
+    var node = range.startContainer;
+    var start = range.startOffset, end = range.endOffset;
+    if (node.nodeType != Node.TEXT_NODE
+    || range.endContainer != node
+    || start == end
+    || !isEditable(node)) {
+        return false;
+    }
+    if (end < node.length) {
+        node.splitText(end);
+    }
+    if (start > 0) {
+        node = node.splitText(start);
+    }
+    var value = getSpecifiedCommandValue(element, command);
+    reorderModifiableDescendants(node.previousSibling, command, value);
+    var previous = node.previousSibling;
+    if (isSimpleModifiableElement(previous)
+    && isEditable(previous)
+    && areEquivalentValues(command, getSpecifiedCommandValue(previous, command), value)) {
+        previous.appendChild(node);
+    } else {
+        var copy = element.cloneNode(false);
+        copy.removeAttribute("id");
+        node.parentNode.insertBefore(copy, node);
+        copy.appendChild(node);
+    }
+    getSelection().collapse(node, 0);
+    getSelection().extend(node, node.length);
+    getActiveRange().setStart(node, 0);
+    getActiveRange().setEnd(node, node.length);
+    return true;
 }
 
 //@}
@@ -4649,6 +4905,24 @@ function deleteSelection(flags) {
     // "If the active range is null, abort these steps and do nothing."
     if (!getActiveRange()) {
         return;
+    }
+
+    // RabbitHole: the node whose formatting the deletion keeps (see
+    // recordCurrentStatesAndValues): like other browsers, the first Text node
+    // if all of it is deleted, otherwise the node where the selection starts
+    // (typing over a selection keeps the specification's).
+    var formattingNode = getActiveRange().startContainer;
+    if (flags.firstFormatting) {
+        formattingNode = undefined;
+    } else if (!getActiveRange().collapsed) {
+        var firstDeleted = getAllEffectivelyContainedNodes(getActiveRange())
+            .filter(isFormattableNode)[0];
+        if (firstDeleted
+        && firstDeleted.nodeType == Node.TEXT_NODE
+        && getPosition(firstDeleted, 0, getActiveRange().startContainer, getActiveRange().startOffset) != "before"
+        && getPosition(firstDeleted, firstDeleted.length, getActiveRange().endContainer, getActiveRange().endOffset) != "after") {
+            formattingNode = firstDeleted;
+        }
     }
 
     // "Canonicalize whitespace at the active range's start."
@@ -4761,7 +5035,7 @@ function deleteSelection(flags) {
     }
 
     // "Record current states and values, and let overrides be the result."
-    var overrides = recordCurrentStatesAndValues();
+    var overrides = recordCurrentStatesAndValues(formattingNode);
 
     // "If start node and end node are the same, and start node is an editable
     // Text node:"
@@ -7468,7 +7742,14 @@ commands.insertlinebreak = {
     preservesOverrides: true,
     action: function(value) {
         // "Delete the selection, with strip wrappers false."
+        //
+        // RabbitHole: the new line keeps the inline formatting of the
+        // deleted selection, as in other browsers.
+        var collapsed = getActiveRange().collapsed;
         deleteSelection({stripWrappers: false});
+        if (!collapsed) {
+            carriedOverrides = recordCarriedOverrides();
+        }
 
         // "If the active range's start node is neither editable nor an editing
         // host, return true."
@@ -7605,7 +7886,14 @@ commands.insertparagraph = {
     preservesOverrides: true,
     action: function() {
         // "Delete the selection."
+        //
+        // RabbitHole: the new paragraph keeps the inline formatting of the
+        // deleted selection, as in other browsers.
+        var collapsed = getActiveRange().collapsed;
         deleteSelection();
+        if (!collapsed) {
+            carriedOverrides = recordCarriedOverrides();
+        }
 
         // "If the active range's start node is neither editable nor an editing
         // host, return true."
@@ -7970,7 +8258,7 @@ commands.insertparagraph = {
 commands.inserttext = {
     action: function(value) {
         // "Delete the selection, with strip wrappers false."
-        deleteSelection({stripWrappers: false});
+        deleteSelection({stripWrappers: false, firstFormatting: true});
 
         // "If the active range's start node is neither editable nor an editing
         // host, return true."
@@ -8091,7 +8379,18 @@ commands.inserttext = {
         }
 
         // "Restore states and values from overrides."
-        restoreStatesAndValues(overrides);
+        var typedText = getActiveRange().startContainer;
+        var typedParent = typedText.parentNode;
+        typingRestore = true;
+        try {
+            restoreStatesAndValues(overrides);
+        } finally {
+            typingRestore = false;
+        }
+        if (getActiveRange().startContainer != typedText
+        || typedText.parentNode != typedParent) {
+            mergeTypedWrapper(typedParent);
+        }
 
         // "Canonicalize whitespace at the active range's start, with fix
         // collapsed space false."
@@ -8654,7 +8953,12 @@ commandNames.forEach(function(command) {
 
         commands[command].action = function(value) {
             var overrides = recordCurrentOverrides();
+            carriedOverrides = null;
             var ret = oldAction(value);
+            if (carriedOverrides) {
+                overrides = carriedOverrides;
+                carriedOverrides = null;
+            }
             if (getActiveRange().collapsed) {
                 restoreStatesAndValues(overrides);
             }
