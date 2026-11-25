@@ -46,6 +46,8 @@ pub(crate) struct ColPiece {
 pub(crate) struct ColRows {
     pub rows: Vec<(f32, f32)>,
     pub break_before: bool,
+    /// The space assumed left for the first row.
+    pub room: f32,
 }
 
 /// The fragments of a box broken across columns, with its unfragmented
@@ -981,7 +983,7 @@ impl Mover<'_> {
     fn rows(&mut self, c: &mut LayoutBox) {
         self.next();
         let start = c.rect.y + self.off;
-        let rows = c.col_rows.take().map(|r| r.rows).unwrap_or_default();
+        let (rows, assumed) = c.col_rows.take().map(|r| (r.rows, r.room)).unwrap_or_default();
         let mut shifts: Vec<(f32, f32, (f32, f32))> = Vec::with_capacity(rows.len());
         for (r, &(top, h)) in rows.iter().enumerate() {
             self.next();
@@ -990,7 +992,7 @@ impl Mover<'_> {
                 // have been pushed): the space left there.
                 let t = top + self.off;
                 let room = self.g.end(self.g.col(t)) - t;
-                if (room - h).abs() > EPS && room > EPS {
+                if (room - assumed).abs() > EPS && room > EPS && h > 0.0 {
                     if let Some(node) = c.node {
                         self.misplaced.push((node, room));
                     }
@@ -1205,11 +1207,15 @@ impl Layouter<'_> {
     /// container with `column-count` or `column-width`); returns their
     /// height. `cb` is its content box.
     pub(crate) fn layout_multicol(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
-        let (mut h, misplaced, empty_first) = self.layout_multicol_pass(b, cb, false);
+        let (mut h, misplaced, empty_first, too_many) = self.layout_multicol_pass(b, cb, false, false);
+        if too_many {
+            return self.layout_multicol_pass(b, cb, false, true).0;
+        }
         if empty_first {
             // Nothing fitted in the space left in the enclosing column:
             // start at the next one.
-            h = self.layout_multicol_pass(b, cb, true).0;
+            let (h2, _, _, too_many) = self.layout_multicol_pass(b, cb, true, false);
+            h = if too_many { self.layout_multicol_pass(b, cb, false, true).0 } else { h2 };
         }
         if !misplaced.is_empty() && !self.column_retry {
             // Nested multi-column containers did not start where assumed
@@ -1218,15 +1224,21 @@ impl Layouter<'_> {
             self.column_retry = true;
             let before = self.column_rooms.len();
             self.column_rooms.extend(misplaced);
-            let (h2, _, empty_first) = self.layout_multicol_pass(b, cb, false);
-            h = if empty_first { self.layout_multicol_pass(b, cb, true).0 } else { h2 };
+            let (h2, _, empty_first, too_many) = self.layout_multicol_pass(b, cb, false, false);
+            h = if too_many {
+                self.layout_multicol_pass(b, cb, false, true).0
+            } else if empty_first {
+                self.layout_multicol_pass(b, cb, true, false).0
+            } else {
+                h2
+            };
             self.column_rooms.truncate(before);
             self.column_retry = false;
         }
         h
     }
 
-    fn layout_multicol_pass(&mut self, b: &mut LayoutBox, cb: &Cb, restart: bool) -> (f32, Vec<(rabbithole_dom::NodeId, f32)>, bool) {
+    fn layout_multicol_pass(&mut self, b: &mut LayoutBox, cb: &Cb, restart: bool, unbroken: bool) -> (f32, Vec<(rabbithole_dom::NodeId, f32)>, bool, bool) {
         // (Fragments in an enclosing flow are placed again after this.)
         b.col_pieces = None;
         let style = b.style.clone();
@@ -1256,7 +1268,7 @@ impl Layouter<'_> {
         // left in the enclosing column (CSS Multicol 1 §8.1).
         let outer_frame = self.column_frame.take();
         let nested_frame = outer_frame.filter(|_| style.column_height.is_none() && style.column_wrap != 2 && !has_spanner(b));
-        let first_row = nested_frame.and_then(|(y, h)| {
+        let first_row = nested_frame.filter(|_| !unbroken).and_then(|(y, h, _)| {
             let room = if restart {
                 h
             } else if let Some(&(_, r)) = b.node.and_then(|n| self.column_rooms.iter().rev().find(|e| e.0 == n)) {
@@ -1274,7 +1286,7 @@ impl Layouter<'_> {
         // This container's own columns frame its nested ones when their
         // height is known before balancing.
         self.column_frame = if style.column_fill_auto && !has_spanner(b) {
-            style.column_height.or(avail_h).filter(|h| *h > 0.0).map(|h| (content_y, h))
+            style.column_height.or(avail_h).filter(|h| *h > 0.0).map(|h| (content_y, h, if style.column_height.is_some() { u32::MAX } else { n }))
         } else {
             None
         };
@@ -1303,6 +1315,8 @@ impl Layouter<'_> {
             _ => style.column_height.is_some(),
         } || first_row.is_some();
         let column_height = style.column_height.or(first_row.and(nested_frame).map(|f| f.1));
+        // The enclosing columns left from where this one starts.
+        let columns_left = nested_frame.map_or(usize::MAX, |(y, h, count)| (count as usize).saturating_sub(((content_y - y) / h.max(1.0) + 1e-4).floor().max(0.0) as usize));
         let row_gap = if first_row.is_some() || style.row_gap_normal { 0.0 } else { style.row_gap.resolve_or_zero(cb.height.unwrap_or(0.0)).max(0.0) };
         let params = FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step, trim: style.margin_trim, column_height, wrap, row_gap, first_row };
         let (rows, end, misplaced, violated_first) = fragment_flow(b, deltas, params);
@@ -1318,7 +1332,7 @@ impl Layouter<'_> {
         }
         b.col_rules = (!rules.is_empty()).then(|| Box::new(rules));
         let mut row_list: Vec<(f32, f32)> = rows.iter().map(|r| (r.top, r.height)).collect();
-        if let (Some(h0), Some((_, colh)), Some(ch)) = (first_row, nested_frame, cb.height) {
+        if let (Some(h0), Some((_, colh, _)), Some(ch)) = (first_row, nested_frame, cb.height) {
             // A definite height is broken at the enclosing column ends
             // whatever its content.
             row_list.clear();
@@ -1333,11 +1347,14 @@ impl Layouter<'_> {
         // Did nothing fit in a first row shorter than the enclosing
         // columns?
         let empty_first = match (first_row, nested_frame) {
-            (Some(h0), Some((_, colh))) if !restart && h0 < colh - EPS => violated_first || !has_content_in(b, content_y, content_y + h0) || overflows(b, content_y + h0),
+            (Some(h0), Some((_, colh, _))) if !restart && h0 < colh - EPS => violated_first || !has_content_in(b, content_y, content_y + h0) || overflows(b, content_y + h0),
             _ => false,
         };
-        b.col_rows = (first_row.is_some() && (row_list.len() > 1 || restart)).then(|| Box::new(ColRows { rows: row_list, break_before: restart }));
-        ((end - content_y).max(0.0), misplaced, empty_first)
+        // More rows than enclosing columns left: not broken, what does not
+        // fit overflows the enclosing column as a whole.
+        let too_many = first_row.is_some() && row_list.len() > columns_left;
+        b.col_rows = (first_row.is_some() && !too_many && (row_list.len() > 1 || restart)).then(|| Box::new(ColRows { rows: row_list, break_before: restart, room: first_row.unwrap_or(0.0) }));
+        ((end - content_y).max(0.0), misplaced, empty_first, too_many)
     }
 }
 

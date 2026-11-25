@@ -109,8 +109,9 @@ pub(crate) struct Layouter<'a> {
     refitting: bool,
     /// Inside the flow of a multi-column container whose columns have a
     /// known height: (flow position where its columns start, their
-    /// height). Nested multi-column containers break at its column ends.
-    pub(crate) column_frame: Option<(f32, f32)>,
+    /// height, their count). Nested multi-column containers break at its
+    /// column ends.
+    pub(crate) column_frame: Option<(f32, f32, u32)>,
     /// The space really left for the first row of nested multi-column
     /// containers (by element), and whether such a correcting layout is
     /// in progress.
