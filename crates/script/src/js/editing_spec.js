@@ -2724,6 +2724,28 @@ function pushDownValues(node, command, newValue) {
         return;
     }
 
+    // RabbitHole: like other browsers, an inline element that sets the color
+    // with another keyword is split around node even if the colors are the
+    // same.
+    if (command == "forecolor"
+    && typeof newValue == "string"
+    && isInlineNode(node)
+    && areLooselyEquivalentValues(command, getEffectiveCommandValue(node, command), newValue)) {
+        for (var ancestor = node.parentNode;
+        ancestor && isEditable(ancestor) && isHtmlElement(ancestor, formattingElementNames);
+        ancestor = ancestor.parentNode) {
+            var specified = getSpecifiedCommandValue(ancestor, command);
+            if (specified !== null) {
+                if (/^[a-z]+$/i.test(specified) && specified.toLowerCase() != newValue.toLowerCase()) {
+                    splitAncestorsAround(node, ancestor).forEach(function(element) {
+                        clearValue(element, command);
+                    });
+                }
+                break;
+            }
+        }
+    }
+
     // "If the effective command value of command is loosely equivalent to new
     // value on node, abort this algorithm."
     if (areLooselyEquivalentValues(command, getEffectiveCommandValue(node, command), newValue)) {
@@ -3198,8 +3220,12 @@ function forceValue(node, command, newValue) {
     // equivalent to new value, and the relevant CSS property for command is
     // not null, set that CSS property of new parent to new value (if the new
     // value would be valid)."
+    //
+    // RabbitHole: not for the font element that has the size, whose computed
+    // size may differ only because of its font (as for monospace).
     var property = commands[command].relevantCssProperty;
     if (property !== null
+    && !(command == "fontsize" && isHtmlElement(newParent, "font") && newParent.hasAttribute("size"))
     && !areLooselyEquivalentValues(command, getEffectiveCommandValue(newParent, command), newValue)) {
         newParent.style[property] = newValue;
     }
@@ -5249,9 +5275,15 @@ function deleteSelection(flags) {
     // "For each node contained in the active range, append node to node list
     // if the last member of node list (if any) is not an ancestor of node;
     // node is editable; and node is not a thead, tbody, tfoot, tr, th, or td."
+    //
+    // RabbitHole: like other browsers, also a selected non-editable element
+    // whose parent is editable.
     var nodeList = getContainedNodes(getActiveRange(),
         function(node) {
-            return isEditable(node)
+            return (isEditable(node)
+                || (node.nodeType == Node.ELEMENT_NODE
+                    && node.parentNode
+                    && (isEditable(node.parentNode) || isEditingHost(node.parentNode))))
                 && !isHtmlElement(node, ["thead", "tbody", "tfoot", "tr", "th", "td"]);
         }
     );
@@ -6955,7 +6987,13 @@ commands["delete"] = {
         while (true) {
             // "If start offset is zero, set start offset to the index of start
             // node and then set start node to its parent."
+            //
+            // RabbitHole: nothing precedes the document element (in design
+            // mode).
             if (startOffset == 0) {
+                if (!startNode.parentNode || startNode.parentNode.nodeType != Node.ELEMENT_NODE) {
+                    return true;
+                }
                 startOffset = getNodeIndex(startNode);
                 startNode = startNode.parentNode;
 

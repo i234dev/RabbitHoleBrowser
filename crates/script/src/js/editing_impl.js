@@ -1707,6 +1707,13 @@
     // block, and text directly in a list is indented with its item, as in
     // other browsers.
     if (cmd === 'formatblock' && value && (el(t.range.startContainer)?.closest('xmp,listing') || el(t.range.endContainer)?.closest('xmp,listing'))) return false;
+    // A selected select element is removed as a whole, and a paragraph
+    // inserted at a caret inside a line break in a list item adds an item.
+    const inSelect = n => el(n)?.closest('select');
+    if (inSelect(t.range.startContainer) || inSelect(t.range.endContainer) ||
+        (!t.range.collapsed && t.range.commonAncestorContainer.nodeType === 1 &&
+         Array.prototype.some.call(t.range.commonAncestorContainer.getElementsByTagName('select'), s => t.range.intersectsNode(s)))) return false;
+    if (cmd === 'insertparagraph' && t.range.startContainer.localName === 'br' && t.range.startContainer.parentElement?.localName === 'li') return false;
     if (cmd === 'indent' && t.range.startContainer.nodeType === 3 && /^(ol|ul)$/.test(t.range.startContainer.parentElement?.localName)) return false;
     // Spaces typed before text that preserves white-space end in a
     // nonbreaking space, as the implementation above does.
@@ -1798,6 +1805,7 @@
         } else if (c.nodeType === 1) {
           if (c.localName === 'br') content = false;
           else if (c.localName === 'img') content = true;
+          else if (isBlock(c)) content = false;
           else scan(c);
         }
       }
