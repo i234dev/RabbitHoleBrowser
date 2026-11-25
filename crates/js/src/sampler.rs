@@ -7,19 +7,28 @@
 //! (one line per sample), preceded by the runtime address of
 //! `rh_sampler_marker` and followed by a copy of `/proc/self/maps`, so an
 //! offline script can symbolize them against an unstripped binary.
+//! `<file>.times` holds each sample's CLOCK_REALTIME in nanoseconds (to
+//! match samples with page-side marks such as `Date.now()`).
+//! `RH_PROF_US=<n>` sets the interval (default 500 µs; CPU-time timers are
+//! limited to the kernel tick, e.g. 4 ms with HZ=250). `RH_PROF_WALL=1`
+//! samples the thread that created the first realm on a high-resolution
+//! wall-clock timer instead, so idle waits are sampled too.
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod imp {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const DEPTH: usize = 16;
-    const MAX: usize = 1 << 16;
+    const DEPTH: usize = 48;
+    const MAX: usize = 1 << 17;
     static mut SAMPLES: [[u64; DEPTH]; MAX] = [[0; DEPTH]; MAX];
+    /// CLOCK_REALTIME of each sample in nanoseconds (written to `<file>.times`).
+    static mut TIMES: [u64; MAX] = [0; MAX];
     static COUNT: AtomicUsize = AtomicUsize::new(0);
     /// Set on every tick; the VM takes a JavaScript-level sample at its
     /// next safe point (`RH_JSPROF`).
     pub static JS_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static STARTED: std::sync::Once = std::sync::Once::new();
+    static WALL_TIMER: AtomicUsize = AtomicUsize::new(0);
 
     #[repr(C)]
     struct Timeval {
@@ -32,6 +41,25 @@ mod imp {
         value: Timeval,
     }
     #[repr(C)]
+    struct Timespec {
+        sec: i64,
+        nsec: i64,
+    }
+    #[repr(C)]
+    struct Itimerspec {
+        interval: Timespec,
+        value: Timespec,
+    }
+    /// glibc `struct sigevent` (64 bytes) with the Linux `_tid` member.
+    #[repr(C)]
+    struct SigEvent {
+        value: u64,
+        signo: i32,
+        notify: i32,
+        tid: i32,
+        pad: [i32; 11],
+    }
+    #[repr(C)]
     struct SigAction {
         handler: usize,
         mask: [u64; 16],
@@ -42,6 +70,10 @@ mod imp {
         fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
         fn setitimer(which: i32, new: *const Itimerval, old: *mut Itimerval) -> i32;
         fn atexit(cb: extern "C" fn()) -> i32;
+        fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+        fn timer_create(clock: i32, sev: *mut SigEvent, timer: *mut usize) -> i32;
+        fn timer_settime(timer: usize, flags: i32, new: *const Itimerspec, old: *mut Itimerspec) -> i32;
+        fn gettid() -> i32;
     }
 
     #[inline(never)]
@@ -57,6 +89,12 @@ mod imp {
         let i = COUNT.fetch_add(1, Ordering::Relaxed);
         if i >= MAX {
             return;
+        }
+        let mut ts = Timespec { sec: 0, nsec: 0 };
+        // SAFETY: async-signal-safe; each index is written once.
+        unsafe {
+            clock_gettime(0, &mut ts);
+            TIMES[i] = ts.sec as u64 * 1_000_000_000 + ts.nsec as u64;
         }
         let mut chain = [0u64; DEPTH];
         chain[0] = rip;
@@ -84,7 +122,14 @@ mod imp {
         let Some(path) = std::env::var_os("RH_PROF") else { return };
         let t = Itimerval { interval: Timeval { sec: 0, usec: 0 }, value: Timeval { sec: 0, usec: 0 } };
         // SAFETY: plain libc calls.
-        unsafe { setitimer(2, &t, std::ptr::null_mut()) };
+        unsafe {
+            setitimer(2, &t, std::ptr::null_mut());
+            let wall = WALL_TIMER.load(Ordering::Relaxed);
+            if wall != 0 {
+                let zero = Itimerspec { interval: Timespec { sec: 0, nsec: 0 }, value: Timespec { sec: 0, nsec: 0 } };
+                timer_settime(wall, 0, &zero, std::ptr::null_mut());
+            }
+        }
         let n = COUNT.load(Ordering::Relaxed).min(MAX);
         let mut out = format!("marker {:x}\n", rh_sampler_marker as *const () as usize);
         for i in 0..n {
@@ -100,6 +145,14 @@ mod imp {
             p.set_extension("maps");
             let _ = std::fs::write(p, maps);
         }
+        let mut times = String::new();
+        for i in 0..n {
+            // SAFETY: the timer is stopped.
+            times.push_str(&format!("{}\n", unsafe { TIMES[i] }));
+        }
+        let mut p = std::path::PathBuf::from(&path);
+        p.set_extension("times");
+        let _ = std::fs::write(p, times);
     }
 
     pub fn start_from_env() {
@@ -111,8 +164,24 @@ mod imp {
             // SAFETY: installs a handler that only writes to static storage.
             unsafe {
                 sigaction(27, &act, std::ptr::null_mut());
-                let t = Itimerval { interval: Timeval { sec: 0, usec: 500 }, value: Timeval { sec: 0, usec: 500 } };
-                setitimer(2, &t, std::ptr::null_mut());
+                // RH_PROF_US: sampling interval in microseconds of CPU time.
+                let us = std::env::var("RH_PROF_US").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
+                if std::env::var_os("RH_PROF_WALL").is_some() {
+                    // Wall-clock sampling of this thread with a high-resolution
+                    // timer (CPU-time interval timers tick at the kernel's HZ):
+                    // idle waits show up too.
+                    let mut sev = SigEvent { value: 0, signo: 27, notify: 4, tid: gettid(), pad: [0; 11] };
+                    let mut timer = 0usize;
+                    if timer_create(1, &mut sev, &mut timer) == 0 {
+                        let ns = us * 1000;
+                        let spec = Itimerspec { interval: Timespec { sec: 0, nsec: ns }, value: Timespec { sec: 0, nsec: ns } };
+                        timer_settime(timer, 0, &spec, std::ptr::null_mut());
+                        WALL_TIMER.store(timer, Ordering::Relaxed);
+                    }
+                } else {
+                    let t = Itimerval { interval: Timeval { sec: 0, usec: us }, value: Timeval { sec: 0, usec: us } };
+                    setitimer(2, &t, std::ptr::null_mut());
+                }
                 atexit(dump);
             }
         });

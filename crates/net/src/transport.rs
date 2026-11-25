@@ -281,7 +281,13 @@ impl Stream {
 impl Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            Stream::Plain(s) => s.read(buf),
+            // Timed reads are not restarted after a signal handler: retry.
+            Stream::Plain(s) => loop {
+                match s.read(buf) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    r => break r,
+                }
+            },
             Stream::Tls(t) => match t.read(buf) {
                 // Servers often close without close_notify; treat as EOF.
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(0),
@@ -402,7 +408,14 @@ impl Read for ReadHalf {
             self.plain.clear();
             self.pos = 0;
             let mut raw = [0u8; 32 * 1024];
-            let n = self.sock.read(&mut raw)?;
+            // A signal (e.g. a profiler's timer) interrupts timed reads even
+            // with SA_RESTART: retry them.
+            let n = loop {
+                match self.sock.read(&mut raw) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    r => break r?,
+                }
+            };
             let Some(tls) = &self.shared.tls else {
                 if n == 0 {
                     self.eof = true;
