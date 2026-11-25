@@ -5778,8 +5778,9 @@ function rebalanceWhitespaceInTextNode(node, offset) {
     if (start == end) {
         return;
     }
-    var replacement = canonicalSpaceSequence(end - start,
-        start == 0, end == node.length);
+    // A space left before a line break by a deletion stays a space.
+    var replacement = canonicalSpaceSequence(end - start, start == 0,
+        end == node.length && !(currentCommand != "inserttext" && isHtmlElement(node.nextSibling, "br")));
     for (var i = start; i < end; i++) {
         if (node.data[i] != replacement[i - start]) {
             node.insertData(i, replacement[i - start]);
@@ -5969,9 +5970,8 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
         nonBreakingStart, nonBreakingEnd);
 
     // RabbitHole: like other browsers, leave a sequence that already shows
-    // every space alone unless it is all in the edited Text node (see
-    // rewriteEditedWhitespace), e.g. one across an inline boundary from a
-    // deletion.
+    // every space alone, e.g. one across an inline boundary from a deletion,
+    // except where an edit rebalances it (see rewriteEditedWhitespace).
     if (length) {
         var sequenceRange = document.createRange();
         sequenceRange.setStart(startNode, startOffset);
@@ -5980,19 +5980,17 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
         var texts = getAllContainedNodes(sequenceRange, function(n) { return n.nodeType == Node.TEXT_NODE })
             .concat([startNode, endNode].filter(function(n) { return n.nodeType == Node.TEXT_NODE }))
             .filter(function(n, i, list) { return list.indexOf(n) == i });
-        // RabbitHole: after an edit, a sequence across Text nodes is
-        // rebalanced only in the edited Text node, as in other browsers.
+        // RabbitHole: after an edit, the sequence is rebalanced only in the
+        // edited Text node, as in other browsers.
         if (rewriteEditedWhitespace
-        && !fixCollapsedSpace
-        && !texts.every(function(n) { return n == node })) {
+        && !fixCollapsedSpace) {
             rebalanceWhitespaceInTextNode(node, offset);
             return;
         }
         if (current.length == length
         && !/  /.test(current)
         && !((nonBreakingStart || length == 1 && nonBreakingEnd) && current[0] == " ")
-        && !(nonBreakingEnd && current[current.length - 1] == " ")
-        && !(rewriteEditedWhitespace && node.nodeType == Node.TEXT_NODE && texts.every(function(n) { return n == node }))) {
+        && !(nonBreakingEnd && current[current.length - 1] == " ")) {
             return;
         }
     }
