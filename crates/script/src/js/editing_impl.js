@@ -1719,6 +1719,9 @@
     // sublists: the implementation above does these as browsers do.
     if (cmd === 'createlink' && t.range.collapsed) return false;
     const el = n => n.nodeType === 1 ? n : n.parentElement;
+    // Removing formatting around part of a link splits the formatting, not
+    // the link structure, as in other browsers.
+    if (cmd === 'removeformat' && (el(t.range.startContainer)?.closest('a[href]') || el(t.range.endContainer)?.closest('a[href]'))) return false;
     if (listCommands.has(cmd)) {
       const inCell = n => el(n)?.closest('td,th,caption');
       const inTable = el(t.range.commonAncestorContainer)?.closest('table,thead,tbody,tfoot,tr');
