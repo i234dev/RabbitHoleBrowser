@@ -1860,8 +1860,20 @@
     else sel.setBaseAndExtent(start[0], start[1], end[0], end[1]);
     t.range = sel.getRangeAt(0);
   }
+  // A caret before a block child is in that block's first line, as in other
+  // browsers (block commands would not find a line there).
+  function caretIntoBlock(t) {
+    const { range, sel } = t;
+    if (!range.collapsed || range.startContainer.nodeType !== 1) return;
+    const block = range.startContainer.childNodes[range.startOffset];
+    if (block?.nodeType === 1 && isBlock(block) && block.isContentEditable && !['table','hr'].includes(block.localName)) {
+      sel.collapse(block, 0);
+      t.range = sel.getRangeAt(0);
+    }
+  }
   function specExecute(doc, state, t, cmd, value) {
     if (listCommands.has(cmd)) excludeEndBlock(t);
+    if (alignments.has(cmd)) caretIntoBlock(t);
     const name = cmd === 'backcolor' && state.name === 'hilitecolor' ? 'hilitecolor' : cmd;
     const observer = new Observer(() => {});
     observer.observe(doc, { childList: true, subtree: true, characterData: true, attributes: true });

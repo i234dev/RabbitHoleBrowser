@@ -5170,6 +5170,11 @@ function deleteSelection(flags) {
     // "Canonicalize whitespace at the active range's end."
     canonicalizeWhitespace(getActiveRange().endContainer, getActiveRange().endOffset);
 
+    // RabbitHole: see rebalanceWhitespaceInTextNode.
+    deletionRemovedLineBreak = getAllContainedNodes(getActiveRange(), function(node) {
+        return isHtmlElement(node, ["br", "hr"]);
+    }).length > 0;
+
     // "Let (start node, start offset) be the last equivalent point for the
     // active range's start."
     var start = getLastEquivalentPoint(getActiveRange().startContainer, getActiveRange().startOffset);
@@ -5884,6 +5889,15 @@ function rebalanceWhitespaceInTextNode(node, offset) {
         }
         if (next && next.nodeType == Node.TEXT_NODE && isSpace(next.data[0])
         && isEditable(next) && inSameEditingHost(node, next)) {
+            // Spaces that started a line removed by the deletion were
+            // collapsed; they go with it.
+            if (deletionRemovedLineBreak && offset > 0 && !isSpace(node.data[offset - 1])) {
+                var spaces = /^[ \t\n]*/.exec(next.data)[0].length;
+                if (spaces) {
+                    next.deleteData(0, spaces);
+                }
+                return;
+            }
             node = next;
             offset = 0;
         } else if (next && next.nodeType == Node.TEXT_NODE && inSameEditingHost(node, next)) {
@@ -5922,6 +5936,7 @@ function rebalanceWhitespaceInTextNode(node, offset) {
 // leave visible sequences as they are, like other browsers.
 var rewriteEditedWhitespace = true;
 var currentCommand;
+var deletionRemovedLineBreak = false;
 
 function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
     if (fixCollapsedSpace === undefined) {
@@ -7870,8 +7885,11 @@ commands.inserthorizontalrule = {
         // "While start offset is 0 and start node's parent is not null, set
         // start offset to start node's index, then set start node to its
         // parent."
+        //
+        // RabbitHole: not out of the editing host (as from an empty one).
         while (startOffset == 0
-        && startNode.parentNode) {
+        && startNode.parentNode
+        && isEditable(startNode)) {
             startOffset = getNodeIndex(startNode);
             startNode = startNode.parentNode;
         }
@@ -7880,7 +7898,8 @@ commands.inserthorizontalrule = {
         // null, set end offset to one plus end node's index, then set end node
         // to its parent."
         while (endOffset == getNodeLength(endNode)
-        && endNode.parentNode) {
+        && endNode.parentNode
+        && isEditable(endNode)) {
             endOffset = 1 + getNodeIndex(endNode);
             endNode = endNode.parentNode;
         }
