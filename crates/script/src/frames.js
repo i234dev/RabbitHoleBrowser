@@ -77,6 +77,10 @@
         append(pendingCanvases, [v, record]);
         return record;
       }
+      if (codec.cryptoKey) {
+        const key = codec.cryptoKey.encode(v);
+        if (key !== null) return { t: 'ck', id, v: key };
+      }
       const blob = encodeBlob(v);
       if (blob !== null) return { t: 'blob', id, v: blob };
       const tag = Object.prototype.toString.call(v).slice(8, -1);
@@ -132,6 +136,7 @@
         case 's': out = new Set(); objs.set(x.id, out); for (const v of x.v) out.add(dec(v)); return out;
         case 'blob': out = decodeBlob(x.v[0], x.v[1], x.v[2], x.v[3]); break;
         case 'ab': out = new Uint8Array(x.v).buffer; break;
+        case 'ck': out = codec.cryptoKey ? codec.cryptoKey.decode(x.v) : undefined; break;
         case 'ta': {
           const C = globalThis[x.k] || Uint8Array;
           const buf = new Uint8Array(x.v).buffer;

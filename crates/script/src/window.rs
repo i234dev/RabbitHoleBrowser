@@ -1296,6 +1296,14 @@ fn replaceable_value(realm: &mut Realm, name: &str, value: Value) {
     replaceable_accessor(realm, name, Value::Object(get));
 }
 
+/// A read-only attribute of the global object holding a fixed value: an
+/// accessor, as Web IDL defines attributes (scripts read its getter).
+fn readonly_value(realm: &mut Realm, name: &str, value: Value) {
+    let g = realm.global();
+    let get = realm.new_native_function_full(&format!("get {name}"), 0, win_replaceable_value, None, vec![value], false);
+    realm.define_accessor_values(g, name, Some(Value::Object(get)), None, ACC);
+}
+
 // -------------------------------------------------------------- install
 
 /// Build the window object (the global) and all its members.
@@ -1318,9 +1326,9 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor_values(g, "location", Some(Value::Object(lg)), Some(Value::Object(ls_fn)), ACC);
     let _ = loc;
     let hist = make_history(realm);
-    realm.define_property(g, "history", Value::Object(hist), ACC);
+    readonly_value(realm, "history", Value::Object(hist));
     let nav = make_navigator(realm);
-    realm.define_property(g, "navigator", Value::Object(nav.clone_id()), ACC);
+    readonly_value(realm, "navigator", Value::Object(nav.clone_id()));
     replaceable_value(realm, "clientInformation", Value::Object(nav));
     let screen = make_screen(realm);
     replaceable_value(realm, "screen", Value::Object(screen));
@@ -1338,9 +1346,9 @@ pub(crate) fn install(realm: &mut Realm) {
     replaceable_value(realm, "devicePixelRatio", Value::Number(1.0));
     realm.define_property(g, "name", Value::str(""), ALL);
     realm.define_property(g, "status", Value::str(""), ALL);
-    realm.define_property(g, "closed", Value::Bool(false), ACC);
+    readonly_value(realm, "closed", Value::Bool(false));
     replaceable_value(realm, "length", Value::Number(0.0));
-    realm.define_property(g, "opener", Value::Null, ALL);
+    replaceable_value(realm, "opener", Value::Null);
     realm.define_accessor(g, "frameElement", Some(win_frame_element), None, ACC);
     replaceable_value(realm, "screenX", Value::Number(0.0));
     replaceable_value(realm, "screenY", Value::Number(0.0));
@@ -1385,8 +1393,8 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class_storage(realm);
     let ls = make_storage(realm, true);
     let ss = make_storage(realm, false);
-    realm.define_property(g, "localStorage", ls, ACC);
-    realm.define_property(g, "sessionStorage", ss, ACC);
+    readonly_value(realm, "localStorage", ls);
+    readonly_value(realm, "sessionStorage", ss);
     let perf = make_performance(realm);
     replaceable_value(realm, "performance", Value::Object(perf));
     let crypto = make_crypto(realm);

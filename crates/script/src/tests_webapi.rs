@@ -2352,7 +2352,8 @@ fn web_crypto_operations_use_the_keys_original_algorithm_and_usages() {
         console.log(await s.sign('AES-CBC', key, new Uint8Array()).catch(e=>e.name));
       })();
     "#);
-    assert_eq!(out, ["32 true InvalidAccessError", "InvalidAccessError"]);
+    // AES-CBC is not registered for "sign": normalization fails first.
+    assert_eq!(out, ["32 true InvalidAccessError", "NotSupportedError"]);
 }
 
 #[test]

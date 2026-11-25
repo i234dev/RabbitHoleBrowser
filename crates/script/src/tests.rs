@@ -1926,3 +1926,38 @@ fn atob_is_forgiving_base64() {
     assert!(out.contains(&r#""a" InvalidCharacterError "a" "a" "abc" "ab" InvalidCharacterError InvalidCharacterError InvalidCharacterError InvalidCharacterError InvalidCharacterError InvalidCharacterError "ÿ""#.to_string()), "{out:?}");
     assert!(out.contains(&"255,238,221".to_string()), "{out:?}");
 }
+
+/// NodeList and HTMLCollection expose `length` as a prototype accessor,
+/// like other interface attributes: scripts that capture native getters
+/// (`Object.getOwnPropertyDescriptor(HTMLCollection.prototype, 'length').get`)
+/// call them on collections later.
+#[test]
+fn collection_length_is_a_prototype_accessor() {
+    let (mut env, mut host) = setup("<p>a</p><p>b</p><div></div>");
+    let out = run(&mut env, &mut host, r#"
+        const hc = Object.getOwnPropertyDescriptor(HTMLCollection.prototype, 'length');
+        const nl = Object.getOwnPropertyDescriptor(NodeList.prototype, 'length');
+        console.log(typeof hc.get, typeof nl.get, hc.get.call(document.getElementsByTagName('p')), nl.get.call(document.querySelectorAll('p, div')));
+        console.log(document.getElementsByTagName('p').length, document.body.childNodes.length);
+        try { hc.get.call({}); console.log('no error'); } catch (e) { console.log(e.name); }
+    "#);
+    assert_eq!(out, ["function function 2 3", "2 3", "TypeError"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+/// Window attributes are accessors on the global object, so scripts can
+/// capture their native getters.
+#[test]
+fn window_attributes_are_accessors() {
+    let (mut env, mut host) = setup("<p>a</p>");
+    let out = run(&mut env, &mut host, r#"
+        const names = ['closed', 'history', 'navigator', 'localStorage', 'sessionStorage', 'opener'];
+        console.log(names.map(n => typeof Object.getOwnPropertyDescriptor(window, n).get).join(' '));
+        const closed = Object.getOwnPropertyDescriptor(window, 'closed').get;
+        console.log(closed.call(window), Object.getOwnPropertyDescriptor(window, 'navigator').get.call(window) === navigator);
+        window.opener = 5;
+        console.log(window.opener, typeof Object.getOwnPropertyDescriptor(window, 'opener').value);
+    "#);
+    assert_eq!(out, ["function function function function function function", "false true", "5 number"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}

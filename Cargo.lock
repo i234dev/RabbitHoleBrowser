@@ -2265,6 +2265,7 @@ dependencies = [
  "aes 0.8.4",
  "aws-lc-rs",
  "aws-lc-sys",
+ "curve25519-dalek",
  "flate2",
  "ghash",
  "rabbithole-css",
