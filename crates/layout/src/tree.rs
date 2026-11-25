@@ -494,10 +494,47 @@ impl LayoutBox {
         Some(Rect::new(first.x, first.y, p.border.w, p.border.h))
     }
 
-    /// The padding box size of a box broken across columns, as if it were
-    /// not (`None` when unbroken).
-    pub fn unfragmented_padding_size(&self) -> Option<(f32, f32)> {
-        self.col_pieces.as_ref().map(|p| (p.padding.w, p.padding.h))
+    /// The scrolling area size of a box broken across columns, as if it
+    /// were not: its unbroken padding box united with its descendants
+    /// mapped back from their columns into the flow (`None` when unbroken).
+    pub fn unfragmented_scroll_size(&self) -> Option<(f32, f32)> {
+        use rabbithole_style::{Direction, WritingMode};
+        let p = self.col_pieces.as_deref()?;
+        let pad = p.padding;
+        let mut u = (pad.x, pad.y, pad.right(), pad.bottom());
+        fn walk(b: &LayoutBox, pieces: &crate::multicol::ColPieces, u: &mut (f32, f32, f32, f32)) {
+            for c in &b.children {
+                if c.fixed {
+                    continue;
+                }
+                let flow = match &c.col_pieces {
+                    Some(cp) => cp.border,
+                    None => {
+                        let Some(piece) = pieces.pieces.iter().find(|q| q.rect.contains(c.rect.x, c.rect.y)).or(pieces.pieces.first()) else { continue };
+                        c.rect.translate(-piece.dx, -piece.dy)
+                    }
+                };
+                if flow.w > 0.0 || flow.h > 0.0 {
+                    u.0 = u.0.min(flow.x);
+                    u.1 = u.1.min(flow.y);
+                    u.2 = u.2.max(flow.right());
+                    u.3 = u.3.max(flow.bottom());
+                }
+                if !c.clips && c.col_pieces.is_none() {
+                    walk(c, pieces, u);
+                }
+            }
+        }
+        if !self.clips {
+            walk(self, p, &mut u);
+        }
+        let s = &self.style;
+        let vertical = matches!(s.writing_mode, WritingMode::VerticalRl | WritingMode::VerticalLr | WritingMode::SidewaysLr);
+        let from_right = (!vertical && s.direction == Direction::Rtl) || s.writing_mode == WritingMode::VerticalRl;
+        let from_bottom = vertical && s.direction == Direction::Rtl;
+        let w = if from_right { pad.right() - u.0 } else { u.2 - pad.x };
+        let h = if from_bottom { pad.bottom() - u.1 } else { u.3 - pad.y };
+        Some((w.max(pad.w), h.max(pad.h)))
     }
 
     /// Is this an inline-level box (participates in a line)?
