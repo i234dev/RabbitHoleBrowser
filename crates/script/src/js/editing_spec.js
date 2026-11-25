@@ -1665,11 +1665,20 @@ function wrap(nodeList, siblingCriteria, newParentInstructions) {
     }
 
     // "Remove extraneous line breaks from new parent."
-    removeExtraneousLineBreaksFrom(newParent);
+    //
+    // RabbitHole: a new paragraph keeps the line break before it, as in
+    // other browsers (see insertParagraph).
+    if (keepLineBreakBeforeWrap) {
+        removeExtraneousLineBreaksAtTheEndOf(newParent);
+    } else {
+        removeExtraneousLineBreaksFrom(newParent);
+    }
 
     // "Return new parent."
     return newParent;
 }
+
+var keepLineBreakBeforeWrap = false;
 
 
 //@}
@@ -8263,10 +8272,15 @@ commands.insertparagraph = {
             // parent instructions returning the result of calling
             // createElement(tag) on the context object. Set container to the
             // result."
-            container = wrap(nodeList,
-                function() { return false },
-                function() { return document.createElement(tag) }
-            );
+            keepLineBreakBeforeWrap = true;
+            try {
+                container = wrap(nodeList,
+                    function() { return false },
+                    function() { return document.createElement(tag) }
+                );
+            } finally {
+                keepLineBreakBeforeWrap = false;
+            }
         }
 
         // "If container's local name is "address", "listing", or "pre":"
