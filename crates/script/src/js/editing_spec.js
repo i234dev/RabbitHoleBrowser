@@ -5733,10 +5733,66 @@ function canonicalSpaceSequence(n, nonBreakingStart, nonBreakingEnd) {
     return buffer;
 }
 
+// RabbitHole: like other browsers, rewrites the run of spaces at (node,
+// offset) within its Text node (or, after deleting at the end of a Text
+// node, within the next one if that starts with a space) as a canonical space sequence whose
+// ends at the Text node's edges are non-breaking spaces.
+function rebalanceWhitespaceInTextNode(node, offset) {
+    if (node.nodeType != Node.TEXT_NODE) {
+        if (offset > 0 && node.childNodes[offset - 1] && node.childNodes[offset - 1].nodeType == Node.TEXT_NODE) {
+            node = node.childNodes[offset - 1];
+            offset = node.length;
+        } else if (node.childNodes[offset] && node.childNodes[offset].nodeType == Node.TEXT_NODE) {
+            node = node.childNodes[offset];
+            offset = 0;
+        } else {
+            return;
+        }
+    }
+    var isSpace = function(c) { return c == " " || c == "\xa0" };
+    if (offset == node.length && (currentCommand == "delete" || currentCommand == "forwarddelete")) {
+        var next = nextNode(node);
+        while (next
+        && ((next.nodeType == Node.TEXT_NODE && !next.length)
+            || (next.nodeType == Node.ELEMENT_NODE && isInlineNode(next)
+                && !isHtmlElement(next, voidElementNames) && isEditable(next)))) {
+            next = nextNode(next);
+        }
+        if (next && next.nodeType == Node.TEXT_NODE && isSpace(next.data[0])
+        && isEditable(next) && inSameEditingHost(node, next)) {
+            node = next;
+            offset = 0;
+        }
+    }
+    if (!isEditable(node)
+    || ["pre", "pre-wrap", "break-spaces"].indexOf(computedStyle(node.parentNode, "white-space")) != -1) {
+        return;
+    }
+    var start = offset, end = offset;
+    while (start > 0 && isSpace(node.data[start - 1])) {
+        start--;
+    }
+    while (end < node.length && isSpace(node.data[end])) {
+        end++;
+    }
+    if (start == end) {
+        return;
+    }
+    var replacement = canonicalSpaceSequence(end - start,
+        start == 0, end == node.length);
+    for (var i = start; i < end; i++) {
+        if (node.data[i] != replacement[i - start]) {
+            node.insertData(i, replacement[i - start]);
+            node.deleteData(i + 1, 1);
+        }
+    }
+}
+
 // RabbitHole: whether a valid sequence in the edited Text node is rewritten
 // too (when deleting or typing); other commands, such as splitting a line,
 // leave visible sequences as they are, like other browsers.
 var rewriteEditedWhitespace = true;
+var currentCommand;
 
 function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
     if (fixCollapsedSpace === undefined) {
@@ -5924,6 +5980,14 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
         var texts = getAllContainedNodes(sequenceRange, function(n) { return n.nodeType == Node.TEXT_NODE })
             .concat([startNode, endNode].filter(function(n) { return n.nodeType == Node.TEXT_NODE }))
             .filter(function(n, i, list) { return list.indexOf(n) == i });
+        // RabbitHole: after an edit, a sequence across Text nodes is
+        // rebalanced only in the edited Text node, as in other browsers.
+        if (rewriteEditedWhitespace
+        && !fixCollapsedSpace
+        && !texts.every(function(n) { return n == node })) {
+            rebalanceWhitespaceInTextNode(node, offset);
+            return;
+        }
         if (current.length == length
         && !/  /.test(current)
         && !((nonBreakingStart || length == 1 && nonBreakingEnd) && current[0] == " ")
@@ -9129,6 +9193,7 @@ function run(doc, state, callback, command) {
     memoActive = true;
     memoEpoch = -1;
     rewriteEditedWhitespace = !command || ["delete", "forwarddelete", "inserttext"].indexOf(command) != -1;
+    currentCommand = command;
     document = doc;
     cssStylingFlag = state.css;
     defaultSingleLineContainerName = state.separator;
