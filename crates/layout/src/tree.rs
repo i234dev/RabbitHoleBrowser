@@ -1486,7 +1486,7 @@ pub fn layout_document(ctx: &LayoutContext) -> LayoutTree {
     layouter.layout_document()
 }
 
-fn physical_rect(coordinates: Option<Matrix>, rect: Rect) -> Rect {
+pub(crate) fn physical_rect(coordinates: Option<Matrix>, rect: Rect) -> Rect {
     coordinates.map_or(rect, |matrix| rabbithole_gfx::path::transform_rect_bounds(&matrix, rect))
 }
 

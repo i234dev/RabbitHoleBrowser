@@ -76,6 +76,13 @@ pub(crate) fn used_columns(count: Option<u32>, width: Option<f32>, avail: f32, g
     (n, w)
 }
 
+/// The distance between the starts of adjacent columns, in f64 so that
+/// fractional widths and gaps add up exactly across many columns.
+fn column_step(n: u32, avail: f32, gap: f32) -> f64 {
+    let (n, avail, gap) = (f64::from(n), f64::from(avail.max(0.0)), f64::from(gap));
+    ((avail - (n - 1.0) * gap) / n).max(0.0) + gap
+}
+
 /// The used `column-gap` of a multicol container (`normal` = 1em).
 pub(crate) fn used_gap(style: &ComputedStyle, basis: f32) -> f32 {
     if style.column_gap_normal {
@@ -339,8 +346,9 @@ struct Geometry {
     y0: f32,
     colh: f32,
     lift: f32,
-    /// Horizontal distance between adjacent columns.
-    step: f32,
+    /// Horizontal distance between adjacent columns (f64: column `k`
+    /// is placed at `k * step` without accumulating rounding errors).
+    step: f64,
     /// Columns per row (`column-wrap`; `usize::MAX` without wrapping) and
     /// the gap between rows.
     per_row: usize,
@@ -369,7 +377,7 @@ impl Geometry {
     }
     /// Horizontal translation from the flow into column `k`.
     fn dx(&self, k: usize) -> f32 {
-        (k % self.per_row) as f32 * self.step
+        ((k % self.per_row) as f64 * self.step) as f32
     }
 }
 
@@ -1022,7 +1030,7 @@ impl Layouter<'_> {
         let (n, w) = used_columns(style.column_count, style.column_width, avail_w, gap);
         let rtl = style.direction == rabbithole_style::Direction::Rtl;
         let x0 = if rtl { cb.x + avail_w - w } else { cb.x };
-        let step = (w + gap) * if rtl { -1.0 } else { 1.0 };
+        let step = column_step(n, avail_w, gap) * if rtl { -1.0 } else { 1.0 };
         // The height available to the columns: a definite height, else the
         // maximum height.
         let pb_v = crate::block::vertical_extras(&style);
@@ -1098,7 +1106,7 @@ struct FlowParams {
     n: u32,
     fill_auto: bool,
     avail: Option<f32>,
-    step: f32,
+    step: f64,
     /// The container's `margin-trim`.
     trim: u8,
     /// `column-height` (Multicol 2), whether columns wrap into rows, and
@@ -1287,13 +1295,13 @@ fn choose_height(evs: &[Ev], clipped: &[bool], a: usize, b: usize, y0: f32, phys
 /// Column rules between adjacent used columns of a row (Multicol 1 §4):
 /// centred in the gaps, as tall as the columns.
 #[allow(clippy::too_many_arguments)]
-fn push_rules(rules: &mut Vec<Rect>, style: &ComputedStyle, x0: f32, w: f32, gap: f32, step: f32, y: f32, h: f32, used: usize) {
+fn push_rules(rules: &mut Vec<Rect>, style: &ComputedStyle, x0: f32, w: f32, gap: f32, step: f64, y: f32, h: f32, used: usize) {
     if !style.column_rule_style.is_visible() || style.column_rule_width <= 0.0 || h <= 0.0 {
         return;
     }
     let rw = style.column_rule_width;
     for k in 0..used.saturating_sub(1) {
-        let col_x = x0 + k as f32 * step;
+        let col_x = x0 + (k as f64 * step) as f32;
         let mid = if step >= 0.0 { col_x + w + gap / 2.0 } else { col_x - gap / 2.0 };
         rules.push(Rect::new(mid - rw / 2.0, y, rw, h));
     }
