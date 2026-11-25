@@ -4190,6 +4190,7 @@ const SUPPORTS_PROBE: &[(&str, &str)] = &[
     ("border-top-color", "rgb(1, 2, 3)"),
     ("columns", "7px 3 / 7px"), ("column-wrap", "wrap"), ("column-fill", "auto"), ("column-span", "all"), ("column-rule", "7px dotted rgb(1, 2, 3)"),
     ("break-before", "column"), ("break-after", "column"), ("break-inside", "avoid-column"), ("orphans", "7"), ("widows", "7"),
+    ("column-gap", "7px"), ("row-gap", "7px"),
 ];
 
 /// Properties every value of which `SUPPORTS_PROBE` detects.
@@ -4201,7 +4202,7 @@ const SUPPORTS_CHECKED: &[&str] = &[
     "min-height", "max-width", "max-height", "color", "background-color", "opacity", "z-index", "box-sizing", "text-align", "white-space",
     "text-transform", "font-style", "font-weight", "flex-direction", "flex-wrap", "border-top-width", "border-top-style", "border-top-color",
     "columns", "column-count", "column-width", "column-height", "column-wrap", "column-fill", "column-span", "column-rule", "column-rule-width", "column-rule-style",
-    "column-rule-color", "break-before", "break-after", "break-inside", "orphans", "widows",
+    "column-rule-color", "break-before", "break-after", "break-inside", "orphans", "widows", "column-gap", "row-gap",
 ];
 
 fn probe_apply(base: &ComputedStyle, name: &str, value: &[Token]) -> ComputedStyle {

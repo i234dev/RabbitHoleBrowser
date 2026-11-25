@@ -325,8 +325,15 @@ fn grid_property(name: &str) -> bool {
     rabbithole_style::props::grid_css::is_longhand(name) || rabbithole_style::props::grid_css::longhands(name).is_some()
 }
 
+/// Multi-column and gap properties, whose values the style system fully
+/// validates (`supports_declaration` is exact for them).
+fn multicol_property(name: &str) -> bool {
+    matches!(name, "columns" | "column-count" | "column-width" | "column-height" | "column-wrap" | "column-fill" | "column-span"
+        | "column-rule" | "column-rule-width" | "column-rule-style" | "column-gap" | "row-gap")
+}
+
 fn checked_property(name: &str) -> bool {
-    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::motion::property(name) || single_color_property(name) || name == "opacity" || grid_property(name) || rabbithole_style::props::flex::alignment_property(name)
+    matches!(name, "shape-outside" | "shape-margin" | "position-area" | "position-try" | "position-try-order" | "position-try-fallbacks" | "position-anchor" | "anchor-name" | "anchor-scope") || rabbithole_style::props::motion::property(name) || single_color_property(name) || name == "opacity" || grid_property(name) || rabbithole_style::props::flex::alignment_property(name) || multicol_property(name)
 }
 
 fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
@@ -403,6 +410,11 @@ fn specified_value(name: &str, tokens: &[Token]) -> Option<String> {
             if name == "position-area" { return rabbithole_style::props::anchor::PositionArea::parse(&parts).map(|a| a.to_css(false)); }
             return rabbithole_style::props::flex::specified_alignment(name, &parts);
         }
+    }
+    // (Invalid values, such as unitless lengths, which only some properties
+    // accept in quirks mode, are dropped.)
+    if multicol_property(name) && rabbithole_style::cascade::supports_declaration(name, tokens) == Some(false) {
+        return None;
     }
     Some(tokens_to_css(tokens))
 }

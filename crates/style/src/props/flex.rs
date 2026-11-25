@@ -217,6 +217,10 @@ fn gap_value(c: &[Token], ctx: &ApplyCtx) -> Option<Length> {
     if values::is_ident(c, "normal") {
         return Some(Length::ZERO);
     }
+    // `<length-percentage [0,∞]>`: negative values are invalid.
+    if matches!(c, [Token::Dimension(v, _) | Token::Percentage(v) | Token::Number(v)] if *v < 0.0) {
+        return None;
+    }
     super::len_no_auto(c, ctx)
 }
 

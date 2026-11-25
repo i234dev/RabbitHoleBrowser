@@ -471,8 +471,13 @@ pub(crate) fn install(realm: &mut Realm) {
     for iface in ["HTMLImageElement", "HTMLMediaElement", "HTMLScriptElement", "HTMLLinkElement"] {
         def(iface, "crossOrigin", "crossorigin", cross_origin());
     }
-    for iface in ["HTMLImageElement", "HTMLIFrameElement", "HTMLAnchorElement", "HTMLAreaElement", "HTMLLinkElement", "HTMLScriptElement"] {
+    for iface in ["HTMLImageElement", "HTMLIFrameElement", "HTMLAnchorElement", "HTMLAreaElement", "HTMLLinkElement", "HTMLScriptElement", "MathMLAnchorElement"] {
         def(iface, "referrerPolicy", "referrerpolicy", enumerated(REFERRER_POLICIES, Some(""), Some("")));
+    }
+    // The MathML <a> element's link attributes besides href, target and rel
+    // (as on HTML anchors).
+    for (prop, attr) in [("hreflang", "hreflang"), ("type", "type"), ("ping", "ping")] {
+        def("MathMLAnchorElement", prop, attr, Reflect::Str);
     }
     def("HTMLImageElement", "decoding", "decoding", enumerated(&["async", "sync", "auto"], Some("auto"), Some("auto")));
     for iface in ["HTMLImageElement", "HTMLIFrameElement"] {

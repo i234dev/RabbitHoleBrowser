@@ -2194,7 +2194,7 @@ fn idl_eval(src: &str) -> Result<String, String> {
 #[test]
 fn idl_functions_check_receiver_and_arguments() {
     let setup = "class C { m(a, b) { return this.v + a + (b === undefined ? 0 : b); } } const S = Symbol('s');\
-        const byProto = idl(C.prototype.m, C.prototype, 1), bySym = idl(function (a) { return this[S] + a; }, S, 1), any = idl(function (a) { return [typeof this, a].join(); }, undefined, 0);\
+        const byProto = idl(C.prototype.m, C.prototype, 1), bySym = idl(function (a) { return this[S] + a; }, S, 1), any = idl(function (a) { 'use strict'; return [typeof this, a].join(); }, undefined, 0);\
         const o = new C(); o.v = 10; o.byProto = byProto; const t = { [S]: 5, bySym };";
     let ok = |body: &str, expected: &str| {
         let src = format!("{setup} {body}");
