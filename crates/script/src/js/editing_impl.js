@@ -1600,10 +1600,21 @@
       if (!range.collapsed && deleteSelection(t,'delete')) input(host,'insertText','');
       return true;
     }
-    if (range.collapsed && !typingStyle(state, range) && host.contentEditable !== 'plaintext-only' &&
+    if (range.collapsed && host.contentEditable !== 'plaintext-only' &&
         ['inserttext','insertlinebreak','insertparagraph'].includes(cmd)) {
+      // The typing style set by the spec algorithms joins ours (after it,
+      // so that a link being typed stays outermost).
       const typing = overridesToTyping(spec.run(doc, state, () => spec.overrides()));
-      if (typing.size) state.typing = { node: range.startContainer, offset: range.startOffset, formats: typing };
+      const current = typingStyle(state, range);
+      if (current) {
+        for (const [name, value] of typing) {
+          if (current.has(name)) continue;
+          // Not a format the text there already has (or lacks).
+          if (typeof value === 'boolean' && activeFormat(selectionElement(range), name) === value) continue;
+          current.set(name, value);
+        }
+      }
+      else if (typing.size) state.typing = { node: range.startContainer, offset: range.startOffset, formats: typing };
     }
     const toggles = range.collapsed && ['inserttext','insertlinebreak','insertparagraph'].includes(cmd) ? typingStyle(state, range) : null;
     state.typing = null;

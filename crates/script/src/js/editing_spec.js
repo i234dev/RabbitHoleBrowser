@@ -2734,14 +2734,8 @@ function pushDownValues(node, command, newValue) {
         for (var ancestor = node.parentNode;
         ancestor && isEditable(ancestor) && isHtmlElement(ancestor, formattingElementNames);
         ancestor = ancestor.parentNode) {
-            var specified = getSpecifiedCommandValue(ancestor, command);
-            if (specified !== null) {
-                // As written, since computed colors are not keywords.
-                var written = /(?:^|;)\s*color\s*:\s*([a-z]+)\s*(?:;|$)/i.exec(ancestor.getAttribute("style") || "");
-                specified = written ? written[1]
-                    : isHtmlElement(ancestor, "font") && ancestor.hasAttribute("color") ? ancestor.getAttribute("color")
-                    : specified;
-                if (/^[a-z]+$/i.test(specified) && specified.toLowerCase() != newValue.toLowerCase()) {
+            if (getSpecifiedCommandValue(ancestor, command) !== null) {
+                if (hasOtherColorKeyword(ancestor, newValue)) {
                     splitAncestorsAround(node, ancestor).forEach(function(element) {
                         clearValue(element, command);
                     });
@@ -2980,6 +2974,21 @@ function moveCaretOutOfInlineEdges() {
     }
 }
 
+// RabbitHole: whether element, unlike the one forcing value would create,
+// sets its color (as written, since computed colors are not keywords) with a
+// keyword other than value.
+function hasOtherColorKeyword(element, value) {
+    // An element like the one forcing the value creates is taken as is.
+    if (isHtmlElement(element, forcedElementName("forecolor", value))) {
+        return false;
+    }
+    var written = /(?:^|;)\s*color\s*:\s*([a-z]+)\s*(?:;|$)/i.exec(element.getAttribute("style") || "");
+    var color = written ? written[1]
+        : isHtmlElement(element, "font") && element.hasAttribute("color") ? element.getAttribute("color")
+        : null;
+    return color !== null && /^[a-z]+$/i.test(color) && color.toLowerCase() != String(value).toLowerCase();
+}
+
 // RabbitHole: whether node starts (or with atEnd, ends) ancestor, ignoring
 // empty Text nodes.
 function isAtEdgeOf(node, ancestor, atEnd) {
@@ -3071,6 +3080,7 @@ function forceValue(node, command, newValue) {
                 // element after it.
                 return !(typingRestore && node == nextOfForced)
                     && (isHtmlElement(node, ["span", forcedElementName(command, newValue)]) || nextToReordered)
+                    && !(command == "forecolor" && hasOtherColorKeyword(node, newValue))
                     && isSimpleModifiableElement(node)
                     && areEquivalentValues(command, getSpecifiedCommandValue(node, command), newValue)
                     && areLooselyEquivalentValues(command, getEffectiveCommandValue(node, command), newValue);
