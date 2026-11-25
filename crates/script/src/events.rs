@@ -1440,6 +1440,8 @@ fn inline_handler(realm: &mut Realm, key: TargetKey, current: &Value, ty: &str) 
 
 struct HandlerSpec {
     ty: &'static str,
+    /// The hidden property holding the handler (`__on_<type>`), built once.
+    key: PropertyKey,
     /// The object the accessor is defined on (an interface prototype or
     /// the global): receivers must inherit from it.
     holder: ObjectId,
@@ -1455,7 +1457,8 @@ fn handler_receiver(realm: &mut Realm, spec: &HandlerSpec, this: &Value) -> JsRe
         _ => return realm.type_error("Illegal invocation"),
     };
     // (WindowProxy objects of other windows forward to their global.)
-    if o == realm.global() || Some(o) == state().borrow().protos.get("__window").copied() || node_of(realm, this).is_some() || realm.obj(o).class_name() == Some("Proxy") {
+    // (Nodes first: the common receivers, checked without a map lookup.)
+    if node_of(realm, this).is_some() || o == realm.global() || Some(o) == state().borrow().protos.get("__window").copied() || realm.obj(o).class_name() == Some("Proxy") {
         return Ok(Some(o));
     }
     let mut p = realm.obj(o).proto;
@@ -1480,7 +1483,7 @@ fn handler_receiver(realm: &mut Realm, spec: &HandlerSpec, this: &Value) -> JsRe
 fn handler_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let spec = native_data::<HandlerSpec>(realm).expect("handler spec");
     let Some(o) = handler_receiver(realm, &spec, &this)? else { return Ok(Value::Null) };
-    let v = get_hidden(realm, o, &format!("__on_{}", spec.ty));
+    let v = realm.obj(o).props.get(&spec.key).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
     if !v.is_undefined() {
         return Ok(v);
     }
@@ -1498,7 +1501,7 @@ fn handler_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     let Some(o) = handler_receiver(realm, &spec, &this)? else { return Ok(Value::Undefined) };
     let v = arg(args, 0);
     let v = if realm.is_callable(&v) { v } else { Value::Null };
-    set_hidden(realm, o, &format!("__on_{}", spec.ty), v.clone());
+    realm.define_property(o, spec.key.clone(), v.clone(), rabbithole_js::HIDDEN);
     if v.is_object() {
         if let Some(key) = target_key(realm, &this) {
             let st = state();
@@ -1524,7 +1527,7 @@ fn handler_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 /// Define `onclick`-style accessors on `obj`.
 pub(crate) fn install_handler_props(realm: &mut Realm, obj: ObjectId, names: &[&'static str]) {
     for ty in names {
-        let data: Rc<dyn std::any::Any> = Rc::new(HandlerSpec { ty, holder: obj });
+        let data: Rc<dyn std::any::Any> = Rc::new(HandlerSpec { ty, key: PropertyKey::str(&format!("__on_{ty}")), holder: obj });
         let g = realm.new_native_function_full(&format!("get on{ty}"), 0, handler_get, Some(data.clone()), vec![], false);
         let s = realm.new_native_function_full(&format!("set on{ty}"), 1, handler_set, Some(data), vec![], false);
         realm.define_accessor_values(obj, format!("on{ty}").as_str(), Some(Value::Object(g)), Some(Value::Object(s)), ACC);

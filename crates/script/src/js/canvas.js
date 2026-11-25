@@ -106,11 +106,16 @@
   function newPathState(map) { return { ops: [], map: map || null, last: null, start: null }; }
   function mapPt(st, x, y) { const m = st.map ? st.map() : IDENT; return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]; }
   const ok = (...v) => v.every(Number.isFinite);
+  // Fixed-arity forms for the hot operations (no rest array per call).
+  const fin = Number.isFinite;
+  const ok2 = (a, b) => fin(a) && fin(b);
+  const ok4 = (a, b, c, d) => fin(a) && fin(b) && fin(c) && fin(d);
+  const ok6 = (a, b, c, d, e, f) => fin(a) && fin(b) && fin(c) && fin(d) && fin(e) && fin(f);
   const P = {
-    moveTo(st, x, y) { if (!ok(x, y)) return; const p = mapPt(st, x, y); st.ops.push(0, p[0], p[1]); st.last = [x, y]; st.start = [x, y]; },
-    lineTo(st, x, y) { if (!ok(x, y)) return; if (!st.last) { P.moveTo(st, x, y); return; } const p = mapPt(st, x, y); st.ops.push(1, p[0], p[1]); st.last = [x, y]; },
-    quadraticCurveTo(st, cx, cy, x, y) { if (!ok(cx, cy, x, y)) return; if (!st.last) P.moveTo(st, cx, cy); const c = mapPt(st, cx, cy), p = mapPt(st, x, y); st.ops.push(2, c[0], c[1], p[0], p[1]); st.last = [x, y]; },
-    bezierCurveTo(st, a, b, c, d, x, y) { if (!ok(a, b, c, d, x, y)) return; if (!st.last) P.moveTo(st, a, b); const c1 = mapPt(st, a, b), c2 = mapPt(st, c, d), p = mapPt(st, x, y); st.ops.push(3, c1[0], c1[1], c2[0], c2[1], p[0], p[1]); st.last = [x, y]; },
+    moveTo(st, x, y) { if (!ok2(x, y)) return; const p = mapPt(st, x, y); st.ops.push(0, p[0], p[1]); st.last = [x, y]; st.start = [x, y]; },
+    lineTo(st, x, y) { if (!ok2(x, y)) return; if (!st.last) { P.moveTo(st, x, y); return; } const p = mapPt(st, x, y); st.ops.push(1, p[0], p[1]); st.last = [x, y]; },
+    quadraticCurveTo(st, cx, cy, x, y) { if (!ok4(cx, cy, x, y)) return; if (!st.last) P.moveTo(st, cx, cy); const c = mapPt(st, cx, cy), p = mapPt(st, x, y); st.ops.push(2, c[0], c[1], p[0], p[1]); st.last = [x, y]; },
+    bezierCurveTo(st, a, b, c, d, x, y) { if (!ok6(a, b, c, d, x, y)) return; if (!st.last) P.moveTo(st, a, b); const c1 = mapPt(st, a, b), c2 = mapPt(st, c, d), p = mapPt(st, x, y); st.ops.push(3, c1[0], c1[1], c2[0], c2[1], p[0], p[1]); st.last = [x, y]; },
     closePath(st) { if (!st.last) return; st.ops.push(4); st.last = st.start; },
     ellipse(st, x, y, rx, ry, rot, a0, a1, ccw = false) {
       if (!ok(x, y, rx, ry, rot, a0, a1)) return;
@@ -152,7 +157,7 @@
       P.lineTo(st, t1[0], t1[1]);
       P.ellipse(st, c[0], c[1], r, r, 0, Math.atan2(t1[1] - c[1], t1[0] - c[0]), Math.atan2(t2[1] - c[1], t2[0] - c[0]), cross > 0);
     },
-    rect(st, x, y, w, h) { if (!ok(x, y, w, h)) return; P.moveTo(st, x, y); P.lineTo(st, x + w, y); P.lineTo(st, x + w, y + h); P.lineTo(st, x, y + h); P.closePath(st); },
+    rect(st, x, y, w, h) { if (!ok4(x, y, w, h)) return; P.moveTo(st, x, y); P.lineTo(st, x + w, y); P.lineTo(st, x + w, y + h); P.lineTo(st, x, y + h); P.closePath(st); },
     roundRect(st, x, y, w, h, radii = 0) {
       const list = Array.isArray(radii) ? radii : [radii];
       if (list.length < 1 || list.length > 4) throw new RangeError(`Failed to execute 'roundRect': ${list.length} radii provided. Between one and four radii are necessary.`);
@@ -184,7 +189,24 @@
       this[S].ops.push(...transformOps(path[S].ops, t));
     }
   }
-  for (const k of Object.keys(P)) hidden(Path2D.prototype, k, function (...a) { return P[k](this[S], ...a); });
+  // The path methods of Path2D and of the context (CanvasPath), with
+  // fixed parameter lists: plain calls without rest or spread arrays.
+  function pathMethods(stOf) {
+    return {
+      moveTo(x, y) { P.moveTo(stOf(this), x, y); },
+      lineTo(x, y) { P.lineTo(stOf(this), x, y); },
+      quadraticCurveTo(cx, cy, x, y) { P.quadraticCurveTo(stOf(this), cx, cy, x, y); },
+      bezierCurveTo(a, b, c, d, x, y) { P.bezierCurveTo(stOf(this), a, b, c, d, x, y); },
+      closePath() { P.closePath(stOf(this)); },
+      ellipse(x, y, rx, ry, rot, a0, a1, ccw) { P.ellipse(stOf(this), x, y, rx, ry, rot, a0, a1, ccw); },
+      arc(x, y, r, a0, a1, ccw) { P.arc(stOf(this), x, y, r, a0, a1, ccw); },
+      arcTo(x1, y1, x2, y2, r) { P.arcTo(stOf(this), x1, y1, x2, y2, r); },
+      rect(x, y, w, h) { P.rect(stOf(this), x, y, w, h); },
+      roundRect(x, y, w, h, radii) { P.roundRect(stOf(this), x, y, w, h, radii); },
+    };
+  }
+  const PATH2D_METHODS = pathMethods((o) => o[S]);
+  for (const k of Object.keys(P)) hidden(Path2D.prototype, k, PATH2D_METHODS[k]);
   tag(Path2D, 'Path2D');
   function transformOps(ops, m) {
     const out = [];
@@ -340,7 +362,9 @@
 
   // ------------------------------------------------------------- surfaces
   // A surface: { id (native), width, height, owner, ctx }.
-  function newSurface(w, h, owner) { return { id: N.canvasNew(w, h), width: w, height: h, owner, ctx: null }; }
+  // `el`: the owner is a <canvas> element (shown on the page), decided
+  // once instead of an instanceof check per drawing operation.
+  function newSurface(w, h, owner) { return { id: N.canvasNew(w, h), width: w, height: h, owner, el: isA(owner, HTMLCanvasElement), ctx: null }; }
   const surfaces = new WeakMap();
   function surfaceOf(canvas) {
     let s = surfaces.get(canvas);
@@ -362,7 +386,7 @@
   const pendingFlush = new Set();
   let flushQueued = false;
   function markDirty(s) {
-    if (!s.owner || !isA(s.owner, HTMLCanvasElement)) return;
+    if (!s.el) return;
     pendingFlush.add(s);
     if (!flushQueued) { flushQueued = true; queueMicrotask(flushCanvases); }
   }
@@ -383,7 +407,7 @@
   // ------------------------------------------------ CanvasRenderingContext2D
   const DEFAULT_STATE = () => ({ fillStyle: '#000000', fill: [0, 0, 0, 1], strokeStyle: '#000000', stroke: [0, 0, 0, 1], globalAlpha: 1, globalCompositeOperation: 'source-over', lineWidth: 1, lineCap: 'butt', lineJoin: 'miter', miterLimit: 10, lineDash: [], lineDashOffset: 0, font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', direction: 'inherit', letterSpacing: '0px', wordSpacing: '0px', fontKerning: 'auto', fontStretch: 'normal', fontVariantCaps: 'normal', textRendering: 'auto', shadowBlur: 0, shadowColor: 'rgba(0, 0, 0, 0)', shadow: [0, 0, 0, 0], shadowOffsetX: 0, shadowOffsetY: 0, filter: 'none', imageSmoothingEnabled: true, imageSmoothingQuality: 'low', lang: 'inherit', m: [1, 0, 0, 1, 0, 0], clip: null });
   function resetState(ctx) { ctx[S].state = DEFAULT_STATE(); ctx[S].stack = []; ctx[S].path = newPathState(() => ctx[S].state.m); }
-  const surf = (ctx) => (isA(ctx[S].canvas, HTMLCanvasElement) ? surfaceOf(ctx[S].canvas) : ctx[S].surface);
+  const surf = (ctx) => { const c = ctx[S]; return c.el ? surfaceOf(c.canvas) : c.surface; };
   function params(ctx) {
     const st = ctx[S].state;
     return { alpha: st.globalAlpha, op: st.globalCompositeOperation, clip: st.clip, shadowColor: st.shadow[3] > 0 ? F64(st.shadow) : null, shadowBlur: st.shadowBlur, shadowOffsetX: st.shadowOffsetX, shadowOffsetY: st.shadowOffsetY };
@@ -411,14 +435,14 @@
     rotate(a) { const c = Math.cos(a), s = Math.sin(a); this.transform(c, s, -s, c, 0, 0); }
     translate(x, y) { this.transform(1, 0, 0, 1, x, y); }
     transform(a, b, c, d, e, f) {
-      if (!ok(a, b, c, d, e, f)) return;
+      if (!ok6(a, b, c, d, e, f)) return;
       const m = this[S].state.m;
       this[S].state.m = [m[0] * a + m[2] * b, m[1] * a + m[3] * b, m[0] * c + m[2] * d, m[1] * c + m[3] * d, m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5]];
     }
     getTransform() { const m = this[S].state.m; return new g.DOMMatrix([m[0], m[1], m[2], m[3], m[4], m[5]]); }
     setTransform(a, b, c, d, e, f) {
       if (typeof a === 'object' || a === undefined) { const mm = g.DOMMatrix.fromMatrix(a || {}); this[S].state.m = [mm.a, mm.b, mm.c, mm.d, mm.e, mm.f]; return; }
-      if (!ok(a, b, c, d, e, f)) return;
+      if (!ok6(a, b, c, d, e, f)) return;
       this[S].state.m = [a, b, c, d, e, f];
     }
     resetTransform() { this[S].state.m = [1, 0, 0, 1, 0, 0]; }
@@ -452,21 +476,21 @@
       return nearPolyline(flattenOps(Array.from(opsOf(this, path))), +x, +y, (st.lineWidth * scale) / 2);
     }
     fillRect(x, y, w, h) {
-      if (!ok(x, y, w, h)) return;
+      if (!ok4(x, y, w, h)) return;
       const p = newPathState(() => this[S].state.m); P.rect(p, +x, +y, +w, +h);
       const st = this[S].state, sf = surf(this);
       N.canvasFill(sf.id, F64(p.ops), 'nonzero', paintOf(st.fillStyle, st.fill), F64(st.m), params(this));
       markDirty(sf);
     }
     strokeRect(x, y, w, h) {
-      if (!ok(x, y, w, h)) return;
+      if (!ok4(x, y, w, h)) return;
       const p = newPathState(() => this[S].state.m); P.rect(p, +x, +y, +w, +h);
       const st = this[S].state, sf = surf(this);
       N.canvasStroke(sf.id, F64(p.ops), strokeSpec(st), paintOf(st.strokeStyle, st.stroke), F64(st.m), params(this));
       markDirty(sf);
     }
     clearRect(x, y, w, h) {
-      if (!ok(x, y, w, h)) return;
+      if (!ok4(x, y, w, h)) return;
       const p = newPathState(() => this[S].state.m); P.rect(p, +x, +y, +w, +h);
       const sf = surf(this);
       N.canvasClear(sf.id, F64(p.ops), { clip: this[S].state.clip });
@@ -533,7 +557,8 @@
     scrollPathIntoView() {}
   }
   tag(CanvasRenderingContext2D, 'CanvasRenderingContext2D');
-  for (const k of Object.keys(P)) hidden(CanvasRenderingContext2D.prototype, k, function (...a) { return P[k](this[S].path, ...a); });
+  const CTX_PATH_METHODS = pathMethods((o) => o[S].path);
+  for (const k of Object.keys(P)) hidden(CanvasRenderingContext2D.prototype, k, CTX_PATH_METHODS[k]);
   // Free a clip mask once neither the state nor the save stack uses it.
   function releaseClip(ctx, id) {
     if (id === null || ctx[S].state.clip === id || ctx[S].stack.some((s) => s.clip === id)) return;
@@ -640,7 +665,7 @@
   const contexts = new WeakMap();
   function makeContext(owner, surface, attrs, C) {
     const ctx = Object.create(C.prototype);
-    hidden(ctx, S, { canvas: owner, surface, attrs: { alpha: attrs.alpha !== false, colorSpace: attrs.colorSpace || 'srgb', desynchronized: !!attrs.desynchronized, willReadFrequently: !!attrs.willReadFrequently, colorType: 'unorm8' } });
+    hidden(ctx, S, { canvas: owner, el: isA(owner, HTMLCanvasElement), surface, attrs: { alpha: attrs.alpha !== false, colorSpace: attrs.colorSpace || 'srgb', desynchronized: !!attrs.desynchronized, willReadFrequently: !!attrs.willReadFrequently, colorType: 'unorm8' } });
     resetState(ctx);
     surface.ctx = ctx;
     surface.mode = '2d';
@@ -771,14 +796,9 @@
       for (const [name, n] of Object.entries(table)) {
         const d = Object.getOwnPropertyDescriptor(P0, name);
         if (!d || typeof d.value !== 'function') continue;
-        const f = d.value;
-        const w = { [name](...a) {
-          if (this == null || !Object.prototype.hasOwnProperty.call(Object(this), S)) throw new TypeError('Illegal invocation');
-          if (a.length < n) throw new TypeError(`Failed to execute '${name}' on '${iface}': ${n} argument${n === 1 ? '' : 's'} required, but only ${a.length} present.`);
-          return f.apply(this, a);
-        } }[name];
-        Object.defineProperty(w, 'length', { value: n, configurable: true });
-        d.value = w;
+        // Receivers own the S slot; the checks run natively before the
+        // implementation's frame (no JavaScript wrapper).
+        d.value = N.idl(d.value, S, n, n, name, iface);
         Object.defineProperty(P0, name, d);
       }
     };

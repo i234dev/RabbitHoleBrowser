@@ -12,9 +12,8 @@
   g.__rhNative.named = (fn, name) => {
     if (typeof fn !== 'function' || fn.name === name) return fn;
     if (namedFns.has(fn)) {
-      const target = fn;
-      fn = { [name](...a) { return target.apply(this, a); } }[name];
-      Object.defineProperty(fn, 'length', { value: target.length, configurable: true });
+      // (A native forwarder: no wrapper frame on calls.)
+      fn = g.__rhNative.idl(fn, undefined, 0, fn.length, name, '');
     } else {
       try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch (e) { return fn; }
     }
@@ -30,13 +29,8 @@
   g.__rhNative.branded = (C, fn, kind, name) => {
     const n = kind === 'method' ? name : kind + ' ' + name;
     if (typeof fn !== 'function' || !C || typeof C !== 'function' || !C.prototype || globalProtos.has(C.prototype) || C === Object) return g.__rhNative.named(fn, n);
-    let w;
-    if (kind === 'get') w = { [n]() { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return fn.call(this); } }[n];
-    else if (kind === 'set') w = { [n](v) { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return fn.call(this, v); } }[n];
-    else w = { [n](...a) { if (!(this instanceof C)) throw new TypeError('Illegal invocation'); return fn.apply(this, a); } }[n];
-    Object.defineProperty(w, 'name', { value: n, configurable: true });
-    if (kind === 'method') Object.defineProperty(w, 'length', { value: fn.length, configurable: true });
-    return w;
+    // The check runs natively before `fn`'s own frame (no wrapper).
+    return g.__rhNative.idl(fn, C.prototype, 0, kind === 'method' ? fn.length : kind === 'set' ? 1 : 0, n, C.name);
   };
 
   // ---------------------------------------------------------- DOMMatrix

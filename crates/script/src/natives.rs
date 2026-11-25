@@ -255,6 +255,24 @@ fn install_handlers(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     Ok(Value::Undefined)
 }
 
+/// `idl(fn, brand, required, length, name, iface)`: a WebIDL operation or
+/// attribute accessor of interface `iface` calling `fn`, which throws a
+/// TypeError for receivers without `brand` (an interface prototype, a
+/// symbol they own, or undefined for none) and for fewer than `required`
+/// arguments (see `Realm::new_idl_function`: no JavaScript wrapper frame).
+fn idl_function(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let target = arg(args, 0);
+    let Some(t) = target.as_object().filter(|_| realm.is_callable(&target)) else {
+        return Err(realm.throw_type_error("idl: function expected"));
+    };
+    let brand = arg(args, 1);
+    let required = realm.to_number(arg(args, 2))?.max(0.0) as u32;
+    let length = realm.to_number(arg(args, 3))?.max(0.0) as u32;
+    let name = arg_str(realm, args, 4)?;
+    let iface = arg_str(realm, args, 5)?;
+    Ok(Value::Object(realm.new_idl_function(t, brand, required, length, &name, &iface)))
+}
+
 /// `markHTMLDDA(object)`: give it [[IsHTMLDDA]] (`document.all`).
 fn mark_htmldda(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     if let Some(o) = arg(args, 0).as_object() {
@@ -509,6 +527,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "listenersThrew", 0, crate::events::listeners_threw);
     realm.define_method(o, "markHTMLDDA", 1, mark_htmldda);
     realm.define_method(o, "registerProto", 2, register_proto);
+    realm.define_method(o, "idl", 6, idl_function);
     realm.define_method(o, "setRenderHook", 1, set_render_hook);
     realm.define_method(o, "setRenderObservers", 1, set_render_observers);
     realm.define_method(o, "requestRenderUpdate", 0, request_render_update);

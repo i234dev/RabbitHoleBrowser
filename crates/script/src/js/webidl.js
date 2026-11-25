@@ -77,16 +77,10 @@
   const requireArgs = (holder, iface, name, n, C) => {
     const d = Object.getOwnPropertyDescriptor(holder, name);
     if (!d || typeof d.value !== 'function') return;
-    const f = d.value;
     // (location, history and navigator objects may not be instances.)
     const brand = C && !globalChain.has(C.prototype) && !['Location', 'History', 'Navigator'].includes(iface);
-    const w = { [name](...a) {
-      if (brand && !(this instanceof C)) throw new TypeError('Illegal invocation');
-      if (a.length < n) throw new TypeError(`Failed to execute '${name}' on '${iface}': ${n} argument${n === 1 ? '' : 's'} required, but only ${a.length} present.`);
-      return f.apply(this, a);
-    } }[name];
-    Object.defineProperty(w, 'length', { value: n, configurable: true });
-    d.value = w;
+    // The checks run natively before the implementation (no wrapper frame).
+    d.value = g.__rhNative.idl(d.value, brand ? C.prototype : undefined, n, n, name, iface);
     try { Object.defineProperty(holder, name, d); } catch (e) { /* ignore */ }
   };
   for (const [iface, ops] of Object.entries(REQUIRED)) {

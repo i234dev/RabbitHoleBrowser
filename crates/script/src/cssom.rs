@@ -464,8 +464,10 @@ fn parse_style(n: NodeRef) -> DeclList {
     let mut list = DeclList { items: Vec::with_capacity(decls.len()) };
     for d in decls {
         if let Some(value) = specified_value(&d.name, &d.value) {
-            let source = tokens_to_css(&d.value);
-            let value = if keeps_source_text(&d.name, &source) { source } else { value };
+            // (Only color functions can keep their text: other declarations
+            // are not serialized a second time on every parse.)
+            let keeps = single_color_property(&d.name) && d.value.iter().any(|t| matches!(t, Token::Function(_)));
+            let value = if keeps && keeps_source_text(&d.name, &tokens_to_css(&d.value)) { tokens_to_css(&d.value) } else { value };
             list.push(d.name,value,d.important);
         }
     }

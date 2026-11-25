@@ -16,12 +16,16 @@ pub(crate) use crate::reflect::{reflect, Reflect};
 /// Set/remove an attribute with mutation records and dirtiness.
 /// The attribute name to use on `n`: lower-cased for HTML elements in
 /// HTML documents (DOM "get an attribute by name").
-fn attr_name_for(n: NodeRef, name: &str) -> String {
+fn attr_name_for(n: NodeRef, name: &str) -> std::borrow::Cow<'_, str> {
+    // (Already lower case: the same name either way, without a lookup.)
+    if !name.bytes().any(|b| b.is_ascii_uppercase()) {
+        return std::borrow::Cow::Borrowed(name);
+    }
     let lower = with_doc(n.doc, |doc| doc.is_html && doc.element(n.node).map(|e| e.ns == rabbithole_dom::Namespace::Html).unwrap_or(true));
     if lower {
-        name.to_ascii_lowercase()
+        std::borrow::Cow::Owned(name.to_ascii_lowercase())
     } else {
-        name.to_string()
+        std::borrow::Cow::Borrowed(name)
     }
 }
 
