@@ -889,7 +889,12 @@
   const cacheOp = (op, id = 0, key = '', value = '') => N.cacheOperation(op, id, key, value);
   const cacheRequest = input => input instanceof g.Request ? input : new g.Request(input);
   const cacheURL = req => { const u = new URL(req.url); u.hash = ''; return u.href; };
-  const cacheEntries = id => cacheOp('entries', id).map(e => ({ key: e.key, record: JSON.parse(e.record) }));
+  // Entries stored for the request's URL (all entries without a request);
+  // their metadata is parsed here, their bytes read only when decoded.
+  const cacheEntries = (id, request, opts = {}) => {
+    const url = request ? cacheURL(request) : '';
+    return N.cacheQuery(id, url, !!opts.ignoreSearch).map(e => ({ key: e.key, record: JSON.parse(e.meta) }));
+  };
   const cacheMatches = (record, request, opts) => {
     if (!request) return true;
     if (!opts.ignoreMethod && request.method !== 'GET') return false;
@@ -905,10 +910,10 @@
     }
     return true;
   };
-  const cacheDecode = record => {
-    const data = record.response;
+  const cacheDecode = (id, entry) => {
+    const data = entry.record.response;
     // Constructing from bytes gives each reader its own unconsumed body.
-    const response = new g.Response(new Uint8Array(data.bytes), { headers: data.headers });
+    const response = new g.Response(N.cacheBody(id, entry.key), { headers: data.headers });
     for (const name of ['status', 'statusText', 'url', 'type', 'redirected']) Object.defineProperty(response, name, { value: data[name], configurable: true, enumerable: true });
     Object.defineProperty(response, 'ok', { value: data.status >= 200 && data.status < 300, configurable: true, enumerable: true });
     return response;
@@ -922,27 +927,27 @@
     if ((response.headers.get('vary') || '').split(',').some(n => n.trim() === '*')) throw new TypeError('Responses with Vary: * cannot be cached.');
     const record = {
       request: { url: cacheURL(request), headers: Array.from(request.headers.entries()) },
-      response: { status: response.status, statusText: response.statusText, headers: Array.from(response.headers.entries()), url: response.url, type: response.type, redirected: response.redirected, bytes: [] },
+      response: { status: response.status, statusText: response.statusText, headers: Array.from(response.headers.entries()), url: response.url, type: response.type, redirected: response.redirected },
     };
-    return response.arrayBuffer().then(buffer => {
-      record.response.bytes = Array.from(new Uint8Array(buffer));
-      return { request, record };
-    });
+    return response.arrayBuffer().then(body => ({ request, record, body }));
   };
   const cacheStoreBatch = (id, entries) => {
-    const removals = cacheEntries(id).filter(previous => entries.some(entry => cacheMatches(previous.record, entry.request, {}))).map(entry => entry.key);
+    const removals = [];
+    for (const entry of entries) {
+      for (const previous of cacheEntries(id, entry.request)) if (cacheMatches(previous.record, entry.request, {}) && !removals.includes(previous.key)) removals.push(previous.key);
+    }
     const keys = entries.map(entry => JSON.stringify(entry.record.request));
-    const records = entries.map(entry => JSON.stringify(entry.record));
-    N.cacheBatchOperation(id, removals, keys, records);
+    const urls = entries.map(entry => entry.record.request.url);
+    const metas = entries.map(entry => JSON.stringify(entry.record));
+    N.cacheBatchOperation(id, removals, keys, urls, metas, entries.map(entry => entry.body));
   };
-  const cacheStore = (id, request, record) => cacheStoreBatch(id, [{ request, record }]);
   class Cache {
     constructor() { ILLEGAL(); }
     match(req, opts = {}) { return this.matchAll(req, opts).then(list => list[0]); }
     matchAll(req, opts = {}) {
       return Promise.resolve().then(() => {
         const request = req === undefined ? null : cacheRequest(req);
-        return cacheEntries(this[S]).filter(e => cacheMatches(e.record, request, opts)).map(e => cacheDecode(e.record));
+        return cacheEntries(this[S], request, opts).filter(e => cacheMatches(e.record, request, opts)).map(e => cacheDecode(this[S], e));
       });
     }
     add(req) { return this.addAll([req]); }
@@ -958,19 +963,19 @@
         })));
       }).then(entries => cacheStoreBatch(this[S], entries));
     }
-    put(req, response) { return Promise.resolve().then(() => cacheEncode(req, response)).then(e => cacheStore(this[S], e.request, e.record)); }
+    put(req, response) { return Promise.resolve().then(() => cacheEncode(req, response)).then(e => cacheStoreBatch(this[S], [e])); }
     delete(req, opts = {}) {
       return Promise.resolve().then(() => {
         const request = cacheRequest(req);
-        const removals = cacheEntries(this[S]).filter(entry => cacheMatches(entry.record, request, opts)).map(entry => entry.key);
-        N.cacheBatchOperation(this[S], removals, [], []);
+        const removals = cacheEntries(this[S], request, opts).filter(entry => cacheMatches(entry.record, request, opts)).map(entry => entry.key);
+        N.cacheBatchOperation(this[S], removals, [], [], [], []);
         return removals.length !== 0;
       });
     }
     keys(req, opts = {}) {
       return Promise.resolve().then(() => {
         const request = req === undefined ? null : cacheRequest(req);
-        return cacheEntries(this[S]).filter(e => cacheMatches(e.record, request, opts)).map(e => new g.Request(e.record.request.url, { headers: e.record.request.headers }));
+        return cacheEntries(this[S], request, opts).filter(e => cacheMatches(e.record, request, opts)).map(e => new g.Request(e.record.request.url, { headers: e.record.request.headers }));
       });
     }
   }

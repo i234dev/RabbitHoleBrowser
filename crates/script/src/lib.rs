@@ -122,6 +122,86 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:webidl.js", include_str!("js/webidl.js")),
 ];
 
+/// Web APIs of [`JS_APIS`] that few pages use, evaluated on first use: after
+/// the first realm of a kind (window, worker, service worker) recorded what
+/// each defines, later realms get placeholders instead (accessors on the
+/// global for its interfaces, stubs for its native hooks) that evaluate it.
+const LAZY_APIS: &[&str] = &["rabbithole:idb.js", "rabbithole:webgl.js", "rabbithole:webaudio.js", "rabbithole:webrtc.js"];
+
+/// Installs the placeholders of a lazy API: `install(index, globals,
+/// natives)`. Loading restores what the APIs capture when they are
+/// evaluated (the engine's timers, base classes and intrinsics, which a
+/// page may have replaced since) for the time of the evaluation: a lazy API
+/// that captures anything else at its top level must be added to the list.
+const LAZY_INSTALLER: &str = r#"(function () {
+  'use strict';
+  const g = globalThis, N = g.__rhNative;
+  const getDesc = Object.getOwnPropertyDescriptor, defineProperty = Object.defineProperty;
+  const TA = Object.getPrototypeOf(Float32Array.prototype);
+  const original = [...['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'queueMicrotask',
+    'HTMLCanvasElement', 'EventTarget', 'Event', 'DOMException', 'Symbol', 'Float32Array', 'Int32Array'].map(k => [g, k]),
+    [Math, 'trunc'], [Number, 'isFinite'], [Reflect, 'apply'], [Object, 'getOwnPropertyDescriptor'], [Object, 'getPrototypeOf'], [Object, 'defineProperty'], [TA, 'length']]
+    .map(([o, k]) => [o, k, getDesc(o, k)]);
+  const put = (o, k, d) => { try { if (d) defineProperty(o, k, d); else delete o[k]; } catch (e) { /* non-configurable */ } };
+  const modules = [];
+  function load(m) {
+    if (m.loaded) return;
+    m.loaded = true;
+    for (const k of m.globals) { const d = getDesc(g, k); if (d && d.get === m.getters.get(k)) delete g[k]; }
+    for (const k of m.natives) { if (N[k] === m.stubs.get(k)) delete N[k]; }
+    const saved = original.map(([o, k]) => [o, k, getDesc(o, k)]);
+    for (const [o, k, d] of original) put(o, k, d);
+    const hadN = getDesc(g, '__rhNative');
+    if (!hadN) defineProperty(g, '__rhNative', { value: N, writable: true, configurable: true });
+    try { N.loadLazyApi(m.index); } finally {
+      if (!hadN) delete g.__rhNative;
+      for (const [o, k, d] of saved) put(o, k, d);
+    }
+    N.webidlEnumerable([], m.globals);
+  }
+  return function install(index, globals, natives) {
+    const m = { index, globals, natives, loaded: false, getters: new Map(), stubs: new Map() };
+    modules.push(m);
+    for (const k of globals) {
+      const get = function () { load(m); return g[k]; };
+      m.getters.set(k, get);
+      defineProperty(g, k, { get, set(v) { load(m); g[k] = v; }, enumerable: false, configurable: true });
+    }
+    for (const k of natives) {
+      const stub = function (...args) { load(m); return N[k].apply(this, args); };
+      m.stubs.set(k, stub);
+      defineProperty(N, k, { value: stub, writable: true, configurable: true });
+    }
+  };
+})()"#;
+
+/// Names a lazy API defined when it was evaluated (global, `__rhNative`).
+type LazySurface = (Vec<String>, Vec<String>);
+
+thread_local! {
+    /// Per realm kind, what each of [`LAZY_APIS`] defines.
+    static LAZY_SURFACES: RefCell<HashMap<u8, Rc<Vec<LazySurface>>>> = RefCell::new(HashMap::default());
+}
+
+/// Evaluate lazy API `index` (called by its placeholders).
+pub(crate) fn load_lazy_api(realm: &mut Realm, index: usize) {
+    let Some(name) = LAZY_APIS.get(index) else { return };
+    let Some((_, src)) = JS_APIS.iter().find(|(n, _)| n == name) else { return };
+    if let Err(e) = realm.eval_builtin(src, name) {
+        let msg = realm.error_to_string(&e);
+        eprintln!("[rabbithole] {name} failed: {msg}");
+    }
+}
+
+/// String keys of an object's own properties.
+fn own_names(realm: &mut Realm, o: Value) -> HashSet<String> {
+    let V::Object(id) = o.v() else { return HashSet::default() };
+    realm.own_keys(id).unwrap_or_default().into_iter().filter_map(|k| match k {
+        rabbithole_js::PropertyKey::String(s) => Some(s.to_rust_string()),
+        _ => None,
+    }).collect()
+}
+
 /// Default watchdog budget of one task (a timer callback, event listener,
 /// animation frame callback, message or microtask checkpoint; see
 /// [`task_budget`]).
@@ -436,11 +516,59 @@ impl ScriptHost {
                 host.state.borrow_mut().document_obj = d;
             }
             // Web APIs written in JavaScript (DOMMatrix, CSSOM, ...).
+            static DEBUG_REALM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let debug_realm = *DEBUG_REALM.get_or_init(|| std::env::var_os("RH_DEBUG_REALM").is_some());
+            let kind = worker.is_some() as u8 | (service_scope as u8) << 1;
+            let surfaces = LAZY_SURFACES.with(|m| m.borrow().get(&kind).cloned());
+            let mut recorded: Vec<LazySurface> = Vec::new();
+            let mut installer: Option<Value> = None;
             for (name, src) in JS_APIS {
-                if let Err(e) = realm.eval_builtin(src, name) {
+                let lazy = LAZY_APIS.iter().position(|n| n == name);
+                if let (Some(index), Some(surfaces)) = (lazy, &surfaces) {
+                    if installer.is_none() {
+                        installer = realm.eval_builtin(LAZY_INSTALLER, "rabbithole:lazy.js").ok();
+                    }
+                    if let Some(install) = installer.clone() {
+                        let (globals, natives) = &surfaces[index];
+                        let globals = globals.iter().map(|n| Value::str(n)).collect();
+                        let globals = realm.new_array_value(globals);
+                        let natives = natives.iter().map(|n| Value::str(n)).collect();
+                        let natives = realm.new_array_value(natives);
+                        if realm.call(install, Value::Undefined, &[Value::Number(index as f64), globals, natives]).is_ok() {
+                            continue;
+                        }
+                    }
+                }
+                let natives_obj = |realm: &mut Realm| {
+                    let global = Value::Object(realm.global());
+                    realm.get_str(global, "__rhNative").unwrap_or(Value::Undefined)
+                };
+                let before = lazy.filter(|_| surfaces.is_none()).map(|_| {
+                    let global = Value::Object(realm.global());
+                    let n = natives_obj(realm);
+                    (own_names(realm, global), own_names(realm, n))
+                });
+                let t = debug_realm.then(std::time::Instant::now);
+                let r = realm.eval_builtin(src, name);
+                if let Some((globals_before, natives_before)) = before {
+                    let global = Value::Object(realm.global());
+                    let n = natives_obj(realm);
+                    let mut globals: Vec<String> = own_names(realm, global).difference(&globals_before).cloned().collect();
+                    let mut natives: Vec<String> = own_names(realm, n).difference(&natives_before).cloned().collect();
+                    globals.sort();
+                    natives.sort();
+                    recorded.push((globals, natives));
+                }
+                if let Some(t) = t {
+                    eprintln!("[realm] {name} {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+                }
+                if let Err(e) = r {
                     let msg = realm.error_to_string(&e);
                     eprintln!("[rabbithole] {name} failed: {msg}");
                 }
+            }
+            if surfaces.is_none() && recorded.len() == LAZY_APIS.len() {
+                LAZY_SURFACES.with(|m| m.borrow_mut().insert(kind, Rc::new(recorded)));
             }
             if worker.is_some() {
                 if let Err(e) = realm.eval_builtin(WORKER_JS, "rabbithole:worker.js") {

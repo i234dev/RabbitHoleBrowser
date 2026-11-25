@@ -1338,8 +1338,45 @@ impl Realm {
 
     /// Compile and run a script in the global scope.
     pub fn eval(&mut self, source: &str, filename: &str) -> Result<Value, Value> {
-        let code = self.compile(source, filename, false)?;
+        let code = self.compile_script_cached(source, filename, true)?;
         self.run_script(code)
+    }
+
+    /// Compile a classic script, reusing (a fresh copy of) the code of the
+    /// same script compiled earlier on this thread by any realm: pages and
+    /// their frames load the same bundles, and so do the documents of a
+    /// site. Small scripts are compiled anew; the cache keeps the most
+    /// recent scripts up to a total source size.
+    fn compile_script_cached(&mut self, source: &str, filename: &str, completion: bool) -> Result<Rc<FunctionCode>, Value> {
+        const MIN_LEN: usize = 4 * 1024;
+        const MAX_TOTAL: usize = 32 * 1024 * 1024;
+        type Entry = (Rc<str>, bool, Rc<str>, Rc<FunctionCode>);
+        thread_local! {
+            static SCRIPT_CODE: RefCell<(VecDeque<Entry>, usize)> = RefCell::new((VecDeque::new(), 0));
+        }
+        if source.len() < MIN_LEN || source.len() > MAX_TOTAL / 4 {
+            return self.compile_with(source, filename, false, completion);
+        }
+        let hit = SCRIPT_CODE.with(|c| {
+            let c = c.borrow();
+            c.0.iter().rev().find(|(f, comp, src, _)| *comp == completion && &**f == filename && &**src == source).map(|e| e.3.clone())
+        });
+        if let Some(t) = hit {
+            let code = FunctionCode::fresh_copy(&t);
+            self.adopt_code(&code);
+            return Ok(code);
+        }
+        let t = self.compile_with(source, filename, false, completion)?;
+        SCRIPT_CODE.with(|c| {
+            let mut c = c.borrow_mut();
+            c.1 += source.len();
+            c.0.push_back((Rc::from(filename), completion, Rc::from(source), t.clone()));
+            while c.1 > MAX_TOTAL {
+                let Some(old) = c.0.pop_front() else { break };
+                c.1 -= old.2.len();
+            }
+        });
+        Ok(t)
     }
 
     /// [`Realm::eval`] of a script built into the program (the same text
@@ -1376,7 +1413,7 @@ impl Realm {
     /// Run a classic script for its effects (its completion value is not
     /// computed).
     pub fn exec(&mut self, source: &str, filename: &str) -> Result<(), Value> {
-        let code = self.compile_with(source, filename, false, false)?;
+        let code = self.compile_script_cached(source, filename, false)?;
         self.run_script(code)?;
         Ok(())
     }

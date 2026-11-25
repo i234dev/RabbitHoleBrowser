@@ -1831,6 +1831,50 @@ fn navigator_members_live_on_the_prototype() {
     assert_eq!(out, "'0|userAgent:function:true|languages:function:true|language:function:true|platform:function:true|onLine:function:true|cookieEnabled:function:true|hardwareConcurrency:function:true|webdriver:function:true|function|function|false|en-US|en-US|en-US|true|true'");
 }
 
+/// Rarely used APIs are evaluated on first use in realms after the first:
+/// their interfaces are visible before (names, `in`, typeof) and behave as
+/// if evaluated at startup, with the engine's timers even when the page
+/// replaced them.
+#[test]
+fn lazy_apis_look_eagerly_installed() {
+    let probe = r#"
+        const names = Object.getOwnPropertyNames(window);
+        const r = [names.includes('IDBFactory'), names.includes('WebGLRenderingContext'), 'AudioContext' in window, 'RTCPeerConnection' in window];
+        window.setTimeout = () => { throw new Error('page timer'); };
+        r.push(typeof indexedDB, typeof IDBKeyRange.bound, Object.getOwnPropertyDescriptor(IDBKeyRange.prototype, 'includes').enumerable);
+        r.push(Object.getOwnPropertyDescriptor(window, 'IDBFactory').writable, typeof window.webkitAudioContext, WebGLRenderingContext.name);
+        const c = document.createElement('canvas');
+        r.push(Object.prototype.toString.call(c.getContext('webgl')));
+        window.result = r.join('|');
+    "#;
+    let expected = "'true|true|true|true|object|function|true|true|function|WebGLRenderingContext|[object WebGLRenderingContext]'";
+    assert_eq!(result_of("<body></body>", probe), expected, "first realm (eager)");
+    assert_eq!(result_of("<body></body>", probe), expected, "later realm (lazy)");
+    let placeholder = "window.result = typeof Object.getOwnPropertyDescriptor(window, 'IDBFactory').get + '|' + typeof IDBFactory + '|' + typeof Object.getOwnPropertyDescriptor(window, 'IDBFactory').value;";
+    assert_eq!(result_of("<body></body>", placeholder), "'function|function|function'");
+    // IndexedDB requests complete through the engine's own timers.
+    let out = logs_of("<body></body>", "window.setTimeout = () => {}; const q = indexedDB.open('lazy', 1); q.onsuccess = () => console.log('opened', q.result.version);");
+    assert_eq!(out, ["opened 1"]);
+}
+
+/// `sendBeacon` rejects non-HTTP(S) URLs and bodies over the 64 KiB
+/// keepalive quota, and queues the rest.
+#[test]
+fn send_beacon_checks_scheme_and_quota() {
+    let out = result_of(
+        "<html><body></body></html>",
+        r#"
+        const r = [];
+        try { navigator.sendBeacon('data:text/plain,x'); r.push('no-throw'); } catch (e) { r.push(e instanceof TypeError); }
+        r.push(navigator.sendBeacon('https://example.test/b', 'x'.repeat(65537)));
+        r.push(navigator.sendBeacon('https://example.test/b', new URLSearchParams('a=1')));
+        r.push(navigator.sendBeacon('https://example.test/b'));
+        window.result = r.join('|');
+        "#,
+    );
+    assert_eq!(out, "'true|false|true|true'");
+}
+
 /// The URL components of `<a>` are settable (HTMLHyperlinkElementUtils):
 /// video blocks strip a flag from `a.hash` before decorating the link.
 #[test]

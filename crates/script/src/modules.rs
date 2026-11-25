@@ -64,6 +64,24 @@ pub struct ModuleState {
     /// computed from, to notice changes): resolving a specifier must not
     /// re-parse every key of a large map.
     normalized: Option<(ImportMap, String, Rc<NormalizedMap>)>,
+    /// Module graph prefetching: dependencies are requested in parallel as
+    /// soon as their importer is compiled, while the engine still loads
+    /// (and evaluates) them depth-first in source order.
+    prefetch: Prefetch,
+}
+
+type FetchResult = Result<rabbithole_net::Response, String>;
+
+#[derive(Default)]
+struct Prefetch {
+    /// Requests still on the network, by URL.
+    in_flight: HashMap<String, std::sync::mpsc::Receiver<FetchResult>>,
+    /// Responses that arrived before the loader asked for them.
+    arrived: HashMap<String, FetchResult>,
+    /// JavaScript modules compiled on arrival (not yet handed to the engine).
+    compiled: HashMap<String, ModuleId>,
+    /// Modules whose requests were already prefetched.
+    expanded: HashSet<ModuleId>,
 }
 
 /// An import map with its keys resolved against the document base URL
@@ -303,10 +321,18 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
     // script's deadline instead of eating its budget.
     let started = std::time::Instant::now();
     // blob: URLs (URL.createObjectURL) are served from the page's store.
+    prefetch_requests_of(realm, referrer);
+    if let Some(id) = take_compiled(&key) {
+        state().borrow_mut().modules.cache.insert(key, id);
+        prefetch_requests(realm, id);
+        return Ok(id);
+    }
     let resp = if url.scheme == "blob" {
         crate::fetch::blob_url_response(&key).ok_or_else(|| format!("no blob for {key}"))
+    } else if let Some(r) = wait_prefetched(realm, &key) {
+        r
     } else {
-        with_env(|env| env.fetch(rabbithole_net::Request::get(url.clone()).with_dest(rabbithole_net::Destination::Script).with_referer(env.document_url())))
+        with_env(|env| env.fetch(module_request(&url, env.document_url())))
     };
     let (text, kind) = match resp {
         Ok(r) if r.status < 400 => (rabbithole_net::decode_text(&r.body, r.charset.as_deref()), module_kind(&url, &r.content_type)),
@@ -351,7 +377,121 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
         }
     };
     state().borrow_mut().modules.cache.insert(key, id);
+    if kind == ModuleKind::JavaScript {
+        prefetch_requests(realm, id);
+    }
     Ok(id)
+}
+
+fn module_request(url: &Url, referer: Url) -> rabbithole_net::Request {
+    rabbithole_net::Request::get(url.clone()).with_dest(rabbithole_net::Destination::Script).with_referer(referer)
+}
+
+/// Start background requests for the dependencies of the module at
+/// `referrer` (the entry module is not in the loader cache: look it up
+/// among the newest records).
+fn prefetch_requests_of(realm: &mut Realm, referrer: &str) {
+    let cached = state().borrow().modules.cache.get(referrer).copied();
+    let id = cached.or_else(|| {
+        let n = realm.modules.len() as u32;
+        (n.saturating_sub(256)..n).rev().map(ModuleId).find(|id| realm.module_url(*id) == referrer)
+    });
+    if let Some(id) = id {
+        prefetch_requests(realm, id);
+    }
+}
+
+/// Start background requests for every not-yet-known dependency of `id`.
+fn prefetch_requests(realm: &mut Realm, id: ModuleId) {
+    if !state().borrow_mut().modules.prefetch.expanded.insert(id) {
+        return;
+    }
+    let referrer = realm.module_url(id).to_string();
+    let specs = realm.module_requests(id).to_vec();
+    if specs.is_empty() {
+        return;
+    }
+    let doc_url = with_env(|env| env.document_url());
+    for spec in specs {
+        let Ok(url) = resolve_from(&referrer, &spec) else { continue };
+        if !url.is_http() {
+            continue;
+        }
+        let key = url.to_string();
+        {
+            let st = state();
+            let st = st.borrow();
+            let m = &st.modules;
+            if m.cache.contains_key(&key) || m.prefetch.in_flight.contains_key(&key) || m.prefetch.arrived.contains_key(&key) || m.prefetch.compiled.contains_key(&key) {
+                continue;
+            }
+        }
+        if let Some(rx) = with_env(|env| env.fetch_background(module_request(&url, doc_url.clone()))) {
+            state().borrow_mut().modules.prefetch.in_flight.insert(key, rx);
+        }
+    }
+}
+
+fn take_compiled(key: &str) -> Option<ModuleId> {
+    state().borrow_mut().modules.prefetch.compiled.remove(key)
+}
+
+/// A prefetched module response, waiting for it if it is still in flight.
+/// While waiting, other
+/// arrivals are compiled and their own dependencies requested, so the whole
+/// graph downloads in parallel. Waiting is network time, not script time.
+fn wait_prefetched(realm: &mut Realm, key: &str) -> Option<FetchResult> {
+    if let Some(r) = state().borrow_mut().modules.prefetch.arrived.remove(key) {
+        return Some(r);
+    }
+    let rx = state().borrow_mut().modules.prefetch.in_flight.remove(key)?;
+    let t = std::time::Instant::now();
+    let result = loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(2)) {
+            Ok(r) => break r,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => pump_prefetches(realm),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Err("module request dropped".to_string()),
+        }
+    };
+    rabbithole_js::exclude_from_watchdog(t.elapsed());
+    Some(result)
+}
+
+/// Collect finished prefetches: compile JavaScript ones (a failure is left
+/// for the loader to reproduce and report in order) and prefetch their
+/// dependencies in turn.
+fn pump_prefetches(realm: &mut Realm) {
+    let done: Vec<(String, FetchResult)> = {
+        let st = state();
+        let mut st = st.borrow_mut();
+        let p = &mut st.modules.prefetch;
+        let keys: Vec<String> = p.in_flight.keys().cloned().collect();
+        keys.into_iter()
+            .filter_map(|k| match p.in_flight[&k].try_recv() {
+                Ok(r) => { p.in_flight.remove(&k); Some((k, r)) }
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => { p.in_flight.remove(&k); Some((k, Err("module request dropped".to_string()))) }
+            })
+            .collect()
+    };
+    for (key, r) in done {
+        let compiled = match &r {
+            Ok(resp) if resp.status < 400 => Url::parse_absolute(&key).filter(|u| module_kind(u, &resp.content_type) == ModuleKind::JavaScript).and_then(|_| {
+                let text = rabbithole_net::decode_text(&resp.body, resp.charset.as_deref());
+                realm.compile_module(&text, &key).ok()
+            }),
+            _ => None,
+        };
+        match compiled {
+            Some(id) => {
+                state().borrow_mut().modules.prefetch.compiled.insert(key, id);
+                prefetch_requests(realm, id);
+            }
+            None => {
+                state().borrow_mut().modules.prefetch.arrived.insert(key, r);
+            }
+        }
+    }
 }
 
 fn parse_json(realm: &mut Realm, text: &str) -> JsResult<Value> {

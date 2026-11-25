@@ -322,6 +322,9 @@ impl Engine {
         page.incr.unrendered.get_mut().clear();
         let fonts_now = page.fonts.selection_generation();
         if page.incr.fonts_seen != Some(fonts_now) {
+            if debug_enabled() && page.incr.fonts_seen.is_some() {
+                eprintln!("[incr] font selection changed: full restyle + layout");
+            }
             page.incr.fonts_seen = Some(fonts_now);
             page.incr.style = None;
             page.incr.layout_full = true;
@@ -399,6 +402,18 @@ impl Engine {
             previous_styles = std::mem::take(&mut out.previous);
             if debug_enabled() {
                 eprintln!("[incr] style: full={} recomputed={} changed={} mutations={}", out.full, out.recomputed, out.changes.len(), log.entries.len());
+                if out.full || out.recomputed > 500 {
+                    let d = &page.doc;
+                    let desc = |n: NodeId| format!("{}{}{}", d.tag(n).unwrap_or("#"), d.attr(n, "id").map(|v| format!("#{v}")).unwrap_or_default(), d.attr(n, "class").map(|v| format!(".{}", v.split_whitespace().next().unwrap_or(""))).unwrap_or_default());
+                    for m in log.entries.iter().take(8) {
+                        match m {
+                            rabbithole_dom::Mutation::Attr { node, name, .. } => eprintln!("[incr]   attr {name} on {}", desc(*node)),
+                            rabbithole_dom::Mutation::Children { parent, child } => eprintln!("[incr]   children of {} ({})", desc(*parent), desc(*child)),
+                            rabbithole_dom::Mutation::Text { node } => eprintln!("[incr]   text in {:?}", d.parent(*node).map(desc)),
+                            rabbithole_dom::Mutation::Node { node } => eprintln!("[incr]   node {}", desc(*node)),
+                        }
+                    }
+                }
             }
             anim_full = out.full;
             if !out.full && (!page.anim.is_idle() || out.changes.iter().any(|c| c.new.as_ref().map(|s| !s.transitions.is_empty() || !s.animations.is_empty()).unwrap_or(false))) {
@@ -439,7 +454,7 @@ impl Engine {
                     }
                 }
             }
-            damage_from_log(&page.doc, &log, &mut incr.box_dirty, &mut incr.layout_full);
+            damage_from_log(&page.doc, &page.styles, &log, &mut incr.box_dirty, &mut incr.layout_full);
             if verify_enabled() {
                 let mut check = StyleEngine::new(&page.sheets, &env);
                 let full = check.full(&page.doc, &page.sheets, &opts);
@@ -599,6 +614,9 @@ impl Engine {
                 .map(|(k, _)| k.as_str())
                 .collect();
             if generated_content_uses(styles, &changed) {
+                if debug_enabled() {
+                    eprintln!("[incr] full layout: generated-content image changed");
+                }
                 incr.layout_full = true;
                 incr.layout_dirty = true;
             } else {
@@ -879,7 +897,7 @@ fn collect_containers(root: &rabbithole_layout::LayoutBox) -> HashMap<NodeId, ra
 /// Layout damage implied by DOM mutations (independent of style changes):
 /// changed text, child lists and attributes (replaced elements, list
 /// markers, form controls...).
-fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId>, full: &mut bool) {
+fn damage_from_log(doc: &Document, styles: &rabbithole_style::StyledTree, log: &MutationLog, dirty: &mut HashSet<NodeId>, full: &mut bool) {
     if log.overflow {
         *full = true;
         return;
@@ -908,6 +926,17 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
         }
     };
     let mut parents_done: HashSet<NodeId> = HashSet::new();
+    // Numbered list markers count their `li` siblings: an inserted or
+    // removed child renumbers the ordinal markers after it (all of them in
+    // reversed lists, or when the removed child's place is unknown).
+    // Bullets do not depend on position.
+    let ordinal = |n: NodeId| {
+        styles.styles.get(n).and_then(|s| s.as_ref()).is_none_or(|s| {
+            !matches!(s.list_style_type, rabbithole_style::ListStyleType::None | rabbithole_style::ListStyleType::Disc | rabbithole_style::ListStyleType::Circle | rabbithole_style::ListStyleType::Square)
+        })
+    };
+    let mut renumbered: HashSet<NodeId> = HashSet::new();
+    let mut renumbered_all: HashSet<NodeId> = HashSet::new();
     for m in &log.entries {
         match m {
             Mutation::Attr { node, name, .. } => {
@@ -932,6 +961,9 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
             }
             Mutation::Children { parent, child } => {
                 if doc.element(boxed(*parent)).is_none() {
+                    if debug_enabled() {
+                        eprintln!("[incr] full layout: child list of a non-element ({:?}) changed", doc.tag(*parent));
+                    }
                     *full = true;
                     continue;
                 }
@@ -939,10 +971,29 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
                 dirty.insert(p);
                 dirty.insert(*child);
                 // (What depends on the parent alone, once per parent.)
+                let inserted = doc.parent(*child) == Some(*parent);
+                if !doc.is_element(*child, "li") {
+                    // Markers count `li` elements only.
+                } else if inserted && doc.attr(*parent, "reversed").is_none() {
+                    // Walk the following siblings until one an earlier
+                    // mutation already walked from.
+                    renumbered.insert(*child);
+                    let mut s = doc.next_sibling(*child);
+                    while let Some(n) = s {
+                        if !renumbered.insert(n) {
+                            break;
+                        }
+                        if doc.is_element(n, "li") && ordinal(n) {
+                            dirty.insert(n);
+                        }
+                        s = doc.next_sibling(n);
+                    }
+                } else if renumbered_all.insert(*parent) {
+                    dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li") && ordinal(c)));
+                }
+                // Other children keep their boxes (the parent's box is
+                // rebuilt around them).
                 if parents_done.insert(*parent) {
-                    // List markers count their `li` siblings; other children
-                    // keep their boxes (the parent's box is rebuilt around them).
-                    dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li")));
                     if shadow && p == *parent {
                         // A light child of a host is laid out in its slot.
                         host_slots(p, dirty);
