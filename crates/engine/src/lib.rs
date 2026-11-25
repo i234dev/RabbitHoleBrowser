@@ -1861,12 +1861,13 @@ impl rabbithole_gfx::image::VectorRender for SvgImageRender {
 }
 
 /// Rasterize inline `<svg>` elements of a document into images keyed by
-/// node, so layout/paint treat them as replaced images.
+/// node, so layout/paint treat them as replaced images (the pixels are
+/// drawn when the page is presented, see [`present`]).
 /// Rasterize the rendered outermost `<svg>` elements of the document (or
 /// only the elements `only`) that have no image yet.
 /// Roots using filters are added to `filtered` (they are rasterized again
 /// when their content changes).
-fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContext, images: &mut HashMap<NodeId, Arc<Image>>, only: Option<&[NodeId]>, filtered: &mut std::collections::HashSet<NodeId>) {
+fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, images: &mut HashMap<NodeId, Arc<Image>>, only: Option<&[NodeId]>, filtered: &mut std::collections::HashSet<NodeId>, pending: &mut Vec<present::PendingSvg>) {
     let mut roots = Vec::new();
     let candidates: Vec<NodeId> = match only {
         None => doc.shadow_including_descendants(Document::ROOT),
@@ -1923,12 +1924,16 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
         // Without a viewBox (and both width and height), the laid-out size
         // is the viewport: percentages resolve against it and user units
         // are CSS px.
-        if tree.viewport_dependent() {
+        let p = if tree.viewport_dependent() {
             let tree = rabbithole_svg::SvgTree::from_dom_in(doc, n, &style_of, (w, h)).unwrap_or(tree);
-            images.insert(n, Arc::new(tree.rasterize_viewport(fonts, w, h, pw as f32 / w)));
-            continue;
-        }
-        images.insert(n, Arc::new(tree.rasterize(fonts, pw, ph)));
+            present::PendingSvg::new(n, tree, present::SvgRaster::Viewport(w, h, pw as f32 / w))
+        } else {
+            present::PendingSvg::new(n, tree, present::SvgRaster::Fixed(pw, ph))
+        };
+        // Layout sees the raster's size now; the pixels are drawn when
+        // the page is presented.
+        images.insert(n, p.placeholder.clone());
+        pending.push(p);
     }
 }
 

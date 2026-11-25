@@ -967,15 +967,27 @@ impl Engine {
     pub(crate) fn shrink_oversized_images(&self, page: &mut Page) -> bool {
         use rabbithole_layout::DisplayItem as D;
         let dpr = self.device_pixel_ratio.max(1.0);
-        let mut need: HashMap<*const Image, f32> = HashMap::new();
-        for it in &page.display_list.items {
-            let (img, s) = match it {
-                D::Image { image, rect, src, .. } if src.w > 0.0 && src.h > 0.0 => (image, (rect.w * dpr / src.w).max(rect.h * dpr / src.h)),
-                D::ImageTiled { image, tile, .. } => (image, (tile.0 * dpr / image.width as f32).max(tile.1 * dpr / image.height as f32)),
-                _ => continue,
-            };
-            let e = need.entry(Arc::as_ptr(img)).or_insert(0.0);
-            *e = e.max(s);
+        let scales = |page: &Page| {
+            let mut need: HashMap<*const Image, f32> = HashMap::new();
+            for it in &page.display_list.items {
+                let (img, s) = match it {
+                    D::Image { image, rect, src, .. } if src.w > 0.0 && src.h > 0.0 => (image, (rect.w * dpr / src.w).max(rect.h * dpr / src.h)),
+                    D::ImageTiled { image, tile, .. } => (image, (tile.0 * dpr / image.width as f32).max(tile.1 * dpr / image.height as f32)),
+                    _ => continue,
+                };
+                let e = need.entry(Arc::as_ptr(img)).or_insert(0.0);
+                *e = e.max(s);
+            }
+            need
+        };
+        let shrinks = |img: &Image, s: Option<&f32>| !(img.anim.is_some() || img.broken || (img.width as u64 * img.height as u64) < 512 * 512) && s.is_some_and(|&s| s > 0.0 && s < 0.25);
+        let mut need = scales(page);
+        // Inline SVGs waiting for their raster are drawn now when it is to
+        // be shrunk (as when they were rasterized right away).
+        let pending: std::collections::HashSet<*const Image> = page.incr.pending_svgs.iter().filter(|p| shrinks(&p.placeholder, need.get(&Arc::as_ptr(&p.placeholder)))).map(|p| Arc::as_ptr(&p.placeholder)).collect();
+        if !pending.is_empty() {
+            self.raster_svgs(page, |p| pending.contains(&Arc::as_ptr(&p.placeholder)));
+            need = scales(page);
         }
         let mut changed = false;
         for img in page.images.values_mut() {

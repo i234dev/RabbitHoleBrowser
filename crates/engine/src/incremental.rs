@@ -79,6 +79,8 @@ pub struct IncrementalState {
     /// Rasterized inline `<svg>` roots that use filters: rasterized again
     /// when their content changes.
     filtered_svgs: HashSet<NodeId>,
+    /// Inline `<svg>` roots rasterized when the page is presented.
+    pub(crate) pending_svgs: Vec<crate::present::PendingSvg>,
     /// Inputs of the last layout, to detect changes made behind our back.
     images_seen: HashMap<NodeId, usize>,
     bg_seen: Vec<(String, usize)>,
@@ -478,7 +480,8 @@ impl Engine {
         self.load_added_fonts(page, uses_unloaded);
         page.background = canvas_background(&page.doc, &page.styles);
         if fresh || log.overflow || anim_full {
-            rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, None, &mut page.incr.filtered_svgs);
+            crate::present::prune_pending_svgs(page);
+            rasterize_inline_svgs(&page.doc, &page.styles, &mut page.images, None, &mut page.incr.filtered_svgs, &mut page.incr.pending_svgs);
         } else {
             // Only newly rendered elements can be SVGs without an image.
             let mut roots: Vec<NodeId> = std::mem::take(&mut newly_styled).into_iter().filter(|&n| page.doc.is_element(n, "svg")).collect();
@@ -517,7 +520,8 @@ impl Engine {
                 }
             }
             if !roots.is_empty() {
-                rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, Some(&roots), &mut page.incr.filtered_svgs);
+                crate::present::prune_pending_svgs(page);
+                rasterize_inline_svgs(&page.doc, &page.styles, &mut page.images, Some(&roots), &mut page.incr.filtered_svgs, &mut page.incr.pending_svgs);
             }
         }
         if anim_full {
