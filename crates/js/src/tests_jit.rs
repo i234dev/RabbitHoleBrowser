@@ -558,6 +558,29 @@ fn native_calls_and_returns_between_compiled_functions() {
 }
 
 #[test]
+fn inline_builtins() {
+    // Built-ins computed without a native call, and their fallbacks.
+    check(r#"
+        function f() {
+            var o = { a: 1 }, arr = [1, 2], fn = function () {}, s = new String('ab');
+            var proto = Object.create({ inherited: 1 });
+            var hp = Object.prototype.hasOwnProperty;
+            var r = [o.hasOwnProperty('a'), o.hasOwnProperty('b'), proto.hasOwnProperty('inherited'),
+                     arr.hasOwnProperty('0'), arr.hasOwnProperty('length'), arr.hasOwnProperty(1), arr.hasOwnProperty('2'),
+                     fn.hasOwnProperty('prototype'), fn.hasOwnProperty('name'), s.hasOwnProperty('0'), s.hasOwnProperty('length'),
+                     hp.call(o, 'a'), hp.call(o, 'x'), hp.call(arr, '1'), hp.call('str', 'length'), hp.call(o, Symbol.iterator)];
+            try { hp.call(null, 'a'); r.push('no'); } catch (e) { r.push(e.constructor.name); }
+            r.push(Object.is(NaN, NaN), Object.is(0, -0), Object.is(-0, -0), Object.is('a' + 'b', 'ab'), Object.is(o, o), Object.is(o, {}), Object.is(), Object.is(1n, 1n));
+            r.push(Array.isArray(arr), Array.isArray(o), Array.isArray(), Array.isArray(new Proxy([], {})), Array.isArray('x'));
+            r.push(Math.round(2.5), Math.round(-2.5), Math.round(0.49999999999999994), 1 / Math.round(-0.2), Math.round('3.7'), Math.round(), Math.round(2 ** 53 + 1));
+            r.push(isNaN(NaN), isNaN(1), isNaN('x'), isNaN('1'), isNaN());
+            return r.join();
+        }
+        f()
+    "#, "true,false,false,true,true,true,false,true,true,true,true,true,false,true,true,false,TypeError,true,false,true,true,true,false,true,true,true,false,false,true,false,3,-2,0,-Infinity,4,NaN,9007199254740992,true,false,true,false,true");
+}
+
+#[test]
 fn calls_with_wide_static_operands_and_return_slots() {
     // Exercise call operands beyond the low byte, rather than only
     // the low byte used by small hand-written functions.

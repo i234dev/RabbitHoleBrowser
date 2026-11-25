@@ -953,7 +953,77 @@ impl Realm {
                 (V::Number(a), V::Number(b)) => Some(Value::Number(to_int32(a).wrapping_mul(to_int32(b)) as f64)),
                 _ => None,
             },
+            // `o.hasOwnProperty(name)`: a string name on an object whose own
+            // properties are all in its property map (no exotic indices or
+            // `length`, no lazy `prototype`).
+            INTRINSIC_HAS_OWN if argc >= 1 => {
+                let (V::Object(id), V::String(name)) = (self.vstack[cb + 1].v(), self.vstack[cb + 2].v()) else { return None };
+                let o = self.heap.try_get(id)?;
+                let plain = match &o.kind {
+                    ObjectKind::Ordinary | ObjectKind::Error | ObjectKind::Native(_) | ObjectKind::Bound(_) => true,
+                    ObjectKind::Function(_) => !o.props.is_lazy_fn(),
+                    ObjectKind::Host(_) => !o.indexed,
+                    _ => false,
+                };
+                if !plain {
+                    return None;
+                }
+                Some(Value::Bool(o.props.get(&PropertyKey::String(name.clone())).is_some()))
+            }
+            // `Object.is(a, b)`: SameValue.
+            INTRINSIC_OBJECT_IS => {
+                let arg = |i: usize| if i < argc { self.vstack[cb + 2 + i].clone() } else { Value::Undefined };
+                let (a, b) = (arg(0), arg(1));
+                Some(Value::Bool(match (a.v(), b.v()) {
+                    (V::Number(x), V::Number(y)) => x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+                    _ => self.strict_equals(&a, &b),
+                }))
+            }
+            // `Array.isArray(v)` (proxies decide through their target).
+            INTRINSIC_IS_ARRAY => match if argc >= 1 { self.vstack[cb + 2].v() } else { V::Undefined } {
+                V::Object(id) => match &self.heap.try_get(id)?.kind {
+                    ObjectKind::Array { .. } => Some(Value::Bool(true)),
+                    ObjectKind::Proxy { .. } => None,
+                    _ => Some(Value::Bool(false)),
+                },
+                _ => Some(Value::Bool(false)),
+            },
+            INTRINSIC_ROUND if argc >= 1 => match self.vstack[cb + 2].v() {
+                V::Number(x) => Some(Value::Number(crate::builtins::math::js_round(x))),
+                _ => None,
+            },
+            INTRINSIC_IS_NAN if argc >= 1 => match self.vstack[cb + 2].v() {
+                V::Number(x) => Some(Value::Bool(x.is_nan())),
+                _ => None,
+            },
             _ => None,
+        }
+    }
+
+    /// `f.call(this, ...args)` of a built-in that [`Realm::inline_intrinsic`]
+    /// computes (e.g. `hasOwnProperty.call(o, k)`): its value, written to
+    /// the callee slot `cb`. False when the general path is needed.
+    #[inline]
+    fn try_call_intrinsic(&mut self, cb: usize, argc: usize) -> bool {
+        if argc == 0 {
+            return false;
+        }
+        let Some(ObjectKind::Native(n)) = self.vstack[cb].as_object().and_then(|id| self.heap.try_get(id)).map(|o| &o.kind) else { return false };
+        if n.intrinsic != INTRINSIC_FN_CALL {
+            return false;
+        }
+        let Some(ObjectKind::Native(t)) = self.vstack[cb + 1].as_object().and_then(|id| self.heap.try_get(id)).map(|o| &o.kind) else { return false };
+        let tag = t.intrinsic;
+        if tag == 0 || tag == INTRINSIC_FN_CALL || tag == INTRINSIC_FN_APPLY || tag == INTRINSIC_IDL {
+            return false;
+        }
+        // Shifted by one: the target at `cb + 1`, `this` at `cb + 2`.
+        match self.inline_intrinsic(tag, cb + 1, argc - 1) {
+            Some(v) => {
+                self.vstack[cb] = v;
+                true
+            }
+            None => false,
         }
     }
 
@@ -2714,6 +2784,9 @@ impl Realm {
             }
         } else if self.try_fast_call(fi, b as usize, argc as usize)? {
             return Ok(Flow::Reload);
+        }
+        if self.try_call_intrinsic(fbase + b as usize, argc as usize) {
+            return Ok(Flow::Next);
         }
         if self.try_idl_call(fbase + b as usize, b, argc as usize)? {
             return Ok(Flow::Reload);
@@ -5868,6 +5941,16 @@ pub const INTRINSIC_IMUL: u8 = 3;
 pub const INTRINSIC_FN_CALL: u8 = 4;
 /// `Function.prototype.apply`.
 pub const INTRINSIC_FN_APPLY: u8 = 5;
+/// `Object.prototype.hasOwnProperty`.
+pub const INTRINSIC_HAS_OWN: u8 = 7;
+/// `Object.is`.
+pub const INTRINSIC_OBJECT_IS: u8 = 8;
+/// `Array.isArray`.
+pub const INTRINSIC_IS_ARRAY: u8 = 9;
+/// `Math.round`.
+pub const INTRINSIC_ROUND: u8 = 10;
+/// The global `isNaN`.
+pub const INTRINSIC_IS_NAN: u8 = 11;
 /// A WebIDL operation or accessor implemented by a JavaScript function
 /// (see [`Realm::new_idl_function`]): calls check the receiver and the
 /// argument count and run the target's frame directly.

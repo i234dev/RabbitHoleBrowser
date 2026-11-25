@@ -638,7 +638,14 @@ impl Realm {
     fn mark_intrinsics(&mut self) {
         let string_ctor = self.obj(self.intrinsics.string_proto).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone());
         let math = self.obj(self.global).props.get(&PropertyKey::str("Math")).map(|p| p.value.clone());
+        let object_ctor = self.obj(self.intrinsics.object_proto).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone());
+        let array_ctor = self.obj(self.intrinsics.array_proto).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone());
         let marks = [
+            (Some(Value::Object(self.intrinsics.object_proto)), "hasOwnProperty", crate::vm::INTRINSIC_HAS_OWN),
+            (object_ctor, "is", crate::vm::INTRINSIC_OBJECT_IS),
+            (array_ctor, "isArray", crate::vm::INTRINSIC_IS_ARRAY),
+            (math.clone(), "round", crate::vm::INTRINSIC_ROUND),
+            (Some(Value::Object(self.global)), "isNaN", crate::vm::INTRINSIC_IS_NAN),
             (Some(Value::Object(self.intrinsics.string_proto)), "charCodeAt", crate::vm::INTRINSIC_CHAR_CODE_AT),
             (string_ctor, "fromCharCode", crate::vm::INTRINSIC_FROM_CHAR_CODE),
             (math, "imul", crate::vm::INTRINSIC_IMUL),
