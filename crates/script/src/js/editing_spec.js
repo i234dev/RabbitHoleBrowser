@@ -6016,9 +6016,16 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
     var replacementWhitespace = canonicalSpaceSequence(length,
         nonBreakingStart, nonBreakingEnd);
 
+    // RabbitHole: after an edit, the spaces are rebalanced only in the
+    // edited Text node, as in other browsers (even those the specification
+    // considers collapsed, like a space typed at the end of a line).
+    if (rewriteEditedWhitespace && !fixCollapsedSpace) {
+        rebalanceWhitespaceInTextNode(node, offset);
+        return;
+    }
+
     // RabbitHole: like other browsers, leave a sequence that already shows
-    // every space alone, e.g. one across an inline boundary from a deletion,
-    // except where an edit rebalances it (see rewriteEditedWhitespace).
+    // every space alone, e.g. one across an inline boundary from a deletion.
     if (length) {
         var sequenceRange = document.createRange();
         sequenceRange.setStart(startNode, startOffset);
@@ -6027,13 +6034,6 @@ function canonicalizeWhitespace(node, offset, fixCollapsedSpace) {
         var texts = getAllContainedNodes(sequenceRange, function(n) { return n.nodeType == Node.TEXT_NODE })
             .concat([startNode, endNode].filter(function(n) { return n.nodeType == Node.TEXT_NODE }))
             .filter(function(n, i, list) { return list.indexOf(n) == i });
-        // RabbitHole: after an edit, the sequence is rebalanced only in the
-        // edited Text node, as in other browsers.
-        if (rewriteEditedWhitespace
-        && !fixCollapsedSpace) {
-            rebalanceWhitespaceInTextNode(node, offset);
-            return;
-        }
         if (current.length == length
         && !/  /.test(current)
         && !((nonBreakingStart || length == 1 && nonBreakingEnd) && current[0] == " ")
