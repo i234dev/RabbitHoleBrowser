@@ -112,6 +112,12 @@ fn fragmentable(c: &LayoutBox) -> bool {
     c.flow == Flow::InFlow && fragmentable_box(c)
 }
 
+/// Can the contents of in-flow box `c` break across the columns of an
+/// enclosing multi-column flow?
+pub(crate) fn breaks_inside(c: &LayoutBox) -> bool {
+    fragmentable_box(c)
+}
+
 /// A block container whose contents can break across columns.
 fn fragmentable_box(c: &LayoutBox) -> bool {
     matches!(c.kind, BoxKind::Block | BoxKind::AnonymousBlock)
@@ -267,6 +273,30 @@ impl Collector {
         self.push(Ev::End { bottom: c.rect.bottom(), edge: bottom_edge, last });
     }
 
+    /// A multi-column container broken into rows of columns (one per
+    /// column of this flow): each row is an unbreakable piece.
+    fn rows(&mut self, c: &LayoutBox, rows: &[(f32, f32)], forced: bool, avoid_before: bool, prev: u32) {
+        let s = &c.style;
+        self.push(Ev::Start {
+            top: c.rect.y,
+            h: c.rect.h,
+            edge: s.border_width.top > 0.0 || c.content_rect.y > c.rect.y + 0.01,
+            forced,
+            avoid_before,
+            avoid_inside: false,
+            prev,
+            mt: c.margin.top,
+            solid: false,
+        });
+        let mut last = NONE;
+        for &(top, h) in rows {
+            last = self.evs.len() as u32;
+            self.push(Ev::Leaf { top, bottom: top + h, forced: false, avoid_before: false, prev: NONE, mt: 0.0, line: None });
+        }
+        let bottom_edge = s.border_width.bottom > 0.0 || c.rect.bottom() > c.content_rect.bottom() + 0.01;
+        self.push(Ev::End { bottom: c.rect.bottom(), edge: bottom_edge, last });
+    }
+
     /// A float: fragmented like a block when it is a block container.
     fn float(&mut self, c: &LayoutBox) {
         if fragmentable_box(c) {
@@ -308,6 +338,8 @@ impl Collector {
                     let here = self.evs.len() as u32;
                     if fragmentable(c) {
                         self.container(c, forced, avoid_before, prev);
+                    } else if let Some(rows) = &c.col_rows {
+                        self.rows(c, rows, forced, avoid_before, prev);
                     } else {
                         self.push(Ev::Leaf { top: c.rect.y, bottom: c.rect.bottom(), forced, avoid_before, prev, mt: c.margin.top, line: None });
                     }
@@ -353,26 +385,56 @@ struct Geometry {
     /// the gap between rows.
     per_row: usize,
     row_gap: f32,
+    /// The height of the columns of the first row when it differs (a
+    /// multicol broken by an enclosing one starts in the space left in
+    /// the enclosing fragmentainer).
+    first: Option<f32>,
 }
 
 impl Geometry {
     fn col(&self, t: f32) -> usize {
-        let k = ((t - self.y0) / self.colh + 1e-4).floor();
+        let rel = t - self.y0;
+        if let Some(h0) = self.first {
+            let k = (rel / h0 + 1e-4).floor();
+            if k < self.per_row as f32 {
+                return if k > 0.0 { k as usize } else { 0 };
+            }
+            let k = ((rel - self.per_row as f32 * h0) / self.colh + 1e-4).floor();
+            return self.per_row + if k > 0.0 { k as usize } else { 0 };
+        }
+        let k = (rel / self.colh + 1e-4).floor();
         if k > 0.0 {
             k as usize
         } else {
             0
         }
     }
+    /// The height of column `k`.
+    fn height(&self, k: usize) -> f32 {
+        match self.first {
+            Some(h0) if k < self.per_row => h0,
+            _ => self.colh,
+        }
+    }
     fn start(&self, k: usize) -> f32 {
-        self.y0 + k as f32 * self.colh
+        match self.first {
+            Some(h0) if k < self.per_row => self.y0 + k as f32 * h0,
+            Some(h0) => self.y0 + self.per_row as f32 * h0 + (k - self.per_row) as f32 * self.colh,
+            None => self.y0 + k as f32 * self.colh,
+        }
     }
     fn end(&self, k: usize) -> f32 {
         self.start(k + 1)
     }
     /// Vertical translation from the flow into column `k`.
     fn dy(&self, k: usize) -> f32 {
-        let row = (k / self.per_row) as f32;
+        let row = k / self.per_row;
+        if let Some(h0) = self.first {
+            let phys = self.y0 - self.lift;
+            let top = if row == 0 { phys } else { phys + h0 + self.row_gap + (row - 1) as f32 * (self.colh + self.row_gap) };
+            return top - self.start(k);
+        }
+        let row = row as f32;
         -self.lift - k as f32 * self.colh + row * (self.colh + self.row_gap)
     }
     /// Horizontal translation from the flow into column `k`.
@@ -485,7 +547,9 @@ fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0
                         let glue = push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
                         violated |= glue && force_at == i;
                     }
-                } else if avoid_inside && h <= g.colh + EPS && t + h > g.end(k) + EPS && t > g.start(k) + EPS {
+                } else if avoid_inside && skip_short_row(g, t, h) {
+                    let _ = push(i, t, g.start(g.per_row), &mut off, &mut struts, &mut pushes, &mut pos);
+                } else if avoid_inside && h <= g.height(k) + EPS && t + h > g.end(k) + EPS && t > g.start(k) + EPS {
                     shortfall = shortfall.min(t + h - g.end(k));
                     if let Some(j) = earlier_break(&pos, g, avoid_before, prev) {
                         backtrack(j, &mut i, &mut off, &offsets, &mut placed, &placed_at, &mut struts, &mut pushes, &mut force_at, &mut pos);
@@ -505,7 +569,7 @@ fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0
                 }
                 placed |= edge;
                 let end = ends[i];
-                if avoid_inside && h <= g.colh + EPS && end < b {
+                if avoid_inside && h <= g.height(g.col(pos[i])) + EPS && end < b {
                     // Kept whole: nothing inside breaks (what overflows it
                     // stays in its column).
                     locked[i] = true;
@@ -540,7 +604,10 @@ fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0
                     // along breaks inside the container's padding.)
                     let glue = i > a && matches!(evs[i - 1], Ev::Start { edge: true, .. }) && at_column_top(g, pos[i - 1]);
                     violated |= avoid_before || glue || inside_avoid(evs, a, i);
-                    let _ = push(i, t, g.end(k), &mut off, &mut struts, &mut pushes, &mut pos);
+                    let target = if skip_short_row(g, t, bt - t) { g.start(g.per_row) } else { g.end(k) };
+                    let _ = push(i, t, target, &mut off, &mut struts, &mut pushes, &mut pos);
+                } else if skip_short_row(g, t, bt - t) {
+                    let _ = push(i, t, g.start(g.per_row), &mut off, &mut struts, &mut pushes, &mut pos);
                 }
                 if force_at == i {
                     force_at = usize::MAX;
@@ -556,10 +623,10 @@ fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0
                     placed = true;
                     used = used.max(k + 1);
                 }
-                if bt - t > g.colh + EPS {
+                if bt - t > g.height(k) + EPS {
                     // Taller than a column: it overflows its column, and
                     // what follows starts in the next one.
-                    shortfall = shortfall.min(bt - t - g.colh);
+                    shortfall = shortfall.min(bt - t - g.height(k));
                     let next = g.end(k);
                     if bt > next && i + 1 < b {
                         let amount = next - bt;
@@ -584,6 +651,13 @@ fn paginate(evs: &[Ev], clipped: &[bool], a: usize, b: usize, g: &Geometry, off0
 }
 
 /// Does flow position `t` start a column (or the set)?
+/// Does an unbreakable piece `h` tall at `t`, in the shorter first row of
+/// a multicol broken by an enclosing one, fit only in the next rows (it
+/// then moves to the next enclosing fragmentainer)?
+fn skip_short_row(g: &Geometry, t: f32, h: f32) -> bool {
+    g.first.is_some_and(|h0| g.col(t) < g.per_row && h > h0 + EPS && h <= g.colh + EPS)
+}
+
 fn at_column_top(g: &Geometry, t: f32) -> bool {
     (t - g.start(g.col(t))).abs() < EPS
 }
@@ -851,6 +925,7 @@ impl Mover<'_> {
                     }
                 }
                 Flow::InFlow if fragmentable(c) => self.container(c),
+                Flow::InFlow if c.col_rows.is_some() => self.rows(c),
                 Flow::InFlow => {
                     self.next();
                     let (dx, dy) = self.shift(c.rect.y);
@@ -882,6 +957,32 @@ impl Mover<'_> {
         self.fragment(c, start, end);
         self.lock = outer_lock;
         self.first = outer_first.or(self.first);
+    }
+
+    /// A multi-column container broken into rows: each row moves to the
+    /// column of this flow it was placed in, with what lies in it.
+    fn rows(&mut self, c: &mut LayoutBox) {
+        self.next();
+        let start = c.rect.y + self.off;
+        let rows = c.col_rows.take().map(|r| *r).unwrap_or_default();
+        let mut shifts: Vec<(f32, f32, (f32, f32))> = Vec::with_capacity(rows.len());
+        for &(top, h) in &rows {
+            self.next();
+            shifts.push((top, top + h, self.shift(top)));
+        }
+        self.next();
+        let end = (c.rect.bottom() + self.off).max(start);
+        let shift_at = |y: f32| -> (f32, f32) {
+            shifts.iter().rev().find(|r| y >= r.0 - EPS).or(shifts.first()).map_or((0.0, self.off), |r| r.2)
+        };
+        move_rows(c, &shift_at);
+        if let Some(rules) = &mut c.col_rules {
+            for r in rules.iter_mut() {
+                let (dx, dy) = shift_at(r.y);
+                *r = r.translate(dx, dy);
+            }
+        }
+        self.fragment(c, start, end);
     }
 
     fn float(&mut self, c: &mut LayoutBox) {
@@ -959,6 +1060,58 @@ impl Mover<'_> {
         // put them.
         c.layout_cache = None;
         c.contents_fp.set(None);
+    }
+}
+
+/// Move the contents of a multi-column container broken into rows by the
+/// translation of the row each piece lies in (`shift_at` of its top).
+fn move_rows(b: &mut LayoutBox, shift_at: &dyn Fn(f32) -> (f32, f32)) {
+    let mut moved = vec![false; b.children.len()];
+    for line in &mut b.lines {
+        let (dx, dy) = shift_at(line.rect.y);
+        line.rect = line.rect.translate(dx, dy);
+        line.baseline += dy;
+        for f in &mut line.fragments {
+            f.rect = f.rect.translate(dx, dy);
+            f.baseline += dy;
+            if let FragmentKind::Box(i) = f.kind {
+                if let Some(c) = b.children.get_mut(i) {
+                    if !moved[i] {
+                        c.translate(dx, dy);
+                        moved[i] = true;
+                    }
+                }
+            }
+        }
+    }
+    for (i, c) in b.children.iter_mut().enumerate() {
+        if moved[i] {
+            continue;
+        }
+        match c.col_pieces.as_deref_mut() {
+            Some(p) => {
+                // Broken across the inner columns: each fragment moves
+                // with its row, then what lies inside.
+                let mut union: Option<Rect> = None;
+                for piece in &mut p.pieces {
+                    let (dx, dy) = shift_at(piece.rect.y);
+                    piece.rect = piece.rect.translate(dx, dy);
+                    piece.dx += dx;
+                    piece.dy += dy;
+                    union = Some(union.map_or(piece.rect, |u| u.union(&piece.rect)));
+                }
+                if let Some(u) = union {
+                    let (dx, dy) = (u.x - c.rect.x, u.y - c.rect.y);
+                    c.content_rect = c.content_rect.translate(dx, dy);
+                    c.rect = u;
+                }
+                move_rows(c, shift_at);
+            }
+            None => {
+                let (dx, dy) = shift_at(c.rect.y);
+                c.translate(dx, dy);
+            }
+        }
     }
 }
 
@@ -1046,6 +1199,22 @@ impl Layouter<'_> {
                 b.children[legend].style = std::rc::Rc::new(st);
             }
         }
+        // Broken by an enclosing multi-column container whose columns
+        // have a known height: rows of columns, the first in the space
+        // left in the enclosing column (CSS Multicol 1 §8.1).
+        let outer_frame = self.column_frame.take();
+        let nested_frame = outer_frame.filter(|_| cb.height.is_none() && style.column_height.is_none() && style.column_wrap != 2 && !has_spanner(b));
+        let first_row = nested_frame.map(|(y, h)| {
+            let used = (content_y - y).rem_euclid(h.max(1.0));
+            if h - used < EPS { h } else { h - used }
+        });
+        // This container's own columns frame its nested ones when their
+        // height is known before balancing.
+        self.column_frame = if style.column_fill_auto && !has_spanner(b) {
+            style.column_height.or(avail_h).filter(|h| *h > 0.0).map(|h| (content_y, h))
+        } else {
+            None
+        };
         // The flow: the contents laid out as one column.
         let saved = b.content_rect;
         b.content_rect.x = x0;
@@ -1064,13 +1233,15 @@ impl Layouter<'_> {
             spanner_widths(self, b, &Cb { x: cb.x, width: avail_w, height: cb.height }, &mut deltas);
         }
         // `column-wrap: auto` wraps when the columns have a height.
+        self.column_frame = outer_frame;
         let wrap = match style.column_wrap {
             1 => false,
             2 => true,
             _ => style.column_height.is_some(),
-        };
-        let row_gap = if style.row_gap_normal { 0.0 } else { style.row_gap.resolve_or_zero(cb.height.unwrap_or(0.0)).max(0.0) };
-        let params = FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step, trim: style.margin_trim, column_height: style.column_height, wrap, row_gap };
+        } || first_row.is_some();
+        let column_height = style.column_height.or(nested_frame.map(|f| f.1));
+        let row_gap = if first_row.is_some() || style.row_gap_normal { 0.0 } else { style.row_gap.resolve_or_zero(cb.height.unwrap_or(0.0)).max(0.0) };
+        let params = FlowParams { y0: content_y, total, n, fill_auto: style.column_fill_auto, avail: avail_h, step, trim: style.margin_trim, column_height, wrap, row_gap, first_row };
         let (rows, end) = fragment_flow(b, deltas, params);
         let mut rules = Vec::new();
         for r in &rows {
@@ -1083,6 +1254,7 @@ impl Layouter<'_> {
             push_rules(&mut rules, &style, x0, w, gap, step, r.top, h, r.used);
         }
         b.col_rules = (!rules.is_empty()).then(|| Box::new(rules));
+        b.col_rows = (first_row.is_some() && rows.len() > 1).then(|| Box::new(rows.iter().map(|r| (r.top, r.height)).collect()));
         (end - content_y).max(0.0)
     }
 }
@@ -1114,6 +1286,9 @@ struct FlowParams {
     column_height: Option<f32>,
     wrap: bool,
     row_gap: f32,
+    /// The height of the first row's columns, when shorter (see
+    /// [`Geometry::first`]).
+    first_row: Option<f32>,
 }
 
 /// Choose the column heights of a laid out flow (the contents of `root`)
@@ -1159,10 +1334,27 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
             // container.)
             let fixed = if p.column_height.is_some() { p.column_height } else if last && (p.fill_auto || p.wrap) { room } else { None };
             let cap = if last { room } else { None };
-            let (colh, plan) = choose_height(&evs, &clipped, a, b, y0, phys, total, n, fixed, cap, off);
+            // (Only the first set of a broken multicol starts in the space
+            // left in the enclosing fragmentainer.)
+            let first = p.first_row.filter(|_| a == 0 && p.wrap);
+            let (colh, plan) = match first {
+                // Balanced, and all in the first row: balance in it.
+                Some(h0) if !p.fill_auto => {
+                    let (h, plan) = choose_height(&evs, &clipped, a, b, y0, phys, total, n, None, Some(h0), off, None);
+                    // (Nothing unbreakable may overflow the first row.)
+                    let tallest = evs[a..b].iter().fold(0.0f32, |m, e| match *e {
+                        Ev::Leaf { top, bottom, .. } => m.max(bottom - top),
+                        Ev::Start { h, avoid_inside: true, .. } | Ev::Start { h, solid: true, .. } => m.max(h),
+                        _ => m,
+                    });
+                    if plan.used <= n && tallest <= h0 + EPS { (h, plan) } else { choose_height(&evs, &clipped, a, b, y0, phys, total, n, fixed, cap, off, first) }
+                }
+                _ => choose_height(&evs, &clipped, a, b, y0, phys, total, n, fixed, cap, off, first),
+            };
+            let first = first.filter(|_| p.fill_auto || plan.used > n);
             let colh = if fixed.is_some() { floor(colh) } else { colh };
             let per_row = if p.wrap { n } else { usize::MAX };
-            let g = Geometry { y0, colh: floor(colh), lift: y0 - phys, step: p.step, per_row, row_gap: p.row_gap };
+            let g = Geometry { first, y0, colh: floor(colh), lift: y0 - phys, step: p.step, per_row, row_gap: p.row_gap };
             let used = plan.used.max(1);
             let count = if p.wrap { used.div_ceil(n) } else { 1 };
             // With wrapping rows and `column-fill: balance`, the last row
@@ -1185,17 +1377,18 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                     let f = g.start(k);
                     sets.push(Set { first: a, end: j, g, flow_end: f });
                     for r in 0..count - 1 {
-                        rows.push(RowOut { top: phys, height: colh, used: (used - r * n).min(n) });
-                        phys += colh + p.row_gap;
+                        let h = g.height(r * n);
+                        rows.push(RowOut { top: phys, height: h, used: (used - r * n).min(n) });
+                        phys += h + p.row_gap;
                     }
                     let off_j = off + plan.struts[a..j].iter().sum::<f32>();
                     let rest = (strip_end + plan.off - f).max(0.0);
-                    let (h2, plan2) = choose_height(&evs, &clipped, j, b, f, phys, rest, n, None, Some(colh), off_j);
+                    let (h2, plan2) = choose_height(&evs, &clipped, j, b, f, phys, rest, n, None, Some(colh), off_j, None);
                     for i in j..b {
                         struts[i] += plan2.struts[i];
                         locked[i] |= plan2.locked[i];
                     }
-                    let g2 = Geometry { y0: f, colh: floor(h2), lift: f - phys, step: p.step, per_row, row_gap: p.row_gap };
+                    let g2 = Geometry { first: None, y0: f, colh: floor(h2), lift: f - phys, step: p.step, per_row, row_gap: p.row_gap };
                     off = plan2.off;
                     sets.push(Set { first: j, end: b, g: g2, flow_end: if last { f32::INFINITY } else { strip_end + off } });
                     rows.push(RowOut { top: phys, height: h2, used: plan2.used.clamp(1, n) });
@@ -1208,9 +1401,16 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
                     }
                     off = plan.off;
                     sets.push(Set { first: a, end: b, g, flow_end: if last { f32::INFINITY } else { strip_end + off } });
+                    // (The last row of a broken multicol filled in order
+                    // is as tall as its content when that fits.)
+                    let content_end = strip_end + plan.off;
                     for r in 0..count {
-                        rows.push(RowOut { top: phys, height: colh, used: if p.wrap { (used - r * n).min(n) } else { used } });
-                        phys += colh + if r + 1 < count { p.row_gap } else { 0.0 };
+                        let mut h = if p.wrap { g.height(r * n) } else { colh };
+                        if r + 1 == count && p.fill_auto && p.first_row.is_some() && (used - r * n) <= 1 {
+                            h = h.min((content_end - g.start(r * n)).max(0.0));
+                        }
+                        rows.push(RowOut { top: phys, height: h, used: if p.wrap { (used - r * n).min(n) } else { used } });
+                        phys += h + if r + 1 < count { p.row_gap } else { 0.0 };
                     }
                 }
             }
@@ -1240,7 +1440,7 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
     phys += pending_mb;
     if sets.is_empty() {
         // (Spanners only.)
-        let g = Geometry { y0: p.y0, colh: 1.0, lift: 0.0, step: p.step, per_row: usize::MAX, row_gap: 0.0 };
+        let g = Geometry { first: None, y0: p.y0, colh: 1.0, lift: 0.0, step: p.step, per_row: usize::MAX, row_gap: 0.0 };
         let mut mover = Mover { struts: &struts, sets: &[], spans: &spans, i: 0, off: 0.0, g, positioned: 0, first: None, locked: &locked, lock: None, nested: 0 };
         mover.contents(root);
         return (rows, phys);
@@ -1254,8 +1454,10 @@ fn fragment_flow(root: &mut LayoutBox, deltas: std::collections::VecDeque<f32>, 
 /// The column height of one column set (events `a..b`, flow from `y0`,
 /// `total` tall, the row at document position `phys`), with its plan.
 #[allow(clippy::too_many_arguments)]
-fn choose_height(evs: &[Ev], clipped: &[bool], a: usize, b: usize, y0: f32, phys: f32, total: f32, n: usize, fixed: Option<f32>, cap: Option<f32>, off: f32) -> (f32, Plan) {
-    let geom = |h: f32| Geometry { y0, colh: h.max(1.0), lift: y0 - phys, step: 0.0, per_row: usize::MAX, row_gap: 0.0 };
+fn choose_height(evs: &[Ev], clipped: &[bool], a: usize, b: usize, y0: f32, phys: f32, total: f32, n: usize, fixed: Option<f32>, cap: Option<f32>, off: f32, first: Option<f32>) -> (f32, Plan) {
+    // (A shorter first row: rows of `n` columns.)
+    let per_row = if first.is_some() { n } else { usize::MAX };
+    let geom = |h: f32| Geometry { first: first.map(|f| f.max(1.0)), y0, colh: h.max(1.0), lift: y0 - phys, step: 0.0, per_row, row_gap: 0.0 };
     if let Some(h) = fixed {
         return (h.max(0.0), paginate(evs, clipped, a, b, &geom(h), off));
     }
@@ -1328,7 +1530,7 @@ mod tests {
     #[test]
     fn pieces_crossing_a_column_end_move_to_the_next_column() {
         let evs = [leaf(0.0, 40.0), leaf(40.0, 80.0), leaf(80.0, 120.0)];
-        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
+        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { first: None, y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts, vec![0.0, 0.0, 20.0]);
         assert_eq!(plan.used, 2);
         assert_eq!(plan.shortfall, 20.0);
@@ -1348,7 +1550,7 @@ mod tests {
         let evs: Vec<Ev> = (0..5).map(|i| line(i, i as f32 * 20.0)).collect();
         // Four lines fit in a 90px column; the last one alone would be a
         // widow: the fourth line moves on too.
-        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { y0: 0.0, colh: 90.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
+        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { first: None, y0: 0.0, colh: 90.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts[3], 30.0);
         assert_eq!(plan.used, 2);
     }
@@ -1359,7 +1561,7 @@ mod tests {
         if let Ev::Leaf { forced, .. } = &mut evs[1] {
             *forced = true;
         }
-        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
+        let plan = paginate(&evs, &[], 0, evs.len(), &Geometry { first: None, y0: 0.0, colh: 100.0, lift: 0.0, step: 0.0, per_row: usize::MAX, row_gap: 0.0 }, 0.0);
         assert_eq!(plan.struts[1], 90.0);
         assert_eq!(plan.used, 2);
     }

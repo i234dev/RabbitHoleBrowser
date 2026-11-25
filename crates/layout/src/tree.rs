@@ -400,6 +400,9 @@ pub struct LayoutBox {
     pub(crate) col_pieces: Option<Box<crate::multicol::ColPieces>>,
     /// A multi-column container's column rules (line boxes).
     pub(crate) col_rules: Option<Box<Vec<Rect>>>,
+    /// A multi-column container broken by an enclosing one: its rows of
+    /// columns (top, height), one per fragment of the enclosing flow.
+    pub(crate) col_rows: Option<Box<Vec<(f32, f32)>>>,
 }
 
 /// Orientation of a writing-mode wrapper's contents relative to the space
@@ -482,6 +485,7 @@ impl LayoutBox {
             wm_kind: WmKind::Cw,
             wm_background: None,
             col_pieces: None,
+            col_rows: None,
             col_rules: None,
         }
     }
@@ -807,6 +811,11 @@ impl LayoutBox {
         if let Some(r) = &mut self.col_rules {
             for r in r.iter_mut() {
                 *r = r.translate(dx, dy);
+            }
+        }
+        if let Some(rows) = &mut self.col_rows {
+            for r in rows.iter_mut() {
+                r.0 += dy;
             }
         }
         if let Some(m) = &mut self.wm_transform {

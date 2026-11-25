@@ -107,6 +107,10 @@ pub(crate) struct Layouter<'a> {
     float_band: Option<f32>,
     /// A box is being refitted beside floats (nested layouts do not refit).
     refitting: bool,
+    /// Inside the flow of a multi-column container whose columns have a
+    /// known height: (flow position where its columns start, their
+    /// height). Nested multi-column containers break at its column ends.
+    pub(crate) column_frame: Option<(f32, f32)>,
     /// Pooled working storage of flex layout.
     pub(crate) flex_scratch: Vec<crate::flex::FlexScratch>,
     /// Whether `FontContext::select_family` & co. are implemented.
@@ -406,6 +410,7 @@ impl<'a> Layouter<'a> {
             intrinsic_forced_h: None,
             float_band: None,
             refitting: false,
+            column_frame: None,
             flex_scratch: Vec::new(),
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
@@ -853,7 +858,7 @@ impl<'a> Layouter<'a> {
         // Table cells are adjusted after layout (vertical-align), so their
         // contents are not where the cache expects them.
         let flex_limits = (b.formatting == Formatting::Flex && explicit_h.is_none()).then(|| self.height_limits(&style, cb.height, pb_v));
-        let cacheable = b.kind != BoxKind::TableCell && self.clamp.is_none() && b.style.line_clamp.is_none()
+        let cacheable = b.kind != BoxKind::TableCell && self.clamp.is_none() && self.column_frame.is_none() && b.style.line_clamp.is_none()
             // Percentage min/max heights of a flex container depend on its
             // containing block, which the cache entry does not record.
             && !(flex_limits.is_some() && (style.min_height.has_percent() || style.max_height.has_percent()));
@@ -1172,6 +1177,14 @@ impl<'a> Layouter<'a> {
     }
 
     fn layout_contents(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
+        // Monolithic boxes (and out-of-flow ones) are not broken by the
+        // columns around them: nor are multi-column containers inside.
+        if self.column_frame.is_some() && !b.style.multicol && !(b.flow == crate::tree::Flow::InFlow && crate::multicol::breaks_inside(b)) {
+            let frame = self.column_frame.take();
+            let h = self.layout_contents(b, cb, bfc, top_collapsible, bottom_collapsible);
+            self.column_frame = frame;
+            return h;
+        }
         if matches!(b.formatting, Formatting::Inline | Formatting::Block) && (b.style.multicol || b.style.line_clamp.is_some_and(|n| n > 0)) {
             if b.style.multicol {
                 return self.layout_multicol(b, cb);
