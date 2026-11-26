@@ -24,12 +24,21 @@ pub struct VideoPlane {
 
 pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::Image>, viewport: Rect, scale: f32, fonts: &FontContext) -> Option<VideoPlane> {
     use DisplayItem as D;
+    macro_rules! fallback {
+        ($reason:expr, $index:expr) => {{
+            static TRACE: OnceLock<bool> = OnceLock::new();
+            if *TRACE.get_or_init(|| std::env::var("RH_VIDEO_LAYER_TRACE").as_deref() == Ok("1")) {
+                eprintln!("rh_video fallback {} {}", $index, $reason);
+            }
+            return None;
+        }};
+    }
     let mut origin = Some((0.0, 0.0));
     let mut origins = Vec::new();
     // An irregular clip still bounds later draws, but a picture inside it
     // cannot be composited with a single rectangular clip.
     let mut clips = vec![(viewport, false)];
-    let mut layers = 0usize;
+    let mut layers: Vec<Rect> = Vec::new();
     let mut plane: Option<VideoPlane> = None;
     let mut target_index = 0;
     let mut foreground_items = Vec::new();
@@ -53,16 +62,22 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
                 clips.push((bounds, irregular || origin.is_none() || !matches!(item, D::PushClip(_))));
             }
             D::PopClip => { clips.pop()?; }
-            D::PushLayer(_) => layers += 1,
-            D::PopLayer(_) => layers = layers.checked_sub(1)?,
+            D::PushLayer(r) => {
+                // begin_layer saves one extra device pixel around its bounds.
+                let pad = 1.0 / scale;
+                let bounds = origin.map_or(clip, |(x, y)| Rect::new(r.x+x-pad, r.y+y-pad, r.w+2.0*pad, r.h+2.0*pad));
+                layers.push(clip.intersect(&bounds));
+            }
+            D::PopLayer(_) => { layers.pop()?; }
             D::Image { rect, src, image, opacity, pixelated } if std::sync::Arc::ptr_eq(image, target) => {
-                let (x, y) = origin?;
+                let Some((x,y)) = origin else { fallback!("transformed-video", index) };
                 let dest = rect.translate(x, y);
                 let visible = dest.intersect(&clip);
-                if plane.is_some() || irregular || layers != 0 || *opacity != 1.0 ||
-                    visible.is_empty() || !aligned(dest) || !aligned(visible) {
-                    return None;
-                }
+                if plane.is_some() { fallback!("multiple-images", index); }
+                if irregular { fallback!("nonrectangular-video-clip", index); }
+                if !layers.is_empty() || *opacity != 1.0 { fallback!("video-opacity-group", index); }
+                if visible.is_empty() { fallback!("outside-viewport", index); }
+                if !aligned(dest) || !aligned(visible) { fallback!("fractional-video-edge", index); }
                 // The normal image painter treats near-full crops as full.
                 let src = if src.x <= 0.0 && src.y <= 0.0 && (src.w - image.width as f32).abs() < 0.5 &&
                     (src.h - image.height as f32).abs() < 0.5 {
@@ -74,25 +89,34 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
             }
             _ => {
                 let Some(v) = &plane else { continue };
-                // These operations can sample a backdrop, alter a preceding
-                // layer, or move ink beyond its two-dimensional bounds.
-                if matches!(item, D::LayerBlend(_) | D::LayerMask(_) | D::BackdropFilter { .. } | D::Transform3d(_)) {
-                    return None;
+                if matches!(item, D::LayerBlend(_) | D::LayerMask(_)) {
+                    if layers.last().is_some_and(|r| r.intersect(&v.clip).is_empty()) { continue; }
+                    fallback!("mask-or-blend", index);
                 }
                 if clip.intersect(&v.clip).is_empty() { continue; }
-                let (x, y) = origin?;
-                if !matches!(item, D::Text { .. }) {
-                    let bounds = crate::damage::item_bounds(item)?.translate(x, y);
-                    if bounds.intersect(&clip).intersect(&v.clip).is_empty() { continue; }
+                // The normal foreground painter replays affine transforms.
+                // Include ink conservatively if a simple translated bounding
+                // box is unavailable (glyph overhang, a rotated control).
+                if let Some((x, y)) = origin {
+                    if !matches!(item, D::Text { .. }) {
+                        if let Some(bounds) = crate::damage::item_bounds(item) {
+                            if bounds.translate(x, y).intersect(&clip).intersect(&v.clip).is_empty() { continue; }
+                        }
+                    }
                 }
-                if matches!(item, D::Filtered { .. } | D::Blended { .. } | D::Isolated { .. }) {
-                    return None;
+                match item {
+                    D::Filtered { .. } => fallback!("filter", index),
+                    D::Blended { .. } => fallback!("mix-blend-mode", index),
+                    D::Isolated { .. } => fallback!("isolated-blend-group", index),
+                    D::BackdropFilter { .. } => fallback!("backdrop-filter", index),
+                    D::Transform3d(_) => fallback!("3d-group", index),
+                    _ => {}
                 }
                 foreground_items.push(index);
             }
         }
     }
-    let mut plane = plane?;
+    let Some(mut plane) = plane else { fallback!("no-top-level-image", list.items.len()) };
     if !foreground_items.is_empty() {
         plane.foreground = VideoForeground::raster(list, target_index, &foreground_items, plane.clip, viewport, scale, fonts)?;
     }
@@ -1308,6 +1332,10 @@ mod video_plane_tests {
             letter_spacing: 0.0, word_spacing: 0.0, shadows: Vec::new(), small_caps: false, oblique: false,
         });
         list.items.push(DisplayItem::PopLayer(0.8));
+        // An affine transform on a control uses the normal foreground painter.
+        list.items.push(DisplayItem::PushTransform([0.0, 1.0, -1.0, 0.0, 48.0, 0.0]));
+        list.items.push(DisplayItem::Rect { rect: Rect::new(18.0, 7.0, 6.0, 4.0), color: Color::rgba(21, 140, 32, 96), radius: 0.0 });
+        list.items.push(DisplayItem::PopTransform);
         for scale in [1.0, 1.5, 2.0] {
             let mut a = Canvas::new((64.0 * scale) as u32, (48.0 * scale) as u32);
             let mut b = Canvas::new(a.width, a.height);
