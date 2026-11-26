@@ -1431,12 +1431,14 @@
     }
     const range = sel.getRangeAt(0);
     const touchedSpace = /[ \u00a0]/.test(range.toString());
+    const last = host.lastChild;
+    const hadLineBreak = last?.localName === 'br' || last?.nodeType === 3 && last.data.endsWith('\n');
     range.deleteContents();
     let caret = range.startContainer, offset = range.startOffset;
     if (touchedSpace) rebalanceSpaces(caret,offset,host,true);
     // A caret left right before a child block is in its first line, as in
     // other browsers (typing goes there).
-    if (!host.textContent && !host.firstElementChild && getComputedStyle(host).display === 'inline' &&
+    if (hadLineBreak && !host.textContent && !host.firstElementChild && getComputedStyle(host).display === 'inline' &&
         inlineLineBoundary(host, false) && inlineLineBoundary(host, true)) {
       host.appendChild(caretBreak(host.ownerDocument));
       caret = host;
