@@ -1088,6 +1088,14 @@
     while (el.parentElement?.isContentEditable) el = el.parentElement;
     return el;
   }
+  // A programmatic selection can put the caret inside an HTML void element.
+  // Its editing insertion point is immediately before the element.
+  const voidTags = new Set(['area','base','br','col','embed','hr','img','input','link','meta','param','source','track','wbr']);
+  function voidCaret(range) {
+    const node = range.startContainer;
+    return range.collapsed && node.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+      voidTags.has(node.localName) && node.isContentEditable && node.parentElement ? node : null;
+  }
   function target(doc) {
     const control = doc.activeElement;
     if (control && (control.localName === 'textarea' ||
@@ -1098,6 +1106,11 @@
     const sel = doc.getSelection();
     if (!sel?.rangeCount) return null;
     const range = sel.getRangeAt(0);
+    const leaf = voidCaret(range);
+    if (leaf) {
+      const host = editingHost(leaf.parentElement);
+      return host ? { sel, range, host, leaf } : null;
+    }
     const host = editingHost(range.startContainer);
     if (!host || host !== editingHost(range.endContainer)) return null;
     return { sel, range, host };
@@ -1579,6 +1592,12 @@
     }
     const t = target(doc);
     if (!enabled(cmd, t)) return false;
+    if (t?.leaf && ['inserttext','inserthtml','insertlinebreak','insertparagraph'].includes(cmd)) {
+      t.range.setStartBefore(t.leaf);
+      t.range.collapse(true);
+      t.sel.collapse(t.range.startContainer, t.range.startOffset);
+      t.range = t.sel.getRangeAt(0);
+    }
     if (cmd === 'inserthtml' && (t.control || t.host.contentEditable === 'plaintext-only')) {
       value = N.editingPlaintext(value);
       cmd = 'inserttext';
