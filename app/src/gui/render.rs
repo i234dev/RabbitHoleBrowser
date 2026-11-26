@@ -28,13 +28,13 @@ impl App {
             let n = buffer.len().min(self.canvas.data.len());
             buffer[..n].copy_from_slice(&self.canvas.data[..n]);
             if buffer.present().is_ok() {
-                if let Some(picture) = picture { picture.composited(); }
+                if let Some((timing, path)) = picture { timing.composited(path); }
             }
         }
     }
 
     /// Paint the whole window into `self.canvas` (`w × h` device px).
-    pub(crate) fn paint(&mut self, w: u32, h: u32) -> Option<rabbithole_engine::script::FrameTiming> {
+    pub(crate) fn paint(&mut self, w: u32, h: u32) -> Option<(rabbithole_engine::script::FrameTiming, &'static str)> {
         if self.canvas.width != w || self.canvas.height != h {
             self.canvas.resize(w, h);
         }

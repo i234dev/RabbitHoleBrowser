@@ -478,6 +478,7 @@ impl HostEnv for EngineEnv<'_> {
         self.engine.replace_video_frame(self.page, node, width, height, rgba);
     }
     fn trace_video_frame(&mut self, node: NodeId, timing: rabbithole_script::FrameTiming) {
+        self.page.trace_video_source(node, &timing);
         self.page.incr.video_timings.retain(|(n, _)| *n != node);
         self.page.incr.video_timings.push((node, timing));
     }
@@ -1020,6 +1021,7 @@ impl Engine {
             img_out = self.fire_image_events(page);
         }
         if self.advance_animations(page) {
+            page.invalidate_video_foreground();
             images_changed = true;
         }
         // CSS transitions / animations, then their events (before

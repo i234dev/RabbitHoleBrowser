@@ -12,16 +12,17 @@ use rabbithole_style::{BorderStyle, Shadow, TextDecorationStyle};
 use std::sync::OnceLock;
 
 /// Geometry in scrolled document coordinates for an opaque video image
-/// whose visible pixels are unobstructed in this display list.
-#[derive(Clone, Copy, Debug)]
+/// and the source-over content painted above it.
+#[derive(Clone, Debug)]
 pub struct VideoPlane {
     pub dest: Rect,
     pub src: Rect,
     pub clip: Rect,
     pub pixelated: bool,
+    pub foreground: Option<std::sync::Arc<VideoForeground>>,
 }
 
-pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::Image>, viewport: Rect, scale: f32) -> Option<VideoPlane> {
+pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::Image>, viewport: Rect, scale: f32, fonts: &FontContext) -> Option<VideoPlane> {
     use DisplayItem as D;
     let mut origin = Some((0.0, 0.0));
     let mut origins = Vec::new();
@@ -30,9 +31,11 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
     let mut clips = vec![(viewport, false)];
     let mut layers = 0usize;
     let mut plane: Option<VideoPlane> = None;
+    let mut target_index = 0;
+    let mut foreground_items = Vec::new();
     let aligned = |r: Rect| [r.x - viewport.x, r.y - viewport.y, r.w, r.h]
         .iter().all(|v| (v * scale).fract() == 0.0);
-    for item in &list.items {
+    for (index, item) in list.items.iter().enumerate() {
         let (clip, irregular) = *clips.last()?;
         match item {
             D::PushTransform(m) => {
@@ -66,24 +69,110 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
                     Rect::new(0.0, 0.0, image.width as f32, image.height as f32)
                 } else { *src };
                 if !*pixelated && (src.w > 4.0 * dest.w * scale || src.h > 4.0 * dest.h * scale) { return None; }
-                plane = Some(VideoPlane { dest, src, clip: visible, pixelated: *pixelated });
+                target_index = index;
+                plane = Some(VideoPlane { dest, src, clip: visible, pixelated: *pixelated, foreground: None });
             }
             _ => {
-                if let Some(v) = plane {
-                    if clip.intersect(&v.clip).is_empty() { continue; }
-                    let (x, y) = origin?;
-                    // Glyph ink (including web fonts) can extend outside
-                    // its nominal text box. Effects may depend on backdrop.
-                    if matches!(item, D::Text { .. } | D::BackdropFilter { .. } | D::LayerBlend(_) | D::LayerMask(_)) {
-                        return None;
-                    }
-                    let bounds = crate::damage::item_bounds(item)?.translate(x, y);
-                    if !bounds.intersect(&clip).intersect(&v.clip).is_empty() { return None; }
+                let Some(v) = &plane else { continue };
+                // These operations can sample a backdrop, alter a preceding
+                // layer, or move ink beyond its two-dimensional bounds.
+                if matches!(item, D::LayerBlend(_) | D::LayerMask(_) | D::BackdropFilter { .. } | D::Transform3d(_)) {
+                    return None;
                 }
+                if clip.intersect(&v.clip).is_empty() { continue; }
+                let (x, y) = origin?;
+                if !matches!(item, D::Text { .. }) {
+                    let bounds = crate::damage::item_bounds(item)?.translate(x, y);
+                    if bounds.intersect(&clip).intersect(&v.clip).is_empty() { continue; }
+                }
+                if matches!(item, D::Filtered { .. } | D::Blended { .. } | D::Isolated { .. }) {
+                    return None;
+                }
+                foreground_items.push(index);
             }
         }
     }
-    plane
+    let mut plane = plane?;
+    if !foreground_items.is_empty() {
+        plane.foreground = VideoForeground::raster(list, target_index, &foreground_items, plane.clip, viewport, scale, fonts)?;
+    }
+    Some(plane)
+}
+
+/// Premultiplied ARGB8 in device pixels, cropped to the visible video.
+#[derive(Debug)]
+pub struct VideoForeground {
+    width: usize,
+    pixels: Vec<u32>,
+}
+
+impl VideoForeground {
+    fn raster(list: &DisplayList, target: usize, foreground: &[usize], clip: Rect, viewport: Rect, scale: f32, fonts: &FontContext) -> Option<Option<std::sync::Arc<Self>>> {
+        use DisplayItem as D;
+        let (w, h) = ((clip.w * scale).round() as u32, (clip.h * scale).round() as u32);
+        if w == 0 || h == 0 { return None; }
+        let render = |background| {
+            let mut canvas = Canvas::new(w, h);
+            canvas.clear(background);
+            canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+            let fixed = (viewport.x - clip.x, viewport.y - clip.y);
+            let mut state = State::nested(-clip.x, -clip.y, fixed, gfx_ext_available());
+            // Use a conservative culling region. The device canvas itself
+            // clips pixels; glyph ink may overhang its layout bounds.
+            let view = Rect::new(-1e7, -1e7, 2e7, 2e7);
+            let mut draws = foreground.iter().copied().peekable();
+            for (i, item) in list.items.iter().enumerate() {
+                let geometry = matches!(item, D::PushClip(_) | D::PushClipRounded(..) |
+                    D::PushClipPath { .. } | D::PopClip | D::PushFixed | D::PopFixed |
+                    D::PushTransform(_) | D::PopTransform);
+                let layer = i > target && matches!(item, D::PushLayer(_) | D::PopLayer(_));
+                if geometry || layer || draws.next_if_eq(&i).is_some() {
+                    paint_item(item, &mut canvas, fonts, &mut state, view);
+                }
+            }
+            canvas.data
+        };
+        // Source-over onto black gives the premultiplied colour. Onto white
+        // it adds (1 - alpha). This also preserves antialiased glyphs.
+        let mut pixels = render(Color::BLACK);
+        let white = render(Color::WHITE);
+        let mut any = false;
+        let mut transparent = false;
+        for (p, w) in pixels.iter_mut().zip(white) {
+            let trans = ((w >> 8) & 255).saturating_sub((*p >> 8) & 255);
+            let alpha = 255 - trans;
+            any |= alpha != 0;
+            transparent |= trans != 0;
+            *p = (*p & 0xffffff) | alpha << 24;
+        }
+        if std::env::var("RH_MEDIA_STATS").as_deref() == Ok("1") {
+            eprintln!("rh_video foreground {w} {h} visible={transparent} ink={any}");
+        }
+        if !transparent { return None; }
+        Some(any.then(|| std::sync::Arc::new(Self { width: w as usize, pixels })))
+    }
+
+    /// Restore the page foreground over a freshly drawn video, clipped to
+    /// the current page area when the window is being resized.
+    pub fn paint(&self, canvas: &mut Canvas, dest: Rect, area: Rect) {
+        let clip = dest.intersect(&area).intersect(&Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32));
+        if clip.is_empty() { return; }
+        let (x0, y0) = (clip.x as usize, clip.y as usize);
+        let n = clip.right() as usize - x0;
+        for y in y0..clip.bottom() as usize {
+            let i = (y as i32 - dest.y as i32) as usize * self.width + (x0 as i32 - dest.x as i32) as usize;
+            let j = y * canvas.width as usize + x0;
+            for (out, &pixel) in canvas.data[j..j+n].iter_mut().zip(&self.pixels[i..i+n]) {
+                let a = pixel >> 24;
+                if a == 0 { continue; }
+                if a == 255 { *out = pixel & 0xffffff; continue; }
+                let channel = |shift: u32| {
+                    (((pixel >> shift) & 255) + (((*out >> shift) & 255) * (255 - a) + 127) / 255).min(255)
+                };
+                *out = (channel(16) << 16) | (channel(8) << 8) | channel(0);
+            }
+        }
+    }
 }
 
 fn style_code(s: BorderStyle) -> u8 {
@@ -1189,16 +1278,55 @@ mod video_plane_tests {
             DisplayItem::Image { rect, src, image: image.clone(), opacity: 1.0, pixelated: true },
             DisplayItem::PopClip, DisplayItem::PopFixed,
         ];
-        let plane = video_plane(&list, &image, viewport, 2.0).unwrap();
+        let plane = video_plane(&list, &image, viewport, 2.0, &FontContext::new()).unwrap();
         assert_eq!(plane.dest.y, 56.0);
         assert_eq!((plane.clip.y, plane.clip.h), (57.0, 9.0));
         assert_eq!((plane.src.x, plane.src.w), (1.0, 3.0));
         assert!(plane.pixelated);
         list.items.push(DisplayItem::Rect { rect: plane.clip, color: Color::WHITE, radius: 0.0 });
-        assert!(video_plane(&list, &image, viewport, 2.0).is_none());
+        assert!(video_plane(&list, &image, viewport, 2.0, &FontContext::new()).is_none());
         list.items.pop();
         list.items.insert(0, DisplayItem::PushLayer(viewport));
         list.items.push(DisplayItem::PopLayer(0.5));
-        assert!(video_plane(&list, &image, viewport, 2.0).is_none());
+        assert!(video_plane(&list, &image, viewport, 2.0, &FontContext::new()).is_none());
+    }
+
+    #[test]
+    fn translucent_controls_and_subtitles_follow_video_scroll_and_zoom() {
+        let fonts = FontContext::new();
+        let mut image = Image::new(16, 16, [210, 92, 31, 255].repeat(256));
+        image.video_frame = true;
+        let image = Arc::new(image);
+        let rect = Rect::new(4.0, 12.0, 48.0, 32.0);
+        let viewport = Rect::new(0.0, 8.0, 64.0, 48.0);
+        let mut list = DisplayList::default();
+        list.items.push(DisplayItem::Image { rect, src: Rect::new(0.0, 0.0, 16.0, 16.0), image: image.clone(), opacity: 1.0, pixelated: true });
+        list.items.push(DisplayItem::PushLayer(rect));
+        list.items.push(DisplayItem::Rect { rect: Rect::new(6.0, 21.0, 38.0, 19.0), color: Color::rgba(10, 40, 90, 148), radius: 2.0 });
+        list.items.push(DisplayItem::Text {
+            x: 7.0, y: 34.0, font: FontId(0), size: 12.0, color: Color::WHITE, text: "Play".into(),
+            letter_spacing: 0.0, word_spacing: 0.0, shadows: Vec::new(), small_caps: false, oblique: false,
+        });
+        list.items.push(DisplayItem::PopLayer(0.8));
+        for scale in [1.0, 1.5, 2.0] {
+            let mut a = Canvas::new((64.0 * scale) as u32, (48.0 * scale) as u32);
+            let mut b = Canvas::new(a.width, a.height);
+            a.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+            paint_with_fixed_origin(&list, &mut a, &fonts, 0.0, 8.0, (0.0, 0.0));
+            let v = video_plane(&list, &image, viewport, scale, &fonts).unwrap();
+            let dest = Rect::new(rect.x * scale, (rect.y - 8.0) * scale, rect.w * scale, rect.h * scale);
+            assert!(b.composite_video(image.pixels(), (16, 16), v.src, dest, dest, true));
+            let before = b.data.clone();
+            v.foreground.unwrap().paint(&mut b, dest, dest);
+            assert_ne!(before, b.data);
+            for (i, (reference, overlay)) in a.data.iter().zip(&b.data).enumerate() {
+                for shift in [0, 8, 16] {
+                    let (r, o) = ((reference >> shift) & 255u32, (overlay >> shift) & 255u32);
+                    assert!(r.abs_diff(o) <= 2, "scale {scale} pixel {i}: {reference:x} vs {overlay:x}");
+                }
+            }
+        }
+        list.items.push(DisplayItem::Filtered { bounds: rect, filters: Vec::new(), svg: None, items: Vec::new() });
+        assert!(video_plane(&list, &image, viewport, 1.0, &fonts).is_none());
     }
 }

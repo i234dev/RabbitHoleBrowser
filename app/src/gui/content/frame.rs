@@ -34,6 +34,9 @@ impl VideoLayer {
         let map = |r: Rect| Rect::new(area.x + (r.x - scroll.0) * scale,
             area.y + (r.y - scroll.1) * scale, r.w * scale, r.h * scale);
         if dst.composite_video(&pic.rgba, self.size, self.plane.src, map(self.plane.dest), map(self.plane.clip).intersect(&area), self.plane.pixelated) {
+            if let Some(foreground) = &self.plane.foreground {
+                foreground.paint(dst, map(self.plane.clip), area);
+            }
             return pic.timing;
         }
         None
@@ -65,6 +68,7 @@ pub struct Frame {
     /// Increases with every frame of a tab.
     pub seq: u64,
     pub video: Option<VideoLayer>,
+    pub raster_timing: Option<FrameTiming>,
     /// Pixels (device px).
     pub canvas: Arc<Pixels>,
     /// Document position (CSS px) of the canvas' top-left corner.
@@ -105,7 +109,7 @@ impl Frame {
     /// Paint the part of the frame visible at `scroll` into `area` of
     /// `dst` (device px): the frame shifted by the scroll difference, the
     /// page background where it has no pixels.
-    pub fn present(&self, dst: &mut Canvas, area: Rect, scroll: (f32, f32), scale: f32) -> Option<FrameTiming> {
+    pub fn present(&self, dst: &mut Canvas, area: Rect, scroll: (f32, f32), scale: f32) -> Option<(FrameTiming, &'static str)> {
         dst.fill_rect(area, if self.background.a > 0 { Color { a: 255, ..self.background } } else { Color::WHITE });
         // A zoom change is shown at the old scale until the repaint.
         let s = if (scale - self.scale).abs() < 1e-3 { scale } else { self.scale };
@@ -113,7 +117,10 @@ impl Frame {
         let y = area.y + ((self.origin.1 - scroll.1) * s).round();
         blit_clipped(dst, &self.canvas, x as i32, y as i32, area);
         if scroll == self.scroll && scale == self.scale {
-            if let Some(video) = &self.video { return video.present(dst, area, scroll, scale); }
+            if let Some(timing) = self.video.as_ref().and_then(|v| v.present(dst, area, scroll, scale)) {
+                return Some((timing, "layer"));
+            }
+            return self.raster_timing.clone().map(|t| (t, "content"));
         }
         None
     }
@@ -182,7 +189,7 @@ mod tests {
             scroll: (0.0, 60.0),
             content: (2.0, 1000.0),
             background: Color::WHITE,
-            video: None, scroll_containers: Arc::new(Vec::new()),
+            video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
         };
         let mut dst = Canvas::new(2, 20);
         // Scrolled to 70: the frame row 20 (doc y=70) is at the top.

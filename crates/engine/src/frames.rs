@@ -831,6 +831,7 @@ impl Engine {
             let img = Arc::new(raster.with_natural_size(natural.0, natural.1));
             let old = c.image.replace(img.clone());
             let node = c.node;
+            page.invalidate_video_foreground();
             // The box is patched below: the same natural size needs no
             // relayout.
             if let Some(old) = page.images.insert(node, img.clone()).filter(|o| (o.natural_width, o.natural_height) == (img.natural_width, img.natural_height)) {

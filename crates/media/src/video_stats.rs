@@ -51,12 +51,12 @@ impl FrameTiming {
     }
 
     /// First successful submission of this picture to the window surface.
-    pub fn composited(&self) {
+    pub fn composited(&self, path: &'static str) {
         static EPOCH: OnceLock<Instant> = OnceLock::new();
         if !self.picture.composited.swap(true, Ordering::Relaxed) {
             self.picture.painted.store(true, Ordering::Relaxed);
             let epoch = EPOCH.get_or_init(Instant::now);
-            eprintln!("rh_video composite {} {:.3} {:.3}", self.picture.id, ms(self.start.elapsed()), ms(epoch.elapsed()));
+            eprintln!("rh_video composite {} {:.3} {:.3} {path}", self.picture.id, ms(self.start.elapsed()), ms(epoch.elapsed()));
         }
     }
 

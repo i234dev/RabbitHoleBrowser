@@ -1228,14 +1228,16 @@ impl Worker {
         collect_scroll_containers(&page.layout.root, false, &mut containers);
         let covered = Rect::new(origin.0, origin.1, w as f32 / s, h as f32 / s);
         self.frame_seq += 1;
+        let viewport = Rect::new(sx, sy, vp.width, vp.height);
         let video = if self.inspect.is_none() && self.edit.is_none() && self.find.query.is_empty() && self.focus.is_none() {
-            page.video_plane(Rect::new(sx, sy, vp.width, vp.height), s).map(|(plane, reader, size)| {
+            page.video_plane(viewport, s).map(|(plane, reader, size)| {
                 let sink = self.sink.clone();
                 let (tab, epoch) = (self.tab_id, self.epoch);
                 VideoLayer::new(plane, reader, size, move || sink(tab, epoch, FromContent::VideoReady))
             })
         } else { None };
         let frame = Frame {
+            raster_timing: page.raster_video_timing(viewport),
             video,
             seq: self.frame_seq,
             canvas: Arc::new(Pixels::from_canvas(&mut frame_canvas)),
