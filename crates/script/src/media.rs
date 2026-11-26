@@ -340,9 +340,8 @@ pub(crate) fn can_play_type(t: &str) -> &'static str {
     for c in &codecs {
         let name = codec_from_rfc6381(c);
         let name = if name.is_empty() && c == "1" { "pcm" } else { name };
-        // Video tracks are demuxed (audio plays, the picture shows the
-        // poster) but not decoded: answer only for audio codecs + AV1.
-        if !(audio.contains(&name) || (video_ok && rabbithole_media::video::can_decode_video(name))) {
+        let playable_video = video_ok && rabbithole_media::video::can_decode_video(name) && rabbithole_media::video::advertise_codec(name);
+        if !(audio.contains(&name) || playable_video) {
             return "";
         }
     }

@@ -28,3 +28,20 @@ between decoded and painted counts includes superseded pictures and pictures
 still pending at the end of a truncated trace. Compare completed playbacks at
 the same resolution, viewport and build profile. The summary reports means
 and nearest-rank p95 values in milliseconds.
+
+## Windows codec selection
+
+With an available H.264 Media Foundation transform, RabbitHole advertises AVC
+and suppresses VP9/AV1 and VP8 in explicit codec queries. If the transform is
+unavailable, it advertises the previous alternatives and suppresses AVC. To
+restore all available alternatives, set `RH_VIDEO_CODECS=all` before starting
+the browser. The setting applies to the whole process. Driver acceleration
+depends on the Media Foundation configuration and the system.
+
+Close RabbitHole, open the candidate executable, and play a YouTube video
+available at 720p and 1080p. In “Stats for nerds”, record the codec, current
+resolution, and the change in dropped/total frames over 30 seconds at each
+resolution. Check sound, seeking and A/V sync. Repeat the same passage after
+starting a new process with `$env:RH_VIDEO_CODECS = 'all'` in PowerShell.
+Use Task Manager's GPU Video Decode graph to check hardware use. Remove the
+override with `Remove-Item Env:RH_VIDEO_CODECS` before the next default run.

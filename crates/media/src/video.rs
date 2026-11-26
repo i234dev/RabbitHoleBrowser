@@ -53,6 +53,42 @@ fn h264_available() -> bool {
     false
 }
 
+/// Filter codec advertisements during source selection. This leaves actual
+/// decoder availability intact for a file or track already selected.
+pub fn advertise_codec(codec: &str) -> bool {
+    #[cfg(windows)]
+    if matches!(codec, "h264" | "vp8" | "vp9" | "av1") {
+        use std::sync::OnceLock;
+        static ALL: OnceLock<bool> = OnceLock::new();
+        let all = *ALL.get_or_init(|| std::env::var("RH_VIDEO_CODECS").as_deref() == Ok("all"));
+        return windows_advertises(codec, h264_available(), all);
+    }
+    let _ = codec;
+    true
+}
+
+#[cfg(any(windows, test))]
+fn windows_advertises(codec: &str, h264_available: bool, allow_all: bool) -> bool {
+    match codec {
+        "h264" => h264_available,
+        "vp8" | "vp9" | "av1" => allow_all || !h264_available,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn windows_codec_advertisements_follow_decoder_availability() {
+    for codec in ["vp8", "vp9", "av1"] {
+        assert!(!windows_advertises(codec, true, false));
+        assert!(windows_advertises(codec, false, false));
+        assert!(windows_advertises(codec, true, true));
+    }
+    assert!(windows_advertises("h264", true, false));
+    assert!(!windows_advertises("h264", false, true));
+    assert!(windows_advertises("opus", true, false));
+}
+
 /// A streaming video decoder: one coded frame (access unit) in, the
 /// pictures that came out of it (display order) back.
 pub trait VideoDecoder: Send {
