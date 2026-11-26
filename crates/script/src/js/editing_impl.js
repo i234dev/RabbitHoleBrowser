@@ -1538,6 +1538,7 @@
     const parent = point.nodeType === 3 ? point.parentElement : point;
     const textOnly = textOnlyContainer(range);
     if (textOnly) {
+      if (!checkVisibility.call(textOnly, { visibilityProperty: true })) return;
       const trailing = !followingContent(range, textOnly) &&
         ['pre','pre-line','pre-wrap','break-spaces'].includes(getComputedStyle(parent).whiteSpace);
       insertText(doc, range, sel, trailing ? '\n\n' : '\n');
@@ -1624,7 +1625,11 @@
       return clipboardGesture(doc, cmd) !== false;
     }
     if (!enabled(cmd, t)) return false;
-    if (t?.leaf && ['inserttext','inserthtml','insertlinebreak','insertparagraph'].includes(cmd)) {
+    // An empty list item ends the list when entering at its boundary. A
+    // caret inside its placeholder still belongs to the item being split.
+    const listPlaceholder = cmd === 'insertparagraph' && t?.leaf?.localName === 'br' &&
+      t.leaf.parentElement.localName === 'li' && t.leaf.parentElement.childNodes.length === 1;
+    if (t?.leaf && !listPlaceholder && ['inserttext','inserthtml','insertlinebreak','insertparagraph'].includes(cmd)) {
       t.range.setStartBefore(t.leaf);
       t.range.collapse(true);
       t.sel.collapse(t.range.startContainer, t.range.startOffset);

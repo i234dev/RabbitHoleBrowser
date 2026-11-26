@@ -3144,7 +3144,8 @@ function forcedElementName(command, newValue) {
             return "i";
         }
         if (command == "strikethrough" && newValue == "line-through") {
-            return "strike";
+            // Rebuilding decorations while joining content preserves semantic markup.
+            return currentCommand == "strikethrough" ? "strike" : "s";
         }
         if (command == "underline" && newValue == "underline") {
             return "u";
@@ -3288,7 +3289,7 @@ function forceValue(node, command, newValue) {
         // new parent be the result of calling createElement("s") on the
         // ownerDocument of node."
         if (command == "strikethrough" && newValue == "line-through") {
-            newParent = node.ownerDocument.createElement("strike");
+            newParent = node.ownerDocument.createElement(forcedElementName(command, newValue));
         }
 
         // "If command is "underline" and new value is "underline", let new
@@ -7407,7 +7408,7 @@ commands["delete"] = {
 // RabbitHole: formatBlock also recognizes semantic paragraph containers
 // used by HTML editors. This list is specific to formatBlock.
 var formattableBlockNames = ["address", "article", "aside", "blockquote", "dd",
-    "div", "dl", "dt", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+    "div", "dt", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
     "header", "hgroup", "main", "nav", "p", "pre", "section"];
 
 commands.formatblock = {
