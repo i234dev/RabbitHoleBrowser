@@ -11,7 +11,7 @@ use windows_sys::core::{GUID, HRESULT};
 use windows_sys::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 
 const CLSID_CMSH264_DECODER_MFT: GUID = GUID::from_u128(0x62ce7e72_4c71_4d20_b15d_452831a87d9d);
-const IID_IMF_TRANSFORM: GUID = GUID::from_u128(0xbf94c121_5b05_4e6f_8000_ba29961414d3);
+const IID_IMF_TRANSFORM: GUID = GUID::from_u128(0xbf94c121_5b05_4e6f_8000_ba598961414d);
 const MF_MT_MAJOR_TYPE: GUID = GUID::from_u128(0x48eba18e_f8c9_4687_bf11_0a74c9f96a8f);
 const MF_MT_SUBTYPE: GUID = GUID::from_u128(0xf7e34c9a_42e8_4714_b74b_cb29d72c35e5);
 const MF_MT_FRAME_SIZE: GUID = GUID::from_u128(0x1652c33d_d6b2_4012_b834_72030849a37d);
