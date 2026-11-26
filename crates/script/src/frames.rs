@@ -25,8 +25,6 @@ pub(crate) fn install(realm: &mut Realm) {
         eprintln!("[rabbithole] frames.js: bridge namespace exhausted");
         return;
     };
-    let post = realm.new_native_function("post", 3, native_post);
-    let info = realm.new_native_function("info", 3, native_info);
     let factory = match realm.eval_builtin(include_str!("frames.js"), "rabbithole:frames.js") {
         Ok(f) => f,
         Err(e) => {
@@ -35,6 +33,10 @@ pub(crate) fn install(realm: &mut Realm) {
             return;
         }
     };
+    // Allocate the callbacks after evaluating the factory: bare ObjectIds
+    // in Rust locals are not roots at VM safe points.
+    let post = realm.new_native_function("post", 3, native_post);
+    let info = realm.new_native_function("info", 3, native_info);
     let encode_blob = realm.new_native_function("serializeBlob", 1, crate::fetch::serialize_blob);
     let decode_blob = realm.new_native_function("deserializeBlob", 4, crate::fetch::deserialize_blob);
     let args = [Value::Object(post), Value::Object(info), Value::str(&namespace), Value::Object(encode_blob), Value::Object(decode_blob)];
