@@ -875,6 +875,7 @@ fn spawn_video(shared: &Arc<Shared>, mse: Option<MseHandle>, codec: String, conf
 
 fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Option<MseHandle>, codec: &str, config: &[u8]) {
     let Some(mut dec) = crate::video::new_decoder(codec, config) else { return };
+    let mut decode_work = Duration::ZERO;
     let mut queue: VecDeque<VideoFrame> = VecDeque::new();
     let mut gen = u64::MAX;
     let mut need_key = true;
@@ -889,6 +890,7 @@ fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Optio
         if g != gen {
             gen = g;
             dec.flush();
+            decode_work = Duration::ZERO;
             queue.clear();
             need_key = true;
             // A seek leaves its target in the wall clock.
@@ -954,7 +956,28 @@ fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Optio
             continue;
         }
         need_key = false;
-        for f in dec.decode(&pkt.data, pkt.pts) {
+        let start = crate::video_stats::clock();
+        let mut frames = dec.decode(&pkt.data, pkt.pts);
+        if let Some(start) = start {
+            decode_work += start.elapsed();
+            // Charge buffered packets to the next output batch. Share decoder
+            // work across its pictures, timing each conversion individually.
+            for f in &frames {
+                if let Some(timing) = &f.timing {
+                    decode_work = decode_work.saturating_sub(timing.conversion());
+                }
+            }
+            if !frames.is_empty() {
+                let cost = decode_work / frames.len() as u32;
+                for f in &mut frames {
+                    if let Some(timing) = &mut f.timing {
+                        timing.decoded(start, codec, f.pts, cost);
+                    }
+                }
+                decode_work = Duration::ZERO;
+            }
+        }
+        for f in frames {
             if f.pts < skip_before {
                 continue;
             }

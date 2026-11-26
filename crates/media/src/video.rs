@@ -20,6 +20,7 @@ const EAGAIN: i32 = 11;
 #[derive(Clone)]
 pub struct VideoFrame {
     pub pts: f64,
+    pub timing: Option<crate::video_stats::FrameTiming>,
     pub width: u32,
     pub height: u32,
     pub rgba: Arc<Vec<u8>>,
@@ -271,6 +272,7 @@ impl VideoDecoder for Vp9Decoder {
                 continue;
             }
             let shift = f.bit_depth.saturating_sub(8);
+            let conversion = crate::video_stats::clock();
             let rgba = yuv_to_rgba(
                 &Planes { y: &f.planes[0], u: &f.planes[1], v: &f.planes[2], strides: [f.strides[0], f.strides[1], f.strides[2]], hbd: f.bit_depth > 8, shift },
                 f.width as usize,
@@ -280,7 +282,7 @@ impl VideoDecoder for Vp9Decoder {
                 if f.height >= 720 { Matrix::Bt709 } else { Matrix::Bt601 },
                 false,
             );
-            out.push(VideoFrame { pts: p, width: f.width, height: f.height, rgba: Arc::new(rgba) });
+            out.push(VideoFrame { timing: crate::video_stats::FrameTiming::converted(conversion), pts: p, width: f.width, height: f.height, rgba: Arc::new(rgba) });
         }
         out
     }
@@ -464,6 +466,7 @@ impl Drop for Av1Decoder {
 /// YUV picture → RGBA (integer BT.601 / BT.709 / BT.2020, limited or full
 /// range; high bit depth is reduced to 8 bits).
 unsafe fn convert(pic: &Dav1dPicture) -> Option<VideoFrame> {
+    let conversion = crate::video_stats::clock();
     let w = pic.p.w as usize;
     let h = pic.p.h as usize;
     if w == 0 || h == 0 || w * h > 8192 * 8192 {
@@ -534,5 +537,5 @@ unsafe fn convert(pic: &Dav1dPicture) -> Option<VideoFrame> {
             rgba[o + 2] = b.clamp(0, 255) as u8;
         }
     }
-    Some(VideoFrame { pts: pic.m.timestamp as f64 / 1e6, width: w as u32, height: h as u32, rgba: Arc::new(rgba) })
+    Some(VideoFrame { timing: crate::video_stats::FrameTiming::converted(conversion), pts: pic.m.timestamp as f64 / 1e6, width: w as u32, height: h as u32, rgba: Arc::new(rgba) })
 }

@@ -125,7 +125,12 @@ fn media_frame(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let Some((_, frame)) = f else { return Ok(Value::Bool(false)) };
     if n.doc == 0 {
         let rgba = frame.rgba.as_ref().clone();
-        with_env(|env| env.set_canvas_image(n.node, frame.width, frame.height, Some(rgba)));
+        with_env(|env| {
+            env.set_canvas_image(n.node, frame.width, frame.height, Some(rgba));
+            if let Some(timing) = frame.timing {
+                env.trace_video_frame(n.node, timing);
+            }
+        });
     }
     Ok(Value::Bool(true))
 }
