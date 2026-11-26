@@ -80,8 +80,10 @@ pub const MAX_OPS: usize = 20_000;
 /// Frames larger than this stay interpreted (slot offsets fit in disp32
 /// comfortably, and untranslated code is excluded).
 pub const MAX_FRAME: usize = 60_000;
-/// Native code per thread beyond which nothing more is compiled.
-pub const MAX_CODE_BYTES: usize = 16 << 20;
+/// Native code per thread beyond which nothing more is compiled. Inline
+/// property caches and direct calls make each function's code larger: with
+/// 16 MiB, a full Speedometer run stopped compiling the suites that run last.
+pub const MAX_CODE_BYTES: usize = 48 << 20;
 
 pub fn options() -> &'static Options {
     static O: std::sync::OnceLock<Options> = std::sync::OnceLock::new();
