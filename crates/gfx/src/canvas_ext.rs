@@ -782,12 +782,12 @@ impl Canvas {
                 return;
             }
             // Decoded YUV video is opaque. Filter its rows and columns separately
-            // when drawing a complete frame with no partial edge coverage.
+            // for whole device-pixel edges, including object-fit source crops.
             if image.video_frame && self.image_smoothing && op == 1.0 && mask.is_none()
-                && src == Rect::new(0.0, 0.0, image.width as f32, image.height as f32)
+                && inside
                 && whole(d.x) && whole(d.y) && whole(d.w) && whole(d.h) && sx <= 4.0 && sy <= 4.0
             {
-                crate::video_scale::paint(self, image, d, b);
+                crate::video_scale::paint(self, image, src, d, b);
                 return;
             }
             for py in b.y0..b.y1 {

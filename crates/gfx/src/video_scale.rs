@@ -12,9 +12,9 @@ struct Filter {
 }
 
 impl Filter {
-    fn new(pixel: i32, origin: f32, source: usize, scale: f32, area: bool) -> Self {
-        let lo = ((pixel as f32 - origin) * scale).clamp(0.0, source as f32);
-        let hi = ((pixel as f32 + 1.0 - origin) * scale).clamp(lo, source as f32);
+    fn new(pixel: i32, origin: f32, source: usize, begin: f32, end: f32, scale: f32, area: bool) -> Self {
+        let lo = (begin + (pixel as f32 - origin) * scale).clamp(begin, end);
+        let hi = (begin + (pixel as f32 + 1.0 - origin) * scale).clamp(lo, end);
         let mut f = Self { first: (lo as usize).min(source - 1), weights: [0; 5], count: 1 };
         if area && hi > lo {
             f.count = ((hi.ceil() as usize).min(source) - f.first).max(1);
@@ -26,7 +26,8 @@ impl Filter {
                 previous = total;
             }
         } else {
-            let center = ((lo + hi) * 0.5 - 0.5).clamp(0.0, (source - 1) as f32);
+            let center = if end - begin <= 1.0 { (begin + end) * 0.5 } else { ((lo + hi) * 0.5).clamp(begin + 0.5, end - 0.5) };
+            let center = (center - 0.5).clamp(0.0, (source - 1) as f32);
             f.first = center as usize;
             f.count = if f.first + 1 < source { 2 } else { 1 };
             f.weights[1] = ((center - f.first as f32) * UNIT as f32).round() as u16;
@@ -36,20 +37,20 @@ impl Filter {
     }
 }
 
-/// `dest` has whole device-pixel edges and covers the entire source. Keep
+/// `dest` has whole device-pixel edges and samples only the cropped source. Keep
 /// eight fractional bits per axis, rounding only at the final RGB pixel.
-pub(super) fn paint(canvas: &mut Canvas, image: &Image, dest: Rect, clip: Bounds) {
+pub(super) fn paint(canvas: &mut Canvas, image: &Image, src: Rect, dest: Rect, clip: Bounds) {
     let (width, height) = (image.width as usize, image.height as usize);
-    let (sx, sy) = (width as f32 / dest.w, height as f32 / dest.h);
+    let (sx, sy) = (src.w / dest.w, src.h / dest.h);
     let area = sx > 1.0 || sy > 1.0;
-    let columns: Vec<_> = (clip.x0..clip.x1).map(|x| Filter::new(x, dest.x, width, sx, area)).collect();
+    let columns: Vec<_> = (clip.x0..clip.x1).map(|x| Filter::new(x, dest.x, width, src.x, src.right(), sx, area)).collect();
     let left = columns[0].first;
     let last = columns.last().unwrap();
     let right = last.first + last.count;
     let mut row = vec![[0u32; 3]; right - left];
     let pixels = image.pixels();
     for y in clip.y0..clip.y1 {
-        let vertical = Filter::new(y, dest.y, height, sy, area);
+        let vertical = Filter::new(y, dest.y, height, src.y, src.bottom(), sy, area);
         row.fill([0; 3]);
         for (i, &weight) in vertical.weights[..vertical.count].iter().enumerate() {
             let base = ((vertical.first + i) * width + left) * 4;
@@ -92,7 +93,9 @@ mod tests {
                 let mut canvas = Canvas::new(80, 65);
                 canvas.clear(Color::WHITE);
                 canvas.push_clip(Rect::new(2.0, 3.0, 67.0, 50.0));
-                canvas.draw_image(image, Rect::new(-2.0, 1.0, w as f32, h as f32), 1.0);
+                let dest = Rect::new(-2.0, 1.0, w as f32, h as f32);
+                canvas.draw_image(image, dest, 1.0);
+                canvas.draw_image_region(image, Rect::new(0.375, 1.25, 45.25, 32.5), dest.translate(8.0, 6.0), 1.0);
                 canvas.data
             };
             image.video_frame = false;
