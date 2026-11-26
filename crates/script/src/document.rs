@@ -131,7 +131,18 @@ fn d_visibility_state(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<V
 
 fn d_domain(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let _ = this_doc(realm, &this)?;
-    Ok(Value::str(&with_env(|env| env.document_url().host)))
+    // A same-origin document wrapper and an initial about:blank document
+    // share the caller's effective origin, including an inherited host.
+    let origin = with_env(|env| env.security_origin());
+    let host = rabbithole_net::Url::parse(&origin).map(|url| url.host).unwrap_or_default();
+    Ok(Value::str(&host))
+}
+
+fn d_domain_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    this_doc(realm, &this)?;
+    let _ = arg_str(realm, args, 0)?;
+    // Browsing contexts retain their original origin after this legacy setter.
+    Ok(Value::Undefined)
 }
 
 fn d_cookie_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -878,7 +889,7 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "URL", d_url, None);
     acc(realm, "documentURI", d_url, None);
     acc(realm, "referrer", d_referrer, None);
-    acc(realm, "domain", d_domain, None);
+    acc(realm, "domain", d_domain, Some(d_domain_set));
     acc(realm, "cookie", d_cookie_get, Some(d_cookie_set));
     acc(realm, "readyState", d_ready_state, None);
     acc(realm, "defaultView", d_default_view, None);
