@@ -148,7 +148,9 @@ pub struct Keyframe {
 
 #[derive(Debug, Clone, Default)]
 pub struct Stylesheet {
-    pub rules: Vec<Rule>,
+    /// The parsed rule tree is shared by cached copies of the same source.
+    /// Scope and source metadata belong to each use of the sheet.
+    pub rules: std::sync::Arc<Vec<Rule>>,
     /// Absolute URL of the sheet, used to resolve `url()` values and
     /// `@import`s. `None` for inline `<style>` (document base applies).
     pub base_url: Option<String>,
@@ -457,7 +459,7 @@ pub fn parse_stylesheet(src: &str) -> Stylesheet {
     let toks = Tokenizer::tokenize(src);
     let mut p = Parser { toks: &toks, pos: 0, namespaces: None };
     Stylesheet {
-        rules: p.parse_rules(true),
+        rules: std::sync::Arc::new(p.parse_rules(true)),
         base_url: None,
         shadow_scopes: Vec::new(),
         source_id: 0,
