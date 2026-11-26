@@ -214,6 +214,22 @@ fn perform_test_driver(engine: &Engine, page: &mut rabbithole_engine::Page, req:
     Ok(())
 }
 
+/// Resolve a WebDriver frame index path against the live frame tree.
+fn context_id(engine: &Engine, root: u64, path: &Value) -> Option<u64> {
+    let frames = engine.frames.borrow();
+    path.as_array()?.iter().try_fold(root, |id, index| {
+        frames.children(id).get(usize::try_from(index.as_u64()?).ok()?).copied()
+    })
+}
+
+fn driver_message(mut message: &str) -> Option<&str> {
+    // The engine tags each nested console line with its frame URL.
+    while let Some(rest) = message.strip_prefix("[frame ") {
+        message = rest.split_once("] ")?.1;
+    }
+    message.strip_prefix(TD_MARKER)
+}
+
 /// Child side: load `url`, run its event loop until the harness reports
 /// (or `timeout` passes, then ask the harness to time out), and print the
 /// report JSON line on stdout.
@@ -241,7 +257,7 @@ pub fn run_child(url: &str, timeout: Duration, verbose: bool) -> i32 {
         for (level, msg) in page.take_console() {
             if let Some(j) = msg.strip_prefix(MARKER) {
                 found = Some(j.to_string());
-            } else if let Some(j) = msg.strip_prefix(TD_MARKER) {
+            } else if let Some(j) = driver_message(&msg) {
                 driver.push(j.to_string());
             } else if verbose {
                 eprintln!("[console.{level}] {msg}");
@@ -260,12 +276,25 @@ pub fn run_child(url: &str, timeout: Duration, verbose: bool) -> i32 {
         for r in std::mem::take(&mut driver_requests) {
             let Ok(req) = serde_json::from_str::<Value>(&r) else { continue };
             let id = req["id"].as_u64().unwrap_or(0);
-            let res = perform_test_driver(&engine, &mut page, &req);
+            let Some(sender) = context_id(&engine, page.frame_id, &req["sender"]) else { continue };
+            let target = context_id(&engine, page.frame_id, &req["target"]);
+            let res = target.and_then(|id| engine.with_browsing_context(&mut page, id, |child| {
+                if child.frame_depth > 0 && req["targetRealm"].is_string() {
+                    let live = format!("self.__rhTestDriverRealm === {}", req["targetRealm"]);
+                    if engine.eval_in_page(child, &live) != "true" {
+                        return Err("Target document navigated".to_owned());
+                    }
+                }
+                perform_test_driver(&engine, child, &req)
+            })).unwrap_or_else(|| Err("Target browsing context was removed".to_owned()));
             let err = match res {
                 Ok(()) => "null".to_string(),
                 Err(e) => Value::from(e).to_string(),
             };
-            let _ = engine.eval_in_page(&mut page, &format!("self.__rhTestDriverDone && self.__rhTestDriverDone({id}, {err}); 0"));
+            if let Some(realm) = req["realm"].as_str() {
+                let complete = format!("self.__rhTestDriverRealm === {} && self.__rhTestDriverDone({id}, {err}); 0", Value::from(realm));
+                engine.with_browsing_context(&mut page, sender, |child| engine.eval_in_page(child, &complete));
+            }
         }
         let now = Instant::now();
         if !timed_out && now >= deadline {
