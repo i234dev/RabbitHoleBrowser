@@ -1628,7 +1628,8 @@ xdata y mapping juntos para reintentar en la próxima salida de la última
 entrada. Si el TLS ya no está disponible o está prestado de forma reentrante,
 se retiene la asignación completa; una entrada nueva se interpreta si no puede
 adquirir su contador. Los mappings retirados o cuyo borrado falla siguen
-contando contra el límite de mappings de 16 MiB. Este límite no representa RSS
+contando contra el límite de mappings (16 MiB hasta 0.2.47, 48 MiB desde
+0.2.48). Este límite no representa RSS
 ni incluye el pequeño propietario/tabla en el heap.
 
 Los seis controles Windows nuevos usan las APIs reales del
@@ -1732,3 +1733,12 @@ intercaladas): llamadas 1,3–1,6×, bucles numéricos sin cambio. La meta de
 2–3× no está alcanzada: el tiempo restante está repartido (intérprete para
 funciones frías, asignación, GC, consultas genéricas de propiedades y
 builtins) y ninguna palanca individual supera unos pocos puntos.
+
+Límite de código (0.2.48). Con las cachés y llamadas en línea cada función
+compilada ocupa unas 1,6 veces más. Con el límite de 16 MiB por hilo, una
+pasada completa de Speedometer 3.1 dejaba de compilar tras 865 funciones y
+rechazaba 469 (las de las suites finales: gráficos −9 %, Perf-Dashboard
+−17 %; aisladas, esas suites eran más rápidas). Con 48 MiB la misma pasada
+compila 1.340 funciones y no rechaza ninguna. El límite es un tope de mappings
+ejecutables por hilo, no memoria reservada: solo se ocupa lo compilado y se
+libera con las funciones.

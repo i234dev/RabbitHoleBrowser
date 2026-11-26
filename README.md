@@ -32,6 +32,16 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.2.48 is **1.032× faster than 0.2.47 on Speedometer 3.1** (7 of 8
+paired runs; jQuery 1.13×, React-Redux 1.12×, SVG charts 1.11×,
+[record](docs/benchmarks/speedometer-2026-11-26-v0.2.48.md)). Compiled
+JavaScript functions now call each other and return in native code, common
+builtins such as `hasOwnProperty`, `Array.isArray` and `Math.round` are
+computed inline, and the shared property cache also serves stores, missing
+properties, `typeof`, for-in and object creation. The JIT may keep up to
+48 MiB of code per thread (previously 16 MiB). Web platform and CSS results
+are unchanged.
+
 Version 0.2.47 is **1.162× faster than 0.2.46 on Speedometer 3.1** (8 of 8
 paired runs; chart and SVG suites 1.3–1.5×,
 [record](docs/benchmarks/speedometer-2026-11-25-v0.2.47.md)). Child frames,
