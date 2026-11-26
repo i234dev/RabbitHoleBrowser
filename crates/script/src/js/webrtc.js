@@ -1,9 +1,7 @@
 // WebRTC signaling values, peer negotiation and SCTP data channels.
-(function () {
+(function (bindings, exports) {
   'use strict';
-  const N = globalThis.__rhNative;
-  if (N.workerInfo()) return;
-
+  const { N, Event, EventTarget, DOMException, Symbol, WeakMap, Map, Set, setTimeout: schedule, clearTimeout: cancel, defineProperty } = bindings;
   function dictionary(value) {
     if (value == null) return {};
     if (typeof value !== 'object' && typeof value !== 'function') throw new TypeError('Expected a dictionary');
@@ -18,12 +16,12 @@
   }
   function expose(ctor, slots, fields) {
     for (const field of fields) {
-      Object.defineProperty(ctor.prototype, field, {
+      defineProperty(ctor.prototype, field, {
         get() { return slots.get(this)[field]; }, enumerable: true, configurable: true,
       });
     }
-    Object.defineProperty(ctor.prototype, Symbol.toStringTag, { value: ctor.name, configurable: true });
-    Object.defineProperty(globalThis, ctor.name, { value: ctor, writable: true, configurable: true });
+    defineProperty(ctor.prototype, Symbol.toStringTag, { value: ctor.name, configurable: true });
+    defineProperty(exports, ctor.name, { value: ctor, writable: true, configurable: true });
   }
 
   const descriptions = new WeakMap();
@@ -175,8 +173,6 @@
   }
   expose(RTCErrorEvent, errorEvents, ['error']);
 
-  const schedule = globalThis.setTimeout.bind(globalThis);
-  const cancel = globalThis.clearTimeout.bind(globalThis);
   const encoder = new TextEncoder(), decoder = new TextDecoder();
   const failure = (name, text) => new DOMException(text,name);
   function ushort(value, max = 65535) {
@@ -271,7 +267,7 @@
       reports.get(this).forEach((record, id) => callback.call(thisArg, record, id, this));
     }
   }
-  Object.defineProperty(RTCStatsReport.prototype, Symbol.iterator, {
+  defineProperty(RTCStatsReport.prototype, Symbol.iterator, {
     value: RTCStatsReport.prototype.entries, configurable: true, writable: true,
   });
   expose(RTCStatsReport, reports, []);
@@ -846,4 +842,4 @@
     'pendingLocalDescription','pendingRemoteDescription','currentLocalDescription','currentRemoteDescription']);
   N.installHandlers(RTCPeerConnection.prototype,['negotiationneeded','icecandidate','icecandidateerror','signalingstatechange',
     'iceconnectionstatechange','connectionstatechange','icegatheringstatechange','datachannel','track']);
-})();
+})

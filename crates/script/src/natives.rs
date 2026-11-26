@@ -441,7 +441,7 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
         }
     }
     let is_proxy = |realm: &Realm, id| matches!(realm.obj(id).kind, rabbithole_js::ObjectKind::Proxy { .. });
-    let g = realm.global();
+    let g = args.get(1).and_then(Value::as_object).unwrap_or_else(|| realm.global());
     if is_proxy(realm, g) {
         return Ok(Value::Bool(false));
     }
@@ -504,8 +504,26 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
     Ok(Value::Bool(true))
 }
 
+/// Return the module factory to its JS caller. Its invocation and every
+/// live binding across that call are traced by the ordinary VM frames.
+fn lazy_initializer(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(V::String(name)) = args.first().map(Value::v) else {
+        return realm.type_error("Expected a built-in API name");
+    };
+    let (src, file) = match name.to_rust_string().as_str() {
+        "idb" => (include_str!("js/idb.js"), "rabbithole:idb.js"),
+        "webgl" => (include_str!("js/webgl.js"), "rabbithole:webgl.js"),
+        "webaudio" => (include_str!("js/webaudio.js"), "rabbithole:webaudio.js"),
+        "webrtc" => (include_str!("js/webrtc.js"), "rabbithole:webrtc.js"),
+        _ => return realm.type_error("Unknown built-in API"),
+    };
+    realm.eval_builtin(src, file)
+}
+
 pub(crate) fn install(realm: &mut Realm) {
     let o = realm.new_object();
+    realm.define_method(o, "lazyInitializer", 1, lazy_initializer);
+    realm.mark_gc_safe(o, "lazyInitializer");
     realm.define_method(o, "webidlEnumerable", 1, webidl_enumerable);
     realm.define_method(o, "inflate", 2, native_inflate);
     realm.define_method(o, "deflate", 2, native_deflate);

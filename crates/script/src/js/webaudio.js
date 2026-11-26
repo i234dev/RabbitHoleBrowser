@@ -5,17 +5,11 @@
 // OscillatorNode, decodeAudioData and the destination. Sources play
 // through native voices (`__rhNative.wa*`); the gain of a voice is the
 // product of the GainNodes on its path to the destination.
-(function () {
+(function (bindings, exports) {
   'use strict';
-  // The engine's own timers, bound now: internal tasks (port messages,
-  // idle callbacks, observer deliveries, ...) must not go through a page's
-  // replacement of these globals, which may wrap, delay or drop them.
-  const { setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame, cancelAnimationFrame, queueMicrotask } = globalThis;
-  const g = globalThis;
-  const N = g.__rhNative;
-  if (!N || !N.waVoiceCreate) return;
-  const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
-  const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
+  const { g, N, Event, EventTarget, Symbol, Set, setTimeout, clearTimeout, queueMicrotask, defineProperty } = bindings;
+  const define = (name, value) => defineProperty(exports, name, { value, writable: true, configurable: true });
+  const tag = (C, name) => defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const domError = (msg, name) => new g.DOMException(msg, name);
   const S = Symbol('webaudio');
@@ -31,7 +25,7 @@
       if (ch < 1 || ch > 32) throw domError(`Failed to construct 'AudioBuffer': The number of channels provided (${ch}) is outside the range [1, 32].`, 'NotSupportedError');
       if (len < 1) throw domError(`Failed to construct 'AudioBuffer': The number of frames provided (${len}) is less than or equal to the minimum bound (0).`, 'NotSupportedError');
       if (!(rate >= 3000 && rate <= 768000)) throw domError(`Failed to construct 'AudioBuffer': The sample rate provided (${rate}) is outside the range [3000, 768000].`, 'NotSupportedError');
-      Object.defineProperty(this, S, { value: { rate, len, data: Array.from({ length: ch }, () => new Float32Array(len)) } });
+      defineProperty(this, S, { value: { rate, len, data: Array.from({ length: ch }, () => new Float32Array(len)) } });
     }
     get sampleRate() { return this[S].rate; }
     get length() { return this[S].len; }
@@ -48,7 +42,7 @@
   tag(AudioBuffer, 'AudioBuffer');
   const makeBuffer = (channels, rate) => {
     const b = Object.create(AudioBuffer.prototype);
-    Object.defineProperty(b, S, { value: { rate, len: channels[0] ? channels[0].length : 0, data: channels } });
+    defineProperty(b, S, { value: { rate, len: channels[0] ? channels[0].length : 0, data: channels } });
     return b;
   };
 
@@ -73,7 +67,7 @@
   tag(AudioParam, 'AudioParam');
   function newParam(ctx, value, min, max, changed) {
     const p = Object.create(AudioParam.prototype);
-    Object.defineProperty(p, S, { value: { ctx, value, dflt: value, min, max, rateMode: 'a-rate', timers: [], changed: changed || (() => {}) } });
+    defineProperty(p, S, { value: { ctx, value, dflt: value, min, max, rateMode: 'a-rate', timers: [], changed: changed || (() => {}) } });
     return p;
   }
   function at(param, t, fn) {
@@ -119,7 +113,7 @@
   }
   tag(AudioNode, 'AudioNode');
   function initNode(node, ctx, inputs, outputs) {
-    Object.defineProperty(node, S, { value: { ctx, inputs, outputs, out: new Set(), channelCount: 2, countMode: 'max', interp: 'speakers' } });
+    defineProperty(node, S, { value: { ctx, inputs, outputs, out: new Set(), channelCount: 2, countMode: 'max', interp: 'speakers' } });
     ctx[S].nodes.add(node);
     return node;
   }
@@ -356,7 +350,7 @@
   N.installHandlers(BaseAudioContext.prototype, ['statechange']);
 
   function initContext(c, rate, state) {
-    Object.defineProperty(c, S, { value: { rate, state, base: 0, since: performance.now(), voices: new Set(), nodes: new Set(), pumpTimer: 0, destination: null } });
+    defineProperty(c, S, { value: { rate, state, base: 0, since: performance.now(), voices: new Set(), nodes: new Set(), pumpTimer: 0, destination: null } });
     const d = Object.create(AudioDestinationNode.prototype);
     initNode(d, c, 1, 0);
     c[S].destination = d;
@@ -438,5 +432,5 @@
   // Node constructors taking the context first (`new GainNode(ctx)`)
   // already work; the AudioNode bases are not constructible.
   for (const [n, C] of [['AudioBuffer', AudioBuffer], ['AudioParam', AudioParam], ['AudioNode', AudioNode], ['AudioDestinationNode', AudioDestinationNode], ['GainNode', GainNode], ['AudioScheduledSourceNode', AudioScheduledSourceNode], ['AudioBufferSourceNode', AudioBufferSourceNode], ['OscillatorNode', OscillatorNode], ['BaseAudioContext', BaseAudioContext], ['AudioContext', AudioContext], ['OfflineAudioContext', OfflineAudioContext]]) define(n, C);
-  if (!g.webkitAudioContext) define('webkitAudioContext', AudioContext);
-})();
+  define('webkitAudioContext', AudioContext);
+})

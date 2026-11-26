@@ -3,17 +3,12 @@
 // transactions with auto-commit and abort/rollback, object stores (in-line
 // and out-of-line keys, key generators), indexes (unique, multiEntry),
 // cursors, key ranges, requests and events.
-(function () {
+(function (bindings, exports) {
   'use strict';
-  // The engine's own timers, bound now: internal tasks (port messages,
-  // idle callbacks, observer deliveries, ...) must not go through a page's
-  // replacement of these globals, which may wrap, delay or drop them.
-  const { setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame, cancelAnimationFrame, queueMicrotask } = globalThis;
-  const g = globalThis;
-  const N = g.__rhNative;
-  const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
-  const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
-  const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
+  const { g, N, EventTarget, Symbol, Map, setTimeout, queueMicrotask, defineProperty } = bindings;
+  const define = (name, value) => defineProperty(exports, name, { value, writable: true, configurable: true });
+  const hidden = (o, k, v) => defineProperty(o, k, { value: v, writable: true, configurable: true });
+  const tag = (C, name) => defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const S = Symbol('idb');
   const ILLEGAL = () => { throw new TypeError('Illegal constructor'); };
   const err = (name, msg) => new g.DOMException(msg, name);
@@ -146,7 +141,7 @@
   function indexRemovePrimary(idx, primaryKey) { idx.records = idx.records.filter((r) => cmp(r.primaryKey, primaryKey) !== 0); }
 
   // ---------------------------------------------------------- requests
-  class IDBRequest extends g.EventTarget {
+  class IDBRequest extends EventTarget {
     constructor() { super(); ILLEGAL(); }
     get result() { if (this[S].readyState !== 'done') throw err('InvalidStateError', "Failed to read the 'result' property from 'IDBRequest': The request has not finished."); return this[S].result; }
     get error() { if (this[S].readyState !== 'done') throw err('InvalidStateError', "Failed to read the 'error' property from 'IDBRequest': The request has not finished."); return this[S].error; }
@@ -202,7 +197,7 @@
   }
 
   // ------------------------------------------------------- transactions
-  class IDBTransaction extends g.EventTarget {
+  class IDBTransaction extends EventTarget {
     constructor() { super(); ILLEGAL(); }
     get objectStoreNames() { return g.__rhDOMStringList(this[S].scope.slice().sort()); }
     get mode() { return this[S].mode; }
@@ -278,7 +273,7 @@
   function processQueue() {}
 
   // ------------------------------------------------------------- database
-  class IDBDatabase extends g.EventTarget {
+  class IDBDatabase extends EventTarget {
     constructor() { super(); ILLEGAL(); }
     get name() { return this[S].name; }
     get version() { return this[S].version; }
@@ -723,5 +718,5 @@
   define('IDBOpenDBRequest', IDBOpenDBRequest);
   define('IDBRecord', IDBRecord);
   const factory = make(IDBFactory, {});
-  Object.defineProperty(g, 'indexedDB', { get() { return factory; }, configurable: true, enumerable: true });
-})();
+  defineProperty(exports, 'indexedDB', { get() { return factory; }, configurable: true, enumerable: true });
+})

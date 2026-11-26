@@ -1,20 +1,10 @@
 // Experimental WebGL software contexts with real buffers, shaders and pixels.
 // Unsupported commands set GL errors; extensions remain unavailable.
-(function () {
+(function (bindings, exports) {
   'use strict';
-  // The engine's own timers, bound now: internal tasks (port messages,
-  // idle callbacks, observer deliveries, ...) must not go through a page's
-  // replacement of these globals, which may wrap, delay or drop them.
-  const { setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame, cancelAnimationFrame, queueMicrotask } = globalThis;
-  const g = globalThis, N = g.__rhNative;
-  const HTMLCanvasElementC = g.HTMLCanvasElement;
-  const invoke = Reflect.apply;
-  const UniformFloats = Float32Array, UniformInts = Int32Array;
-  const uniformLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(UniformFloats.prototype), 'length').get;
-  // IDL conversion must not invoke page replacements of these builtins.
-  const truncateOffset = Math.trunc, finiteOffset = Number.isFinite;
-  const hidden = (o, k, value) => Object.defineProperty(o, k, { value, configurable: true, writable: true });
-  const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
+  const { g, N, Event, WeakMap, Symbol, queueMicrotask, HTMLCanvasElementC, invoke, UniformFloats, UniformInts, uniformLength, truncateOffset, finiteOffset, defineProperty, getOwnPropertyDescriptor, entries, ownKeys } = bindings;
+  const hidden = (o, k, value) => defineProperty(o, k, { value, configurable: true, writable: true });
+  const tag = (C, name) => defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const illegal = () => { throw new TypeError('Illegal constructor'); };
   const contexts = new WeakMap(), objects = new WeakMap(), locations = new WeakMap();
   const limits = N.webglLimits();
@@ -236,9 +226,9 @@
   class WebGLActiveInfo { constructor() { illegal(); } }
   class WebGLShaderPrecisionFormat { constructor() { illegal(); } }
   class WEBGL_debug_renderer_info { constructor() { illegal(); } }
-  for (const [k, v] of [['UNMASKED_VENDOR_WEBGL', 0x9245], ['UNMASKED_RENDERER_WEBGL', 0x9246]]) Object.defineProperty(WEBGL_debug_renderer_info.prototype, k, { value: v, enumerable: true });
-  class WebGLContextEvent extends g.Event {
-    constructor(type, init = {}) { super(type, init); Object.defineProperty(this, 'statusMessage', { value: String(init.statusMessage || ''), enumerable: true }); }
+  for (const [k, v] of [['UNMASKED_VENDOR_WEBGL', 0x9245], ['UNMASKED_RENDERER_WEBGL', 0x9246]]) defineProperty(WEBGL_debug_renderer_info.prototype, k, { value: v, enumerable: true });
+  class WebGLContextEvent extends Event {
+    constructor(type, init = {}) { super(type, init); defineProperty(this, 'statusMessage', { value: String(init.statusMessage || ''), enumerable: true }); }
   }
   class WebGLRenderingContext {
     constructor() { illegal(); }
@@ -527,7 +517,7 @@
     const r = call(s, command, p.id); if (r.error) return null; index >>>= 0;
     if (index >= r.value.length) { flag(s, GL.INVALID_VALUE); return null; }
     const item = r.value[index], result = Object.create(WebGLActiveInfo.prototype);
-    for (const key of ['name', 'size', 'type']) Object.defineProperty(result, key, { value: item[key], enumerable: true });
+    for (const key of ['name', 'size', 'type']) defineProperty(result, key, { value: item[key], enumerable: true });
     return result;
   }
   function uploadTexture(s, sub, args) {
@@ -585,9 +575,9 @@
   // These operations are deliberately unavailable until their rendering
   // semantics exist. Libraries get an observable GL error, never fake IDs.
   for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'cullFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'uniform2i', 'uniform3i', 'uniform4i']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
-  for (const [name, value] of Object.entries(GL)) {
-    Object.defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
-    Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
+  for (const [name, value] of entries(GL)) {
+    defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
+    defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
   }
   class WebGL2RenderingContext { constructor() { illegal(); }
     readBuffer(selection) {
@@ -639,17 +629,17 @@
   }
   function freshAttributes() { return Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, divisor: 0, current: [0, 0, 0, 1] })); }
   // These interfaces implement separate WebIDL mixins; WebGL2 is not a WebGL1 subclass.
-  for (const key of Reflect.ownKeys(WebGLRenderingContext.prototype)) if (key !== 'constructor') Object.defineProperty(WebGL2RenderingContext.prototype, key, Object.getOwnPropertyDescriptor(WebGLRenderingContext.prototype, key));
+  for (const key of ownKeys(WebGLRenderingContext.prototype)) if (key !== 'constructor') defineProperty(WebGL2RenderingContext.prototype, key, getOwnPropertyDescriptor(WebGLRenderingContext.prototype, key));
   // WebGL2 adds source/destination-offset overloads; reject these until implemented.
-  for (const [name, maxArgs] of Object.entries({ bufferData: 3, bufferSubData: 3, readPixels: 7, texImage2D: 9, texSubImage2D: 9, uniform1fv: 2, uniform2fv: 2, uniform3fv: 2, uniform4fv: 2, uniform1iv: 2, uniform2iv: 2, uniform3iv: 2, uniform4iv: 2, uniformMatrix2fv: 3, uniformMatrix3fv: 3, uniformMatrix4fv: 3 })) {
+  for (const [name, maxArgs] of entries({ bufferData: 3, bufferSubData: 3, readPixels: 7, texImage2D: 9, texSubImage2D: 9, uniform1fv: 2, uniform2fv: 2, uniform3fv: 2, uniform4fv: 2, uniform1iv: 2, uniform2iv: 2, uniform3iv: 2, uniform4iv: 2, uniformMatrix2fv: 3, uniformMatrix3fv: 3, uniformMatrix4fv: 3 })) {
     const base = WebGL2RenderingContext.prototype[name];
     hidden(WebGL2RenderingContext.prototype, name, function (...args) { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); if (args.length > maxArgs) { flag(s, GL.INVALID_OPERATION); return null; } return base.apply(this, args); });
   }
-  for (const [name, value] of Object.entries({ ...GL, VERTEX_ARRAY_BINDING: 0x85B5, MAX_ELEMENT_INDEX: 0x8D6B, VERTEX_ATTRIB_ARRAY_DIVISOR: 0x88FE, READ_FRAMEBUFFER: 0x8CA8, DRAW_FRAMEBUFFER: 0x8CA9, READ_FRAMEBUFFER_BINDING: 0x8CAA, DRAW_FRAMEBUFFER_BINDING: 0x8CA6, BACK: 0x0405, READ_BUFFER: 0x0C02, DRAW_BUFFER0: 0x8825, MAX_DRAW_BUFFERS: 0x8824, MAX_COLOR_ATTACHMENTS: 0x8CDF })) { Object.defineProperty(WebGL2RenderingContext, name, { value, enumerable: true }); if (!(name in WebGL2RenderingContext.prototype)) Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, enumerable: true }); }
+  for (const [name, value] of entries({ ...GL, VERTEX_ARRAY_BINDING: 0x85B5, MAX_ELEMENT_INDEX: 0x8D6B, VERTEX_ATTRIB_ARRAY_DIVISOR: 0x88FE, READ_FRAMEBUFFER: 0x8CA8, DRAW_FRAMEBUFFER: 0x8CA9, READ_FRAMEBUFFER_BINDING: 0x8CAA, DRAW_FRAMEBUFFER_BINDING: 0x8CA6, BACK: 0x0405, READ_BUFFER: 0x0C02, DRAW_BUFFER0: 0x8825, MAX_DRAW_BUFFERS: 0x8824, MAX_COLOR_ATTACHMENTS: 0x8CDF })) { defineProperty(WebGL2RenderingContext, name, { value, enumerable: true }); if (!(name in WebGL2RenderingContext.prototype)) defineProperty(WebGL2RenderingContext.prototype, name, { value, enumerable: true }); }
   for (const name of ['drawRangeElements', 'vertexAttribIPointer', 'vertexAttribI4i', 'vertexAttribI4ui', 'vertexAttribI4iv', 'vertexAttribI4uiv', 'texImage3D', 'texSubImage3D', 'copyTexSubImage3D', 'compressedTexImage3D', 'compressedTexSubImage3D', 'texStorage2D', 'texStorage3D', 'invalidateFramebuffer', 'invalidateSubFramebuffer', 'framebufferTextureLayer', 'renderbufferStorageMultisample', 'copyBufferSubData', 'getBufferSubData', 'bindBufferBase', 'bindBufferRange', 'getIndexedParameter', 'getInternalformatParameter', 'getUniformIndices', 'getActiveUniforms', 'getUniformBlockIndex', 'getActiveUniformBlockParameter', 'getActiveUniformBlockName', 'uniformBlockBinding', 'createQuery', 'deleteQuery', 'isQuery', 'beginQuery', 'endQuery', 'getQuery', 'getQueryParameter', 'createSampler', 'deleteSampler', 'isSampler', 'bindSampler', 'samplerParameteri', 'samplerParameterf', 'getSamplerParameter', 'fenceSync', 'isSync', 'deleteSync', 'clientWaitSync', 'waitSync', 'getSyncParameter', 'createTransformFeedback', 'deleteTransformFeedback', 'isTransformFeedback', 'bindTransformFeedback', 'beginTransformFeedback', 'endTransformFeedback', 'transformFeedbackVaryings', 'getTransformFeedbackVarying', 'pauseTransformFeedback', 'resumeTransformFeedback', 'getFragDataLocation', 'clearBufferiv', 'clearBufferuiv', 'clearBufferfv', 'clearBufferfi', 'uniform1ui', 'uniform2ui', 'uniform3ui', 'uniform4ui', 'uniform1uiv', 'uniform2uiv', 'uniform3uiv', 'uniform4uiv', 'uniformMatrix2x3fv', 'uniformMatrix3x2fv', 'uniformMatrix2x4fv', 'uniformMatrix4x2fv', 'uniformMatrix3x4fv', 'uniformMatrix4x3fv']) hidden(WebGL2RenderingContext.prototype, name, function () { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); flag(s, GL.INVALID_OPERATION); return null; });
-  for (const C of [WebGLObject, WebGL2RenderingContext, WebGLVertexArrayObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLFramebuffer, WebGLRenderbuffer, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
+  for (const C of [WebGLObject, WebGL2RenderingContext, WebGLVertexArrayObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLFramebuffer, WebGLRenderbuffer, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(exports, C.name, C); }
   tag(WEBGL_debug_renderer_info, 'WebGLDebugRendererInfo');
-  hidden(N, 'makeWebGLContext', function (canvas, surface, options, version = 1) {
+  hidden(exports, 'makeWebGLContext', function (canvas, surface, options, version = 1) {
     if (options !== null && typeof options !== 'object' && typeof options !== 'function') throw new TypeError('WebGL context attributes must be a dictionary');
     const alpha = options.alpha, depth = options.depth, premultipliedAlpha = options.premultipliedAlpha, powerPreference = options.powerPreference;
     const attrs = { alpha: alpha === undefined ? true : !!alpha, depth: depth === undefined ? true : !!depth, stencil: false, antialias: false, premultipliedAlpha: premultipliedAlpha === undefined ? true : !!premultipliedAlpha, preserveDrawingBuffer: !!options.preserveDrawingBuffer, powerPreference: powerPreference === undefined ? 'default' : String(powerPreference), failIfMajorPerformanceCaveat: !!options.failIfMajorPerformanceCaveat, desynchronized: false };
@@ -668,6 +658,6 @@
     N.canvasMarkDirty(surface);
     return ctx;
   });
-  hidden(N, 'resizeWebGLSurface', function (surface, w, h) { if (surface.ctx) resize(state(surface.ctx), w, h); });
-  hidden(N, 'webglSurfacePresented', function (surface) { const s = state(surface.ctx); if (!s.lost && !s.attrs.preserveDrawingBuffer) { const result = N.webglDiscard(surface.id); if (result.error) flag(s, result.error); } });
-})();
+  hidden(exports, 'resizeWebGLSurface', function (surface, w, h) { if (surface.ctx) resize(state(surface.ctx), w, h); });
+  hidden(exports, 'webglSurfacePresented', function (surface) { const s = state(surface.ctx); if (!s.lost && !s.attrs.preserveDrawingBuffer) { const result = N.webglDiscard(surface.id); if (result.error) flag(s, result.error); } });
+})
