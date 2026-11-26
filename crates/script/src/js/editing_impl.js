@@ -1080,7 +1080,7 @@
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
   const richCommands = new Set(['createlink', 'unlink', 'indent', 'outdent', 'removeformat', 'inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
   function supported(cmd) {
-    return blockCommand(cmd) || valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
+    return blockCommand(cmd) || valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall' || cmd === 'copy' || cmd === 'cut';
   }
   function editingHost(node) {
     let el = node?.nodeType === 1 ? node : node?.parentElement;
@@ -1118,6 +1118,8 @@
   function enabled(cmd, t) {
     if (preferences.has(cmd) || cmd === 'selectall') return true;
     if (!t) return false;
+    if (cmd === 'copy' || cmd === 'cut') return t.control ? t.control.type !== 'password' &&
+      t.control.selectionStart !== t.control.selectionEnd : !t.range.collapsed;
     if (textCommands.has(cmd) || cmd === 'inserthtml') return true;
     if (t.control && (cmd === 'insertlinebreak' || cmd === 'insertparagraph')) return t.control.localName === 'textarea';
     return !t.control && (richCommands.has(cmd) || formats.has(cmd) || valueFormats.has(cmd) || blockCommand(cmd)) &&
@@ -1615,6 +1617,10 @@
       return true;
     }
     const t = target(doc);
+    if (cmd === 'copy' || cmd === 'cut') {
+      if (!doc.defaultView?.navigator.userActivation?.isActive) return false;
+      return clipboardGesture(doc, cmd) !== false;
+    }
     if (!enabled(cmd, t)) return false;
     if (t?.leaf && ['inserttext','inserthtml','insertlinebreak','insertparagraph'].includes(cmd)) {
       t.range.setStartBefore(t.leaf);
@@ -2066,6 +2072,73 @@
     return spec.run(doc, state, () => spec[method](name));
   }
 
+  // Only a user paste receives a payload from the embedder. Copy and cut
+  // write the current selection or the formats set by a canceled event.
+  function clipboardGesture(doc, cmd, text = '', html = null) {
+    const t = target(doc), control = t?.control;
+    const active = doc.activeElement;
+    const field = active && /^(input|textarea)$/.test(active.localName) ? active : null;
+    if (field && (field.disabled || cmd !== 'copy' && field.readOnly || cmd !== 'paste' && field.type === 'password')) return false;
+    const sel = doc.getSelection();
+    const host = field || t?.host || doc.body;
+    if (!host) return false;
+    const paste = cmd === 'paste';
+    const transfer = N.editingTransfer(paste ? text : null, paste ? html : null);
+    if (!N.editingClipboardEvent(host, cmd, '', transfer, null)) {
+      if (!paste && transfer.types.length) {
+        const copied = transfer.getData('text/plain');
+        N.editingStoreClipboard(copied, transfer.types.includes('text/html') ? transfer.getData('text/html') : null);
+        return copied;
+      }
+      return true;
+    }
+    if (doc.activeElement !== active || !host.isConnected) return true;
+    if (!paste) {
+      if (field) {
+        if (field.type === 'password' || field.selectionStart == null || field.selectionStart === field.selectionEnd) return false;
+        text = field.value.slice(field.selectionStart, field.selectionEnd);
+      } else {
+        if (!sel?.rangeCount || sel.isCollapsed) return false;
+        const container = doc.createElement('div');
+        container.appendChild(sel.getRangeAt(0).cloneContents());
+        html = container.innerHTML;
+        text = sel.toString();
+      }
+      if (cmd === 'copy') {
+        N.editingStoreClipboard(text, html);
+        return text;
+      }
+    }
+    if (!t || field && (!control || field.readOnly || field.disabled)) return false;
+    const type = paste ? 'insertFromPaste' : 'deleteByCut';
+    const data = paste && control ? text : null;
+    const payload = paste && !control ? transfer : null;
+    if (!N.editingClipboardEvent(host, 'beforeinput', type, payload, data)) return true;
+    const live = target(doc);
+    if (doc.activeElement !== active || !live || (live.control || live.host) !== host) return true;
+    if (control) {
+      const start = control.selectionStart, end = control.selectionEnd;
+      let inserted = paste ? text.replace(/\r\n?/g, '\n') : '';
+      if (control.localName === 'input') inserted = inserted.replace(/\n/g, '');
+      if (control.maxLength >= 0) inserted = inserted.slice(0, Math.max(0, control.maxLength - control.value.length + end - start));
+      if (start === end && !inserted) return true;
+      control.value = control.value.slice(0, start) + inserted + control.value.slice(end);
+      control.setSelectionRange(start + inserted.length, start + inserted.length);
+    } else {
+      if (paste && !text && live.range.collapsed || !paste && live.range.collapsed) return true;
+      const state = context(doc);
+      // The gesture owns its input event and may run as a legacy copy/cut
+      // command. The normal edit still supplies the DOM and caret behavior.
+      const prior = state.userEdit;
+      state.userEdit = true;
+      try { execute(doc, state, paste ? 'inserttext' : 'delete', paste ? text : ''); }
+      finally { state.userEdit = prior; }
+    }
+    if (!paste) N.editingStoreClipboard(text, html);
+    N.editingClipboardEvent(host, 'input', type, payload, data);
+    return paste ? true : text;
+  }
+
   function userEdit(host, cmd, value) {
     const doc = host.ownerDocument, state = context(doc), t = target(doc);
     if (state.executing || !t || t.host !== host) return false;
@@ -2125,5 +2198,5 @@
       return valueFormats.has(cmd) ? selectedValue(state, target(this), cmd, false) : cmd === 'defaultparagraphseparator' ? state.separator : '';
     },
   };
-  return { userEdit, methods };
+  return { userEdit, clipboardGesture, methods };
 })

@@ -3,7 +3,60 @@ use crate::scripting::{input_event_init, EngineEnv, ScriptOutcome};
 use crate::{Engine, Modifiers, Page};
 use rabbithole_script::EventDetail;
 
+#[derive(Default)]
+pub(crate) struct EditClipboard {
+    serial: u64,
+    platform_copy: String,
+    pub(crate) text: String,
+    pub(crate) html: Option<String>,
+}
+
 impl Engine {
+    pub fn clipboard_serial(&self) -> u64 { self.edit_clipboard.borrow().serial }
+
+    pub fn copied_text_since(&self, serial: u64) -> Option<String> {
+        let clip = self.edit_clipboard.borrow();
+        (clip.serial != serial).then(|| clip.platform_copy.clone())
+    }
+
+    /// Keyboard default after an uncancelled keydown. GUI paste supplies its
+    /// own text for this gesture. Headless input uses this Engine's clipboard.
+    pub fn clipboard_key_default(&self, page: &mut Page, key: &str, mods: Modifiers, platform_text: Option<&str>) -> Option<ScriptOutcome> {
+        if !(mods.ctrl || mods.meta) || mods.alt { return None; }
+        let command = match key {
+            "c" | "C" if !mods.shift => "copy",
+            "x" | "X" if !mods.shift => "cut",
+            "v" | "V" => "paste",
+            _ => return None,
+        };
+        let (text, html) = match (command, platform_text) {
+            ("paste", Some(text)) => (text.to_owned(), None),
+            ("paste", None) => {
+                let clip = self.edit_clipboard.borrow();
+                (clip.text.clone(), if mods.shift { None } else { clip.html.clone() })
+            }
+            _ => (String::new(), None),
+        };
+        self.ensure_script_host(page);
+        let mut host = page.script.host.take()?;
+        let mut env = EngineEnv { engine: self, page };
+        host.realm().begin_task();
+        let handled = host.clipboard_gesture(&mut env, command, &text, html.as_deref());
+        host.run_jobs(&mut env);
+        host.realm().set_deadline(None);
+        page.script.host = Some(host);
+        match handled {
+            rabbithole_script::ClipboardGesture::Ignored => return None,
+            rabbithole_script::ClipboardGesture::Copied(text) if platform_text.is_some() && command != "paste" => {
+                let mut clip = self.edit_clipboard.borrow_mut();
+                clip.platform_copy = text;
+                clip.serial = clip.serial.wrapping_add(1);
+            }
+            _ => {}
+        }
+        Some(self.settle(page, false))
+    }
+
     /// Called after keydown. A handled key consumes the GUI default even
     /// if a beforeinput listener prevents the edit or moves focus away.
     pub fn editable_key_default(&self, page: &mut Page, key: &str, mods: Modifiers) -> Option<ScriptOutcome> {

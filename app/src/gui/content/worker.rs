@@ -530,7 +530,12 @@ impl Worker {
                 self.dispatch_to(node, "change", plain_init(false));
             }
             ToContent::CopySelection => {
-                if let Some(text) = self.selection_text() {
+                let serial = self.engine.clipboard_serial();
+                let mods = Modifiers { ctrl: true, ..Default::default() };
+                if let Some(out) = self.page.as_mut().and_then(|p| self.engine.clipboard_key_default(p, "c", mods, Some(""))) {
+                    if let Some(text) = self.engine.copied_text_since(serial) { self.send(FromContent::Clipboard(text)); }
+                    self.apply_outcome(out);
+                } else if let Some(text) = self.selection_text() {
                     self.send(FromContent::Clipboard(text));
                 }
             }
@@ -1984,8 +1989,11 @@ impl Worker {
     /// Returns true when a listener called `preventDefault()`.
     fn page_key_event(&mut self, k: &KeyInput) -> bool {
         // Keys go into a focused iframe's document.
-        let routed = self.page.as_mut().and_then(|page| self.engine.frame_key_event(page, &k.key, &k.code, k.pressed, k.mods));
+        let copying = k.pressed && (k.mods.ctrl || k.mods.meta) && !k.mods.alt && !k.mods.shift && matches!(k.key.as_str(), "c" | "C" | "x" | "X");
+        let serial = copying.then(|| self.engine.clipboard_serial());
+        let routed = self.page.as_mut().and_then(|page| self.engine.frame_key_event_with_paste(page, &k.key, &k.code, k.pressed, k.mods, Some(k.clipboard.as_deref().unwrap_or(""))));
         if let Some(out) = routed {
+            if let Some(text) = serial.and_then(|old| self.engine.copied_text_since(old)) { self.send(FromContent::Clipboard(text)); }
             self.apply_outcome(out);
             return k.key != "Tab";
         }
@@ -2013,6 +2021,18 @@ impl Worker {
         }
         if self.page_key_event(k) {
             return;
+        }
+        if (k.mods.ctrl || k.mods.meta) && !k.mods.alt && matches!(k.key.as_str(), "c" | "C" | "x" | "X" | "v" | "V") {
+            let serial = self.engine.clipboard_serial();
+            if let Some(out) = self.page.as_mut().and_then(|p| self.engine.clipboard_key_default(p, &k.key, k.mods, Some(k.clipboard.as_deref().unwrap_or("")))) {
+                if matches!(k.key.as_str(), "c" | "C" | "x" | "X") {
+                    if let Some(text) = self.engine.copied_text_since(serial) { self.send(FromContent::Clipboard(text)); }
+                }
+                self.apply_outcome(out);
+                self.sync_edit_from_page();
+                self.dirty = true;
+                return;
+            }
         }
         if let Some(edit) = self.page.as_mut().and_then(|p| self.engine.editable_key_default(p, &k.key, k.mods)) {
             self.apply_outcome(edit);

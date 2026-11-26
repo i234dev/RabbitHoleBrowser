@@ -343,6 +343,11 @@ impl HostEnv for EngineEnv<'_> {
         let _fonts = rabbithole_style::values::scope_unit_fonts(Some(self.page.fonts.clone()), rabbithole_style::values::font_unit_skip(&self.page.styles.font_faces));
         Some(rabbithole_style::values::font_units(&s).1 * s.computed_font_size())
     }
+    fn write_edit_clipboard(&mut self, text: String, html: Option<String>) {
+        let mut clipboard = self.engine.edit_clipboard.borrow_mut();
+        clipboard.text = text;
+        clipboard.html = html;
+    }
     fn author_white_space(&mut self, frame: Option<u64>, node: NodeId) -> bool {
         let read = |page: &Page| {
             let se = page.incr.style_engine()?;

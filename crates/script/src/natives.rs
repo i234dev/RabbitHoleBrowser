@@ -235,6 +235,39 @@ fn editing_impl(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     }
 }
 
+fn editing_store_clipboard(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let text = arg_str(realm, args, 0)?;
+    let html = match arg(args, 1).v() { V::String(s) => Some(s.to_rust_string()), _ => None };
+    with_env(|env| env.write_edit_clipboard(text, html));
+    Ok(Value::Undefined)
+}
+
+/// The private editing implementation attaches the operation's DataTransfer
+/// to clipboard/input events. Script-created events retain their own trust.
+fn editing_clipboard_event(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let target = this_node(realm, &arg(args, 0), "editingClipboardEvent")?;
+    let ty = arg_str(realm, args, 1)?;
+    let op = arg_str(realm, args, 2)?;
+    let editing = matches!(ty.as_str(), "beforeinput" | "input");
+    if !(editing && matches!(op.as_str(), "insertFromPaste" | "deleteByCut") ||
+        matches!(ty.as_str(), "copy" | "cut" | "paste") && op.is_empty()) {
+        return Ok(Value::Bool(false));
+    }
+    let transfer = arg(args, 3);
+    let data = match arg(args, 4).v() { V::String(s) => Some(s.to_rust_string()), _ => None };
+    let target_range = if editing && ty == "beforeinput" && !matches!(with_doc(target.doc, |d| d.tag(target.node).map(str::to_owned)).as_deref(), Some("input" | "textarea")) {
+        with_doc(target.doc, |d| d.selection().map(|s| (s.start, s.end)))
+    } else { None };
+    let detail = editing.then_some(crate::EventDetail::Input { data, input_type: op, is_composing: false, target_range });
+    let init = crate::EventInit { bubbles: true, cancelable: ty != "input", detail };
+    let class = if editing { "InputEvent" } else { "ClipboardEvent" };
+    let id = crate::events::create_event(realm, class, &ty, &init, true);
+    realm.define_property(id, if editing { "dataTransfer" } else { "clipboardData" }, transfer, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
+    if let Some(e) = realm.host_data_mut::<crate::events::EventData>(id) { e.composed = true; }
+    let result = crate::events::dispatch_object(realm, TargetKey::Node(target), id, None);
+    Ok(Value::Bool(!result.default_prevented))
+}
+
 fn editing_plaintext(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let html = arg_str(realm, args, 0)?;
     let (w, h) = with_env(|env| env.viewport());
@@ -587,6 +620,9 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
     realm.define_method(o, "canvasColor", 1, crate::cssom::canvas_color);
+    realm.define_method(o, "editingStoreClipboard", 2, editing_store_clipboard);
+    realm.define_method(o, "editingClipboardEvent", 5, editing_clipboard_event);
+    realm.mark_gc_safe(o, "editingClipboardEvent");
     realm.define_method(o, "editingPlaintext", 1, editing_plaintext);
     realm.mark_gc_safe(o, "editingPlaintext");
     realm.define_method(o, "editingAuthorWhiteSpace", 1, editing_author_white_space);

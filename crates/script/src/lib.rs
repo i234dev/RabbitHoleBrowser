@@ -188,6 +188,16 @@ pub enum DefaultAction {
 }
 
 /// What a [`ScriptHost`] entry point returns when a Rust panic stopped it.
+pub enum ClipboardGesture {
+    Ignored,
+    Handled,
+    Copied(String),
+}
+
+impl PanicFallback for ClipboardGesture {
+    fn after_panic(_: &str) -> Self { Self::Ignored }
+}
+
 pub(crate) trait PanicFallback {
     fn after_panic(msg: &str) -> Self;
 }
@@ -603,6 +613,22 @@ impl ScriptHost {
             let changed = host::call_logged(realm, &factory, Value::Undefined, &[host, Value::str(command), Value::str(text)], "keyboard editing");
             shadow::flush(realm);
             realm.to_boolean(&changed)
+        })
+    }
+
+    /// A clipboard gesture delivered by the embedder. Only this entry point
+    /// receives data supplied by the UI for the current paste.
+    pub fn clipboard_gesture(&mut self, env: &mut dyn HostEnv, command: &str, text: &str, html: Option<&str>) -> ClipboardGesture {
+        self.enter(env, |realm| {
+            let Some(f) = state().borrow().factories.get("clipboardGesture").cloned() else { return ClipboardGesture::Ignored };
+            let args = [Value::str(command), Value::str(text), html.map(Value::str).unwrap_or(Value::Null)];
+            let result = host::call_logged(realm, &f, Value::Undefined, &args, "clipboard editing");
+            shadow::flush(realm);
+            match result.v() {
+                V::String(text) => ClipboardGesture::Copied(text.to_rust_string()),
+                V::Bool(true) => ClipboardGesture::Handled,
+                _ => ClipboardGesture::Ignored,
+            }
         })
     }
 

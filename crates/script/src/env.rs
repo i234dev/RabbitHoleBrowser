@@ -61,6 +61,8 @@ pub trait HostEnv {
     fn elements_from_point(&mut self, _x: f32, _y: f32) -> Option<Vec<NodeId>> {
         None
     }
+    /// Update the embedder's in-memory editing clipboard.
+    fn write_edit_clipboard(&mut self, _text: String, _html: Option<String>) {}
     fn author_white_space(&mut self, _frame: Option<u64>, _node: NodeId) -> bool { false }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>>;
     /// The x-height (in px) of the first available font of a node's

@@ -9,6 +9,7 @@
   let impl = null;
   const api = () => impl || (impl = N.editingImpl(false)(N, N.editingImpl(true)(N)));
   const apply = Reflect.apply;
+  N.setFactory('clipboardGesture', (cmd, text, html) => api().clipboardGesture(document, cmd, text, html));
   N.setFactory('userEdit', function (host, cmd, value) { return api().userEdit(host, cmd, value); });
   const methods = {
     execCommand(name, showUI = false, value = '') { return apply(api().methods.execCommand, this, arguments); },

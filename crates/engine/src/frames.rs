@@ -1322,12 +1322,16 @@ impl Engine {
     /// child's focused element (or body), and printable keys / Backspace
     /// edit a focused text control there. None when no frame has focus.
     pub fn frame_key_event(&self, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers) -> Option<ScriptOutcome> {
+        self.frame_key_event_with_paste(page, key, code, pressed, m, None)
+    }
+
+    pub fn frame_key_event_with_paste(&self, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers, paste: Option<&str>) -> Option<ScriptOutcome> {
         let node = page.state.focused?;
         let i = Self::child_index(page, node)?;
         page.frames.children[i].page.as_ref()?;
-        let mut o = self.with_child(page, i, |child| match self.frame_key_event(child, key, code, pressed, m) {
+        let mut o = self.with_child(page, i, |child| match self.frame_key_event_with_paste(child, key, code, pressed, m, paste) {
             Some(o) => o,
-            None => key_into_page(self, child, key, code, pressed, m),
+            None => key_into_page(self, child, key, code, pressed, m, paste),
         })?;
         if o.relayout {
             page.frames.children[i].dirty = true;
@@ -1360,13 +1364,13 @@ impl Engine {
     /// (frames, WebDriver-style test automation): `keydown`/`keyup` to the
     /// focused element and simple text editing.
     pub fn key_input(&self, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers) -> ScriptOutcome {
-        key_into_page(self, page, key, code, pressed, m)
+        key_into_page(self, page, key, code, pressed, m, None)
     }
 }
 
 /// Keyboard input for a page without the embedder's editing machinery
 /// (a frame): key events to the focused element, simple text editing.
-fn key_into_page(engine: &Engine, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers) -> ScriptOutcome {
+fn key_into_page(engine: &Engine, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers, paste: Option<&str>) -> ScriptOutcome {
     let target = page.state.focused.or_else(|| page.doc.body());
     let Some(target) = target else { return ScriptOutcome::default() };
     let init = crate::scripting::key_init(key, code, m.ctrl, m.shift, m.alt, m.meta, false);
@@ -1374,7 +1378,7 @@ fn key_into_page(engine: &Engine, page: &mut Page, key: &str, code: &str, presse
     if !pressed || out.default_prevented || out.navigation.is_some() {
         return out;
     }
-    if let Some(edit) = engine.editable_key_default(page, key, m) {
+    if let Some(edit) = engine.clipboard_key_default(page, key, m, paste).or_else(|| engine.editable_key_default(page, key, m)) {
         out.merge(edit);
         return out;
     }
