@@ -1270,6 +1270,19 @@ fn child_index(doc: &Document, node: NodeId, of_type: bool, from_end: bool) -> i
     i
 }
 
+/// Does an attribute selector (without namespace) match the value `v`
+/// (`None` = attribute absent)? For incremental restyle: comparing the
+/// match of an attribute's old and new values.
+pub fn attr_value_matches(a: &AttrSelector, v: Option<&str>) -> bool {
+    let Some(v) = v else { return false };
+    a.op == AttrOp::Exists
+        || if a.case_insensitive {
+            attr_op_matches(&a.op, &v.to_ascii_lowercase(), &a.value.to_ascii_lowercase())
+        } else {
+            attr_op_matches(&a.op, v, &a.value)
+        }
+}
+
 /// Compare an attribute value `v` with a selector's `want` by `op`.
 fn attr_op_matches(op: &AttrOp, v: &str, want: &str) -> bool {
     match op {

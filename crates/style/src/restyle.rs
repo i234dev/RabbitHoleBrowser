@@ -159,7 +159,12 @@ const R_HAS: u8 = 16;
 struct InvalidationMap {
     classes: HashMap<String, u8>,
     ids: HashMap<String, u8>,
+    /// Attributes pseudo-classes depend on (`:checked`, `:dir()`, ...).
     attrs: HashMap<String, u8>,
+    /// Attribute selectors by attribute name, with their relation: a
+    /// change restyles by the relations of the selectors whose match
+    /// differs between the old and the new value.
+    attr_sels: HashMap<String, Vec<(rabbithole_css::selector::AttrSelector, u8)>>,
     /// Relation of `:dir()` to the content of `dir=auto` elements.
     dir_auto: u8,
     /// Compounds using `:hover` / `:active` / `:focus`, so a state change
@@ -214,6 +219,11 @@ struct HasRule {
     tag: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
+    /// The rest of the compound (without its `:has()` pseudo-classes) and
+    /// the compounds enclosing it through `:not()` / `:is()` / `:where()`
+    /// that match the same element: where one does not match, the `:has()`
+    /// result cannot matter.
+    rest: Vec<Compound>,
     list: Vec<(Combinator, Selector)>,
     /// Some argument starts with a descendant / child combinator, or with
     /// a sibling one.
@@ -225,7 +235,7 @@ struct HasRule {
 impl HasRule {
     /// Could the compound match `node` apart from its pseudo-classes and
     /// attributes? (Otherwise its `:has()` result cannot matter there.)
-    fn prefilter(&self, doc: &Document, node: NodeId) -> bool {
+    fn prefilter(&self, doc: &Document, node: NodeId, state: &MatchState) -> bool {
         let Some(el) = doc.element(node) else { return false };
         if self.tag.as_deref().is_some_and(|t| t != "*" && !el.tag.eq_ignore_ascii_case(t)) {
             return false;
@@ -239,7 +249,7 @@ impl HasRule {
                 return false;
             }
         }
-        true
+        self.rest.iter().all(|c| rabbithole_css::selector::match_compound_with(c, doc, node, state))
     }
 }
 
@@ -247,7 +257,7 @@ impl InvalidationMap {
     fn build(scopes: &ScopeIndex) -> InvalidationMap {
         let mut m = InvalidationMap::default();
         for r in std::iter::once(&scopes.doc).chain(scopes.shadow.iter()).flat_map(|ix| ix.rules.iter()) {
-            m.add_selector(&r.selector, R_SELF, false);
+            m.add_selector(&r.selector, R_SELF, false, &[]);
         }
         m
     }
@@ -273,14 +283,16 @@ impl InvalidationMap {
     fn add_groups(&mut self, scopes: &ScopeIndex, groups: &[usize]) {
         for &g in groups {
             for r in scopes.shadow[g].rules.iter().filter(|r| !r.is_ua) {
-                self.add_selector(&r.selector, R_SELF, false);
+                self.add_selector(&r.selector, R_SELF, false, &[]);
             }
         }
     }
 
     /// Record the features of `sel`, whose subject relates to the element
     /// that matters as `outer` (nested selectors) — `in_has` forces global.
-    fn add_selector(&mut self, sel: &Selector, outer: u8, in_has: bool) {
+    /// `same`: compounds that must match the element of `sel`'s subject
+    /// (the compounds `sel` is nested in, for `:has()` prefilters).
+    fn add_selector(&mut self, sel: &Selector, outer: u8, in_has: bool, same: &[Compound]) {
         let last = sel.compounds.len() - 1;
         for (i, c) in sel.compounds.iter().enumerate() {
             let own = if i == last {
@@ -303,11 +315,23 @@ impl InvalidationMap {
             if i > 0 && matches!(sel.combinators[i - 1], Combinator::NextSibling | Combinator::SubsequentSibling) {
                 self.sibling_follow |= rel;
             }
-            self.add_compound(c, rel, in_has);
+            self.add_compound(c, rel, in_has, if i == last { same } else { &[] });
         }
     }
 
-    fn add_compound(&mut self, c: &Compound, rel: u8, in_has: bool) {
+    fn add_compound(&mut self, c: &Compound, rel: u8, in_has: bool, same: &[Compound]) {
+        // For selectors nested in this compound's `:not()` / `:is()` /
+        // `:where()`: their subject is this compound's element.
+        let nests = c.pseudos.iter().any(|p| matches!(p, Pseudo::Not(_) | Pseudo::Is(_) | Pseudo::Where(_) | Pseudo::Nesting(_)));
+        let constrains = c.tag.as_deref().is_some_and(|t| t != "*") || c.id.is_some() || !c.classes.is_empty() || !c.attrs.is_empty();
+        let nested_same: Vec<Compound> = if !nests {
+            Vec::new()
+        } else if constrains {
+            let plain = Compound { namespace: c.namespace.clone(), tag: c.tag.clone(), id: c.id.clone(), classes: c.classes.clone(), attrs: c.attrs.clone(), pseudos: Vec::new(), pseudo_element: None };
+            same.iter().cloned().chain(std::iter::once(plain)).collect()
+        } else {
+            same.to_vec()
+        };
         if in_has {
             let tag = c.tag.as_ref().filter(|t| *t != "*");
             let nested = c.pseudos.iter().any(|p| matches!(p, Pseudo::Is(_) | Pseudo::Where(_) | Pseudo::Nesting(_)));
@@ -335,7 +359,12 @@ impl InvalidationMap {
             *self.ids.entry(id.clone()).or_default() |= rel;
         }
         for a in &c.attrs {
-            *self.attrs.entry(a.name.clone()).or_default() |= rel;
+            let sels = self.attr_sels.entry(a.name.clone()).or_default();
+            if let Some(e) = sels.iter_mut().find(|(s, _)| s == a) {
+                e.1 |= rel;
+            } else {
+                sels.push((a.clone(), rel));
+            }
         }
         for p in &c.pseudos {
             match p {
@@ -353,7 +382,7 @@ impl InvalidationMap {
                     if matches!(p, Pseudo::NthChildOf(..)) { self.nth_fwd |= rel; } else { self.nth_back |= rel; }
                     // A filter change can alter sibling membership, including
                     // complex selectors depending on ancestors or :has().
-                    for s in list { self.add_selector(s, R_GLOBAL, false); }
+                    for s in list { self.add_selector(s, R_GLOBAL, false, &[]); }
                 }
                 Pseudo::NthChild(..) | Pseudo::NthOfType(..) | Pseudo::FirstOfType => self.nth_fwd |= rel,
                 Pseudo::NthLastChild(..) | Pseudo::NthLastOfType(..) | Pseudo::LastOfType => self.nth_back |= rel,
@@ -405,11 +434,11 @@ impl InvalidationMap {
                 }
                 Pseudo::Not(list) | Pseudo::Is(list) | Pseudo::Where(list) => {
                     for s in list {
-                        self.add_selector(s, rel, in_has);
+                        self.add_selector(s, rel, in_has, &nested_same);
                     }
                 }
                 Pseudo::Nesting(list) => {
-                    for s in list.iter() { self.add_selector(s, rel, in_has); }
+                    for s in list.iter() { self.add_selector(s, rel, in_has, &nested_same); }
                 }
                 Pseudo::Has(list) => {
                     self.has_has = true;
@@ -417,10 +446,21 @@ impl InvalidationMap {
                     let side = list.iter().any(|(comb, _)| matches!(comb, Combinator::NextSibling | Combinator::SubsequentSibling));
                     self.has_sib |= side;
                     if rel & !R_SELF != 0 && !in_has {
+                        // The compound without its `:has()` (and without a
+                        // pseudo-element, which the subject check ignores).
+                        let mut rest = same.to_vec();
+                        if !c.attrs.is_empty() || c.pseudos.iter().any(|p| !matches!(p, Pseudo::Has(_))) {
+                            rest.push(Compound {
+                                pseudos: c.pseudos.iter().filter(|p| !matches!(p, Pseudo::Has(_))).cloned().collect(),
+                                pseudo_element: None,
+                                ..c.clone()
+                            });
+                        }
                         self.has_rules.push(HasRule {
                             tag: c.tag.clone(),
                             id: c.id.clone(),
                             classes: c.classes.clone(),
+                            rest,
                             list: list.clone(),
                             down: list.iter().any(|(comb, _)| matches!(comb, Combinator::Descendant | Combinator::Child)),
                             side,
@@ -428,12 +468,12 @@ impl InvalidationMap {
                         });
                     }
                     for (_, s) in list {
-                        self.add_selector(s, R_HAS, true);
+                        self.add_selector(s, R_HAS, true, &[]);
                     }
                 }
                 Pseudo::Host(list) | Pseudo::HostContext(list) | Pseudo::Slotted(list) => {
                     for s in list {
-                        self.add_selector(s, rel | R_DESC, in_has);
+                        self.add_selector(s, rel | R_DESC, in_has, &[]);
                     }
                 }
                 _ => {}
@@ -600,7 +640,12 @@ impl Marks<'_> {
         }
         let rules = self.has_rules;
         for (i, rule) in rules.iter().enumerate() {
-            if !(if sibling { rule.side } else { rule.down }) || !rule.prefilter(self.doc, a) {
+            if !(if sibling { rule.side } else { rule.down }) {
+                continue;
+            }
+            if !rule.prefilter(self.doc, a, self.state) {
+                // Not evaluated now: a cached result would go stale.
+                self.has_cache.remove(&(a, i as u32));
                 continue;
             }
             if self.has_budget == 0 {
@@ -1083,6 +1128,13 @@ impl StyleEngine {
                     m.mark(node, N_SELF);
                     let mut rel = inval.attrs.get(name.as_str()).copied().unwrap_or(0);
                     let new = doc.attr(node, name);
+                    if let Some(sels) = inval.attr_sels.get(name.as_str()) {
+                        for (a, r) in sels {
+                            if a.any_namespace || a.namespace.is_some() || rabbithole_css::selector::attr_value_matches(a, old.as_deref()) != rabbithole_css::selector::attr_value_matches(a, new) {
+                                rel |= *r;
+                            }
+                        }
+                    }
                     match name.as_str() {
                         "class" => {
                             let o: HashSet<&str> = old.as_deref().unwrap_or("").split_ascii_whitespace().collect();

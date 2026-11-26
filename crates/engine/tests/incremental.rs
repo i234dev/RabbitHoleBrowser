@@ -373,6 +373,7 @@ fn randomized_mutations_match_full_recompute() {
         body { counter-reset: c } .o { counter-increment: c } .o::before { content: counter(c) ". " } .p::after { content: open-quote "q" close-quote }
         .q:has(> .a) { outline: 2px solid red; padding-top: 2px } .r { position: absolute; left: 5px; width: 20px }
         .l:has(.c) .b { padding-left: 6px } .m:has(+ .d) ~ .p { color: green } .n:not(:has(> :not(:empty))) + .i { width: 12px }
+        .p:not(:has(.a)) .c { display: block; height: 3px } .k:is(:has(+ .e)) { color: blue }
         section:has(~ .h) > span { margin-right: 5px }
     "#;
     let classes = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", ""];
