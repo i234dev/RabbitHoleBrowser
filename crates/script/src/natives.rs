@@ -235,6 +235,12 @@ fn editing_impl(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     }
 }
 
+fn editing_plaintext(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let html = arg_str(realm, args, 0)?;
+    let (w, h) = with_env(|env| env.viewport());
+    Ok(Value::str(&crate::inner_text::text_from_html(&html, w, h)))
+}
+
 fn editing_author_white_space(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &arg(args, 0), "editingAuthorWhiteSpace")?;
     let frame = (n.doc & FRAME_DOC != 0).then_some((n.doc & !FRAME_DOC) as u64);
@@ -581,6 +587,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
     realm.define_method(o, "canvasColor", 1, crate::cssom::canvas_color);
+    realm.define_method(o, "editingPlaintext", 1, editing_plaintext);
+    realm.mark_gc_safe(o, "editingPlaintext");
     realm.define_method(o, "editingAuthorWhiteSpace", 1, editing_author_white_space);
     realm.mark_gc_safe(o, "editingAuthorWhiteSpace");
     realm.define_method(o, "editingInput", 3, editing_input);

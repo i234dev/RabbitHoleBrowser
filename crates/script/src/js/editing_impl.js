@@ -1105,7 +1105,8 @@
   function enabled(cmd, t) {
     if (preferences.has(cmd) || cmd === 'selectall') return true;
     if (!t) return false;
-    if (textCommands.has(cmd)) return true;
+    if (textCommands.has(cmd) || cmd === 'inserthtml') return true;
+    if (t.control && (cmd === 'insertlinebreak' || cmd === 'insertparagraph')) return t.control.localName === 'textarea';
     return !t.control && (richCommands.has(cmd) || formats.has(cmd) || valueFormats.has(cmd) || blockCommand(cmd)) &&
       (t.host.contentEditable !== 'plaintext-only' || cmd === 'insertlinebreak' || cmd === 'insertparagraph');
   }
@@ -1120,7 +1121,10 @@
   function editControl(control, cmd, text) {
     let start = control.selectionStart, end = control.selectionEnd;
     const old = control.value;
-    if (cmd !== 'inserttext') {
+    const line = cmd === 'insertlinebreak' || cmd === 'insertparagraph';
+    if (line) text = '\n';
+    else if (cmd === 'inserttext' && control.localName === 'input') text = text.replace(/[\r\n]/g, '');
+    else if (cmd !== 'inserttext') {
       text = '';
       if (start === end) {
         if (cmd === 'delete' && start) {
@@ -1134,7 +1138,7 @@
     if (start === end && !text) return;
     control.value = old.slice(0, start) + text + old.slice(end);
     control.setSelectionRange(start + text.length, start + text.length);
-    input(control, inputTypeFor(cmd), cmd === 'inserttext' ? text : null);
+    input(control, line ? (cmd === 'insertparagraph' ? 'insertParagraph' : 'insertLineBreak') : inputTypeFor(cmd), cmd === 'inserttext' ? text : null);
   }
   function adjacentNode(node, host, forward) {
     while (node && node !== host) {
@@ -1575,6 +1579,10 @@
     }
     const t = target(doc);
     if (!enabled(cmd, t)) return false;
+    if (cmd === 'inserthtml' && (t.control || t.host.contentEditable === 'plaintext-only')) {
+      value = N.editingPlaintext(value);
+      cmd = 'inserttext';
+    }
     // A link being typed (createLink at the caret) splits the surrounding
     // link in the implementation above.
     const typingLink = cmd === 'inserttext' && t && !t.control && typingStyle(state, t.range)?.has('createlink');
@@ -1643,7 +1651,11 @@
     } else if (cmd === 'inserttext') {
       const lines = value.replace(/\r\n?/g, '\n').split('\n');
       for (let i = 0; i < lines.length; ++i) {
-        if (i) splitParagraph(doc, {host, sel, range:sel.getRangeAt(0)}, state.separator);
+        if (i) {
+          const caret = { host, sel, range: sel.getRangeAt(0) };
+          if (host.contentEditable === 'plaintext-only') insertLineBreak(doc, caret);
+          else splitParagraph(doc, caret, state.separator);
+        }
         if (!lines[i]) continue;
         const caret = sel.getRangeAt(0);
         const point = caret.startContainer, offset = caret.startOffset;
