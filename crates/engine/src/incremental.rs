@@ -850,6 +850,8 @@ impl Engine {
         self.present(page);
         match (page.incr.canvas, page.incr.painted_dl.as_ref()) {
             (CanvasSync::Current(s), _) if s == origin => Some(Vec::new()),
+            (CanvasSync::Stale(s), Some(prev)) if s == origin && page.incr.video_frame_pending =>
+                rabbithole_layout::video_display_list_damage(prev, &page.display_list, origin),
             (CanvasSync::Stale(s), Some(prev)) if s == origin => rabbithole_layout::display_list_damage(prev, &page.display_list, origin),
             _ => None,
         }

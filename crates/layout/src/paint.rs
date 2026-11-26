@@ -315,7 +315,11 @@ fn device_bounds(canvas: &Canvas, r: Rect) -> Option<(i32, i32, usize, usize)> {
     let y0 = d.y.floor().max(0.0) as i32;
     let x1 = (d.x + d.w).ceil().min(canvas.width as f32) as i32;
     let y1 = (d.y + d.h).ceil().min(canvas.height as f32) as i32;
-    (x1 > x0 && y1 > y0).then(|| (x0, y0, (x1 - x0) as usize, (y1 - y0) as usize))
+    if x1 <= x0 || y1 <= y0 { return None; }
+    // The group's output cannot affect any pixel outside these bounds.
+    // Keep all input pixels when it overlaps: blur can sample past the clip.
+    let output = Rect::new(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32);
+    (!output.intersect(&canvas.clip()).is_empty()).then(|| (x0, y0, (x1 - x0) as usize, (y1 - y0) as usize))
 }
 
 /// Draw straight RGBA pixels at device position (x0, y0), clipped by the

@@ -1133,7 +1133,7 @@ impl Worker {
         let fixed_scroll = fixed.then_some(self.scroll);
         // Damage is relative to the viewport when fixed items are present.
         let damage_origin = fixed_scroll.unwrap_or(origin);
-        let video_update = std::mem::take(&mut page.incr.video_frame_pending);
+        let video_update = page.incr.video_frame_pending;
 
         // With fixed/sticky items only reuse pixels for an unmoved viewport.
         // `partial`: the cached pixels brought up to date; `spare`: a
@@ -1215,6 +1215,7 @@ impl Worker {
         };
         let raster_end = video_paint.map(|_| Instant::now());
         self.engine.mark_painted(page, damage_origin);
+        page.incr.video_frame_pending = false;
 
         // The frame: the page pixels plus overlays (selection, find, caret).
         let mut frame_canvas = Canvas::new(w, h);

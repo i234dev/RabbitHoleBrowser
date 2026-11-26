@@ -199,17 +199,38 @@ fn range_damage(items: &[DisplayItem], from: usize, to: usize, scroll: (f32, f32
 /// Device-space rectangles to repaint to go from a frame of `old` to one of
 /// `new` at the same scroll position, or `None` for "repaint everything".
 pub fn damage(old: &DisplayList, new: &DisplayList, scroll: (f32, f32)) -> Option<Vec<Rect>> {
+    damage_by(old, new, scroll, item_eq)
+}
+
+/// A static filtered subtree around a sibling of a video need not expand
+/// the repaint to the whole group on every decoded frame. URL filters
+/// and items with external paint state retain the conservative fallback.
+pub fn video_damage(old: &DisplayList, new: &DisplayList, scroll: (f32, f32)) -> Option<Vec<Rect>> {
+    fn equal(a: &DisplayItem, b: &DisplayItem) -> bool {
+        use DisplayItem as D;
+        match (a, b) {
+            (D::Filtered { bounds: x, filters: fx, items: xs, svg: None },
+             D::Filtered { bounds: y, filters: fy, items: ys, svg: None }) =>
+                x == y && fx == fy && xs.len() == ys.len() && xs.iter().zip(ys).all(|(a, b)| equal(a, b)),
+            (D::Image { image, .. } | D::ImageTiled { image, .. }, _) if image.is_animated() => false,
+            _ => item_eq(a, b),
+        }
+    }
+    damage_by(old, new, scroll, equal)
+}
+
+fn damage_by(old: &DisplayList, new: &DisplayList, scroll: (f32, f32), equal: impl Fn(&DisplayItem, &DisplayItem) -> bool) -> Option<Vec<Rect>> {
     let (a, b) = (&old.items, &new.items);
     let n = a.len().min(b.len());
     let mut pre = 0;
-    while pre < n && item_eq(&a[pre], &b[pre]) {
+    while pre < n && equal(&a[pre], &b[pre]) {
         pre += 1;
     }
     if pre == a.len() && pre == b.len() {
         return Some(Vec::new());
     }
     let mut suf = 0;
-    while suf < n - pre && item_eq(&a[a.len() - 1 - suf], &b[b.len() - 1 - suf]) {
+    while suf < n - pre && equal(&a[a.len() - 1 - suf], &b[b.len() - 1 - suf]) {
         suf += 1;
     }
     let mut out = Vec::new();
