@@ -1257,13 +1257,17 @@
     const destinationSpace = getComputedStyle(dest).whiteSpace;
     // Extraction can clone a partial inline ancestor. Save the formatting
     // of the source line while its elements still match their old selectors.
+    // An inline line of the enclosing block keeps its ambient whitespace
+    // when moved inside a differently formatted child paragraph. A sibling
+    // block loses its UA formatting when the block itself is discarded.
+    const enclosingLine = src.contains(dest);
     const styles = [];
     const after = move.endContainer === src ? src.childNodes[move.endOffset] :
         branchIn(move.endContainer,src).nextSibling;
     for (let part = first; part && part !== after; part = part.nextSibling) {
       const el = part.nodeType === 1 ? part : src;
       const value = el === src ? whiteSpace : getComputedStyle(el).whiteSpace;
-      styles.push(value !== destinationSpace && N.editingAuthorWhiteSpace(el) ? value : null);
+      styles.push(value !== destinationSpace && (enclosingLine || N.editingAuthorWhiteSpace(el)) ? value : null);
     }
     const before = branchIn(left, dest).nextSibling;
     const fragment = move.extractContents();
