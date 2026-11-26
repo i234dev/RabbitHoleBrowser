@@ -206,6 +206,7 @@ pub struct PageState {
 #[derive(Debug, Clone)]
 pub enum FromContent {
     Frame(Frame),
+    VideoReady,
     /// A new document replaced the old one (first paint follows).
     Committed { url: Url, title: String, push_history: bool },
     /// Load progress after the commit (None = finished).

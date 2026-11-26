@@ -11,6 +11,81 @@ use rabbithole_gfx::{Canvas, Color, FontContext, FontId, Matrix, Paint, Point, R
 use rabbithole_style::{BorderStyle, Shadow, TextDecorationStyle};
 use std::sync::OnceLock;
 
+/// Geometry in scrolled document coordinates for an opaque video image
+/// whose visible pixels are unobstructed in this display list.
+#[derive(Clone, Copy, Debug)]
+pub struct VideoPlane {
+    pub dest: Rect,
+    pub src: Rect,
+    pub clip: Rect,
+    pub pixelated: bool,
+}
+
+pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::Image>, viewport: Rect, scale: f32) -> Option<VideoPlane> {
+    use DisplayItem as D;
+    let mut origin = Some((0.0, 0.0));
+    let mut origins = Vec::new();
+    // An irregular clip still bounds later draws, but a picture inside it
+    // cannot be composited with a single rectangular clip.
+    let mut clips = vec![(viewport, false)];
+    let mut layers = 0usize;
+    let mut plane: Option<VideoPlane> = None;
+    let aligned = |r: Rect| [r.x - viewport.x, r.y - viewport.y, r.w, r.h]
+        .iter().all(|v| (v * scale).fract() == 0.0);
+    for item in &list.items {
+        let (clip, irregular) = *clips.last()?;
+        match item {
+            D::PushTransform(m) => {
+                origins.push(origin);
+                origin = origin.filter(|_| m[..4] == [1.0, 0.0, 0.0, 1.0])
+                    .map(|(x, y)| (x + m[4], y + m[5]));
+            }
+            D::PushFixed => {
+                origins.push(origin);
+                origin = origin.map(|_| (viewport.x, viewport.y));
+            }
+            D::PopFixed | D::PopTransform => origin = origins.pop()?,
+            D::PushClip(r) | D::PushClipRounded(r, _) | D::PushClipPath { bounds: r, .. } => {
+                let bounds = origin.map_or(clip, |(x, y)| clip.intersect(&r.translate(x, y)));
+                clips.push((bounds, irregular || origin.is_none() || !matches!(item, D::PushClip(_))));
+            }
+            D::PopClip => { clips.pop()?; }
+            D::PushLayer(_) => layers += 1,
+            D::PopLayer(_) => layers = layers.checked_sub(1)?,
+            D::Image { rect, src, image, opacity, pixelated } if std::sync::Arc::ptr_eq(image, target) => {
+                let (x, y) = origin?;
+                let dest = rect.translate(x, y);
+                let visible = dest.intersect(&clip);
+                if plane.is_some() || irregular || layers != 0 || *opacity != 1.0 ||
+                    visible.is_empty() || !aligned(dest) || !aligned(visible) {
+                    return None;
+                }
+                // The normal image painter treats near-full crops as full.
+                let src = if src.x <= 0.0 && src.y <= 0.0 && (src.w - image.width as f32).abs() < 0.5 &&
+                    (src.h - image.height as f32).abs() < 0.5 {
+                    Rect::new(0.0, 0.0, image.width as f32, image.height as f32)
+                } else { *src };
+                if !*pixelated && (src.w > 4.0 * dest.w * scale || src.h > 4.0 * dest.h * scale) { return None; }
+                plane = Some(VideoPlane { dest, src, clip: visible, pixelated: *pixelated });
+            }
+            _ => {
+                if let Some(v) = plane {
+                    if clip.intersect(&v.clip).is_empty() { continue; }
+                    let (x, y) = origin?;
+                    // Glyph ink (including web fonts) can extend outside
+                    // its nominal text box. Effects may depend on backdrop.
+                    if matches!(item, D::Text { .. } | D::BackdropFilter { .. } | D::LayerBlend(_) | D::LayerMask(_)) {
+                        return None;
+                    }
+                    let bounds = crate::damage::item_bounds(item)?.translate(x, y);
+                    if !bounds.intersect(&clip).intersect(&v.clip).is_empty() { return None; }
+                }
+            }
+        }
+    }
+    plane
+}
+
 fn style_code(s: BorderStyle) -> u8 {
     match s {
         BorderStyle::None | BorderStyle::Hidden => 0,
@@ -1094,3 +1169,36 @@ fn draw_decoration_line(canvas: &mut Canvas, ax: f32, ay: f32, bx: f32, by: f32,
 
 #[allow(dead_code)]
 fn unused(_: &Shadow) {}
+
+#[cfg(test)]
+mod video_plane_tests {
+    use super::*;
+    use std::sync::Arc;
+    use rabbithole_gfx::Image;
+
+    #[test]
+    fn promote_an_unobstructed_clipped_video_at_the_painted_scroll() {
+        let image = Arc::new(Image::new(4, 4, vec![255; 64]));
+        let src = Rect::new(1.0, 0.0, 3.0, 4.0);
+        let mut list = DisplayList::default();
+        let rect = Rect::new(5.0, 4.0, 18.0, 16.0);
+        let viewport = Rect::new(0.0, 52.0, 80.0, 50.0);
+        list.items = vec![
+            DisplayItem::PushFixed,
+            DisplayItem::PushClip(Rect::new(5.0, 5.0, 10.0, 9.0)),
+            DisplayItem::Image { rect, src, image: image.clone(), opacity: 1.0, pixelated: true },
+            DisplayItem::PopClip, DisplayItem::PopFixed,
+        ];
+        let plane = video_plane(&list, &image, viewport, 2.0).unwrap();
+        assert_eq!(plane.dest.y, 56.0);
+        assert_eq!((plane.clip.y, plane.clip.h), (57.0, 9.0));
+        assert_eq!((plane.src.x, plane.src.w), (1.0, 3.0));
+        assert!(plane.pixelated);
+        list.items.push(DisplayItem::Rect { rect: plane.clip, color: Color::WHITE, radius: 0.0 });
+        assert!(video_plane(&list, &image, viewport, 2.0).is_none());
+        list.items.pop();
+        list.items.insert(0, DisplayItem::PushLayer(viewport));
+        list.items.push(DisplayItem::PopLayer(0.5));
+        assert!(video_plane(&list, &image, viewport, 2.0).is_none());
+    }
+}

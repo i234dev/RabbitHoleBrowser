@@ -1,6 +1,44 @@
 //! Rasterized page frames sent from content threads to the UI.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use rabbithole_engine::layout::paint::VideoPlane;
+use rabbithole_engine::script::{FrameTiming, VideoReader};
+
+/// The player holds a weak callback. Dropping the displayed frame releases
+/// its subscription even when the decoder is waiting for input.
+#[derive(Clone)]
+pub struct VideoLayer {
+    plane: VideoPlane,
+    reader: VideoReader,
+    size: (u32, u32),
+    pending: Arc<AtomicBool>,
+    _wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl VideoLayer {
+    pub(super) fn new(plane: VideoPlane, reader: VideoReader, size: (u32, u32), redraw: impl Fn() + Send + Sync + 'static) -> Self {
+        let pending = Arc::new(AtomicBool::new(false));
+        let flag = pending.clone();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if !flag.swap(true, Ordering::AcqRel) { redraw(); }
+        });
+        reader.listen(&wake);
+        Self { plane, reader, size, pending, _wake: wake }
+    }
+
+    fn present(&self, dst: &mut Canvas, area: Rect, scroll: (f32, f32), scale: f32) -> Option<FrameTiming> {
+        self.pending.store(false, Ordering::Release);
+        let (_, pic) = self.reader.current()?;
+        if (pic.width, pic.height) != self.size { return None; }
+        let map = |r: Rect| Rect::new(area.x + (r.x - scroll.0) * scale,
+            area.y + (r.y - scroll.1) * scale, r.w * scale, r.h * scale);
+        if dst.composite_video(&pic.rgba, self.size, self.plane.src, map(self.plane.dest), map(self.plane.clip).intersect(&area), self.plane.pixelated) {
+            return pic.timing;
+        }
+        None
+    }
+}
 
 use rabbithole_engine::gfx::{Canvas, Color, Rect};
 
@@ -26,6 +64,7 @@ impl Pixels {
 pub struct Frame {
     /// Increases with every frame of a tab.
     pub seq: u64,
+    pub video: Option<VideoLayer>,
     /// Pixels (device px).
     pub canvas: Arc<Pixels>,
     /// Document position (CSS px) of the canvas' top-left corner.
@@ -66,13 +105,17 @@ impl Frame {
     /// Paint the part of the frame visible at `scroll` into `area` of
     /// `dst` (device px): the frame shifted by the scroll difference, the
     /// page background where it has no pixels.
-    pub fn present(&self, dst: &mut Canvas, area: Rect, scroll: (f32, f32), scale: f32) {
+    pub fn present(&self, dst: &mut Canvas, area: Rect, scroll: (f32, f32), scale: f32) -> Option<FrameTiming> {
         dst.fill_rect(area, if self.background.a > 0 { Color { a: 255, ..self.background } } else { Color::WHITE });
         // A zoom change is shown at the old scale until the repaint.
         let s = if (scale - self.scale).abs() < 1e-3 { scale } else { self.scale };
         let x = area.x + ((self.origin.0 - scroll.0) * s).round();
         let y = area.y + ((self.origin.1 - scroll.1) * s).round();
         blit_clipped(dst, &self.canvas, x as i32, y as i32, area);
+        if scroll == self.scroll && scale == self.scale {
+            if let Some(video) = &self.video { return video.present(dst, area, scroll, scale); }
+        }
+        None
     }
 
     /// Is a wheel at viewport point `css` (CSS px) over a scroll container?
@@ -139,7 +182,7 @@ mod tests {
             scroll: (0.0, 60.0),
             content: (2.0, 1000.0),
             background: Color::WHITE,
-            scroll_containers: Arc::new(Vec::new()),
+            video: None, scroll_containers: Arc::new(Vec::new()),
         };
         let mut dst = Canvas::new(2, 20);
         // Scrolled to 70: the frame row 20 (doc y=70) is at the top.

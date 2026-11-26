@@ -109,6 +109,51 @@ impl Page {
     }
 }
 
+pub(crate) struct VideoSource {
+    node: NodeId,
+    reader: rabbithole_script::VideoReader,
+    geometry: Option<VideoGeometry>,
+}
+
+struct VideoGeometry {
+    generation: u64,
+    viewport: rabbithole_gfx::Rect,
+    scale: f32,
+    size: (u32, u32),
+    plane: Option<rabbithole_layout::paint::VideoPlane>,
+}
+
+impl Page {
+    pub(crate) fn track_video(&mut self, node: NodeId, reader: rabbithole_script::VideoReader) {
+        if let Some(source) = self.video_source.as_mut().filter(|s| s.node == node) {
+            source.reader = reader;
+        } else {
+            self.video_source = Some(Box::new(VideoSource { node, reader, geometry: None }));
+        }
+    }
+
+    /// Cache both eligible and obstructed geometry across picture-only
+    /// replacements. Layout, display list rebuilds, scrolling and zoom
+    /// invalidate it. Inner scroll translations rebuild the display list.
+    pub fn video_plane(&mut self, viewport: rabbithole_gfx::Rect, scale: f32) -> Option<(rabbithole_layout::paint::VideoPlane, rabbithole_script::VideoReader, (u32, u32))> {
+        let source = self.video_source.as_mut()?;
+        let image = self.images.get(&source.node)?;
+        if !image.video_frame { return None; }
+        let size = (image.width, image.height);
+        let generation = self.incr.generation();
+        if let Some(g) = &source.geometry {
+            if g.generation == generation && g.viewport == viewport && g.scale == scale && g.size == size {
+                return Some((g.plane?, source.reader.clone(), size));
+            }
+        }
+        let plane = if self.images.values().filter(|i| i.video_frame).take(2).count() == 1 {
+            rabbithole_layout::paint::video_plane(&self.display_list, image, viewport, scale)
+        } else { None };
+        source.geometry = Some(VideoGeometry { generation, viewport, scale, size, plane });
+        Some((plane?, source.reader.clone(), size))
+    }
+}
+
 impl Engine {
     pub(crate) fn replace_video_frame(&self, page: &mut Page, node: NodeId, width: u32, height: u32, rgba: Vec<u8>) {
         let mut image = Image::new(width, height, rgba);

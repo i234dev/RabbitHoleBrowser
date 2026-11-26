@@ -20,6 +20,7 @@ pub use live::SharedRange;
 pub use host::AuxiliaryDocument;
 mod media;
 pub use rabbithole_media::video_stats::FrameTiming;
+pub use rabbithole_media::player::VideoReader;
 mod node;
 mod reflect;
 mod inner_text;

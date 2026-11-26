@@ -1,6 +1,7 @@
 //! Separable box / bilinear filtering of opaque decoded video. The regular
 //! image painter also handles alpha, fractional edge coverage and transforms.
 use crate::canvas::{Bounds, Canvas, Rect};
+#[cfg(test)]
 use crate::image::Image;
 
 const UNIT: u32 = 256;
@@ -39,8 +40,7 @@ impl Filter {
 
 /// `dest` has whole device-pixel edges and samples only the cropped source. Keep
 /// eight fractional bits per axis, rounding only at the final RGB pixel.
-pub(super) fn paint(canvas: &mut Canvas, image: &Image, src: Rect, dest: Rect, clip: Bounds) {
-    let (width, height) = (image.width as usize, image.height as usize);
+pub(super) fn paint(canvas: &mut Canvas, pixels: &[u8], width: usize, height: usize, src: Rect, dest: Rect, clip: Bounds) {
     let (sx, sy) = (src.w / dest.w, src.h / dest.h);
     let area = sx > 1.0 || sy > 1.0;
     let columns: Vec<_> = (clip.x0..clip.x1).map(|x| Filter::new(x, dest.x, width, src.x, src.right(), sx, area)).collect();
@@ -48,7 +48,6 @@ pub(super) fn paint(canvas: &mut Canvas, image: &Image, src: Rect, dest: Rect, c
     let last = columns.last().unwrap();
     let right = last.first + last.count;
     let mut row = vec![[0u32; 3]; right - left];
-    let pixels = image.pixels();
     for y in clip.y0..clip.y1 {
         let vertical = Filter::new(y, dest.y, height, src.y, src.bottom(), sy, area);
         row.fill([0; 3]);
@@ -105,6 +104,31 @@ mod tests {
                 for shift in [0, 8, 16] {
                     assert!(((a >> shift) & 255).abs_diff((b >> shift) & 255) <= 2, "{w}x{h}");
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod composite_tests {
+    use super::*;
+    #[test]
+    fn gui_and_content_sample_the_same_cropped_picture() {
+        let mut image = Image::new(24, 32, (0..24*32).flat_map(|n| [n as u8, (n*7) as u8, (n*31) as u8, 255]).collect());
+        image.video_frame = true;
+        let clip = Rect::new(2.0, 7.0, 21.0, 18.0);
+        for smooth in [true, false] {
+            for (src, dest) in [
+                (Rect::new(0.0, 0.0, 24.0, 32.0), Rect::new(1.0, 5.0, 24.0, 32.0)),
+                (Rect::new(2.5, 1.75, 15.5, 25.25), Rect::new(-1.0, 4.0, 19.0, 18.0)),
+            ] {
+                let mut a = Canvas::new(28, 32);
+                let mut b = Canvas::new(28, 32);
+                a.image_smoothing = smooth;
+                a.push_clip(clip);
+                a.draw_image_region(&image, src, dest, 1.0);
+                assert!(b.composite_video(image.pixels(), (24,32), src, dest, clip, !smooth));
+                assert_eq!(a.data, b.data);
             }
         }
     }

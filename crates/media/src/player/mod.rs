@@ -15,7 +15,7 @@ use crate::video::VideoFrame;
 use crate::video::av1_is_key;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 use symphonia::core::codecs::audio::AudioCodecParameters;
 use symphonia::core::codecs::CodecParameters;
@@ -125,6 +125,30 @@ struct VideoOut {
     serial: u64,
     shown: u64,
     dropped: u64,
+    generation: u64,
+    wake: Option<Weak<dyn Fn() + Send + Sync>>,
+}
+
+/// A compositor may read the picture due on the media clock without keeping
+/// a closed player or its decoder alive.
+#[derive(Clone, Debug)]
+pub struct VideoReader(Weak<Shared>);
+
+impl VideoReader {
+    pub fn listen(&self, wake: &Arc<dyn Fn() + Send + Sync>) {
+        if let Some(shared) = self.0.upgrade() {
+            shared.video.lock().unwrap_or_else(|e| e.into_inner()).wake = Some(Arc::downgrade(wake));
+        }
+    }
+
+    pub fn current(&self) -> Option<(u64, VideoFrame)> {
+        let shared = self.0.upgrade()?;
+        let v = shared.video.lock().unwrap_or_else(|e| e.into_inner());
+        if shared.stop.load(Ordering::Acquire) || v.generation != shared.seek_gen.load(Ordering::Acquire) {
+            return None;
+        }
+        Some((v.serial, v.frame.clone()?))
+    }
 }
 
 /// A coded video frame on its way to the decoder thread.
@@ -308,6 +332,10 @@ impl Player {
         c.rate = r;
         drop(c);
         self.shared.sink.set_speed(r);
+    }
+
+    pub fn video_reader(&self) -> VideoReader {
+        VideoReader(Arc::downgrade(&self.shared))
     }
 
     /// The current video picture when it changed since `serial`:
@@ -932,6 +960,10 @@ fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VideoInput>, mse: Op
             v.frame = Some(f);
             v.serial += 1;
             v.shown += 1;
+            v.generation = gen;
+            let wake = v.wake.as_ref().and_then(Weak::upgrade);
+            drop(v);
+            if let Some(wake) = wake { wake(); }
         }
         if queue.len() >= 4 {
             std::thread::sleep(Duration::from_millis(4));
