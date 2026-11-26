@@ -2498,6 +2498,10 @@ function reorderModifiableDescendants(node, command, newValue) {
         return;
     }
 
+    liftFormattingElement(candidate, node);
+}
+
+function liftFormattingElement(candidate, node) {
     // "While candidate has children, insert the first child of candidate into
     // candidate's parent immediately before candidate, preserving ranges."
     while (candidate.hasChildNodes()) {
@@ -3004,6 +3008,15 @@ function moveCaretOutOfLinkEdge() {
     var carried = inside.filter(function(pair, i) {
         return pair[0] != "createlink" && pair[1] !== atLink[i][1];
     });
+    // When all of a link has the same formatting, put the existing
+    // formatting element around the link and the new caret. This lets
+    // typing keep its style without extending the hyperlink.
+    while (link.childNodes.length == 1 && isHtmlElement(link.firstChild,
+        ["b", "i", "u", "s", "strike", "strong", "em", "sub", "sup"])
+        && link.firstChild.attributes.length == 0 && isInlineNode(link.firstChild)
+        && isEditable(link.firstChild)) {
+        liftFormattingElement(link.firstChild, link);
+    }
     var parent = link.parentNode, index = getNodeIndex(link) + (atEnd ? 1 : 0);
     getSelection().collapse(parent, index);
     range.setStart(parent, index);
