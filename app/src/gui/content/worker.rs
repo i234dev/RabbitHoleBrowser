@@ -1114,6 +1114,7 @@ impl Worker {
         self.dirty = false;
         // Child frames are rasterized now, when a frame is shown.
         self.engine.present(page);
+        let present_end = video_paint.map(|_| Instant::now());
         let s = self.view.scale;
         let vp = self.view.viewport;
         let (sx, sy) = self.scroll;
@@ -1194,6 +1195,7 @@ impl Worker {
                 }
             }
         }
+        let partial_paint = partial.is_some();
         let mut cv = match partial {
             Some(c) => c,
             None => {
@@ -1211,6 +1213,7 @@ impl Worker {
                 cv
             }
         };
+        let raster_end = video_paint.map(|_| Instant::now());
         self.engine.mark_painted(page, damage_origin);
 
         // The frame: the page pixels plus overlays (selection, find, caret).
@@ -1236,8 +1239,12 @@ impl Worker {
         };
         self.painted = Some(Painted { covered, scroll: (sx, sy), scale: s, scroll_dependent: fixed });
         self.send(FromContent::Frame(frame));
-        if video_paint.is_some() {
+        if let (Some(start), Some(present), Some(raster)) = (video_paint, present_end, raster_end) {
+            let end = Instant::now();
             self.page.as_mut().unwrap().finish_video_paint(video_paint);
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            eprintln!("rh_video gui partial={partial_paint} fixed={fixed} present_ms={:.3} raster_ms={:.3} deliver_ms={:.3}",
+                      ms(present - start), ms(raster - present), ms(end - raster));
         }
     }
 
