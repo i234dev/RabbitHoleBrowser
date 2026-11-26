@@ -1116,7 +1116,8 @@
     return { sel, range, host };
   }
   function enabled(cmd, t) {
-    if (preferences.has(cmd) || cmd === 'selectall') return true;
+    if (preferences.has(cmd)) return !t?.control || t.control.isContentEditable;
+    if (cmd === 'selectall') return true;
     if (!t) return false;
     if (cmd === 'copy' || cmd === 'cut') return t.control ? t.control.type !== 'password' &&
       t.control.selectionStart !== t.control.selectionEnd : !t.range.collapsed;
@@ -1606,6 +1607,8 @@
     else sel.collapse(caret, 0);
   }
   function execute(doc, state, cmd, value) {
+    const t = target(doc);
+    if (preferences.has(cmd) && !enabled(cmd, t)) return false;
     if (cmd === 'stylewithcss' || cmd === 'usecss') {
       state.css = (value.toLowerCase() !== 'false') === (cmd === 'stylewithcss');
       return true;
@@ -1616,7 +1619,6 @@
       state.separator = tag;
       return true;
     }
-    const t = target(doc);
     if (cmd === 'copy' || cmd === 'cut') {
       if (!doc.defaultView?.navigator.userActivation?.isActive) return false;
       return clipboardGesture(doc, cmd) !== false;
