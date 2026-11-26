@@ -32,6 +32,17 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.2.49 makes small DOM changes on large pages up to two orders of
+magnitude cheaper: a class change on a developer reference page went from
+31 ms to 0.08 ms, appending text on a repository page from 31 ms to 2.5 ms
+([record](docs/benchmarks/interaction-2026-11-27-v0.2.49.md)). `:has()`,
+attribute selectors, container queries and attributes without visible effect
+no longer restyle or relayout the whole document. On Windows, video sites get
+H.264 decoded through Media Foundation (the decoder could not be opened in
+earlier versions), video conversion uses SSE2, and video frames update only
+their own pixels instead of the page layout. Speedometer 3.1 is unchanged
+(1.0006×); web platform results are unchanged or better.
+
 Version 0.2.48 is **1.032× faster than 0.2.47 on Speedometer 3.1** (7 of 8
 paired runs; jQuery 1.13×, React-Redux 1.12×, SVG charts 1.11×,
 [record](docs/benchmarks/speedometer-2026-11-26-v0.2.48.md)). Compiled
