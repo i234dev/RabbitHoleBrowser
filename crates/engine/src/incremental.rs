@@ -591,6 +591,17 @@ impl Engine {
             if *page.state.containers == found {
                 return;
             }
+            // Changed containers restyle their subtrees (also pseudo-elements
+            // such as ::first-letter, whose changes are not listed): lay
+            // those boxes out again.
+            let old = page.state.containers.clone();
+            let changed: Vec<NodeId> = old.iter().filter(|(n, i)| found.get(n) != Some(i)).map(|(n, _)| *n).chain(found.keys().filter(|n| !old.contains_key(n)).copied()).collect();
+            for n in changed {
+                if page.doc.is_connected(n) {
+                    page.incr.box_dirty.extend(page.doc.descendants(n).filter(|&d| page.doc.element(d).is_some()));
+                    page.incr.layout_dirty = true;
+                }
+            }
             page.state.containers = Arc::new(found);
         }
     }
@@ -926,6 +937,11 @@ fn damage_from_log(doc: &Document, styles: &rabbithole_style::StyledTree, log: &
         *full = true;
         return;
     }
+    // No style changed in this flush: attributes that act only through
+    // styles cannot have moved anything. (With style changes they damage
+    // as before: boxes such as anchor-positioned ones depend on others
+    // without changing style themselves.)
+    let style_quiet = dirty.is_empty();
     let shadow = !doc.shadow_roots.is_empty();
     // Boxes follow the flat tree: a shadow root's children are laid out in
     // its host, a host's light children in the slots they are assigned to.
@@ -965,12 +981,11 @@ fn damage_from_log(doc: &Document, styles: &rabbithole_style::StyledTree, log: &
         match m {
             Mutation::Attr { node, name, .. } => {
                 // These reach the boxes of HTML elements only through their
-                // styles: when the element's style did not change (it is not
-                // already damaged), its boxes stay as they are.
+                // styles: when no style changed, the boxes stay as they are.
                 let style_only = matches!(name.as_str(), "class" | "id" | "style" | "title" | "role" | "tabindex")
                     || (name.starts_with("data-") && !name.starts_with("data-rh-"))
                     || name.starts_with("aria-");
-                if style_only && !dirty.contains(node) && doc.element(*node).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Html) {
+                if style_only && style_quiet && doc.element(*node).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Html) {
                     continue;
                 }
                 add_with_children(*node, dirty);
