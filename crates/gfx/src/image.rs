@@ -15,6 +15,8 @@ pub struct Image {
     /// Straight (non-premultiplied) RGBA, row-major (first frame of an
     /// animation; use [`Image::pixels`] for the current frame).
     pub rgba: Vec<u8>,
+    /// The current decoded picture of a video element.
+    pub video_frame: bool,
     /// Intrinsic size in CSS pixels (what layout and `naturalWidth` see).
     pub natural_width: u32,
     pub natural_height: u32,
@@ -249,7 +251,7 @@ impl Image {
 
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         debug_assert_eq!(rgba.len(), (width * height * 4) as usize);
-        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None, broken: false, no_ratio: false, vector: None, unoriented: None }
+        Image { width, height, rgba, video_frame: false, natural_width: width, natural_height: height, anim: None, broken: false, no_ratio: false, vector: None, unoriented: None }
     }
 
     /// Marker image for a failed load (1×1 transparent, natural size 0).
@@ -393,7 +395,7 @@ impl Image {
                 a.loop_count,
             ))
         });
-        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken, no_ratio: self.no_ratio, vector: self.vector.clone(), unoriented: self.unoriented.as_ref().map(|u| {
+        Image { width: nw, height: nh, rgba, video_frame: self.video_frame, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken, no_ratio: self.no_ratio, vector: self.vector.clone(), unoriented: self.unoriented.as_ref().map(|u| {
             let swapped = u.width == self.height && u.height == self.width && self.width != self.height;
             Arc::new(if swapped { u.resized(nh, nw) } else { u.resized(nw, nh) })
         }) }

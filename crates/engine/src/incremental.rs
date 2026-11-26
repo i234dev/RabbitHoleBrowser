@@ -110,6 +110,8 @@ pub struct IncrementalState {
     canvas: CanvasSync,
     /// The display list the canvas shows when it is out of date.
     painted_dl: Option<rabbithole_layout::DisplayList>,
+    /// A decoded video picture has changed since the last GUI paint.
+    pub video_frame_pending: bool,
     pub(crate) video_timings: Vec<(NodeId, rabbithole_script::FrameTiming)>,
     pub stats: IncrementalStats,
 }
@@ -842,8 +844,8 @@ impl Engine {
     /// `origin` (the document point at the canvas' top-left corner), where
     /// the display list changed since [`Engine::mark_painted`] was called
     /// with the same origin. `Some(empty)`: nothing changed; `None`:
-    /// unknown, repaint everything. Only meaningful for pages without
-    /// fixed or sticky content (their position depends on the scroll).
+    /// unknown, repaint everything. With fixed content, pass the unchanged
+    /// viewport scroll to both calls and translate the result to the canvas.
     pub fn paint_damage_since(&self, page: &mut Page, origin: (f32, f32)) -> Option<Vec<rabbithole_gfx::Rect>> {
         self.present(page);
         match (page.incr.canvas, page.incr.painted_dl.as_ref()) {

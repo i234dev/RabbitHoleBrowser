@@ -117,6 +117,9 @@ pub trait HostEnv {
     }
     /// A canvas bitmap to render for `node` (straight RGBA), or `None`.
     fn set_canvas_image(&mut self, _node: NodeId, _width: u32, _height: u32, _rgba: Option<Vec<u8>>) {}
+    fn set_video_image(&mut self, node: NodeId, width: u32, height: u32, rgba: Vec<u8>) {
+        self.set_canvas_image(node, width, height, Some(rgba));
+    }
     fn trace_video_frame(&mut self, _node: NodeId, _timing: crate::FrameTiming) {}
     /// Render 2D surface `surface` (`width`×`height`) for `node`; the
     /// embedder takes its pixels when it shows them

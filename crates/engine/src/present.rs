@@ -110,6 +110,22 @@ impl Page {
 }
 
 impl Engine {
+    pub(crate) fn replace_video_frame(&self, page: &mut Page, node: NodeId, width: u32, height: u32, rgba: Vec<u8>) {
+        let mut image = Image::new(width, height, rgba);
+        image.video_frame = true;
+        let image = Arc::new(image);
+        page.incr.video_frame_pending = true;
+        let old = page.images.insert(node, image.clone());
+        if let Some(old) = old.filter(|i| i.video_frame && i.width == width && i.height == height) {
+            page.incr.image_replaced(node, &old, &image);
+            self.install_rasters(page, &[(old, image)]);
+            page.incr.canvas_drawn = true;
+        } else {
+            // First picture or resolution change: layout needs the intrinsic size.
+            page.script.dom_dirty = true;
+        }
+    }
+
     /// Bring everything painting `page` reads up to date: layout, the
     /// display list, inline SVG rasters and the rasters of child frames
     /// changed since they were last painted (recursively). Embedders call
@@ -243,5 +259,29 @@ fn swap_box_images(b: &mut LayoutBox, swaps: &[(Arc<Image>, Arc<Image>)]) {
     }
     for c in b.children.iter_mut() {
         swap_box_images(c, swaps);
+    }
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+
+    #[test]
+    fn successive_video_frames_preserve_layout_and_replace_pixels() {
+        let mut engine = Engine::new_bundled_fonts_only();
+        let mut page = engine.load_html("<style>*{margin:0}video{display:block;width:40px;height:40px}</style><video id=v></video>",
+            rabbithole_net::Url::parse("https://example.test/").unwrap(), crate::Viewport { width: 100.0, height: 100.0 });
+        let node = page.doc.element_by_id("v").unwrap();
+        engine.replace_video_frame(&mut page, node, 2, 2, [255, 0, 0, 255].repeat(4));
+        engine.restyle(&mut page);
+        let mut canvas = rabbithole_gfx::Canvas::new(100, 100);
+        engine.render_damage(&mut page, &mut canvas);
+        assert_eq!(canvas.data[2020], 0xff0000);
+        let generation = page.incr.generation();
+        engine.replace_video_frame(&mut page, node, 2, 2, [0, 255, 0, 255].repeat(4));
+        let damage = engine.render_damage(&mut page, &mut canvas);
+        assert!(!damage.is_empty() && damage.iter().all(|r| r.w < 100.0 && r.h < 100.0));
+        assert_eq!(canvas.data[2020], 0x00ff00);
+        assert_eq!(page.incr.generation(), generation);
     }
 }

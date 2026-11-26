@@ -126,7 +126,7 @@ fn media_frame(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     if n.doc == 0 {
         let rgba = frame.rgba.as_ref().clone();
         with_env(|env| {
-            env.set_canvas_image(n.node, frame.width, frame.height, Some(rgba));
+            env.set_video_image(n.node, frame.width, frame.height, rgba);
             if let Some(timing) = frame.timing {
                 env.trace_video_frame(n.node, timing);
             }

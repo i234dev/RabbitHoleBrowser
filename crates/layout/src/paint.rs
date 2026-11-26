@@ -215,12 +215,18 @@ pub fn paint_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &
 /// Paint only the device-space `region` (clipped; items outside it are
 /// skipped), e.g. the damage of a scroll or a style change.
 pub fn paint_region(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, region: Rect) {
+    paint_region_with_fixed_origin(list, canvas, fonts, scroll_x, scroll_y, region, (0.0, 0.0));
+}
+
+/// Paint a damaged region of an overscanned canvas at the same viewport
+/// offset as a full paint, including fixed elements overlapping the damage.
+pub fn paint_region_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, region: Rect, fixed_origin: (f32, f32)) {
     let view = region.intersect(&Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32));
     if view.is_empty() {
         return;
     }
     canvas.push_clip(view);
-    paint_view(list, canvas, fonts, scroll_x, scroll_y, view, (0.0, 0.0));
+    paint_view(list, canvas, fonts, scroll_x, scroll_y, view, fixed_origin);
     canvas.pop_clip();
 }
 

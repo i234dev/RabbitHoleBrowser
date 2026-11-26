@@ -79,6 +79,7 @@ struct Find {
 /// paint: scrolling shifts them and only the exposed strip is rastered;
 /// page changes repaint only the damaged regions.
 struct PaintCache {
+    fixed_scroll: Option<(f32, f32)>,
     canvas: Canvas,
     origin: (f32, f32),
     scale: f32,
@@ -1128,26 +1129,30 @@ impl Worker {
         let origin = (sx, oy);
         let fixed = page.layout.has_sticky_or_fixed();
         let background = page.background;
+        let fixed_scroll = fixed.then_some(self.scroll);
+        // Damage is relative to the viewport when fixed items are present.
+        let damage_origin = fixed_scroll.unwrap_or(origin);
+        let video_update = std::mem::take(&mut page.incr.video_frame_pending);
 
-        // Incremental paths need a matching cached canvas, no content that
-        // moves with the scroll (fixed / sticky) and scale >= 1 (region
-        // culling works in canvas units).
+        // With fixed/sticky items only reuse pixels for an unmoved viewport.
         // `partial`: the cached pixels brought up to date; `spare`: a
         // canvas of the right size to repaint fully.
         let mut partial: Option<Canvas> = None;
         let mut spare: Option<Canvas> = None;
         if let Some(c) = self.cache.take() {
-            let compatible = !fixed && s >= 1.0 && (c.scale - s).abs() < 1e-4 && c.canvas.width == w && c.canvas.height == h && c.origin.0 == origin.0;
+            let can_reuse = c.fixed_scroll == fixed_scroll && (!fixed || (video_update && c.origin == origin));
+            let compatible = can_reuse && s >= 1.0 && (c.scale - s).abs() < 1e-4 && c.canvas.width == w && c.canvas.height == h && c.origin.0 == origin.0;
             let shift = (origin.1 - c.origin.1) * s;
             let dy = shift.round() as i64;
             let exact = (shift - dy as f32).abs() < 0.01 && dy.unsigned_abs() < h as u64;
-            let damage = if compatible && exact { self.engine.paint_damage_since(page, c.origin) } else { None };
+            let old_damage_origin = c.fixed_scroll.unwrap_or(c.origin);
+            let damage = if compatible && exact { self.engine.paint_damage_since(page, old_damage_origin) } else { None };
             let mut cv = c.canvas;
             match damage {
                 Some(damage) => {
                     shift_rows(&mut cv, dy);
                     // Damage (CSS px relative to the old origin) → device px now.
-                    let mut regions: Vec<Rect> = damage.iter().map(|r| Rect::new(r.x * s, (r.y + c.origin.1 - origin.1) * s, r.w * s, r.h * s)).collect();
+                    let mut regions: Vec<Rect> = damage.iter().map(|r| Rect::new(r.x * s, (r.y + old_damage_origin.1 - origin.1) * s, r.w * s, r.h * s)).collect();
                     if dy > 0 {
                         regions.push(Rect::new(0.0, (h as i64 - dy) as f32, w as f32, dy as f32));
                     } else if dy < 0 {
@@ -1171,7 +1176,7 @@ impl Worker {
                             cv.pop_clip();
                             cv.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
                             let css = Rect::new(r.x / s, r.y / s, r.w / s, r.h / s);
-                            rabbithole_engine::layout::paint_region(&page.display_list, &mut cv, &page.fonts, origin.0, origin.1, css);
+                            rabbithole_engine::layout::paint::paint_region_with_fixed_origin(&page.display_list, &mut cv, &page.fonts, origin.0, origin.1, css, (sx - origin.0, sy - origin.1));
                             cv.pop_transform();
                         }
                         self.paint_stats.partial += 1;
@@ -1206,13 +1211,13 @@ impl Worker {
                 cv
             }
         };
-        self.engine.mark_painted(page, origin);
+        self.engine.mark_painted(page, damage_origin);
 
         // The frame: the page pixels plus overlays (selection, find, caret).
         let mut frame_canvas = Canvas::new(w, h);
         frame_canvas.data.copy_from_slice(&cv.data);
         self.paint_overlays(&mut frame_canvas, origin);
-        self.cache = Some(PaintCache { canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
+        self.cache = Some(PaintCache { fixed_scroll, canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
 
         let page = self.page.as_ref().expect("page");
         let mut containers = Vec::new();
