@@ -298,6 +298,53 @@ fn layout_reuse_skips_clean_subtrees() {
     assert_eq!(page.incr.stats.layout_incremental, n.layout_incremental);
 }
 
+/// `:has()` in compounds that style other elements than the subject
+/// (descendants, following siblings): only subjects whose `:has()` result
+/// flipped restyle those, after the first evaluation without full restyles.
+#[test]
+fn has_with_non_subject_relations_restyles_only_flipped_subjects() {
+    let mut html = String::from(r#"<html><head><style>
+        .g:has(.on) .t { color: red; padding-left: 4px }
+        .g:has(> .k) + .s { margin-top: 7px }
+        .h:has(+ .m) .t { padding-top: 3px }
+        .e:not(:has(> :not(:empty))) { width: 10px; height: 10px; background: blue }
+        </style></head><body>"#);
+    html.push_str(r#"<div class="g" id="g"><div><span id="deep">deep</span></div><p class="t">t</p></div><div class="s">s</div>"#);
+    html.push_str(r#"<div class="h" id="h"><p class="t">h</p></div><div id="after">x</div>"#);
+    html.push_str(r#"<div class="e" id="e"><i id="ei"></i></div>"#);
+    for i in 0..200 {
+        html.push_str(&format!("<div class=\"item\"><p>Paragraph {i}</p></div>"));
+    }
+    html.push_str("</body></html>");
+    let (engine, mut page) = load(&html);
+    let (g, deep, h, after, ei) = (id(&page, "g"), id(&page, "deep"), id(&page, "h"), id(&page, "after"), id(&page, "ei"));
+    let mut warm = None;
+    for round in 0..4 {
+        page.doc.set_attr(deep, "class", Some(if round % 2 == 0 { "on" } else { "off" }));
+        check(&engine, &mut page, "descendant flips .g:has(.on)");
+        page.doc.set_attr(deep, "title", Some(&format!("r{round}")));
+        check(&engine, &mut page, "change that leaves :has() as it was");
+        let k = page.doc.create_element("b", vec![("class".into(), "k".into())]);
+        page.doc.append_child(g, k);
+        check(&engine, &mut page, "child .k makes .g:has(> .k) + .s match");
+        page.doc.detach(k);
+        check(&engine, &mut page, "child .k removed");
+        page.doc.set_attr(after, "class", Some(if round % 2 == 0 { "m" } else { "" }));
+        check(&engine, &mut page, "next sibling flips .h:has(+ .m)");
+        let text = page.doc.create_text(if round % 2 == 0 { "now not empty" } else { "" });
+        page.doc.append_child(ei, text);
+        check(&engine, &mut page, "text inside a :not(:has(> :not(:empty))) child");
+        page.doc.detach(text);
+        check(&engine, &mut page, "text removed");
+        if round == 1 {
+            warm = Some(page.incr.stats.clone());
+        }
+    }
+    let warm = warm.unwrap();
+    assert_eq!(page.incr.stats.style_full, warm.style_full, "no full restyle once :has() results are known");
+    let _ = h;
+}
+
 /// Random DOM mutations against a stylesheet exercising every
 /// invalidation path; after each step the incremental result must equal
 /// a full recomputation.
@@ -325,6 +372,9 @@ fn randomized_mutations_match_full_recompute() {
         .k { --w: 70px } .k .l { width: var(--w) } .m { border-left: inherit } .n { display: contents } ul { list-style: decimal }
         body { counter-reset: c } .o { counter-increment: c } .o::before { content: counter(c) ". " } .p::after { content: open-quote "q" close-quote }
         .q:has(> .a) { outline: 2px solid red; padding-top: 2px } .r { position: absolute; left: 5px; width: 20px }
+        .l:has(.c) .b { padding-left: 6px } .m:has(+ .d) ~ .p { color: green } .n:not(:has(> :not(:empty))) + .i { width: 12px }
+        .p:not(:has(.a)) .c { display: block; height: 3px } .k:is(:has(+ .e)) { color: blue }
+        section:has(~ .h) > span { margin-right: 5px }
     "#;
     let classes = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", ""];
     let tags = ["div", "p", "span", "ul", "li", "section", "b"];

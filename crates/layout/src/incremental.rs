@@ -264,6 +264,7 @@ fn dismantle(b: LayoutBox, map: &mut HashMap<NodeId, LayoutBox>) {
 /// Lay out the document reusing what `damage` says is still valid in
 /// `prev`.
 pub fn layout_incremental(prev: LayoutTree, ctx: &LayoutContext, damage: &LayoutDamage) -> LayoutTree {
+    crate::build::reset_list_numbers();
     let doc = ctx.doc;
     let html = doc.html_element();
     let usable = !damage.full

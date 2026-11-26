@@ -1511,6 +1511,49 @@ fn parse_dimension_attr(v: &str) -> Option<f32> {
 }
 
 /// Marker text for a list item: bullet or counter (with trailing ". ").
+thread_local! {
+    /// (document, epoch) and the item numbers of the lists seen in it.
+    static LIST_NUMBERS: std::cell::RefCell<(usize, u64, HashMap<NodeId, Rc<HashMap<NodeId, i64>>>)> = std::cell::RefCell::new((0, 0, HashMap::new()));
+}
+
+/// Forget the list numbers (a new layout pass: another document may now
+/// live at the address of a dropped one, with the same epoch).
+pub(crate) fn reset_list_numbers() {
+    LIST_NUMBERS.with(|c| *c.borrow_mut() = (0, 0, HashMap::new()));
+}
+
+/// The numbers of the `li` children of `parent` (`start`, `reversed` and
+/// `value` attributes applied).
+fn list_numbers(doc: &Document, parent: NodeId) -> Rc<HashMap<NodeId, i64>> {
+    let doc_key = doc as *const Document as usize;
+    LIST_NUMBERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.0 != doc_key || cache.1 != doc.epoch() {
+            *cache = (doc_key, doc.epoch(), HashMap::new());
+        }
+        if let Some(n) = cache.2.get(&parent) {
+            return n.clone();
+        }
+        let (start, reversed) = doc
+            .element(parent)
+            .map(|e| (e.attr("start").and_then(|s| s.trim().parse::<i64>().ok()), e.attr("reversed").is_some()))
+            .unwrap_or((None, false));
+        let items: Vec<NodeId> = doc.child_elements(parent).filter(|&c| doc.is_element(c, "li")).collect();
+        let mut current = start.unwrap_or(if reversed { items.len() as i64 } else { 1 });
+        let mut numbers = HashMap::with_capacity(items.len());
+        for li in items {
+            if let Some(v) = doc.attr(li, "value").and_then(|v| v.trim().parse::<i64>().ok()) {
+                current = v;
+            }
+            numbers.insert(li, current);
+            current += if reversed { -1 } else { 1 };
+        }
+        let numbers = Rc::new(numbers);
+        cache.2.insert(parent, numbers.clone());
+        numbers
+    })
+}
+
 fn list_marker_text(doc: &Document, node: NodeId, style: &ComputedStyle) -> Option<Rc<str>> {
     let t = match style.list_style_type {
         ListStyleType::None => return None,
@@ -1519,49 +1562,10 @@ fn list_marker_text(doc: &Document, node: NodeId, style: &ComputedStyle) -> Opti
         ListStyleType::Square => return Some(Rc::from("▪")),
         other => other,
     };
-    // Count previous list-item siblings.
-    let parent = doc.parent(node);
-    let (start, reversed) = parent
-        .and_then(|p| doc.element(p))
-        .map(|e| {
-            (
-                e.attr("start").and_then(|s| s.trim().parse::<i64>().ok()),
-                e.attr("reversed").is_some(),
-            )
-        })
-        .unwrap_or((None, false));
-    let mut index: i64 = 0;
-    let mut value_override: Option<i64> = None;
-    if let Some(p) = parent {
-        let mut count_total = 0i64;
-        for sib in doc.child_elements(p) {
-            if doc.is_element(sib, "li") {
-                count_total += 1;
-            }
-        }
-        let mut n = 0i64;
-        let mut current = start.unwrap_or(if reversed { count_total } else { 1 });
-        for sib in doc.child_elements(p) {
-            if !doc.is_element(sib, "li") {
-                continue;
-            }
-            if let Some(v) = doc.attr(sib, "value").and_then(|v| v.trim().parse::<i64>().ok()) {
-                current = v;
-            }
-            n += 1;
-            if sib == node {
-                index = n;
-                value_override = Some(current);
-                break;
-            }
-            if reversed {
-                current -= 1;
-            } else {
-                current += 1;
-            }
-        }
-    }
-    let number = value_override.unwrap_or(index.max(1));
+    // The ordinal of the item among its list-item siblings (computed once
+    // per list while the document is unchanged: counting the previous
+    // siblings for every item is quadratic on long lists).
+    let number = doc.parent(node).and_then(|p| list_numbers(doc, p).get(&node).copied()).unwrap_or(1);
     let s = match t {
         ListStyleType::Decimal => number.to_string(),
         ListStyleType::DecimalLeadingZero => format!("{number:02}"),

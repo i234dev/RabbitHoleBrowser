@@ -154,8 +154,21 @@ fn wait_clear_still_waits_for_later_raf_pixels() {
       });
       send([{type:'pointerMove',x:10,y:10},{type:'pointerDown',button:0},{type:'pointerUp',button:0}]);
     "#));
+    let started=std::time::Instant::now();
     let frame=finish(&engine,&mut page,Duration::from_secs(2)).unwrap();
-    assert_eq!(&frame.rgba[(10*frame.width as usize+10)*4..][..4],&[0,255,0,255]);
+    let pixel=&frame.rgba[(10*frame.width as usize+10)*4..][..4];
+    if pixel!=[0,255,0,255] {
+        // Intermittent on Windows CI only: report what the image area holds.
+        let mut colors=std::collections::BTreeMap::<[u8;4],usize>::new();
+        for y in 0..100usize { for x in 0..100usize {
+            let o=(y*frame.width as usize+x)*4;
+            *colors.entry(frame.rgba[o..o+4].try_into().unwrap()).or_default()+=1;
+        }}
+        let mut colors:Vec<_>=colors.into_iter().collect();
+        colors.sort_by(|a,b|b.1.cmp(&a.1));
+        colors.truncate(8);
+        panic!("pixel {pixel:?} after {:?}; images in flight {}; image area colors {colors:?}",started.elapsed(),page.images_in_flight());
+    }
 }
 
 #[test]
@@ -189,8 +202,21 @@ fn wait_clear_still_waits_for_delayed_image_pixels() {
     "#)));
     engine.loader.load_images=true;
     engine.loader.prefetch_images=false;
+    let started=std::time::Instant::now();
     let frame=finish(&engine,&mut page,Duration::from_secs(2)).unwrap();
-    assert_eq!(&frame.rgba[(10*frame.width as usize+10)*4..][..4],&[0,255,0,255]);
+    let pixel=&frame.rgba[(10*frame.width as usize+10)*4..][..4];
+    if pixel!=[0,255,0,255] {
+        // Intermittent on Windows CI only: report what the image area holds.
+        let mut colors=std::collections::BTreeMap::<[u8;4],usize>::new();
+        for y in 0..100usize { for x in 0..100usize {
+            let o=(y*frame.width as usize+x)*4;
+            *colors.entry(frame.rgba[o..o+4].try_into().unwrap()).or_default()+=1;
+        }}
+        let mut colors:Vec<_>=colors.into_iter().collect();
+        colors.sort_by(|a,b|b.1.cmp(&a.1));
+        colors.truncate(8);
+        panic!("pixel {pixel:?} after {:?}; images in flight {}; image area colors {colors:?}",started.elapsed(),page.images_in_flight());
+    }
 }
 
 #[test]
