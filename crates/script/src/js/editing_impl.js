@@ -1394,6 +1394,28 @@
       if (replacement !== text.data.slice(from,to)) text.replaceData(from,to-from,replacement);
     }
   }
+  // A now-empty inline editor needs a caret line if removing it would
+  // collapse the entire line in the surrounding block formatting context.
+  function inlineLineBoundary(host, forward) {
+    for (let node = host; node;) {
+      const next = forward ? node.nextSibling : node.previousSibling;
+      if (!next) {
+        node = node.parentElement;
+        if (!node || isBlock(node)) return true;
+        continue;
+      }
+      node = next;
+      if (node.nodeType === 3) {
+        if (!node.length) continue;
+        return false;
+      }
+      if (node.nodeType !== 1 || getComputedStyle(node).display === 'none') continue;
+      if (node.localName === 'br') return !forward;
+      return isBlock(node);
+    }
+    return true;
+  }
+
   function deleteSelection(t, cmd) {
     if (endsInChildBlock(t)) {
       deleteIntoChildBlock(t);
@@ -1414,6 +1436,12 @@
     if (touchedSpace) rebalanceSpaces(caret,offset,host,true);
     // A caret left right before a child block is in its first line, as in
     // other browsers (typing goes there).
+    if (!host.textContent && !host.firstElementChild && getComputedStyle(host).display === 'inline' &&
+        inlineLineBoundary(host, false) && inlineLineBoundary(host, true)) {
+      host.appendChild(caretBreak(host.ownerDocument));
+      caret = host;
+      offset = 0;
+    }
     const following = caret.nodeType === 1 ? caret.childNodes[offset] : null;
     if (following?.nodeType === 1 && isBlock(following) && following.isContentEditable &&
         (!caret.childNodes[offset - 1] || caret.childNodes[offset - 1].localName === 'br') &&
@@ -2110,6 +2138,9 @@
         container.appendChild(sel.getRangeAt(0).cloneContents());
         html = container.innerHTML;
         text = sel.toString();
+        // Selection stringification collects text nodes and may omit a
+        // selected line break. The clipboard represents rendered breaks.
+        if (container.querySelector('br')) text = N.editingPlaintext(html);
       }
       if (cmd === 'copy') {
         N.editingStoreClipboard(text, html);
