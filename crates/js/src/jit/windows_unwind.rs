@@ -192,6 +192,21 @@ mod registry {
         accounted: Cell<bool>,
         #[cfg(test)]
         layout: Layout,
+        #[cfg(test)]
+        id: u64,
+    }
+
+    // Unwind tables are process-wide while tests run on parallel threads: a
+    // freed code address can be mapped and registered again by another test
+    // before a lookup. Tests record which registration owns each base, and
+    // registration changes happen under this lock.
+    #[cfg(test)]
+    static REGISTERED: std::sync::Mutex<Vec<(usize, u64)>> = std::sync::Mutex::new(Vec::new());
+    #[cfg(test)]
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    #[cfg(test)]
+    fn registered() -> std::sync::MutexGuard<'static, Vec<(usize, u64)>> {
+        REGISTERED.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     impl Registration {
@@ -199,8 +214,12 @@ mod registry {
             if !self.registered { return true; }
             #[cfg(test)]
             if FAIL_DELETE.try_with(|flag| flag.replace(false)).unwrap_or(false) { return false; }
+            #[cfg(test)]
+            let mut list = registered();
             // No generated activation may still own a return address here.
             if unsafe { RtlDeleteFunctionTable(&**self.table) } == 0 { return false; }
+            #[cfg(test)]
+            list.retain(|&(_, id)| id != self.id);
             self.registered = false;
             true
         }
@@ -290,12 +309,18 @@ mod registry {
                 registered: false, accounted: Cell::new(false),
                 #[cfg(test)]
                 layout,
+                #[cfg(test)]
+                id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             });
             #[cfg(test)]
             if FAIL_ADD.try_with(|flag| flag.replace(false)).unwrap_or(false) { return Err("Windows unwind registration refused".into()); }
+            #[cfg(test)]
+            let mut list = registered();
             if unsafe { RtlAddFunctionTable(&**inner.table, 1, inner.mem.ptr() as u64) } == 0 {
                 return Err("Windows unwind registration refused".into());
             }
+            #[cfg(test)]
+            list.push((inner.mem.ptr() as usize, inner.id));
             inner.registered = true;
             Ok(Self { inner: Some(inner) })
         }
@@ -304,6 +329,8 @@ mod registry {
         pub(crate) fn ptr(&self) -> *const u8 { self.inner.as_ref().unwrap().mem.ptr() }
         pub(crate) fn len(&self) -> usize { self.inner.as_ref().unwrap().mem.len() }
         pub(crate) fn mapped_len(&self) -> usize { self.inner.as_ref().unwrap().mem.mapped_len() }
+        #[cfg(test)]
+        pub(crate) fn test_id(&self) -> u64 { self.inner.as_ref().unwrap().id }
     }
 
     fn release(mut owner: Box<Registration>) {
@@ -348,6 +375,15 @@ mod registry {
             let mut base = 0;
             let entry = RtlLookupFunctionEntry(pc as u64, &mut base, std::ptr::null_mut());
             (entry, base)
+        }
+
+        /// The registration `id` at `base` is gone from the OS tables: the
+        /// lookup finds nothing, or finds a later registration of the same
+        /// address by another thread.
+        fn unregistered(base: usize, id: u64) -> bool {
+            let list = registered();
+            !list.iter().any(|&(_, i)| i == id)
+                && (unsafe { lookup(base).0.is_null() } || list.iter().any(|&(b, _)| b == base))
         }
 
         fn real_code(realm: &mut Realm) -> RegisteredCode {
@@ -424,8 +460,9 @@ mod registry {
                     assert!(lookup(base + pc).0.is_null(), "data/padding is not a function");
                 }
             }
+            let id = mem.test_id();
             drop(mem);
-            assert!(unsafe { lookup(base).0.is_null() }, "unregistered before freeing");
+            assert!(unregistered(base, id), "unregistered before freeing");
             eprintln!("windows-unwind-os actual-js-image prologue=12 inner=40 jumps=2 epilogue=8 lookup_after_drop=none");
         }
 
@@ -453,6 +490,7 @@ mod registry {
             let mut realm = Realm::new();
             let mem = real_code(&mut realm);
             let base = mem.ptr() as usize;
+            let id = mem.test_id();
             let before = super::super::super::code_bytes();
             let bytes = mem.mapped_len();
             super::super::super::CODE_BYTES.with(|n| n.set(n.get() + bytes));
@@ -475,14 +513,14 @@ mod registry {
             super::super::super::CODE_BYTES.with(|n| n.set(held_budget));
             // A subsequent real entry lease retries the owned failed removal.
             drop(EntryLease::new().unwrap());
-            assert!(unsafe { lookup(base).0.is_null() });
+            assert!(unregistered(base, id));
             assert_eq!(super::super::super::code_bytes(), before);
             assert_eq!(DISPOSALS.with(Cell::get), disposals + 1);
         }
 
         #[derive(Default)]
         struct RetireProbe {
-            base: Cell<usize>, bytes: Cell<usize>, budget: Cell<usize>,
+            base: Cell<usize>, id: Cell<u64>, bytes: Cell<usize>, budget: Cell<usize>,
             nested_entries: Cell<u64>, nested_checked: Cell<bool>,
         }
 
@@ -511,6 +549,7 @@ mod registry {
             let owner = code.jit.s.code.get().unwrap();
             let base = owner.mem.ptr() as usize;
             probe.base.set(base);
+            probe.id.set(owner.mem.test_id());
             probe.bytes.set(owner.mem.mapped_len());
             probe.budget.set(super::super::super::code_bytes());
             let disposals = DISPOSALS.with(Cell::get);
@@ -553,7 +592,7 @@ mod registry {
             assert_eq!(r.to_string(result).unwrap().to_rust_string(), "73");
             assert!(probe.nested_checked.get());
             assert!(probe.nested_entries.get() > 0);
-            assert!(unsafe { lookup(probe.base.get()).0.is_null() });
+            assert!(unregistered(probe.base.get(), probe.id.get()));
             assert_eq!(r.jit.live_entries, 0);
             assert!(RETIREMENT.with(|tls| { let state=tls.borrow(); state.active==0 && state.retired.is_empty() }));
             drop(r);
@@ -594,7 +633,7 @@ mod registry {
             assert_eq!(panic.downcast_ref::<&'static str>().copied(), Some("contained-windows-jit-panic"));
             assert!(r.jit_entries() > entries);
             assert_eq!(r.jit.live_entries, 0);
-            assert!(unsafe { lookup(probe.base.get()).0.is_null() }, "retirement finished before resume_unwind");
+            assert!(unregistered(probe.base.get(), probe.id.get()), "retirement finished before resume_unwind");
             assert!(RETIREMENT.with(|tls| { let state=tls.borrow(); state.active==0 && state.retired.is_empty() }));
             drop(r);
             assert_eq!(super::super::super::code_bytes(), before);
