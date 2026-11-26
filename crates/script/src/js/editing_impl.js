@@ -1429,6 +1429,7 @@
   const paragraphProhibited = new Set(['address','article','aside','blockquote','caption','center','col','colgroup','dd','details',
     'dir','div','dl','dt','fieldset','figcaption','figure','footer','form','h1','h2','h3','h4','h5','h6','header','hgroup','hr','li',
     'listing','menu','nav','ol','p','plaintext','pre','section','summary','table','tbody','td','tfoot','th','thead','tr','ul','xmp']);
+  const insideParagraphInvalid = Array.from(paragraphProhibited).join(',');
   const headings = new Set(['h1','h2','h3','h4','h5','h6']);
   const onlyChildren = { colgroup: ['col'], table: ['caption','col','colgroup','tbody','td','tfoot','th','thead','tr'],
     tbody: ['td','th','tr'], tfoot: ['td','th','tr'], thead: ['td','th','tr'], tr: ['td','th'], dl: ['dt','dd'],
@@ -1568,7 +1569,8 @@
     const { host, range, sel } = t;
     let block = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
     if (textOnlyContainer(range)) return insertLineBreak(doc, t);
-    while (block !== host && (!isBlock(block) || !['address','div','p','pre','li','blockquote','h1','h2','h3','h4','h5','h6'].includes(block.localName)))
+    while (block !== host && (!isBlock(block) || !(inlineContents.has(block.localName) ||
+        ['address','div','li','blockquote'].includes(block.localName))))
       block = block.parentElement;
     if (!isBlock(block) || block.localName === 'pre' || (block === host && inlineContents.has(host.localName)) || (block === host && host.contentEditable === 'plaintext-only')) {
       insertLineBreak(doc, t);
@@ -1578,6 +1580,9 @@
     tail.selectNodeContents(block);
     tail.setStart(range.startContainer, range.startOffset);
     const after = tail.extractContents();
+    // CSS can make a paragraph or div inline. Its clone still has the HTML
+    // content model of that element and cannot be nested inside a new p.
+    if (block === host && separator === 'p' && after.querySelector(insideParagraphInvalid)) separator = 'div';
     const next = block === host ? doc.createElement(separator) : block.cloneNode(false);
     next.removeAttribute('id');
     next.appendChild(after);
@@ -1693,6 +1698,7 @@
           const caret = { host, sel, range: sel.getRangeAt(0) };
           if (host.contentEditable === 'plaintext-only') insertLineBreak(doc, caret);
           else splitParagraph(doc, caret, state.separator);
+          if (toggles?.size) state.typing = { node: sel.focusNode, offset: sel.focusOffset, formats: toggles };
         }
         if (!lines[i]) continue;
         const caret = sel.getRangeAt(0);
