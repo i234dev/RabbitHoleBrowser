@@ -1369,6 +1369,10 @@
     }
   }
   function deleteSelection(t, cmd) {
+    if (endsInChildBlock(t)) {
+      deleteIntoChildBlock(t);
+      return true;
+    }
     if (joinParagraphs(t, cmd)) return true;
     const { sel, host } = t;
     if (sel.isCollapsed) {
@@ -1627,7 +1631,8 @@
     }
     const toggles = range.collapsed && ['inserttext','insertlinebreak','insertparagraph'].includes(cmd) ? typingStyle(state, range) : null;
     state.typing = null;
-    range.deleteContents();
+    if (cmd === 'inserttext' && endsInChildBlock(t)) deleteIntoChildBlock(t);
+    else range.deleteContents();
     if (cmd === 'insertparagraph' || cmd === 'insertlinebreak') {
       if (cmd === 'insertparagraph') splitParagraph(doc, t, state.separator);
       else insertLineBreak(doc, t);
@@ -1806,6 +1811,15 @@
       else others++;
     }
     return breaks <= 1 && others <= ancestors;
+  }
+  // The DOM deletion algorithm collapses at the common ancestor. Editing a
+  // whole line into a nested paragraph instead continues typing at the
+  // surviving end of that paragraph, including its inline formatting.
+  function deleteIntoChildBlock({ range, sel }) {
+    const endpoint = range.cloneRange();
+    endpoint.collapse(false);
+    range.deleteContents();
+    sel.collapse(endpoint.startContainer, endpoint.startOffset);
   }
   function endsInChildBlock({ range, host }) {
     if (range.collapsed) return false;
