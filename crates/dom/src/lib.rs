@@ -300,6 +300,9 @@ pub struct Document {
     /// fragment parser or a parser without scripting, or already run);
     /// copied when the element is cloned or imported.
     pub script_started: std::collections::HashSet<NodeId>,
+    /// Assigning srcdoc starts a new navigation even if its text is unchanged.
+    /// The frame synchronizer consumes assignments once per turn.
+    pub pending_srcdoc: std::collections::HashSet<NodeId>,
     /// Quirks mode decided by the parser from the DOCTYPE.
     pub quirks_mode: QuirksMode,
     /// An HTML document (`false` for XML documents made by
@@ -417,6 +420,7 @@ impl Document {
             cdata: std::collections::HashSet::new(),
             pi_targets: HashMap::new(),
             script_started: std::collections::HashSet::new(),
+            pending_srcdoc: Default::default(),
             quirks_mode: QuirksMode::NoQuirks,
             is_html: true,
             design_mode: false,
@@ -996,6 +1000,9 @@ impl Document {
             Some(v) => match el.attrs.iter_mut().find(|(k, _)| *k == name) {
                 Some(slot) => {
                     if slot.1 == v {
+                        if name == "srcdoc" && el.tag == "iframe" && el.ns == Namespace::Html {
+                            self.pending_srcdoc.insert(id);
+                        }
                         return; // unchanged: nothing to restyle
                     }
                     Some(std::mem::replace(&mut slot.1, v.to_string()))

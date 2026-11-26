@@ -648,3 +648,19 @@ fn same_origin_frames_share_detached_documents_and_their_live_ranges() {
     })()"#);
     assert_eq!(result, "true|true|true|true|lphab|lphab|separate");
 }
+
+#[test]
+fn srcdoc_loads_before_its_owner_and_reloads_on_an_identical_assignment() {
+    let mut engine = engine();
+    let mut page = load(&mut engine, r#"<iframe id="f" srcdoc="<script>window.ready=1</script>"></iframe>
+      <script>
+        var events = [];
+        document.addEventListener('DOMContentLoaded', () => events.push(document.readyState));
+        f.onload = () => events.push('child:' + f.contentWindow.ready);
+        window.onload = () => events.push('parent:' + f.contentWindow.ready);
+      </script>"#);
+    assert_eq!(eval(&engine, &mut page, "events.join('|')"), "interactive|child:1|parent:1");
+    eval(&engine, &mut page, "f.contentWindow.ready=2; f.srcdoc=f.srcdoc");
+    settle(&engine, &mut page);
+    assert_eq!(eval(&engine, &mut page, "events.join('|')"), "interactive|child:1|parent:1|child:1");
+}

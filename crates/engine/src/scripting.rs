@@ -58,6 +58,7 @@ pub struct ScriptState {
     pub scripts_ran: bool,
     /// Loading state belongs to the document, including documents without JS.
     pub(crate) load_complete: bool,
+    pub(crate) waiting_for_frame_load: bool,
     /// Page scripts not run yet (load-time scripts run in slices, see
     /// [`Engine::run_page_scripts_for`]).
     pub(crate) pending_scripts: Option<std::collections::VecDeque<crate::ScriptSource>>,
@@ -234,6 +235,7 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn referrer_policy(&self) -> rabbithole_net::ReferrerPolicy { self.page.referrer_policy }
     fn document_is_complete(&self) -> bool { self.page.script.load_complete }
+    fn document_is_interactive(&self) -> bool { self.page.script.waiting_for_frame_load }
     fn security_origin(&self) -> String { crate::frames::page_origin(self.page) }
     fn window_context(&self) -> Option<rabbithole_script::WindowContext> {
         if self.page.frame_depth == 0 { self.engine.window_context.clone() } else { None }
@@ -762,6 +764,7 @@ impl HostEnv for EngineEnv<'_> {
         }
     }
     fn document_load_started(&mut self) {
+        self.page.script.waiting_for_frame_load = false;
         self.page.script.load_complete = false;
         self.page.script.frame_load_pending = false;
         self.page.script.frame_initial_load_pending = false;
@@ -902,12 +905,11 @@ impl Engine {
             return;
         }
         page.script.scripts_ran = true;
-        page.script.load_complete = true;
-        let mut host = {
+        page.script.load_complete = !page.script.waiting_for_frame_load;
+        let host = {
             let mut env = EngineEnv { engine: self, page };
             ScriptHost::new(&mut env)
         };
-        host.mark_loaded();
         page.script.host = Some(host);
     }
 
@@ -964,15 +966,13 @@ impl Engine {
                 }
             }
             if queue.is_empty() {
-                env.page.script.load_complete = true;
-                host.document_ready(&mut env);
-                host.run_jobs(&mut env);
+                host.document_parsed(&mut env);
             }
             host.realm().set_deadline(None);
         }
         page.script.host = Some(host);
         if queue.is_empty() {
-            Some(self.settle(page, false))
+            Some(self.finish_parsed_document(page))
         } else {
             // The embedder paints what the scripts built so far (painting
             // flushes style and layout); requests made by the scripts stay
@@ -986,12 +986,31 @@ impl Engine {
     /// A realm created by an early console evaluation still receives its
     /// real ready/load events once; a later realm starts already complete.
     pub(crate) fn complete_document_without_scripts(&self, page: &mut Page) -> ScriptOutcome {
-        if page.script.load_complete { return ScriptOutcome::default(); }
+        if page.script.load_complete || page.script.waiting_for_frame_load { return ScriptOutcome::default(); }
+        if let Some(mut host) = page.script.host.take() {
+            host.document_parsed(&mut EngineEnv { engine: self, page });
+            page.script.host = Some(host);
+        }
+        self.finish_parsed_document(page)
+    }
+
+    fn finish_parsed_document(&self, page: &mut Page) -> ScriptOutcome {
+        // The initial layout discovered parser-inserted frames. Include
+        // children added or removed by scripts and DOMContentLoaded listeners.
+        self.sync_frames(page);
+        if page.has_load_delaying_frame() {
+            page.script.waiting_for_frame_load = true;
+            return self.settle(page, false);
+        }
+        self.finish_window_load(page)
+    }
+
+    fn finish_window_load(&self, page: &mut Page) -> ScriptOutcome {
         page.script.load_complete = true;
         let Some(mut host) = page.script.host.take() else { return ScriptOutcome::default() };
         {
             let mut env = EngineEnv { engine: self, page };
-            host.document_ready(&mut env);
+            host.document_loaded(&mut env);
             host.run_jobs(&mut env);
         }
         page.script.host = Some(host);
@@ -1050,6 +1069,11 @@ impl Engine {
         if console_deadline.is_none_or(|deadline| std::time::Instant::now() < deadline) {
             let frames_out = self.tick_frames(page);
             out.merge(frames_out);
+            if page.script.waiting_for_frame_load && !page.has_load_delaying_frame() {
+                page.script.waiting_for_frame_load = false;
+                out.merge(self.finish_window_load(page));
+                page.script.frame_load_pending = page.frame_depth > 0;
+            }
         }
         out.relayout |= images_changed || img_out.relayout;
         if out.navigation.is_none() {

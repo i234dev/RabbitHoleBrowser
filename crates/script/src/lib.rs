@@ -318,7 +318,9 @@ impl ScriptHost {
         realm.set_task_budget(Some(task_budget()));
         rabbithole_wasm_js::install(&mut realm);
         let now = env.now_ms();
-        let document_complete = env.document_is_complete();
+        let ready_state = if env.document_is_complete() { "complete" }
+            else if env.document_is_interactive() { "interactive" }
+            else { "loading" };
         let url_links = (
             realm.new_private_symbol(rabbithole_js::JsStr::new("URL.queryList")),
             realm.new_private_symbol(rabbithole_js::JsStr::new("URLSearchParams.url")),
@@ -338,8 +340,8 @@ impl ScriptHost {
             last_frame: now,
             last_tick: 0.0,
             dirty: false,
-            ready_state: if document_complete { "complete" } else { "loading" },
-            loading: !document_complete,
+            ready_state,
+            loading: ready_state == "loading",
             current_script: None,
             focused: None,
             extra_docs: Vec::new(),
@@ -672,6 +674,12 @@ impl ScriptHost {
     /// Finish loading: `readyState` → interactive, `DOMContentLoaded`,
     /// then `complete` and `load`.
     pub fn document_ready(&mut self, env: &mut dyn HostEnv) {
+        self.document_parsed(env);
+        self.document_loaded(env);
+    }
+
+    /// The parser finished. Eager child browsing contexts may still delay load.
+    pub fn document_parsed(&mut self, env: &mut dyn HostEnv) {
         self.enter(env, |realm| {
             docparser::finish_snapshot(realm);
             {
@@ -684,6 +692,12 @@ impl ScriptHost {
             events::dispatch(realm, TargetKey::Node(NodeRef::main(Document::ROOT)), "DOMContentLoaded", EventInit::simple(true, false), true);
             realm.begin_task();
             realm.run_jobs();
+        });
+    }
+
+    /// The document and its load-delaying resources have finished.
+    pub fn document_loaded(&mut self, env: &mut dyn HostEnv) {
+        self.enter(env, |realm| {
             state().borrow_mut().ready_state = "complete";
             events::dispatch(realm, TargetKey::Node(NodeRef::main(Document::ROOT)), "readystatechange", EventInit::simple(false, false), true);
             events::dispatch(realm, TargetKey::Window, "load", EventInit::simple(false, false), true);

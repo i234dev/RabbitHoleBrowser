@@ -476,6 +476,16 @@ impl Page {
         }
     }
 
+    /// Lazy embeds do not delay the owner's load event. Eager children
+    /// finish after their own load-delaying descendants.
+    pub(crate) fn has_load_delaying_frame(&self) -> bool {
+        self.frames.children.iter().any(|c| {
+            !self.doc.attr(c.node, "loading").is_some_and(|v| v.eq_ignore_ascii_case("lazy"))
+                && (c.pending.is_some() || c.page.as_ref().is_some_and(|p|
+                    p.script.waiting_for_frame_load || p.script.frame_initial_load_pending || p.script.frame_load_pending))
+        })
+    }
+
     /// Any frame load still in progress (this page or below)?
     pub fn frames_loading(&self) -> bool {
         self.frames.children.iter().any(|c| c.pending.is_some() || c.page.as_ref().map(|p| p.script.frame_load_pending || p.script.frame_initial_load_pending || p.frames_loading()).unwrap_or(false))
@@ -552,6 +562,7 @@ impl Engine {
             let sources = nodes.iter().map(|&n| frame_source(page, n)).collect();
             page.frames.scan = Some(FrameScan { doc: page.doc.weak_identity(), epoch, base: page.base_url.clone(), scripting: self.scripting, nodes, sources });
         }
+        let repeated_srcdoc = std::mem::take(&mut page.doc.pending_srcdoc);
         let scan = page.frames.scan.as_ref().expect("frame scan");
         if scan.nodes.is_empty() && page.frames.children.is_empty() {
             return;
@@ -571,7 +582,7 @@ impl Engine {
         let mut changed = before != page.frames.children.len();
         for (&node, source) in iframes.iter().zip(sources) {
             match page.frames.children.iter_mut().find(|c| c.node == node) {
-                Some(c) if c.source == source => {}
+                Some(c) if c.source == source && !repeated_srcdoc.contains(&node) => {}
                 Some(c) => {
                     // `src` changed: navigate the frame. The current
                     // document stays until the new one arrives (scripts
@@ -1082,8 +1093,8 @@ impl Engine {
         if let Some(nav) = nav {
             self.navigate_frame_node(page, node, nav.request.url);
         }
-        // The iframe's `load` event in the parent.
-        if page.script.host.is_some() {
+        // Nested eager frames may still delay this document's window load.
+        if page.script.host.is_some() && !page.frames.children[i].page.as_ref().is_some_and(|p| p.script.waiting_for_frame_load) {
             let o = self.dispatch_event(page, node, "load", EventInit::simple(false, false));
             out.merge(o);
         }

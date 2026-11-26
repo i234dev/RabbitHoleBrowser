@@ -22,6 +22,8 @@ pub trait HostEnv {
     fn referrer_policy(&self) -> rabbithole_net::ReferrerPolicy { Default::default() }
     /// The document can finish loading before its first script realm exists.
     fn document_is_complete(&self) -> bool { false }
+    /// Parsing finished while a child still delays the load event.
+    fn document_is_interactive(&self) -> bool { false }
     /// Effective origin, including inheritance by an initial about:blank.
     fn security_origin(&self) -> String { self.document_url().origin() }
     /// Top-level context owned by the embedder; absent in workers/headless hosts.
