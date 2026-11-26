@@ -1518,10 +1518,24 @@
     }
     return null;
   }
+  // These editable HTML elements can only represent a line break as text.
+  function textOnlyContainer(range) {
+    const node = range.startContainer;
+    const el = node.nodeType === 1 ? node : node.parentElement;
+    return el?.closest('title,script,style,xmp,plaintext');
+  }
   function insertLineBreak(doc, t) {
     const {host, range, sel} = t;
     const point = range.startContainer;
     const parent = point.nodeType === 3 ? point.parentElement : point;
+    const textOnly = textOnlyContainer(range);
+    if (textOnly) {
+      const trailing = !followingContent(range, textOnly) &&
+        ['pre','pre-line','pre-wrap','break-spaces'].includes(getComputedStyle(parent).whiteSpace);
+      insertText(doc, range, sel, trailing ? '\n\n' : '\n');
+      if (trailing) sel.collapse(sel.focusNode, sel.focusOffset - 1);
+      return;
+    }
     const block = parent === host || isBlock(parent) ? parent : containingBlock(parent, host);
     const atEnd = !followingContent(range, block);
     if (['pre','pre-line','pre-wrap','break-spaces'].includes(getComputedStyle(parent).whiteSpace)) {
@@ -1549,6 +1563,7 @@
   function splitParagraph(doc, t, separator) {
     const { host, range, sel } = t;
     let block = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+    if (textOnlyContainer(range)) return insertLineBreak(doc, t);
     while (block !== host && (!isBlock(block) || !['address','div','p','pre','li','blockquote','h1','h2','h3','h4','h5','h6'].includes(block.localName)))
       block = block.parentElement;
     if (!isBlock(block) || block.localName === 'pre' || (block === host && inlineContents.has(host.localName)) || (block === host && host.contentEditable === 'plaintext-only')) {
@@ -1752,6 +1767,7 @@
     // The specification assumes block editing hosts: an inline host gets
     // line breaks instead of paragraphs, as in other browsers.
     if (getComputedStyle(t.host).display.startsWith('inline')) return false;
+    if ((cmd === 'insertparagraph' || cmd === 'insertlinebreak') && textOnlyContainer(t.range)) return false;
     // A CSS display override does not change the host's HTML content model.
     if (inlineContents.has(t.host.localName) &&
         (cmd === 'insertparagraph' || cmd === 'insertlinebreak' || (cmd === 'inserttext' && /[\r\n]/.test(value)))) return false;
