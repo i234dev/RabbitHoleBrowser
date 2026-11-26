@@ -1109,6 +1109,7 @@ impl Worker {
 
     fn paint_frame(&mut self) {
         let Some(page) = self.page.as_mut() else { return };
+        let video_paint = page.video_paint_start();
         self.dirty = false;
         // Child frames are rasterized now, when a frame is shown.
         self.engine.present(page);
@@ -1230,6 +1231,9 @@ impl Worker {
         };
         self.painted = Some(Painted { covered, scroll: (sx, sy), scale: s, scroll_dependent: fixed });
         self.send(FromContent::Frame(frame));
+        if video_paint.is_some() {
+            self.page.as_mut().unwrap().finish_video_paint(video_paint);
+        }
     }
 
     /// Selection, find highlights, focus ring and caret.

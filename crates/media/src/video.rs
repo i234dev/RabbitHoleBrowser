@@ -20,6 +20,7 @@ const EAGAIN: i32 = 11;
 #[derive(Clone)]
 pub struct VideoFrame {
     pub pts: f64,
+    pub timing: Option<crate::video_stats::FrameTiming>,
     pub width: u32,
     pub height: u32,
     pub rgba: Arc<Vec<u8>>,
@@ -50,6 +51,42 @@ fn h264_available() -> bool {
 #[cfg(not(windows))]
 fn h264_available() -> bool {
     false
+}
+
+/// Filter codec advertisements during source selection. This leaves actual
+/// decoder availability intact for a file or track already selected.
+pub fn advertise_codec(codec: &str) -> bool {
+    #[cfg(windows)]
+    if matches!(codec, "h264" | "vp8" | "vp9" | "av1") {
+        use std::sync::OnceLock;
+        static ALL: OnceLock<bool> = OnceLock::new();
+        let all = *ALL.get_or_init(|| std::env::var("RH_VIDEO_CODECS").as_deref() == Ok("all"));
+        return windows_advertises(codec, h264_available(), all);
+    }
+    let _ = codec;
+    true
+}
+
+#[cfg(any(windows, test))]
+fn windows_advertises(codec: &str, h264_available: bool, allow_all: bool) -> bool {
+    match codec {
+        "h264" => h264_available,
+        "vp8" | "vp9" | "av1" => allow_all || !h264_available,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn windows_codec_advertisements_follow_decoder_availability() {
+    for codec in ["vp8", "vp9", "av1"] {
+        assert!(!windows_advertises(codec, true, false));
+        assert!(windows_advertises(codec, false, false));
+        assert!(windows_advertises(codec, true, true));
+    }
+    assert!(windows_advertises("h264", true, false));
+    assert!(!windows_advertises("h264", false, true));
+    assert!(windows_advertises("opus", true, false));
 }
 
 /// A streaming video decoder: one coded frame (access unit) in, the
@@ -271,6 +308,7 @@ impl VideoDecoder for Vp9Decoder {
                 continue;
             }
             let shift = f.bit_depth.saturating_sub(8);
+            let conversion = crate::video_stats::clock();
             let rgba = yuv_to_rgba(
                 &Planes { y: &f.planes[0], u: &f.planes[1], v: &f.planes[2], strides: [f.strides[0], f.strides[1], f.strides[2]], hbd: f.bit_depth > 8, shift },
                 f.width as usize,
@@ -280,7 +318,7 @@ impl VideoDecoder for Vp9Decoder {
                 if f.height >= 720 { Matrix::Bt709 } else { Matrix::Bt601 },
                 false,
             );
-            out.push(VideoFrame { pts: p, width: f.width, height: f.height, rgba: Arc::new(rgba) });
+            out.push(VideoFrame { timing: crate::video_stats::FrameTiming::converted(conversion), pts: p, width: f.width, height: f.height, rgba: Arc::new(rgba) });
         }
         out
     }
@@ -309,20 +347,101 @@ pub(crate) struct Planes<'a> {
     pub shift: u32,
 }
 
+#[derive(Clone, Copy)]
+struct Coefficients {
+    yo: i32,
+    yk: i32,
+    crr: i32,
+    cbb: i32,
+    cgr: i32,
+    cgb: i32,
+}
+
+impl Coefficients {
+    fn new(m: Matrix, full: bool) -> Self {
+        let (kr, kb) = match m {
+            Matrix::Bt709 => (0.2126f32, 0.0722f32),
+            Matrix::Bt2020 => (0.2627, 0.0593),
+            Matrix::Bt601 => (0.299, 0.114),
+        };
+        let kg = 1.0 - kr - kb;
+        let (ys, cs, yo) = if full { (1.0f32, 1.0f32, 0i32) } else { (255.0 / 219.0, 255.0 / 224.0, 16) };
+        let crr = (2.0 * (1.0 - kr) * cs * 1024.0) as i32;
+        let cbb = (2.0 * (1.0 - kb) * cs * 1024.0) as i32;
+        let cgr = (2.0 * (1.0 - kr) * kr / kg * cs * 1024.0) as i32;
+        let cgb = (2.0 * (1.0 - kb) * kb / kg * cs * 1024.0) as i32;
+        let yk = (ys * 1024.0) as i32;
+        Self { yo, yk, crr, cbb, cgr, cgb }
+    }
+
+    #[inline]
+    fn pixel(self, y: i32, u: i32, v: i32) -> [u8; 4] {
+        let yy = (y - self.yo) * self.yk;
+        let r = (yy + self.crr * v) >> 10;
+        let g = (yy - self.cgr * v - self.cgb * u) >> 10;
+        let b = (yy + self.cbb * u) >> 10;
+        [r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8, 255]
+    }
+
+    fn row_420(self, y: &[u8], u: &[u8], v: &[u8], dst: &mut [u8]) {
+        #[cfg(target_arch = "x86_64")]
+        let first = self.row_420_sse2(y, u, v, dst);
+        #[cfg(not(target_arch = "x86_64"))]
+        let first = 0;
+        for x in first..y.len() {
+            let pixel = self.pixel(y[x].into(), i32::from(u[x / 2]) - 128, i32::from(v[x / 2]) - 128);
+            dst[4 * x..4 * x + 4].copy_from_slice(&pixel);
+        }
+    }
+
+    // SSE2 is part of the x86-64 baseline. PMADDWD computes two terms
+    // of the fixed-point dot product per lane without losing precision.
+    #[cfg(target_arch = "x86_64")]
+    fn row_420_sse2(self, y: &[u8], u: &[u8], v: &[u8], dst: &mut [u8]) -> usize {
+        use std::arch::x86_64::*;
+        // SAFETY: the chunks provide exactly 8 luma samples, 4 samples
+        // of each chroma plane and space for the two 16-byte stores.
+        unsafe {
+            let zero = _mm_setzero_si128();
+            let pair = |a: i32, b: i32| _mm_set1_epi32(i32::from(a as u16) | (b << 16));
+            let red = pair(self.yk, self.crr);
+            let blue = pair(self.yk, self.cbb);
+            let green = pair(-self.cgb, -self.cgr);
+            let luma = pair(self.yk, 0);
+            let chroma = |src: &[u8]| {
+                let four = _mm_cvtsi32_si128(i32::from_ne_bytes(src.try_into().unwrap()));
+                let words = _mm_sub_epi16(_mm_unpacklo_epi8(four, zero), _mm_set1_epi16(128));
+                _mm_unpacklo_epi16(words, words)
+            };
+            let bytes = |lo, hi| {
+                let words = _mm_packs_epi32(_mm_srai_epi32(lo, 10), _mm_srai_epi32(hi, 10));
+                _mm_packus_epi16(words, words)
+            };
+            let mut count = 0;
+            for (((ys, us), vs), out) in y.chunks_exact(8).zip(u.chunks_exact(4)).zip(v.chunks_exact(4)).zip(dst.chunks_exact_mut(32)) {
+                let eight = _mm_loadl_epi64(ys.as_ptr().cast());
+                let y = _mm_sub_epi16(_mm_unpacklo_epi8(eight, zero), _mm_set1_epi16(self.yo as i16));
+                let (u, v) = (chroma(us), chroma(vs));
+                let r = bytes(_mm_madd_epi16(_mm_unpacklo_epi16(y, v), red), _mm_madd_epi16(_mm_unpackhi_epi16(y, v), red));
+                let b = bytes(_mm_madd_epi16(_mm_unpacklo_epi16(y, u), blue), _mm_madd_epi16(_mm_unpackhi_epi16(y, u), blue));
+                let g = bytes(
+                    _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(y, zero), luma), _mm_madd_epi16(_mm_unpacklo_epi16(u, v), green)),
+                    _mm_add_epi32(_mm_madd_epi16(_mm_unpackhi_epi16(y, zero), luma), _mm_madd_epi16(_mm_unpackhi_epi16(u, v), green)),
+                );
+                let rg = _mm_unpacklo_epi8(r, g);
+                let ba = _mm_unpacklo_epi8(b, _mm_set1_epi8(-1));
+                _mm_storeu_si128(out.as_mut_ptr().cast(), _mm_unpacklo_epi16(rg, ba));
+                _mm_storeu_si128(out.as_mut_ptr().add(16).cast(), _mm_unpackhi_epi16(rg, ba));
+                count += 8;
+            }
+            count
+        }
+    }
+}
+
 /// Planar YUV → RGBA (integer arithmetic).
 pub(crate) fn yuv_to_rgba(p: &Planes, w: usize, h: usize, ssx: usize, ssy: usize, m: Matrix, full: bool) -> Vec<u8> {
-    let (kr, kb) = match m {
-        Matrix::Bt709 => (0.2126f32, 0.0722f32),
-        Matrix::Bt2020 => (0.2627, 0.0593),
-        Matrix::Bt601 => (0.299, 0.114),
-    };
-    let kg = 1.0 - kr - kb;
-    let (ys, cs, yo) = if full { (1.0f32, 1.0f32, 0i32) } else { (255.0 / 219.0, 255.0 / 224.0, 16) };
-    let crr = (2.0 * (1.0 - kr) * cs * 1024.0) as i32;
-    let cbb = (2.0 * (1.0 - kb) * cs * 1024.0) as i32;
-    let cgr = (2.0 * (1.0 - kr) * kr / kg * cs * 1024.0) as i32;
-    let cgb = (2.0 * (1.0 - kb) * kb / kg * cs * 1024.0) as i32;
-    let yk = (ys * 1024.0) as i32;
+    let coeff = Coefficients::new(m, full);
     let get = |plane: &[u8], stride: usize, x: usize, y: usize| -> i32 {
         if p.hbd {
             let i = y * stride + x * 2;
@@ -337,15 +456,24 @@ pub(crate) fn yuv_to_rgba(p: &Planes, w: usize, h: usize, ssx: usize, ssy: usize
     let mut rgba = vec![255u8; w * h * 4];
     for y in 0..h {
         let cy = y >> ssy;
+        if !p.hbd && ssx == 1 && ssy == 1 {
+            let cw = w.div_ceil(2);
+            let row = |plane: usize, y: usize, width: usize| {
+                let start = y * p.strides[plane];
+                [p.y, p.u, p.v][plane].get(start..start + width)
+            };
+            if let (Some(ys), Some(us), Some(vs)) = (row(0, y, w), row(1, cy, cw), row(2, cy, cw)) {
+                coeff.row_420(ys, us, vs, &mut rgba[y * w * 4..(y + 1) * w * 4]);
+                continue;
+            }
+        }
         for x in 0..w {
             let cx = x >> ssx;
-            let yy = (get(p.y, p.strides[0], x, y) - yo) * yk;
+            let yy = get(p.y, p.strides[0], x, y);
             let u = get(p.u, p.strides[1], cx, cy) - 128;
             let v = get(p.v, p.strides[2], cx, cy) - 128;
             let o = (y * w + x) * 4;
-            rgba[o] = ((yy + crr * v) >> 10).clamp(0, 255) as u8;
-            rgba[o + 1] = ((yy - cgr * v - cgb * u) >> 10).clamp(0, 255) as u8;
-            rgba[o + 2] = ((yy + cbb * u) >> 10).clamp(0, 255) as u8;
+            rgba[o..o + 4].copy_from_slice(&coeff.pixel(yy, u, v));
         }
     }
     rgba
@@ -464,6 +592,7 @@ impl Drop for Av1Decoder {
 /// YUV picture → RGBA (integer BT.601 / BT.709 / BT.2020, limited or full
 /// range; high bit depth is reduced to 8 bits).
 unsafe fn convert(pic: &Dav1dPicture) -> Option<VideoFrame> {
+    let conversion = crate::video_stats::clock();
     let w = pic.p.w as usize;
     let h = pic.p.h as usize;
     if w == 0 || h == 0 || w * h > 8192 * 8192 {
@@ -480,19 +609,12 @@ unsafe fn convert(pic: &Dav1dPicture) -> Option<VideoFrame> {
         },
         None => (false, DAV1D_MC_BT709),
     };
-    // Fixed-point coefficients (×1024).
-    let (kr, kb) = match mtrx {
-        DAV1D_MC_BT709 => (0.2126f32, 0.0722f32),
-        DAV1D_MC_BT2020_NCL | DAV1D_MC_BT2020_CL => (0.2627, 0.0593),
-        _ => (0.299, 0.114),
+    let matrix = match mtrx {
+        DAV1D_MC_BT709 => Matrix::Bt709,
+        DAV1D_MC_BT2020_NCL | DAV1D_MC_BT2020_CL => Matrix::Bt2020,
+        _ => Matrix::Bt601,
     };
-    let kg = 1.0 - kr - kb;
-    let (ys, cs, yo) = if full { (1.0f32, 1.0f32, 0i32) } else { (255.0 / 219.0, 255.0 / 224.0, 16) };
-    let crr = (2.0 * (1.0 - kr) * cs * 1024.0) as i32;
-    let cbb = (2.0 * (1.0 - kb) * cs * 1024.0) as i32;
-    let cgr = (2.0 * (1.0 - kr) * kr / kg * cs * 1024.0) as i32;
-    let cgb = (2.0 * (1.0 - kb) * kb / kg * cs * 1024.0) as i32;
-    let yk = (ys * 1024.0) as i32;
+    let coeff = Coefficients::new(matrix, full);
     let py = pic.data[0]?.as_ptr() as *const u8;
     let (pu, pv) = if layout == DAV1D_PIXEL_LAYOUT_I400 { (py, py) } else { (pic.data[1]?.as_ptr() as *const u8, pic.data[2]?.as_ptr() as *const u8) };
     let ystride = pic.stride[0] as isize;
@@ -517,22 +639,49 @@ unsafe fn convert(pic: &Dav1dPicture) -> Option<VideoFrame> {
     for y in 0..h {
         let cy = y >> sy;
         let o_row = y * w * 4;
+        if layout == DAV1D_PIXEL_LAYOUT_I420 && !hbd {
+            // SAFETY: dav1d owns these visible rows until picture_unref. Use
+            // each signed stride separately, and expose only the visible width.
+            let cw = w.div_ceil(2);
+            unsafe {
+                let ys = std::slice::from_raw_parts(py.offset(y as isize * ystride), w);
+                let us = std::slice::from_raw_parts(pu.offset(cy as isize * cstride), cw);
+                let vs = std::slice::from_raw_parts(pv.offset(cy as isize * cstride), cw);
+                coeff.row_420(ys, us, vs, &mut rgba[o_row..o_row + w * 4]);
+            }
+            continue;
+        }
         for x in 0..w {
-            let yy = (sample(py, ystride, x, y) - yo) * yk;
+            let yy = sample(py, ystride, x, y);
             let (u, v) = if layout == DAV1D_PIXEL_LAYOUT_I400 {
                 (0, 0)
             } else {
                 let cx = x >> sx;
                 (sample(pu, cstride, cx, cy) - 128, sample(pv, cstride, cx, cy) - 128)
             };
-            let r = (yy + crr * v) >> 10;
-            let g = (yy - cgr * v - cgb * u) >> 10;
-            let b = (yy + cbb * u) >> 10;
             let o = o_row + x * 4;
-            rgba[o] = r.clamp(0, 255) as u8;
-            rgba[o + 1] = g.clamp(0, 255) as u8;
-            rgba[o + 2] = b.clamp(0, 255) as u8;
+            rgba[o..o + 4].copy_from_slice(&coeff.pixel(yy, u, v));
         }
     }
-    Some(VideoFrame { pts: pic.m.timestamp as f64 / 1e6, width: w as u32, height: h as u32, rgba: Arc::new(rgba) })
+    Some(VideoFrame { timing: crate::video_stats::FrameTiming::converted(conversion), pts: pic.m.timestamp as f64 / 1e6, width: w as u32, height: h as u32, rgba: Arc::new(rgba) })
+}
+
+#[cfg(test)]
+#[test]
+fn block_conversion_matches_scalar_for_every_tail_length() {
+    for width in 1..65 {
+        let ys: Vec<_> = (0..width).map(|i| (i * 67) as u8).collect();
+        let us: Vec<_> = (0..(width + 1) / 2).map(|i| (i * 41) as u8).collect();
+        let vs: Vec<_> = us.iter().map(|v| 255 - v).collect();
+        for m in [Matrix::Bt601, Matrix::Bt709, Matrix::Bt2020] {
+            for full in [false, true] {
+                let coeff = Coefficients::new(m, full);
+                let mut out = vec![0; width * 4];
+                coeff.row_420(&ys, &us, &vs, &mut out);
+                for x in 0..width {
+                    assert_eq!(out[x * 4..x * 4 + 4], coeff.pixel(ys[x].into(), i32::from(us[x / 2]) - 128, i32::from(vs[x / 2]) - 128));
+                }
+            }
+        }
+    }
 }

@@ -76,14 +76,9 @@ fn com_init() {
 /// so the caller's COM apartment is untouched.)
 pub fn h264_available() -> bool {
     static OK: OnceLock<bool> = OnceLock::new();
-    *OK.get_or_init(|| {
-        std::thread::spawn(|| {
-            com_init();
-            api().is_some() && create_transform().is_some()
-        })
-        .join()
-        .unwrap_or(false)
-    })
+    // Test the same H.264 input and NV12 output negotiation used for
+    // playback. The avcC parameter sets are only needed on the first IDR.
+    *OK.get_or_init(|| std::thread::spawn(|| MfH264Decoder::new(&[]).is_some()).join().unwrap_or(false))
 }
 
 // ---------------------------------------------------------------- vtables
@@ -320,10 +315,11 @@ impl MfH264Decoder {
                 let (w, h, stride) = (self.width, self.height, self.stride.max(self.width));
                 // NV12: the UV plane follows the (16-aligned) Y plane.
                 let y_rows = if data.len() >= stride * h.next_multiple_of(16) * 3 / 2 { h.next_multiple_of(16) } else { h };
+                let conversion = crate::video_stats::clock();
                 let rgba = if w > 0 && h > 0 && data.len() >= stride * y_rows + stride * h.div_ceil(2) { nv12_to_rgba(data, stride, w, h, stride * y_rows, self.matrix) } else { Vec::new() };
                 call!(buf, BUF_UNLOCK, fn());
                 if !rgba.is_empty() {
-                    out.push(VideoFrame { pts: t100 as f64 / 1e7, width: w as u32, height: h as u32, rgba: Arc::new(rgba) });
+                    out.push(VideoFrame { timing: crate::video_stats::FrameTiming::converted(conversion), pts: t100 as f64 / 1e7, width: w as u32, height: h as u32, rgba: Arc::new(rgba) });
                 }
             }
         }

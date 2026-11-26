@@ -94,6 +94,21 @@ pub(crate) fn prune_pending_svgs(page: &mut Page) {
     incr.pending_svgs.retain(|p| images.get(&p.node).is_some_and(|i| Arc::ptr_eq(i, &p.placeholder)));
 }
 
+impl Page {
+    pub fn video_paint_start(&self) -> Option<std::time::Instant> {
+        (!self.incr.video_timings.is_empty()).then(std::time::Instant::now)
+    }
+
+    pub fn finish_video_paint(&mut self, start: Option<std::time::Instant>) {
+        if let Some(start) = start {
+            let end = std::time::Instant::now();
+            for (_, timing) in self.incr.video_timings.drain(..) {
+                timing.painted(start, end);
+            }
+        }
+    }
+}
+
 impl Engine {
     /// Bring everything painting `page` reads up to date: layout, the
     /// display list, inline SVG rasters and the rasters of child frames

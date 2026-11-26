@@ -110,6 +110,7 @@ pub struct IncrementalState {
     canvas: CanvasSync,
     /// The display list the canvas shows when it is out of date.
     painted_dl: Option<rabbithole_layout::DisplayList>,
+    pub(crate) video_timings: Vec<(NodeId, rabbithole_script::FrameTiming)>,
     pub stats: IncrementalStats,
 }
 

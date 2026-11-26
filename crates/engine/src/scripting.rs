@@ -473,6 +473,10 @@ impl HostEnv for EngineEnv<'_> {
         crate::present::canvas_surface_shown(self.page, node, surface, width, height);
         true
     }
+    fn trace_video_frame(&mut self, node: NodeId, timing: rabbithole_script::FrameTiming) {
+        self.page.incr.video_timings.retain(|(n, _)| *n != node);
+        self.page.incr.video_timings.push((node, timing));
+    }
     fn set_canvas_image(&mut self, node: NodeId, width: u32, height: u32, rgba: Option<Vec<u8>>) {
         self.page.incr.pending_canvases.retain(|c| c.0 != node);
         match rgba {

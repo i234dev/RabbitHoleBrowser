@@ -111,6 +111,10 @@ fn main() {
     let done = std::env::var("RH_DONE").ok();
     let mut next_report = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let (mut idle_waits, mut idle_time) = (0u32, std::time::Duration::ZERO);
+    let mut playback_canvas = (std::env::var("RH_MEDIA_STATS").as_deref() == Ok("1")).then(|| Canvas::new(w, h));
+    if let Some(canvas) = &mut playback_canvas {
+        engine.render_damage(&mut page, canvas);
+    }
     while std::time::Instant::now() < deadline {
         if std::time::Instant::now() >= next_report {
             next_report = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -146,7 +150,17 @@ fn main() {
                         std::hint::spin_loop();
                     }
                 }
-                let _ = engine.tick(&mut page);
+                let outcome = engine.tick(&mut page);
+                if let Some(canvas) = &mut playback_canvas {
+                    let start = page.video_paint_start();
+                    if outcome.relayout || start.is_some() {
+                        let damage = engine.render_damage(&mut page, canvas);
+                        page.finish_video_paint(start);
+                        if start.is_some() {
+                            eprintln!("rh_video damage {:?}", damage);
+                        }
+                    }
+                }
             }
             None => break,
         }

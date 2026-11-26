@@ -505,7 +505,7 @@ pub fn is_type_supported(mime: &str) -> bool {
     let video_codecs: &[&str] = if base.ends_with("webm") { &["vp9", "vp8", "av1"] } else { &["h264", "av1", "vp9"] };
     for c in &codecs {
         let name = demux::codec_from_rfc6381(c);
-        let ok = audio_codecs.contains(&name) || (video_ok && video_codecs.contains(&name));
+        let ok = audio_codecs.contains(&name) || (video_ok && video_codecs.contains(&name) && crate::video::advertise_codec(name));
         if !ok {
             return false;
         }
@@ -604,8 +604,8 @@ mod tests {
     fn type_support() {
         assert!(is_type_supported("audio/webm; codecs=\"opus\""));
         assert!(is_type_supported("audio/mp4; codecs=\"mp4a.40.2\""));
-        assert!(is_type_supported("video/webm; codecs=\"vp9\""));
-        assert!(is_type_supported("video/mp4; codecs=\"avc1.4d401f, mp4a.40.2\""));
+        assert_eq!(is_type_supported("video/webm; codecs=\"vp9\""), crate::video::advertise_codec("vp9"));
+        assert_eq!(is_type_supported("video/mp4; codecs=\"avc1.4d401f, mp4a.40.2\""), crate::video::advertise_codec("h264"));
         assert!(!is_type_supported("audio/webm; codecs=\"aac\""));
         assert!(!is_type_supported("video/x-flv"));
         assert!(!is_type_supported("audio/mp4; codecs=\"ec-3\""));

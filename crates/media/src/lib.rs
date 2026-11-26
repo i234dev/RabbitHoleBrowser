@@ -12,6 +12,7 @@ pub mod oneshot;
 pub mod player;
 pub mod source;
 pub mod video;
+pub mod video_stats;
 #[cfg(windows)]
 mod mf;
 pub mod wav;
