@@ -72,16 +72,27 @@ pub(crate) const MEGA_BITS: u32 = 12;
 /// Multipliers of [`mega_index`] (native code computes it as well).
 pub(crate) const MEGA_MUL_SHAPE: u64 = 0x9E37_79B9_7F4A_7C15;
 pub(crate) const MEGA_MUL_KEY: u64 = 0xC2B2_AE3D_27D4_EB4F;
+pub(crate) const MEGA_MUL_PROTO: u64 = 0x1656_67B1_9E37_79F9;
 /// `MegaEntry` field offsets and size, for native code.
 pub(crate) const MEGA_SHAPE: i32 = std::mem::offset_of!(MegaEntry, shape) as i32;
 pub(crate) const MEGA_KEY: i32 = std::mem::offset_of!(MegaEntry, key) as i32;
 pub(crate) const MEGA_IC: i32 = std::mem::offset_of!(MegaEntry, ic) as i32;
 pub(crate) const MEGA_SIZE: i32 = std::mem::size_of::<MegaEntry>() as i32;
 
+/// Slot of (receiver shape, receiver prototype, key): receivers that
+/// share a shape but not a prototype (DOM nodes of different interfaces,
+/// objects made by `Object.create`) get different slots, so their
+/// prototype-dependent records (absent keys, inherited properties) do
+/// not evict each other.
 #[inline(always)]
-fn mega_index(shape: u32, key: u64) -> usize {
-    let h = (shape as u64).wrapping_mul(MEGA_MUL_SHAPE) ^ key.wrapping_mul(MEGA_MUL_KEY);
+fn mega_index(shape: u32, proto: u32, key: u64) -> usize {
+    let h = (shape as u64).wrapping_mul(MEGA_MUL_SHAPE) ^ key.wrapping_mul(MEGA_MUL_KEY) ^ (proto as u64).wrapping_mul(MEGA_MUL_PROTO);
     (h >> (64 - MEGA_BITS)) as usize
+}
+
+#[inline(always)]
+fn proto_word(o: &Object) -> u32 {
+    o.proto.map(|p| p.0).unwrap_or(NO_OBJ)
 }
 
 /// The megamorphic cache's word for a read of `key`: a string name's
@@ -276,7 +287,7 @@ impl Realm {
     pub(crate) fn mega_get(&self, recv: &Value, key: u64) -> Option<PropIc> {
         let o = self.heap.try_get(recv.as_object()?)?;
         let shape = o.props.shape_id();
-        let e = self.mega.get(mega_index(shape, key))?;
+        let e = self.mega.get(mega_index(shape, proto_word(o), key))?;
         if e.shape == shape && e.key == key && e.ic.kind != IC_NONE {
             Some(e.ic)
         } else {
@@ -292,7 +303,7 @@ impl Realm {
         }
         let (Some(id), Some(kb)) = (recv.as_object(), mega_word(key)) else { return };
         let Some(o) = self.heap.try_get(id) else { return };
-        let shape = o.props.shape_id();
+        let (shape, proto) = (o.props.shape_id(), proto_word(o));
         if self.mega.is_empty() {
             self.mega = vec![MegaEntry::default(); 1 << MEGA_BITS];
         }
@@ -300,7 +311,7 @@ impl Realm {
             PropertyKey::String(k) => Some(k.clone()),
             PropertyKey::Symbol(_) => None,
         };
-        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, name, ic };
+        self.mega[mega_index(shape, proto, kb)] = MegaEntry { shape, key: kb, name, ic };
     }
 
     /// Remember a filled store cache record in the megamorphic cache, under
@@ -309,12 +320,13 @@ impl Realm {
         if !matches!(ic.kind, IC_OWN | IC_ADD | IC_ADD_DEEP | IC_SETTER) || ic_disabled(1) {
             return;
         }
-        let (Some((shape, _)), Some(_), PropertyKey::String(k)) = (before, recv.as_object(), key) else { return };
+        let (Some((shape, _)), Some(id), PropertyKey::String(k)) = (before, recv.as_object(), key) else { return };
+        let Some(proto) = self.heap.try_get(id).map(proto_word) else { return };
         if self.mega.is_empty() {
             self.mega = vec![MegaEntry::default(); 1 << MEGA_BITS];
         }
         let kb = k.bits() | 1;
-        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, name: Some(k.clone()), ic };
+        self.mega[mega_index(shape, proto, kb)] = MegaEntry { shape, key: kb, name: Some(k.clone()), ic };
     }
 
     /// Walk the prototype chain above `first` (the receiver's prototype)
@@ -500,7 +512,7 @@ impl Realm {
     /// Fast path of a cached store of `v` into `recv.key`. Returns `v` back
     /// when the cache does not apply.
     #[inline]
-    pub(crate) fn ic_set(&mut self, ic: &PropIc, recv: &Value, key: &JsStr, v: Value) -> Result<(), Value> {
+    pub(crate) fn ic_set(&mut self, ic: &PropIc, recv: &Value, _key: &JsStr, v: Value) -> Result<(), Value> {
         let Some(id) = recv.as_object() else { return Err(v) };
         match ic.kind {
             IC_OWN => {
@@ -527,10 +539,7 @@ impl Realm {
                 if o.props.shape_id() != ic.shape || !o.extensible || o.proto.map(|p| p.0) != Some(ic.holder) || crate::shape::proto_epoch() != ic.mid_shape || !cacheable_receiver(o) {
                     return Err(v);
                 }
-                let next = match o.props.shape().and_then(|s| s.lookup_transition_str(key)) {
-                    Some(n) if n.id == ic.slot => n,
-                    _ => return Err(v),
-                };
+                let Some(next) = o.props.shape().and_then(|s| s.transition_to(ic.slot)) else { return Err(v) };
                 o.props.push_with_shape(next, Property::data(v, ALL));
                 Ok(())
             }
@@ -539,10 +548,7 @@ impl Realm {
                     return Err(v);
                 }
                 let o = self.heap.get_mut(id);
-                let next = match o.props.shape().and_then(|s| s.lookup_transition_str(key)) {
-                    Some(n) if n.id == ic.slot => n,
-                    _ => return Err(v),
-                };
+                let Some(next) = o.props.shape().and_then(|s| s.transition_to(ic.slot)) else { return Err(v) };
                 o.props.push_with_shape(next, Property::data(v, ALL));
                 Ok(())
             }

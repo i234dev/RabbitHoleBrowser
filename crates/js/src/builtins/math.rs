@@ -233,7 +233,7 @@ fn sum_precise(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     }))
 }
 
-fn js_round(x: f64) -> f64 {
+pub(crate) fn js_round(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() || x == 0.0 {
         return x;
     }

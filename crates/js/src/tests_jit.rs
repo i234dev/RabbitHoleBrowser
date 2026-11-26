@@ -510,6 +510,133 @@ out.join(",")
 }
 
 #[test]
+fn native_calls_and_returns_between_compiled_functions() {
+    // Calls and returns that stay in native code (plain closures with a
+    // scope and native code): `this` binding (sloppy, strict, arrows),
+    // fewer and more arguments than parameters, counted arguments and
+    // return values, the hole, receiver slots of every kind.
+    check(r#"
+        var log = [];
+        function sloppy() { return this === globalThis; }
+        function strict() { 'use strict'; return this; }
+        function pair(a, b) { return [a, b].join('|'); }
+        function many(a, b, c, d, e, f, g, h, i) { return [a, b, c, d, e, f, g, h, i].join(''); }
+        var o = { m: function (x) { return this.k + x; }, k: 'k:' };
+        function outer() {
+            var s = [sloppy(), sloppy.call(null), strict(), strict.call(5), o.m('x')];
+            var arrow = () => this === globalThis;
+            s.push(arrow(), pair(1), pair(1, 2, 3), many(1, 2, 3, 4, 5, 6, 7, 8, 9), many('a'));
+            var str = 'abc', t = '';
+            for (var i = 0; i < 50; i++) t = pair(str + i, t.length);
+            s.push(t);
+            return s.join(',');
+        }
+        outer()
+    "#, "true,true,,5,k:x,true,1|,1|2,123456789,a,abc49|7");
+    // Strict functions called with string receivers (a counted `this`),
+    // returning strings that are the last reference.
+    check(r#"
+        String.prototype.twice = function () { 'use strict'; return this + this; };
+        function f(n) { var r = ''; for (var i = 0; i < n; i++) r = ('x' + i).twice(); return r; }
+        f(30)
+    "#, "x29x29");
+    // Exceptions thrown by a callee entered natively unwind to the
+    // caller's handler; recursion keeps the interpreter's limit.
+    check(r#"
+        function thrower(n) { if (n % 3 === 0) throw new Error('e' + n); return n; }
+        function catcher() { var s = 0, m = ''; for (var i = 0; i < 10; i++) { try { s += thrower(i); } catch (e) { m += e.message; } } return s + m; }
+        catcher()
+    "#, "27e0e3e6e9");
+    same("var d = 0; function r(a, b) { d++; return r(a, b) + 1; } try { r(1, 2) } catch (e) { String(e) + d }");
+    // Closures of one function with different scopes, called from one site.
+    check(r#"
+        function mk(k) { return function (x) { return x + k; }; }
+        var fs = [mk(1), mk(10), mk(100)];
+        function run() { var s = 0; for (var i = 0; i < 30; i++) s += fs[i % 3](i); return s; }
+        run()
+    "#, "1545");
+}
+
+#[test]
+fn inline_builtins() {
+    // Built-ins computed without a native call, and their fallbacks.
+    check(r#"
+        function f() {
+            var o = { a: 1 }, arr = [1, 2], fn = function () {}, s = new String('ab');
+            var proto = Object.create({ inherited: 1 });
+            var hp = Object.prototype.hasOwnProperty;
+            var r = [o.hasOwnProperty('a'), o.hasOwnProperty('b'), proto.hasOwnProperty('inherited'),
+                     arr.hasOwnProperty('0'), arr.hasOwnProperty('length'), arr.hasOwnProperty(1), arr.hasOwnProperty('2'),
+                     fn.hasOwnProperty('prototype'), fn.hasOwnProperty('name'), s.hasOwnProperty('0'), s.hasOwnProperty('length'),
+                     hp.call(o, 'a'), hp.call(o, 'x'), hp.call(arr, '1'), hp.call('str', 'length'), hp.call(o, Symbol.iterator)];
+            try { hp.call(null, 'a'); r.push('no'); } catch (e) { r.push(e.constructor.name); }
+            r.push(Object.is(NaN, NaN), Object.is(0, -0), Object.is(-0, -0), Object.is('a' + 'b', 'ab'), Object.is(o, o), Object.is(o, {}), Object.is(), Object.is(1n, 1n));
+            r.push(Array.isArray(arr), Array.isArray(o), Array.isArray(), Array.isArray(new Proxy([], {})), Array.isArray('x'));
+            r.push(Math.round(2.5), Math.round(-2.5), Math.round(0.49999999999999994), 1 / Math.round(-0.2), Math.round('3.7'), Math.round(), Math.round(2 ** 53 + 1));
+            r.push(isNaN(NaN), isNaN(1), isNaN('x'), isNaN('1'), isNaN());
+            return r.join();
+        }
+        f()
+    "#, "true,false,false,true,true,true,false,true,true,true,true,true,false,true,true,false,TypeError,true,false,true,true,true,false,true,true,true,false,false,true,false,3,-2,0,-Infinity,4,NaN,9007199254740992,true,false,true,false,true");
+}
+
+#[test]
+fn megamorphic_reads_and_named_stores() {
+    // Receivers sharing a shape with different prototypes: absent and
+    // inherited names, then a prototype gaining the name; named element
+    // stores (existing, added, frozen, setters) through the shared cache.
+    check(r#"
+        var protos = [{ a: 1 }, { b: 2 }, { c: 3 }, Object.create({ d: 4 })];
+        var objs = []; for (var i = 0; i < 12; i++) objs.push(Object.create(protos[i % 4]));
+        var key = 'k' + 'ey';
+        function read(o) { return [o.a, o.b, o.d, o[key], o.zz].join('/'); }
+        function run() {
+            var out = [];
+            for (var r = 0; r < 3; r++) {
+                for (var i = 0; i < objs.length; i++) out.push(read(objs[i]));
+                if (r === 1) { protos[2].zz = 'late'; Object.getPrototypeOf(protos[3]).key = 'deep'; }
+            }
+            return out.slice(0, 4).join(',') + ';' + out.slice(-4).join(',');
+        }
+        run()
+    "#, "1////,/2///,////,//4//;1////,/2///,////late,//4/deep/");
+    check(r#"
+        function copy(src, dst) { for (var k in src) dst[k] = src[k]; return dst; }
+        function copyS(src, dst) { 'use strict'; for (var k in src) dst[k] = src[k]; return dst; }
+        function run() {
+            var log = [];
+            var frozen = Object.freeze({ x: 1 });
+            var withSetter = { set x(v) { log.push('set ' + v); } };
+            for (var i = 0; i < 6; i++) {
+                var d = copy({ x: i, y: 'y' + i }, i % 2 ? {} : { x: -1 });
+                log.push(d.x + d.y);
+            }
+            copy({ x: 8 }, frozen);
+            try { copyS({ x: 9 }, frozen); } catch (e) { log.push(e.constructor.name); }
+            copy({ x: 7 }, withSetter);
+            return log.join(',') + '|' + frozen.x;
+        }
+        run()
+    "#, "0y0,1y1,2y2,3y3,4y4,5y5,TypeError,set 7|1");
+}
+
+#[test]
+fn typeof_of_every_kind() {
+    check(r#"
+        function t(v) { return typeof v; }
+        function f() {
+            var vals = [undefined, null, true, false, 0, -0, NaN, 1.5, '', 'x', Symbol('s'), 10n, {}, [], function () {}, () => 1,
+                        class A {}, Math.max, Math.max.bind(null), new Proxy({}, {}), new Proxy(function () {}, {}), new Date(0), /r/, new Map()];
+            var out = [];
+            for (var i = 0; i < vals.length; i++) out.push(t(vals[i]));
+            var x; out.push(typeof x, typeof undeclaredName);
+            return out.join();
+        }
+        f()
+    "#, "undefined,object,boolean,boolean,number,number,number,number,string,string,symbol,bigint,object,object,function,function,function,function,function,object,function,object,object,object,undefined,undefined");
+}
+
+#[test]
 fn calls_with_wide_static_operands_and_return_slots() {
     // Exercise call operands beyond the low byte, rather than only
     // the low byte used by small hand-written functions.

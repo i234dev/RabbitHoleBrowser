@@ -27,6 +27,9 @@ pub(crate) struct Ctx {
     pub code: *const FunctionCode,
     /// Instruction to continue at after [`ST_JUMP`].
     pub pc: u32,
+    /// Spill space of native calls and returns (values kept across a
+    /// helper call, which clobbers every scratch register).
+    pub scratch: [u64; 4],
 }
 
 pub(crate) const CTX_SLOTS: i32 = 0;
@@ -34,6 +37,9 @@ pub(crate) const CTX_CONSTS: i32 = 8;
 pub(crate) const CTX_REALM: i32 = 16;
 pub(crate) const CTX_TICK: i32 = 24;
 pub(crate) const CTX_PC: i32 = 40;
+pub(crate) const CTX_CODE: i32 = 32;
+pub(crate) const CTX_SCRATCH: i32 = 48;
+const _: () = assert!(std::mem::offset_of!(Ctx, code) == CTX_CODE as usize && std::mem::offset_of!(Ctx, pc) == CTX_PC as usize && std::mem::offset_of!(Ctx, scratch) == CTX_SCRATCH as usize && std::mem::offset_of!(Ctx, slots) == CTX_SLOTS as usize && std::mem::offset_of!(Ctx, consts) == CTX_CONSTS as usize && std::mem::offset_of!(Ctx, realm) == CTX_REALM as usize && std::mem::offset_of!(Ctx, tick) == CTX_TICK as usize);
 
 /// Continue with the instruction's continuation in native code.
 pub(crate) const ST_NEXT: usize = 0;
@@ -140,6 +146,7 @@ impl Realm {
                 tick: unsafe { std::ptr::addr_of_mut!((*realm).tick) },
                 code,
                 pc: 0,
+                scratch: [0; 4],
             };
             // SAFETY: `entry` is the native code of `code` (kept alive by
             // the frame's code), entered at an instruction of it; until it
@@ -642,6 +649,68 @@ pub(crate) unsafe extern "sysv64" fn h_set_elem(ctx: *mut Ctx, pc: u32) -> usize
                 false
             }
         }
+    })
+}
+
+/// `NewObject` and `MakeClosure`: stack instructions that push a new
+/// object (no JavaScript runs, nothing throws), without the generic
+/// instruction dispatch.
+pub(crate) unsafe extern "sysv64" fn h_alloc_op(ctx: *mut Ctx, pc: u32) -> usize {
+    guard(ctx, |r, ctx| {
+        let code: &FunctionCode = &*(*ctx).code;
+        let fi = r.frames.len() - 1;
+        // As the interpreter's out-of-line path: the frame is synced.
+        r.frames.get_unchecked_mut(fi).pc = pc as usize + 1;
+        let sp = r.frames.get_unchecked(fi).base as usize + code.nregs as usize + *code.depths.get_unchecked(pc as usize) as usize;
+        let v = match *code.ops.get_unchecked(pc as usize) {
+            Op::NewObject => Value::Object(r.new_object()),
+            Op::MakeClosure(idx) => {
+                let c = code.functions[idx as usize].clone();
+                Value::Object(r.make_closure(fi, c))
+            }
+            _ => unreachable!("h_alloc_op"),
+        };
+        r.vstack[sp] = v;
+        ST_NEXT
+    })
+}
+
+/// `ForInNext` (a stack instruction: the iterator on top is replaced by
+/// the next key and the done flag) while the enumerated object keeps the
+/// shape its keys were collected with (no key can have been deleted) or
+/// the keys are exhausted; anything else in full.
+pub(crate) unsafe extern "sysv64" fn h_for_in_next(ctx: *mut Ctx, pc: u32) -> usize {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Some(&depth) = code.depths.get(pc as usize) else { return false };
+        let sp = code.nregs as usize + depth as usize;
+        if depth == 0 || sp >= code.frame_size() {
+            return false;
+        }
+        let Some(it) = (*slots.add(sp - 1)).as_object() else { return false };
+        let Some(crate::heap::ObjectKind::ForInIterator(f)) = r.heap.try_get(it).map(|o| &o.kind) else { return false };
+        let next = if f.index >= f.keys.len() {
+            None
+        } else {
+            match f.object {
+                Some(o) if f.shape != 0 => match r.heap.try_get(o) {
+                    Some(obj) if obj.props.shape_id() == f.shape && !obj.is_array() => Some(f.keys[f.index].clone()),
+                    _ => return false,
+                },
+                _ => return false,
+            }
+        };
+        let (k, done) = match next {
+            Some(k) => {
+                if let Some(crate::heap::ObjectKind::ForInIterator(f)) = r.heap.try_get_mut(it).map(|o| &mut o.kind) {
+                    f.index += 1;
+                }
+                (Value::String(k), false)
+            }
+            None => (Value::Undefined, true),
+        };
+        *slots.add(sp - 1) = k;
+        *slots.add(sp) = Value::Bool(done);
+        true
     })
 }
 

@@ -282,4 +282,400 @@ mod tests {
     fn layout_probe_succeeds() {
         assert!(super::probe().is_ok(), "{:?}", super::probe().err());
     }
+
+    #[test]
+    fn call_layout_probe_succeeds() {
+        assert!(super::call_probe().is_ok(), "{:?}", super::call_probe().err());
+    }
+}
+
+/// Offsets for native calls and returns between compiled functions
+/// (`CallR` / `ReturnR` without helpers): the value stack and frame stack
+/// of the realm, the fields of a frame, of a closure and of its code.
+/// Probed like [`Layout`]; `None` keeps calls and returns in helpers.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CallLayout {
+    /// In `Realm`: the value stack (pointer, length, capacity), the frame
+    /// stack's capacity, `max_frames`, `current_realm` (u16), the global
+    /// object's id and `jit.on` (a byte).
+    pub vs_ptr: i32,
+    pub vs_len: i32,
+    pub vs_cap: i32,
+    pub frames_cap: i32,
+    pub max_frames: i32,
+    pub current_realm: i32,
+    pub global: i32,
+    pub jit_on: i32,
+    /// In `Realm`: `jit.stats.enabled` (a byte) and `jit.stats.switches`
+    /// (u64), counted like the helpers' frame switches.
+    pub stats_on: i32,
+    pub switches: i32,
+    /// In `Frame`.
+    pub f_code: i32,
+    pub f_pc: i32,
+    pub f_base: i32,
+    pub f_argc: i32,
+    pub f_scope: i32,
+    pub f_scope_depth: i32,
+    pub f_this: i32,
+    pub f_func_id: i32,
+    pub f_func_tag: i32,
+    pub f_new_target: i32,
+    pub f_ret_slot: i32,
+    pub f_is_construct: i32,
+    pub f_entry: i32,
+    pub f_extra: i32,
+    /// Tag word of `Some` in an `Option<ObjectId>`.
+    pub some_id: u32,
+    /// In an object table entry: the value of the variant tag (byte or
+    /// niche word at `Layout::scope_tag`) of `ObjectKind::Function`, and
+    /// its `Box<Closure>`.
+    pub fn_tag_value: u64,
+    pub closure_box: i32,
+    /// Tag values of `ObjectKind::Ordinary` and `ObjectKind::Native`, and
+    /// the offset of `Object::htmldda` (a byte) in an entry.
+    pub ordinary_tag: u64,
+    pub native_tag: u64,
+    pub htmldda: i32,
+    /// In `Realm`: the `typeof` result strings (`jit.typeof_strs`).
+    pub typeof_strs: i32,
+    /// In `Closure`: the code (`Rc` word; the `FunctionCode` is at that
+    /// address plus `code_adj`), the scope (`Option<ObjectId>`), and the
+    /// lexical `this`, `new.target` and `arguments` of arrows
+    /// (`Option<Value>`: tag word and value word, `Some` tag).
+    pub cl_code: i32,
+    pub code_adj: i32,
+    pub cl_scope_id: i32,
+    pub cl_scope_tag: i32,
+    pub cl_this_tag: i32,
+    pub cl_this_val: i32,
+    pub cl_nt_tag: i32,
+    pub cl_nt_val: i32,
+    pub cl_args_tag: i32,
+    pub some_value: u64,
+    /// In `FunctionCode`: the constants' pointer, the number of
+    /// parameter locations, `call_flags` (byte), `nregs` and `max_depth`
+    /// (u32), the native entry and the realm (u16).
+    pub fc_consts: i32,
+    pub fc_params: i32,
+    pub fc_flags: i32,
+    pub fc_nregs: i32,
+    pub fc_max_depth: i32,
+    pub fc_entry: i32,
+    pub fc_realm: i32,
+}
+
+/// Word indices of the pointer, length and capacity of a `Vec<T>`.
+fn vec_words3<T>(mut v: Vec<T>, one: T) -> Option<(usize, usize, usize)> {
+    v.reserve_exact(7);
+    v.push(one);
+    let (ptr, len, cap) = (v.as_ptr() as usize, v.len(), v.capacity());
+    if std::mem::size_of::<Vec<T>>() != 3 * std::mem::size_of::<usize>() || cap == len || len == ptr || cap == ptr {
+        return None;
+    }
+    // SAFETY: a `Vec` is three words (checked above); read them in place.
+    let words: [usize; 3] = unsafe { std::ptr::read(&v as *const Vec<T> as *const [usize; 3]) };
+    let find = |x: usize| {
+        let mut it = (0..3).filter(|&i| words[i] == x);
+        let i = it.next()?;
+        it.next().is_none().then_some(i)
+    };
+    Some((find(ptr)?, find(len)?, find(cap)?))
+}
+
+/// Compile-time check of the types of the `Realm` fields native calls use.
+#[allow(dead_code)]
+fn _realm_field_types(r: &Realm) -> (u16, usize, ObjectId, bool, bool, u64, &[crate::value::Value; 8], bool) {
+    (r.current_realm, r.max_frames, r.global, r.jit.on, r.jit.stats.enabled, r.jit.stats.switches, &r.jit.typeof_strs, r.heap.get(ObjectId(0)).htmldda)
+}
+
+fn call_probe() -> Result<CallLayout, u32> {
+    use crate::heap::Closure;
+    use crate::value::Value;
+    let l = get().ok_or(100u32)?;
+    let i32_of = |x: usize| i32::try_from(x).map_err(|_| 101u32);
+    let w = std::mem::size_of::<usize>();
+    // Value stack and frame stack.
+    let (vp, vl, vc) = vec_words3::<Value>(Vec::new(), Value::Number(2.5)).ok_or(102u32)?;
+    let vs = std::mem::offset_of!(Realm, vstack);
+    let mk_frame = || crate::vm::Frame {
+        code: std::ptr::NonNull::dangling(),
+        pc: 0,
+        base: 0,
+        argc: 0,
+        scope: ObjectId(0),
+        scope_depth: 0,
+        this: Value::Undefined,
+        func: None,
+        new_target: Value::Undefined,
+        ret_slot: 0,
+        is_construct: false,
+        entry: false,
+        extra: None,
+    };
+    let (fp, fl, fc) = vec_words3::<crate::vm::Frame>(Vec::new(), mk_frame()).ok_or(103u32)?;
+    let frames = std::mem::offset_of!(Realm, frames);
+    if l.frames_ptr != i32_of(frames + fp * w)? || l.frames_len != i32_of(frames + fl * w)? {
+        return Err(104);
+    }
+    // Field sizes the templates assume.
+    if std::mem::size_of::<usize>() != 8
+        || std::mem::size_of::<Option<Box<crate::vm::FrameExtra>>>() != 8
+        || std::mem::size_of::<Option<ObjectId>>() != 8
+        || std::mem::size_of::<ObjectId>() != 4
+        || std::mem::size_of::<Value>() != 8
+    {
+        return Err(105);
+    }
+    // Option<ObjectId>: id word and tag word (as for prototypes).
+    let words = |o: Option<ObjectId>| -> [u32; 2] {
+        // SAFETY: the size is checked above.
+        unsafe { std::mem::transmute::<Option<ObjectId>, [u32; 2]>(o) }
+    };
+    let (a, b, none) = (words(Some(ObjectId(0x1234_5678))), words(Some(ObjectId(0x0765_4321))), words(None));
+    let id_word = (0..2).find(|&i| a[i] == 0x1234_5678 && b[i] == 0x0765_4321).ok_or(106u32)?;
+    let tag_word = 1 - id_word;
+    if a[tag_word] != b[tag_word] || none[tag_word] == a[tag_word] || a[tag_word] != l.proto_some {
+        return Err(107);
+    }
+    // Option<Value>: two words (tag, value).
+    if std::mem::size_of::<Option<Value>>() != 16 {
+        return Err(108);
+    }
+    let vwords = |o: Option<Value>| -> [u64; 2] {
+        // SAFETY: the size is checked above; any bit pattern is a valid [u64; 2].
+        unsafe { std::mem::transmute::<Option<Value>, [u64; 2]>(o) }
+    };
+    let (x1, x2, xn) = (vwords(Some(Value::Number(1.5))), vwords(Some(Value::Number(-7.25))), vwords(None));
+    let vw = (0..2).find(|&i| x1[i] == 1.5f64.to_bits() && x2[i] == (-7.25f64).to_bits()).ok_or(109u32)?;
+    let tw = 1 - vw;
+    if x1[tw] != x2[tw] || xn[tw] == x1[tw] {
+        return Err(110);
+    }
+    let some_value = x1[tw];
+    if some_value > i32::MAX as u64 {
+        return Err(131);
+    }
+    // The tag words are written whole (no stale padding bytes): store
+    // over garbage and compare.
+    {
+        let mut buf = [0xABu8; 16];
+        // SAFETY: the buffer holds 16 bytes; `Option<Value>` is 16 bytes
+        // (checked above) and its alignment is not needed for a byte copy.
+        let words = unsafe {
+            std::ptr::write_unaligned(buf.as_mut_ptr() as *mut Option<Value>, Some(Value::Number(3.5)));
+            std::ptr::read_unaligned(buf.as_ptr() as *const [u64; 2])
+        };
+        if words[tw] != some_value {
+            return Err(132);
+        }
+        let mut buf = [0xABu8; 8];
+        // SAFETY: as above, 8 bytes.
+        let words = unsafe {
+            std::ptr::write_unaligned(buf.as_mut_ptr() as *mut Option<ObjectId>, Some(ObjectId(77)));
+            std::ptr::read_unaligned(buf.as_ptr() as *const [u32; 2])
+        };
+        if words[tag_word] != a[tag_word] || words[id_word] != 77 {
+            return Err(133);
+        }
+    }
+    // A function object: its variant tag and closure box.
+    let code = {
+        let program = crate::parser::parse_program("0", false).map_err(|_| 111u32)?;
+        crate::compiler::compile_program(&program, "probe", "0").map_err(|_| 112u32)?
+    };
+    let code_addr = &*code as *const crate::bytecode::FunctionCode as usize;
+    let closure = |scope: Option<ObjectId>| Closure { code: code.clone(), scope, this_value: Some(Value::Number(1.5)), new_target: None, home_object: None, fields: None, arguments: None };
+    let f1 = Some(crate::heap::Object::new(None, ObjectKind::Function(Box::new(closure(Some(ObjectId(0x2233_4455)))))));
+    let kind = std::mem::offset_of!(crate::heap::Object, kind);
+    let obj = {
+        let base = &f1 as *const Option<crate::heap::Object> as usize;
+        f1.as_ref().ok_or(113u32)? as *const crate::heap::Object as usize - base
+    };
+    let fo = f1.as_ref().ok_or(114u32)?;
+    let ObjectKind::Function(cb) = &fo.kind else { return Err(115) };
+    let box_addr = &**cb as *const Closure as usize;
+    let entry_base = &f1 as *const Option<crate::heap::Object> as usize;
+    let rd = |off: usize| -> usize {
+        // SAFETY: reading a word within the live probe entry.
+        unsafe { std::ptr::read_unaligned((entry_base + off) as *const usize) }
+    };
+    let ksize = std::mem::size_of::<ObjectKind>();
+    let kstart = obj + kind;
+    let closure_box = (0..=ksize - w).step_by(w).map(|i| kstart + i).find(|&o| rd(o) == box_addr).ok_or(116u32)?;
+    let tag_at = l.scope_tag as usize;
+    // Tag value, checked against the probe kinds of `Layout`.
+    let fn_tag_value = if l.tag_niche {
+        let v = rd(tag_at) as u64;
+        if v == l.scope_tag_value || v & (1 << 63) == 0 {
+            return Err(117);
+        }
+        v
+    } else {
+        // SAFETY: a byte within the probe entry.
+        let v = unsafe { std::ptr::read((entry_base + tag_at) as *const u8) } as u64;
+        if v == l.scope_tag_value || v == l.array_tag_value as u64 {
+            return Err(118);
+        }
+        v
+    };
+    if (closure_box..closure_box + w).contains(&tag_at) {
+        return Err(119);
+    }
+    // The tag value of a kind, at the measured place.
+    let tag_of = |k: ObjectKind| -> u64 {
+        let e = Some(crate::heap::Object::new(None, k));
+        let b = &e as *const Option<crate::heap::Object> as usize;
+        // SAFETY: reading within the live probe entry.
+        unsafe { if l.tag_niche { std::ptr::read_unaligned((b + tag_at) as *const usize) as u64 } else { std::ptr::read((b + tag_at) as *const u8) as u64 } }
+    };
+    let ordinary_tag = tag_of(ObjectKind::Ordinary);
+    let native_tag = tag_of(ObjectKind::Native(Box::new(crate::heap::NativeFunction {
+        func: |_, _, _| Ok(Value::Undefined),
+        name: crate::value::JsStr::empty(),
+        data: None,
+        captures: Vec::new(),
+        is_constructor: false,
+        intrinsic: 0,
+        gc_safe: false,
+        realm: 0,
+    })));
+    // Kinds must not share a tag value there (the scope and array values
+    // were checked by `Layout`).
+    let tags = [fn_tag_value, ordinary_tag, native_tag, tag_of(ObjectKind::Arguments), tag_of(ObjectKind::Error), l.scope_tag_value];
+    for i in 0..tags.len() {
+        for j in i + 1..tags.len() {
+            if tags[i] == tags[j] {
+                return Err(120);
+            }
+        }
+    }
+    if !l.tag_niche && [fn_tag_value, ordinary_tag, native_tag].contains(&(l.array_tag_value as u64)) {
+        return Err(134);
+    }
+    // Closure fields.
+    let cl_code = std::mem::offset_of!(Closure, code);
+    // SAFETY: the `Rc` word inside the live closure.
+    let rc_word = unsafe { std::ptr::read((box_addr + cl_code) as *const usize) };
+    let code_adj = code_addr.checked_sub(rc_word).ok_or(121u32)?;
+    if code_adj > 64 {
+        return Err(122);
+    }
+    let opt_id_at = |field: usize| (field + id_word * 4, field + tag_word * 4);
+    let (cl_scope_id, cl_scope_tag) = opt_id_at(std::mem::offset_of!(Closure, scope));
+    // SAFETY: reading the live closure's scope words.
+    if unsafe { std::ptr::read((box_addr + cl_scope_id) as *const u32) } != 0x2233_4455 {
+        return Err(123);
+    }
+    let opt_val_at = |field: usize| (field + tw * 8, field + vw * 8);
+    let (cl_this_tag, cl_this_val) = opt_val_at(std::mem::offset_of!(Closure, this_value));
+    let (cl_nt_tag, cl_nt_val) = opt_val_at(std::mem::offset_of!(Closure, new_target));
+    let (cl_args_tag, _) = opt_val_at(std::mem::offset_of!(Closure, arguments));
+    // SAFETY: reading the live closure's `this_value` words.
+    unsafe {
+        if std::ptr::read((box_addr + cl_this_val) as *const u64) != 1.5f64.to_bits() || std::ptr::read((box_addr + cl_this_tag) as *const u64) != some_value {
+            return Err(124);
+        }
+    }
+    drop(f1);
+    // FunctionCode.
+    use crate::bytecode::FunctionCode;
+    let (cp, _) = vec_words::<Value>(Vec::new(), Value::Number(1.0)).ok_or(125u32)?;
+    let (_, pl) = vec_words::<crate::bytecode::VarLoc>(Vec::new(), crate::bytecode::VarLoc::Reg(3)).ok_or(126u32)?;
+    let entry_off = std::mem::offset_of!(FunctionCode, jit) + std::mem::offset_of!(crate::bytecode::JitSlot, s) + std::mem::offset_of!(super::Slot, entry);
+    // SAFETY: reading fields of the live probe code.
+    unsafe {
+        let c = code_addr;
+        let consts = std::ptr::read((c + std::mem::offset_of!(FunctionCode, constants) + cp * w) as *const usize);
+        if consts != code.constants.as_ptr() as usize {
+            return Err(127);
+        }
+        let np = std::ptr::read((c + std::mem::offset_of!(FunctionCode, param_locs) + pl * w) as *const usize);
+        if np != code.param_locs.len() {
+            return Err(128);
+        }
+        code.jit.s.entry.set(0x5a5a);
+        let e = std::ptr::read((c + entry_off) as *const usize);
+        code.jit.s.entry.set(0);
+        if e != 0x5a5a {
+            return Err(129);
+        }
+        let r = std::ptr::read((c + std::mem::offset_of!(FunctionCode, realm)) as *const u16);
+        if r != code.realm.get() {
+            return Err(130);
+        }
+    }
+    let jit_on = std::mem::offset_of!(Realm, jit) + std::mem::offset_of!(super::State, on);
+    let stats = std::mem::offset_of!(Realm, jit) + std::mem::offset_of!(super::State, stats);
+    let func = std::mem::offset_of!(crate::vm::Frame, func);
+    Ok(CallLayout {
+        vs_ptr: i32_of(vs + vp * w)?,
+        vs_len: i32_of(vs + vl * w)?,
+        vs_cap: i32_of(vs + vc * w)?,
+        frames_cap: i32_of(frames + fc * w)?,
+        max_frames: i32_of(std::mem::offset_of!(Realm, max_frames))?,
+        current_realm: i32_of(std::mem::offset_of!(Realm, current_realm))?,
+        global: i32_of(std::mem::offset_of!(Realm, global))?,
+        jit_on: i32_of(jit_on)?,
+        stats_on: i32_of(stats + std::mem::offset_of!(super::Stats, enabled))?,
+        switches: i32_of(stats + std::mem::offset_of!(super::Stats, switches))?,
+        f_code: i32_of(std::mem::offset_of!(crate::vm::Frame, code))?,
+        f_pc: i32_of(std::mem::offset_of!(crate::vm::Frame, pc))?,
+        f_base: i32_of(std::mem::offset_of!(crate::vm::Frame, base))?,
+        f_argc: i32_of(std::mem::offset_of!(crate::vm::Frame, argc))?,
+        f_scope: i32_of(std::mem::offset_of!(crate::vm::Frame, scope))?,
+        f_scope_depth: i32_of(std::mem::offset_of!(crate::vm::Frame, scope_depth))?,
+        f_this: i32_of(std::mem::offset_of!(crate::vm::Frame, this))?,
+        f_func_id: i32_of(func + id_word * 4)?,
+        f_func_tag: i32_of(func + tag_word * 4)?,
+        f_new_target: i32_of(std::mem::offset_of!(crate::vm::Frame, new_target))?,
+        f_ret_slot: i32_of(std::mem::offset_of!(crate::vm::Frame, ret_slot))?,
+        f_is_construct: i32_of(std::mem::offset_of!(crate::vm::Frame, is_construct))?,
+        f_entry: i32_of(std::mem::offset_of!(crate::vm::Frame, entry))?,
+        f_extra: i32_of(std::mem::offset_of!(crate::vm::Frame, extra))?,
+        some_id: a[tag_word],
+        fn_tag_value,
+        closure_box: i32_of(closure_box)?,
+        ordinary_tag,
+        native_tag,
+        htmldda: i32_of(obj + std::mem::offset_of!(crate::heap::Object, htmldda))?,
+        typeof_strs: i32_of(std::mem::offset_of!(Realm, jit) + std::mem::offset_of!(super::State, typeof_strs))?,
+        cl_code: i32_of(cl_code)?,
+        code_adj: i32_of(code_adj)?,
+        cl_scope_id: i32_of(cl_scope_id)?,
+        cl_scope_tag: i32_of(cl_scope_tag)?,
+        cl_this_tag: i32_of(cl_this_tag)?,
+        cl_this_val: i32_of(cl_this_val)?,
+        cl_nt_tag: i32_of(cl_nt_tag)?,
+        cl_nt_val: i32_of(cl_nt_val)?,
+        cl_args_tag: i32_of(cl_args_tag)?,
+        some_value,
+        fc_consts: i32_of(std::mem::offset_of!(FunctionCode, constants) + cp * w)?,
+        fc_params: i32_of(std::mem::offset_of!(FunctionCode, param_locs) + pl * w)?,
+        fc_flags: i32_of(std::mem::offset_of!(FunctionCode, call_flags))?,
+        fc_nregs: i32_of(std::mem::offset_of!(FunctionCode, nregs))?,
+        fc_max_depth: i32_of(std::mem::offset_of!(FunctionCode, max_depth))?,
+        fc_entry: i32_of(entry_off)?,
+        fc_realm: i32_of(std::mem::offset_of!(FunctionCode, realm))?,
+    })
+}
+
+/// The probed call layout (`None`: calls and returns go through helpers;
+/// `RABBITHOLE_JIT_NO_INLINE_CALL` turns it off).
+pub(crate) fn call_layout() -> Option<CallLayout> {
+    static L: std::sync::OnceLock<Option<CallLayout>> = std::sync::OnceLock::new();
+    *L.get_or_init(|| {
+        if std::env::var_os("RABBITHOLE_JIT_NO_INLINE_CALL").is_some() {
+            return None;
+        }
+        match call_probe() {
+            Ok(l) => Some(l),
+            Err(step) => {
+                if super::options().trace {
+                    eprintln!("[jit] call layout probe failed at step {step}: calls through helpers");
+                }
+                None
+            }
+        }
+    })
 }

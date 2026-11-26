@@ -1678,3 +1678,57 @@ Se descartó el cambio y se conservan las recargas anteriores. No se mezcló
 con el registro de unwind ni con la habilitación explícita de Windows. La
 puerta de rendimiento global sigue abierta; quitar una instrucción no basta
 para afirmar una mejora del motor.
+
+### Llamadas nativas, cachés megamórficas y helpers dedicados (2026-11-25)
+
+Diagnóstico de partida (Speedometer 3.1, `main` 191c5eb4, contadores de
+eventos por suite y 3 iteraciones; los contadores no se integran porque
+cuestan tiempo): 2–4,3 M llamadas JS→JS por suite pasaban por
+`h_call`/`h_return`; 0,6–2,5 M llamadas a nativos (sobre todo
+`hasOwnProperty`, `Function.prototype.call`, `Object.is`, `Array.isArray`);
+en jQuery, 0,88 M lecturas por nombre de claves ausentes rellenaban la caché
+compartida en cada acceso porque nodos con la misma forma y distinto
+prototipo se expulsaban mutuamente del hueco `(forma, clave)`; en React,
+`typeof` (≈1 M), `ForInNext` (0,6–1 M), `NewObject` y `MakeClosure` iban por
+helpers genéricos y las adiciones cacheadas buscaban de nuevo la transición
+por contenido de la clave.
+
+Cambios, cada uno en su commit:
+
+- `CallR` de un cierre `CALL_SIMPLE` con código nativo, ámbito y del reino
+  en curso empuja el marco en código generado (como `push_simple_frame`) y
+  salta a la entrada del llamado; `ReturnR` de un marco simple a un llamador
+  con código nativo lo desapila, suelta sus valores y reanuda al llamador.
+  Lo demás (nativos, marcos con objeto de ámbito, `arguments`, pila llena,
+  `this` con contador, constructores, entradas) sigue en los helpers, de
+  modo que excepciones, generadores/async, recursión máxima y GC no cambian.
+  Los desplazamientos de `Frame`, `Closure`, `FunctionCode` y de las pilas se
+  sondean en ejecución (`layout::CallLayout`;
+  `RABBITHOLE_JIT_NO_INLINE_CALL` lo apaga).
+- `hasOwnProperty` (también vía `.call`), `Object.is`, `Array.isArray`,
+  `Math.round` e `isNaN` se calculan en la instrucción de llamada cuando los
+  argumentos son el caso común.
+- La caché megamórfica indexa por `(forma, prototipo, clave)` y guarda los
+  almacenamientos `obj[nombre] = v` en objetos ordinarios.
+- Las adiciones cacheadas toman la forma destino por su id
+  (`Shape::transition_to`).
+- `typeof` en línea, helpers dedicados para `ForInNext`, `NewObject` y
+  `MakeClosure`, y lecturas de propiedades ausentes o sin registro servidas
+  por la caché compartida en código nativo.
+
+Validación: test262 completo en modo normal y con
+`RABBITHOLE_JIT=on RABBITHOLE_JIT_THRESHOLD=0`, 0 regresiones frente a
+`crates/js/tests/test262_baseline.txt`; pruebas de `rabbithole-js` y
+`rabbithole-jit` con JIT apagado y a umbral 0 bajo `RH_GC_STRESS=inc`;
+`cargo check` para `x86_64-pc-windows-gnu` y `aarch64-apple-darwin`.
+
+Medidas orientativas (máquina de compilación compartida con otras tareas,
+5 rondas alternas por suite, 3 iteraciones; binarios con frame pointers;
+la medida oficial es la del propietario): frente a 191c5eb4, media
+geométrica de los mínimos por suite −8,0 %, de las medianas −6,7 % y CPU del
+proceso −5,7 % en las 8 suites con más JavaScript; React-Redux −23 % (CPU
+−19 %), jQuery −20 % (CPU −15 %). En `perf.rs` (mínimo de 5 rondas
+intercaladas): llamadas 1,3–1,6×, bucles numéricos sin cambio. La meta de
+2–3× no está alcanzada: el tiempo restante está repartido (intérprete para
+funciones frías, asignación, GC, consultas genéricas de propiedades y
+builtins) y ninguna palanca individual supera unos pocos puntos.
