@@ -93,6 +93,8 @@ fn windows_codec_advertisements_follow_decoder_availability() {
 /// pictures that came out of it (display order) back.
 pub trait VideoDecoder: Send {
     fn decode(&mut self, data: &[u8], pts: f64) -> Vec<VideoFrame>;
+    /// Emit pictures held for reordering at the end of the coded stream.
+    fn end_of_stream(&mut self) -> Vec<VideoFrame> { Vec::new() }
     /// Drop decoder state (seek).
     fn flush(&mut self);
 }
@@ -571,6 +573,8 @@ impl Av1Decoder {
         out
     }
 
+    /// Emit pictures held for reordering at the end of the coded stream.
+    fn end_of_stream(&mut self) -> Vec<VideoFrame> { Vec::new() }
     /// Drop decoder state (seek).
     pub fn flush(&mut self) {
         if let Some(c) = self.ctx {

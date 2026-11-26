@@ -13,7 +13,6 @@ const MF_MT_AUDIO_NUM_CHANNELS: GUID = GUID::from_u128(0x37e48bf5_645e_4c5b_89de
 const MF_MT_AUDIO_BITS_PER_SAMPLE: GUID = GUID::from_u128(0xf2deb57f_40fa_4764_aa33_ed4f2d1ff669);
 const MF_MT_AAC_PAYLOAD_TYPE: GUID = GUID::from_u128(0xbfbabe79_7434_4d1c_94f0_72a3b9e17188);
 const MF_MT_USER_DATA: GUID = GUID::from_u128(0xb6bc765f_4c3b_40a4_bd51_2535b66fe09d);
-const ATTR_SET_UINT32: usize = 21;
 const ATTR_SET_BLOB: usize = 26;
 
 pub struct MfAacDecoder {

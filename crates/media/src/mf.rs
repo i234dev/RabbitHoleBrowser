@@ -21,7 +21,10 @@ const MF_MEDIA_TYPE_VIDEO: GUID = GUID::from_u128(0x73646976_0000_0010_8000_00aa
 const MF_VIDEO_FORMAT_H264: GUID = GUID::from_u128(0x34363248_0000_0010_8000_00aa00389b71);
 const MF_VIDEO_FORMAT_NV12: GUID = GUID::from_u128(0x3231564e_0000_0010_8000_00aa00389b71);
 
+const MF_LOW_LATENCY: GUID = GUID::from_u128(0x9c27891a_ed7a_40e1_88e8_b22727a024ee);
 const MF_VERSION: u32 = 0x0002_0070;
+const MFT_MESSAGE_COMMAND_DRAIN: u32 = 1;
+const MFT_MESSAGE_NOTIFY_END_OF_STREAM: u32 = 0x1000_0002;
 const MFT_MESSAGE_COMMAND_FLUSH: u32 = 0;
 const MFT_MESSAGE_NOTIFY_BEGIN_STREAMING: u32 = 0x1000_0000;
 const MFT_MESSAGE_NOTIFY_START_OF_STREAM: u32 = 0x1000_0003;
@@ -124,6 +127,7 @@ pub use aac::MfAacDecoder;
 const ATTR_GET_UINT32: usize = 7;
 const ATTR_GET_UINT64: usize = 8;
 const ATTR_GET_GUID: usize = 10;
+const ATTR_SET_UINT32: usize = 21;
 const ATTR_SET_GUID: usize = 24;
 // IMFSample (after IMFAttributes' 33 slots)
 const SAMPLE_GET_TIME: usize = 35;
@@ -135,6 +139,7 @@ const BUF_LOCK: usize = 3;
 const BUF_UNLOCK: usize = 4;
 const BUF_SET_LEN: usize = 6;
 // IMFTransform
+const T_GET_ATTRIBUTES: usize = 8;
 const T_GET_OUTPUT_STREAM_INFO: usize = 7;
 const T_GET_OUTPUT_AVAILABLE_TYPE: usize = 14;
 const T_SET_INPUT_TYPE: usize = 15;
@@ -188,6 +193,11 @@ impl MfH264Decoder {
         let t = create_transform()?;
         // SAFETY: COM calls on live interfaces with valid out pointers.
         unsafe {
+            let mut attributes = std::ptr::null_mut();
+            if call!(t, T_GET_ATTRIBUTES, fn(*mut *mut c_void), &mut attributes) >= 0 && !attributes.is_null() {
+                let attributes = Com(attributes);
+                call!(attributes, ATTR_SET_UINT32, fn(*const GUID, u32), &MF_LOW_LATENCY, 1);
+            }
             let mut mt: *mut c_void = std::ptr::null_mut();
             if (api.create_media_type)(&mut mt) < 0 || mt.is_null() {
                 return None;
@@ -369,6 +379,19 @@ impl VideoDecoder for MfH264Decoder {
         }
         self.drain(&mut out);
         out
+    }
+
+    fn end_of_stream(&mut self) -> Vec<VideoFrame> {
+        let mut frames = Vec::new();
+        // SAFETY: the synchronous transform owns all buffered input samples.
+        unsafe {
+            call!(self.t, T_PROCESS_MESSAGE, fn(u32, usize), MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            call!(self.t, T_PROCESS_MESSAGE, fn(u32, usize), MFT_MESSAGE_COMMAND_DRAIN, 0);
+            self.drain(&mut frames);
+            // MSE may reopen and append after endOfStream.
+            call!(self.t, T_PROCESS_MESSAGE, fn(u32, usize), MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+        }
+        frames
     }
 
     fn flush(&mut self) {

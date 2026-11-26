@@ -136,6 +136,17 @@ struct VPacket {
     gen: u64,
 }
 
+enum VideoInput {
+    Packet(VPacket),
+    End(u64),
+}
+
+impl VideoInput {
+    fn generation(&self) -> u64 {
+        match self { Self::Packet(p) => p.gen, Self::End(gen) => *gen }
+    }
+}
+
 impl Shared {
     fn status(&self) -> MutexGuard<'_, Status> {
         self.status.lock().unwrap_or_else(|e| e.into_inner())
@@ -472,6 +483,7 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
     }
     shared.ctl().audio_clock = decoder.is_some();
     let mut eof = false;
+    let mut video_end_sent = false;
     let mut trim_from = 0.0f64;
     let mut pushed_since_seek = false;
     let mut failures = 0;
@@ -499,10 +511,17 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
             }
             trim_from = t;
             eof = false;
+            video_end_sent = false;
             pushed_since_seek = false;
             if decoder.is_none() {
                 finish_seek(shared);
             }
+        }
+        if eof && !video_end_sent {
+            if let Some(tx) = &vtx {
+                send_video(shared, tx, VideoInput::End(shared.seek_gen.load(Ordering::SeqCst)));
+            }
+            video_end_sent = true;
         }
         update_file_status(shared, &src, duration, eof);
         if decoder.is_none() && (vtx.is_none() || eof) {
@@ -531,7 +550,7 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
                     if let Some(tx) = &vtx {
                         let pts = video_tb.and_then(|tb| tb.calc_time(p.pts)).map(secs).unwrap_or(0.0);
                         let key = crate::video::is_key(&vcodec, &p.data);
-                        send_video(shared, tx, VPacket { pts, dts: pts, key, data: p.data.to_vec().into(), gen: shared.seek_gen.load(Ordering::SeqCst) });
+                        send_video(shared, tx, VideoInput::Packet(VPacket { pts, dts: pts, key, data: p.data.to_vec().into(), gen: shared.seek_gen.load(Ordering::SeqCst) }));
                     }
                     continue;
                 }
@@ -835,12 +854,12 @@ fn run_mse(shared: &Arc<Shared>, mse: MseHandle) {
 
 /// Queue a video packet for the decoder thread (blocks while its queue
 /// is full, giving up on stop / seek).
-fn send_video(shared: &Shared, tx: &std::sync::mpsc::SyncSender<VPacket>, mut pkt: VPacket) {
+fn send_video(shared: &Shared, tx: &std::sync::mpsc::SyncSender<VideoInput>, mut pkt: VideoInput) {
     loop {
         match tx.try_send(pkt) {
             Ok(()) => return,
             Err(std::sync::mpsc::TrySendError::Full(p)) => {
-                if shared.stop.load(Ordering::SeqCst) || shared.ctl().seek.is_some() || p.gen != shared.seek_gen.load(Ordering::SeqCst) {
+                if shared.stop.load(Ordering::SeqCst) || shared.ctl().seek.is_some() || p.generation() != shared.seek_gen.load(Ordering::SeqCst) {
                     return;
                 }
                 pkt = p;
@@ -866,14 +885,14 @@ fn video_codec_name(c: symphonia::core::codecs::video::VideoCodecId) -> String {
     }
 }
 
-fn spawn_video(shared: &Arc<Shared>, mse: Option<MseHandle>, codec: String, config: Vec<u8>) -> Option<std::sync::mpsc::SyncSender<VPacket>> {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<VPacket>(120);
+fn spawn_video(shared: &Arc<Shared>, mse: Option<MseHandle>, codec: String, config: Vec<u8>) -> Option<std::sync::mpsc::SyncSender<VideoInput>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<VideoInput>(120);
     let s2 = shared.clone();
     let spawned = std::thread::Builder::new().name("rh-video".into()).spawn(move || run_video(&s2, rx, mse, &codec, &config));
     spawned.ok().map(|_| tx)
 }
 
-fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Option<MseHandle>, codec: &str, config: &[u8]) {
+fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VideoInput>, mse: Option<MseHandle>, codec: &str, config: &[u8]) {
     let Some(mut dec) = crate::video::new_decoder(codec, config) else { return };
     let mut decode_work = Duration::ZERO;
     let mut queue: VecDeque<VideoFrame> = VecDeque::new();
@@ -882,6 +901,7 @@ fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Optio
     let mut skip_before = 0.0f64;
     // MSE: decode-order position in the track buffer.
     let mut next_dts: Option<f64> = None;
+    let mut drained = false;
     loop {
         if shared.stop.load(Ordering::SeqCst) {
             return;
@@ -896,6 +916,7 @@ fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Optio
             // A seek leaves its target in the wall clock.
             skip_before = if gen == 0 { 0.0 } else { shared.ctl().wall_time - 0.001 };
             next_dts = None;
+            drained = false;
         }
         // Present the latest frame that is due.
         let t = shared.time();
@@ -917,7 +938,7 @@ fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Optio
             continue;
         }
         // Next coded frame.
-        let pkt: Option<VPacket> = match &mse {
+        let input = match &mse {
             None => match rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(p) => Some(p),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
@@ -936,28 +957,35 @@ fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Optio
                             (0..upto).rev().find(|&k| tb.frames[k].key).unwrap_or(upto)
                         }
                     };
-                    tb.frames.get(idx).map(|f| VPacket { pts: f.pts, dts: f.dts, key: f.key, data: f.data.clone(), gen })
+                    tb.frames.get(idx).map(|f| VideoInput::Packet(VPacket { pts: f.pts, dts: f.dts, key: f.key, data: f.data.clone(), gen }))
+                        .or_else(|| (m.ended && !drained).then_some(VideoInput::End(gen)))
                 })
             }
         };
-        let Some(pkt) = pkt else {
+        let Some(input) = input else {
             if mse.is_some() {
                 std::thread::sleep(Duration::from_millis(10));
             }
             continue;
         };
-        if pkt.gen != gen {
+        if input.generation() != gen {
             continue;
         }
-        if mse.is_some() {
-            next_dts = Some(pkt.dts);
-        }
-        if need_key && !pkt.key {
-            continue;
-        }
-        need_key = false;
         let start = crate::video_stats::clock();
-        let mut frames = dec.decode(&pkt.data, pkt.pts);
+        let mut frames = match input {
+            VideoInput::Packet(pkt) => {
+                if mse.is_some() { next_dts = Some(pkt.dts); }
+                if need_key && !pkt.key { continue; }
+                need_key = false;
+                drained = false;
+                dec.decode(&pkt.data, pkt.pts)
+            }
+            VideoInput::End(_) => {
+                if drained { continue; }
+                drained = true;
+                dec.end_of_stream()
+            }
+        };
         if let Some(start) = start {
             decode_work += start.elapsed();
             // Charge buffered packets to the next output batch. Share decoder
