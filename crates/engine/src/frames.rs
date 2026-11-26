@@ -136,6 +136,9 @@ pub struct ChildFrame {
     pub source: FrameSource,
     pub page: Option<Box<Page>>,
     pending: Option<Receiver<Result<Loaded, String>>>,
+    /// A location navigation superseded the child resource that delayed
+    /// the owner. Its replacement has its own navigation lifecycle.
+    replaced_load: bool,
     /// When the pending load started (young loads are polled more often).
     pending_since: Option<std::time::Instant>,
     /// The page shows a previous source; the current one must be loaded.
@@ -480,7 +483,7 @@ impl Page {
     /// finish after their own load-delaying descendants.
     pub(crate) fn has_load_delaying_frame(&self) -> bool {
         self.frames.children.iter().any(|c| {
-            !self.doc.attr(c.node, "loading").is_some_and(|v| v.eq_ignore_ascii_case("lazy"))
+            !c.replaced_load && !self.doc.attr(c.node, "loading").is_some_and(|v| v.eq_ignore_ascii_case("lazy"))
                 && (c.pending.is_some() || c.page.as_ref().is_some_and(|p|
                     p.script.waiting_for_frame_load || p.script.frame_initial_load_pending || p.script.frame_load_pending))
         })
@@ -588,6 +591,7 @@ impl Engine {
                     // document stays until the new one arrives (scripts
                     // keep seeing the initial about:blank document).
                     c.source = source;
+                    c.replaced_load = false;
                     c.pending = None;
                     c.stale = true;
                     if let Some(p) = c.page.as_mut() {
@@ -597,7 +601,7 @@ impl Engine {
                     changed = true;
                 }
                 None => {
-                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, pending_since: None, stale: false, size: attr_size(&page.doc, node), dirty: true, unpainted: false, image: None, canvas: None });
+                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, replaced_load: false, pending_since: None, stale: false, size: attr_size(&page.doc, node), dirty: true, unpainted: false, image: None, canvas: None });
                     changed = true;
                 }
             }
@@ -753,7 +757,7 @@ impl Engine {
         }
         // Source Blank: a `src` attribute shows up as a change on the next
         // sync and starts the real load.
-        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, pending_since: None, stale: false, size, dirty: true, unpainted: false, image: None, canvas: None });
+        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, replaced_load: false, pending_since: None, stale: false, size, dirty: true, unpainted: false, image: None, canvas: None });
         Some(id)
     }
 
@@ -1121,6 +1125,17 @@ impl Engine {
         if let Some(nav) = o.navigation {
             self.navigate_frame_node(page, node, nav.request.url);
         }
+    }
+
+    /// Cancel the old receiver before a ready response can install its
+    /// document. Starting a network navigation here cannot run child JS.
+    pub(crate) fn replace_pending_frame_navigation(&self, page: &mut Page, id: u64, url: &Url) -> bool {
+        if url.scheme == "javascript" { return false; }
+        let Some(c) = page.frames.children.iter_mut().find(|c| c.id == id && c.pending.is_some()) else { return false };
+        c.replaced_load = true;
+        let node = c.node;
+        self.navigate_frame_node(page, node, url.clone());
+        true
     }
 
     /// Load `url` in the frame hosted by `node`.

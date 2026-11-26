@@ -650,7 +650,7 @@ impl HostEnv for EngineEnv<'_> {
         if let Some(u) = self.page.resolve(url) {
             if id == self.page.frame_id {
                 self.navigate(u, false);
-            } else {
+            } else if !self.engine.replace_pending_frame_navigation(self.page, id, &u) {
                 self.engine.frames.borrow_mut().navigations.push((id, u));
                 crate::frames::set_mail_pending();
             }
