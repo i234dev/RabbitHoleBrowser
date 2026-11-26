@@ -1328,10 +1328,16 @@ impl Engine {
     /// next (after filling `page.scripts` when they were deferred).
     /// Links of `page` whose destination is in the visited history (for
     /// `:visited`), recomputed when the DOM or the history changed.
-    pub(crate) fn update_visited_links(&self, page: &mut Page) {
+    pub(crate) fn update_visited_links(&self, page: &mut Page, log: &rabbithole_dom::MutationLog) {
         let visited = self.visited.borrow();
         let key = (page.doc.epoch(), visited.len(), page.base_url.to_string());
         if page.incr.visited_key.as_ref() == Some(&key) {
+            return;
+        }
+        // Same history and base, and the mutations since the last scan
+        // touched no link: the visited links are the same elements.
+        if page.incr.visited_key.as_ref().is_some_and(|(_, n, b)| *n == key.1 && *b == key.2) && !touches_links(&page.doc, log) {
+            page.incr.visited_key = Some(key);
             return;
         }
         let base = page.base_url.clone();
@@ -2900,4 +2906,17 @@ pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
     let w = if from_right { p.x + p.w - u.0 } else { u.2 - p.x };
     let h = if from_bottom { p.y + p.h - u.1 } else { u.3 - p.y };
     (w.max(p.w), h.max(p.h))
+}
+
+/// Could these mutations add, remove or retarget an `<a>` / `<area>` link?
+fn touches_links(doc: &Document, log: &rabbithole_dom::MutationLog) -> bool {
+    use rabbithole_dom::Mutation;
+    let is_link = |n: NodeId| doc.element(n).is_some_and(|e| matches!(e.tag.as_str(), "a" | "area"));
+    log.overflow
+        || log.entries.iter().any(|m| match m {
+            Mutation::Attr { node, name, .. } => name == "href" && is_link(*node),
+            Mutation::Children { child, .. } => doc.element(*child).is_some() && doc.descendants(*child).any(is_link),
+            Mutation::Text { .. } => false,
+            Mutation::Node { .. } => true,
+        })
 }

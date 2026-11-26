@@ -380,7 +380,7 @@ impl Engine {
             self.queue_link_events(page);
         }
         let env = media_env(page.viewport, self.scripting);
-        self.update_visited_links(page);
+        self.update_visited_links(page, &log);
         let base_str = page.base_url.to_string();
         let state = page.state.clone();
         let opts = StyleOptions {
@@ -963,6 +963,15 @@ fn damage_from_log(doc: &Document, styles: &rabbithole_style::StyledTree, log: &
     for m in &log.entries {
         match m {
             Mutation::Attr { node, name, .. } => {
+                // These reach the boxes of HTML elements only through their
+                // styles: when the element's style did not change (it is not
+                // already damaged), its boxes stay as they are.
+                let style_only = matches!(name.as_str(), "class" | "id" | "style" | "title" | "role" | "tabindex")
+                    || (name.starts_with("data-") && !name.starts_with("data-rh-"))
+                    || name.starts_with("aria-");
+                if style_only && !dirty.contains(node) && doc.element(*node).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Html) {
+                    continue;
+                }
                 add_with_children(*node, dirty);
                 if name == "value" {
                     if let Some(p) = doc.parent(*node) {

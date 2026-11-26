@@ -85,6 +85,7 @@ pub(crate) fn pseudo_style(styles: &StyledTree, id: NodeId, which: rabbithole_cs
 
 /// Lay out the document into absolute (document-space) coordinates.
 pub fn layout(ctx: &LayoutContext) -> LayoutTree {
+    build::reset_list_numbers();
     tree::layout_document(ctx)
 }
 
