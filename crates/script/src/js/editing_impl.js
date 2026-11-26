@@ -414,7 +414,7 @@
   const alignments = new Map([
     ['justifyleft','left'], ['justifyright','right'], ['justifycenter','center'], ['justifyfull','justify']
   ]);
-  const blockTags = new Set(['address','dd','div','dt','h1','h2','h3','h4','h5','h6','p','pre']);
+  const blockTags = new Set(spec.formattableBlockNames);
   const listCommands = new Map([['insertorderedlist','ol'],['insertunorderedlist','ul']]);
   const blockCommand = cmd => alignments.has(cmd) || cmd === 'formatblock' || listCommands.has(cmd);
   function isBlock(node) {

@@ -7404,8 +7404,11 @@ commands["delete"] = {
 //@{
 // "A formattable block name is "address", "dd", "div", "dt", "h1", "h2", "h3",
 // "h4", "h5", "h6", "p", or "pre"."
-var formattableBlockNames = ["address", "dd", "div", "dt", "h1", "h2", "h3",
-    "h4", "h5", "h6", "p", "pre"];
+// RabbitHole: formatBlock also recognizes semantic paragraph containers
+// used by HTML editors. This list is specific to formatBlock.
+var formattableBlockNames = ["address", "article", "aside", "blockquote", "dd",
+    "div", "dl", "dt", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+    "header", "hgroup", "main", "nav", "p", "pre", "section"];
 
 commands.formatblock = {
     preservesOverrides: true,
@@ -7438,7 +7441,7 @@ commands.formatblock = {
             return isEditableOrInlineIsland(node)
                 && (isNonListSingleLineContainer(node)
                 || isAllowedChild(node, "p")
-                || isHtmlElement(node, ["dd", "dt"]))
+                || isHtmlElement(node, formattableBlockNames))
                 && !getDescendants(node).some(isProhibitedParagraphChild);
         });
 
@@ -7472,7 +7475,7 @@ commands.formatblock = {
 
             // "If the first member of node list is a single-line
             // container:"
-            if (isSingleLineContainer(nodeList[0])) {
+            if (isSingleLineContainer(nodeList[0]) || isHtmlElement(nodeList[0], formattableBlockNames)) {
                 // "Let sublist be the children of the first member of node
                 // list."
                 sublist = [].slice.call(nodeList[0].childNodes);
@@ -7518,7 +7521,7 @@ commands.formatblock = {
                 // append it to sublist."
                 while (nodeList.length
                 && nodeList[0] == sublist[sublist.length - 1].nextSibling
-                && !isSingleLineContainer(nodeList[0])
+                && !isSingleLineContainer(nodeList[0]) && !isHtmlElement(nodeList[0], formattableBlockNames)
                 && !isHtmlElement(sublist[sublist.length - 1], "BR")) {
                     sublist.push(nodeList.shift());
                 }
@@ -9564,6 +9567,7 @@ function run(doc, state, callback, command) {
 
 return {
     run: run,
+    formattableBlockNames: formattableBlockNames,
     moveCaret: moveCaretKeepingOverrides,
     // The typing style (state and value overrides) at the caret, as
     // [command, boolean or string] pairs, and setting it.
