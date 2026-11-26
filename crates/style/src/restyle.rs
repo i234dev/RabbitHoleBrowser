@@ -137,6 +137,11 @@ pub(crate) fn ancestor_hashes(sel: &Selector) -> [u32; 4] {
 
 // ------------------------------------------------------------ invalidation
 
+fn debug_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RH_DEBUG_INCREMENTAL").is_some())
+}
+
 /// The changed element itself must be restyled.
 const R_SELF: u8 = 1;
 /// Its whole subtree must be restyled.
@@ -191,8 +196,51 @@ struct InvalidationMap {
     /// features (universal, pseudo-classes only, `:not()`).
     has_any: bool,
     /// Relation of the compounds carrying `:has()` to their subjects; when
-    /// not just `R_SELF`, `:has()` changes restyle the whole document.
+    /// not just `R_SELF`, a `:has()` change restyles the elements related to
+    /// subjects whose `:has()` result flipped (see `has_rules`).
     has_outer: u8,
+    /// The `:has()` pseudo-classes whose compound relates to other elements
+    /// than the subject: the compound's tag / id / classes (a prefilter),
+    /// the argument list and the relation.
+    has_rules: Vec<HasRule>,
+    /// Some `:has()` argument starts with `+` or `~`: preceding siblings of
+    /// a changed element's ancestors are possible subjects.
+    has_sib: bool,
+}
+
+/// A `:has()` whose result change restyles more than its subject.
+#[derive(Debug)]
+struct HasRule {
+    tag: Option<String>,
+    id: Option<String>,
+    classes: Vec<String>,
+    list: Vec<(Combinator, Selector)>,
+    /// Some argument starts with a descendant / child combinator, or with
+    /// a sibling one.
+    down: bool,
+    side: bool,
+    rel: u8,
+}
+
+impl HasRule {
+    /// Could the compound match `node` apart from its pseudo-classes and
+    /// attributes? (Otherwise its `:has()` result cannot matter there.)
+    fn prefilter(&self, doc: &Document, node: NodeId) -> bool {
+        let Some(el) = doc.element(node) else { return false };
+        if self.tag.as_deref().is_some_and(|t| t != "*" && !el.tag.eq_ignore_ascii_case(t)) {
+            return false;
+        }
+        if self.id.as_deref().is_some_and(|id| el.attr("id") != Some(id)) {
+            return false;
+        }
+        if !self.classes.is_empty() {
+            let have = el.attr("class").unwrap_or("");
+            if !self.classes.iter().all(|c| have.split_ascii_whitespace().any(|h| h == c)) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl InvalidationMap {
@@ -366,6 +414,19 @@ impl InvalidationMap {
                 Pseudo::Has(list) => {
                     self.has_has = true;
                     self.has_outer |= rel;
+                    let side = list.iter().any(|(comb, _)| matches!(comb, Combinator::NextSibling | Combinator::SubsequentSibling));
+                    self.has_sib |= side;
+                    if rel & !R_SELF != 0 && !in_has {
+                        self.has_rules.push(HasRule {
+                            tag: c.tag.clone(),
+                            id: c.id.clone(),
+                            classes: c.classes.clone(),
+                            list: list.clone(),
+                            down: list.iter().any(|(comb, _)| matches!(comb, Combinator::Descendant | Combinator::Child)),
+                            side,
+                            rel,
+                        });
+                    }
                     for (_, s) in list {
                         self.add_selector(s, R_HAS, true);
                     }
@@ -447,6 +508,15 @@ struct Marks<'d> {
     /// `:has()` subjects relate to other elements: any `:has()` change is
     /// global.
     has_global: bool,
+    /// Why `global` was set (for `RH_DEBUG_INCREMENTAL`).
+    why: &'static str,
+    has_rules: &'d [HasRule],
+    has_sib: bool,
+    /// Last known result of each `has_rules` entry per subject.
+    has_cache: &'d mut HashMap<(NodeId, u32), bool>,
+    state: &'d MatchState,
+    /// `:has()` re-evaluations left before falling back to a full restyle.
+    has_budget: u32,
 }
 
 impl Marks<'_> {
@@ -477,6 +547,8 @@ impl Marks<'_> {
     fn apply(&mut self, node: NodeId, rel: u8) {
         if rel & R_GLOBAL != 0 {
             self.global = true;
+
+            self.why = "selector relation (R_GLOBAL)";
         }
         if rel & R_HAS != 0 {
             self.has_scope(node);
@@ -496,22 +568,51 @@ impl Marks<'_> {
         }
     }
 
-    /// A `:has()` argument may have changed at `node`: restyle its
-    /// ancestors and their preceding siblings (the possible subjects).
+    /// A `:has()` argument may have changed at `node`: restyle the possible
+    /// subjects (its inclusive ancestors and, for arguments starting with a
+    /// sibling combinator, their preceding siblings). Where a `:has()` whose
+    /// compound relates to other elements flipped, restyle those as well.
     fn has_scope(&mut self, node: NodeId) {
-        if self.has_global {
-            self.global = true;
-            return;
-        }
         let mut cur = Some(node);
         while let Some(a) = cur {
-            self.mark(a, N_SELF);
-            let mut sib = self.doc.prev_sibling(a);
-            while let Some(s) = sib {
-                self.mark(s, N_SELF);
-                sib = self.doc.prev_sibling(s);
+            self.has_subject(a, false);
+            if self.has_sib {
+                let mut sib = self.doc.prev_sibling(a);
+                while let Some(s) = sib {
+                    self.has_subject(s, true);
+                    sib = self.doc.prev_sibling(s);
+                }
+            }
+            if self.global {
+                return;
             }
             cur = self.doc.parent(a);
+        }
+    }
+
+    fn has_subject(&mut self, a: NodeId, sibling: bool) {
+        if self.doc.element(a).is_none() {
+            return;
+        }
+        self.mark(a, N_SELF);
+        if !self.has_global || self.global {
+            return;
+        }
+        let rules = self.has_rules;
+        for (i, rule) in rules.iter().enumerate() {
+            if !(if sibling { rule.side } else { rule.down }) || !rule.prefilter(self.doc, a) {
+                continue;
+            }
+            if self.has_budget == 0 {
+                self.global = true;
+                self.why = "`:has()` re-evaluation budget";
+                return;
+            }
+            self.has_budget -= 1;
+            let now = rabbithole_css::selector::has_list_matches(&rule.list, self.doc, a, self.state);
+            if self.has_cache.insert((a, i as u32), now) != Some(now) {
+                self.apply(a, rule.rel & !R_HAS);
+            }
         }
     }
 
@@ -524,6 +625,8 @@ impl Marks<'_> {
         }
         if (all | nearest) & R_GLOBAL != 0 {
             self.global = true;
+
+            self.why = "sibling relation (R_GLOBAL)";
         }
         let doc = self.doc;
         let step = |n: NodeId| if forward { doc.next_sibling(n) } else { doc.prev_sibling(n) };
@@ -552,6 +655,8 @@ impl Marks<'_> {
         let flag = if rel & !R_SELF != 0 { N_SUBTREE } else { N_SELF };
         if rel & R_GLOBAL != 0 {
             self.global = true;
+
+            self.why = "child relation (R_GLOBAL)";
         }
         let kids: Vec<NodeId> = self.doc.child_elements(parent).collect();
         for k in kids {
@@ -605,6 +710,8 @@ pub struct StyleEngine {
     /// `@font-feature-values` by lower-cased family.
     feature_values: Rc<std::collections::HashMap<String, Vec<(String, String, Vec<u32>)>>>,
     inval: InvalidationMap,
+    /// Last `:has()` results per subject (see `HasRule`).
+    has_cache: HashMap<(NodeId, u32), bool>,
     env: MediaEnv,
     /// Custom properties per element (inherited by children).
     vars: Vec<Option<Rc<Vars>>>,
@@ -687,6 +794,7 @@ impl StyleEngine {
             aux_dirty: false,
             feature_values: Rc::new(std::collections::HashMap::new()),
             inval,
+            has_cache: HashMap::new(),
             env: *env,
             vars: Vec::new(),
             vars_memo: Vec::new(),
@@ -840,6 +948,8 @@ impl StyleEngine {
     /// dynamic state change to `opts.state`.
     pub fn update(&mut self, doc: &Document, tree: &mut StyledTree, log: &MutationLog, opts: &StyleOptions, author: &[Stylesheet]) -> RestyleOutcome {
         if !self.ready || log.overflow {
+            // Mutations not examined: cached `:has()` results may be stale.
+            self.has_cache.clear();
             let previous = std::mem::replace(tree, self.full(doc, author, opts)).styles;
             return RestyleOutcome { full: true, previous, ..Default::default() };
         }
@@ -865,6 +975,8 @@ impl StyleEngine {
         self.state = opts.state.clone();
         self.state_chains = new_chains;
         if global {
+            // Invalidation stopped early: cached `:has()` results may be stale.
+            self.has_cache.clear();
             let previous = std::mem::replace(tree, self.full(doc, author, opts)).styles;
             return RestyleOutcome { full: true, previous, ..Default::default() };
         }
@@ -881,7 +993,18 @@ impl StyleEngine {
         let inval = &self.inval;
         let has_global = inval.has_outer & !R_SELF != 0;
         let shadow = !doc.shadow_roots.is_empty() || !self.shadow_seen.is_empty();
-        let mut m = Marks { doc, need: &mut self.need, shadow, global: false, has_global };
+        // Child list changes: cached `:has()` results of those elements are
+        // stale (removed, or a reused node id).
+        if !self.has_cache.is_empty() {
+            let moved: HashSet<NodeId> = log.entries.iter().filter_map(|mu| if let Mutation::Children { child, .. } = mu { Some(*child) } else { None }).collect();
+            if !moved.is_empty() {
+                self.has_cache.retain(|&(n, _), _| !moved.contains(&n));
+            }
+            if self.has_cache.len() > 100_000 {
+                self.has_cache.clear();
+            }
+        }
+        let mut m = Marks { doc, need: &mut self.need, shadow, global: false, has_global, why: "", has_rules: &inval.has_rules, has_sib: inval.has_sib, has_cache: &mut self.has_cache, state: new_state, has_budget: 4096 };
         let mut removed: Vec<NodeId> = Vec::new();
         // Shadow DOM bookkeeping: hosts whose light children changed (slot
         // assignment / fallback content), hosts whose slots changed, and
@@ -1091,8 +1214,20 @@ impl StyleEngine {
         }
         if old_state.containers != new_state.containers {
             // Query containers were (re)measured: container queries and
-            // `cq*` units may resolve differently anywhere.
-            m.global = true;
+            // `cq*` units resolve against ancestors, so only the subtrees of
+            // the containers that changed (or appeared / went away) can
+            // style differently.
+            let (old, new) = (&old_state.containers, &new_state.containers);
+            for (&n, info) in old.iter() {
+                if new.get(&n) != Some(info) && n < doc.nodes.len() && doc.is_connected(n) {
+                    m.mark(n, N_SUBTREE);
+                }
+            }
+            for &n in new.keys() {
+                if !old.contains_key(&n) && n < doc.nodes.len() && doc.is_connected(n) {
+                    m.mark(n, N_SUBTREE);
+                }
+            }
         }
         if old_state.target_id != new_state.target_id && inval.target != 0 {
             for id in [old_state.target_id.as_deref(), new_state.target_id.as_deref()].into_iter().flatten() {
@@ -1177,6 +1312,9 @@ impl StyleEngine {
             self.defined_seen = doc.defined_custom.clone();
         }
         let global = m.global;
+        if global && debug_enabled() {
+            eprintln!("[incr] full restyle: {}", if m.why.is_empty() { "other" } else { m.why });
+        }
         // Removed subtrees lose their styles (unless re-inserted, which
         // marked them for restyle above).
         for r in removed {

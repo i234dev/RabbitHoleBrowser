@@ -1699,6 +1699,13 @@ fn is_default_button(doc: &Document, node: NodeId) -> bool {
     first == Some(node)
 }
 
+/// Does the argument list of a `:has()` match at `node` (for incremental
+/// restyle: re-evaluating a `:has()` after a mutation)?
+pub fn has_list_matches(list: &[(Combinator, Selector)], doc: &Document, node: NodeId, state: &MatchState) -> bool {
+    let matcher = SelectorMatcher::new(doc, state);
+    list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node, state, &matcher))
+}
+
 /// `:has()` support: does any element related to `node` by `comb` match `sel`?
 fn has_matches<'s>(comb: Combinator, sel: &'s Selector, doc: &Document, node: NodeId, _state: &MatchState, matcher: &SelectorMatcher<'_, 's>) -> bool {
     match comb {

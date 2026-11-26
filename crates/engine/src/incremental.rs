@@ -896,7 +896,12 @@ fn collect_containers(root: &rabbithole_layout::LayoutBox) -> HashMap<NodeId, ra
             if let Some(n) = b.node {
                 // Vertical subtrees are laid out transposed (logical
                 // width = inline size).
-                let (width, height) = if s.layout_transposed { (b.content_rect.h, b.content_rect.w) } else { (b.content_rect.w, b.content_rect.h) };
+                let (mut width, mut height) = if s.layout_transposed { (b.content_rect.h, b.content_rect.w) } else { (b.content_rect.w, b.content_rect.h) };
+                // An inline-size container's block size cannot be queried:
+                // leave it out so content growing inside it is no change.
+                if !s.container_size {
+                    if s.writing_mode.is_vertical() { width = 0.0 } else { height = 0.0 }
+                }
                 out.entry(n).or_insert_with(|| rabbithole_css::container::ContainerInfo {
                     width,
                     height,
