@@ -345,6 +345,50 @@ fn has_with_non_subject_relations_restyles_only_flipped_subjects() {
     let _ = h;
 }
 
+/// `:has()` arguments whose inner compounds match outside the subject:
+/// sibling insertions before the subject's following siblings and class
+/// changes left of `+` / `~` inside `:is()` (WPT selectors/invalidation).
+#[test]
+fn has_arguments_matching_outside_the_subject() {
+    let (engine, mut page) = load(r#"<html><head><style>
+        div, main { color: grey }
+        div:has(~ div .test) #subject { color: purple }
+        div:has(+ .test) #subject { color: blue }
+        .green:has(#descendant:is(.p + .c ~ .d .e)) { color: green }
+        .orange:has(#descendant:is(:is(.m, .n) .e)) { color: orange }
+        </style></head><body>
+        <main id="main"><div id="a"><div><div id="subject">s</div></div></div><div id="n"><div><div id="nd"></div></div></div></main>
+        <div id="has_scope" class="green"><div class="p"></div><div id="prev"></div><div class="d"><div id="descendant" class="e">x</div></div></div>
+        </body></html>"#);
+    let (main, n, nd, a, prev) = (id(&page, "main"), id(&page, "n"), id(&page, "nd"), id(&page, "a"), id(&page, "prev"));
+    for _ in 0..2 {
+        page.doc.set_attr(nd, "class", Some("test"));
+        check(&engine, &mut page, "class in a following sibling's subtree");
+        page.doc.set_attr(nd, "class", Some(""));
+        check(&engine, &mut page, "class removed again");
+        let t = page.doc.create_element("div", vec![("class".into(), "test".into())]);
+        page.doc.insert_before(main, t, Some(n));
+        check(&engine, &mut page, "div.test inserted after the subject's ancestor");
+        page.doc.detach(t);
+        check(&engine, &mut page, "div.test removed");
+        let u = page.doc.create_element("div", vec![("class".into(), "test".into())]);
+        page.doc.append_child(main, u);
+        check(&engine, &mut page, "div.test appended after the next sibling");
+        page.doc.detach(u);
+        check(&engine, &mut page, "appended div.test removed");
+        page.doc.set_attr(prev, "class", Some("c"));
+        check(&engine, &mut page, ".c before .d inside :is() in :has()");
+        let scope = id(&page, "has_scope");
+        page.doc.set_attr(scope, "class", Some("green orange m"));
+        check(&engine, &mut page, ".m on an ancestor inside nested :is() in :has()");
+        page.doc.set_attr(scope, "class", Some("green orange"));
+        check(&engine, &mut page, ".m removed");
+        page.doc.set_attr(prev, "class", Some(""));
+        check(&engine, &mut page, ".c removed");
+    }
+    let _ = a;
+}
+
 /// Random DOM mutations against a stylesheet exercising every
 /// invalidation path; after each step the incremental result must equal
 /// a full recomputation.
@@ -374,6 +418,7 @@ fn randomized_mutations_match_full_recompute() {
         .q:has(> .a) { outline: 2px solid red; padding-top: 2px } .r { position: absolute; left: 5px; width: 20px }
         .l:has(.c) .b { padding-left: 6px } .m:has(+ .d) ~ .p { color: green } .n:not(:has(> :not(:empty))) + .i { width: 12px }
         .p:not(:has(.a)) .c { display: block; height: 3px } .k:is(:has(+ .e)) { color: blue }
+        div:has(~ div .h) .b { padding-top: 4px } .g:has(.b:is(.e + .k ~ .m .c)) { color: teal } .q:has(+ .d .a) ~ .r { margin-left: 3px }
         section:has(~ .h) > span { margin-right: 5px }
     "#;
     let classes = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", ""];

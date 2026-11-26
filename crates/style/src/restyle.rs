@@ -305,8 +305,12 @@ impl InvalidationMap {
             };
             // Inside `:has()` the argument's own ancestors are matched without
             // scoping, so a change there can also affect elements below it.
+            // (Elements left of a sibling combinator in an argument relate
+            // to their following siblings' subtrees.)
+            // A subject nested through `:is()` / `:not()` in a non-last
+            // compound of the argument keeps that compound's relation.
             let rel = if in_has {
-                if own == R_SELF { R_HAS } else { R_HAS | R_DESC }
+                if own == R_SELF { R_HAS | (outer & (R_DESC | R_SIB)) } else { R_HAS | R_DESC | (own & R_SIB) }
             } else if own == R_SELF {
                 outer
             } else {
@@ -585,6 +589,14 @@ impl Marks<'_> {
     }
 
     fn apply(&mut self, node: NodeId, rel: u8) {
+        if rel & R_HAS != 0 && rel & (R_DESC | R_SIB) != 0 {
+            // A compound of a `:has()` argument other than its last one
+            // matches elements outside the subjects' subtrees: subjects
+            // that are not candidates below may have flipped. Their own
+            // and related elements are restyled by the marks below; their
+            // cached results are no longer known.
+            self.has_cache.clear();
+        }
         if rel & R_GLOBAL != 0 {
             self.global = true;
 
@@ -1171,6 +1183,14 @@ impl StyleEngine {
                         has_done.insert(parent);
                         m.has_scope(parent);
                         m.children(parent, R_SELF);
+                        if inval.has_sib {
+                            // Inserted or removed: any child may be a subject
+                            // whose `:has(~ ...)` / `:has(+ ...)` changed.
+                            let kids: Vec<NodeId> = doc.child_elements(parent).collect();
+                            for k in kids {
+                                m.has_subject(k, true);
+                            }
+                        }
                     }
                     if doc.element(child).is_some() && structural != 0 && !swept.contains(&parent) {
                         let many = per_parent.get(&parent).is_some_and(|&c| c > 4);
