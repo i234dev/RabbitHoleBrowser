@@ -24,7 +24,7 @@
     ['bold', ['b', 'font-weight', 'bold', 'normal', 'formatBold']],
     ['italic', ['i', 'font-style', 'italic', 'normal', 'formatItalic']],
     ['underline', ['u', 'text-decoration-line', 'underline', 'none', 'formatUnderline']],
-    ['strikethrough', ['s', 'text-decoration-line', 'line-through', 'none', 'formatStrikeThrough']],
+    ['strikethrough', ['strike', 'text-decoration-line', 'line-through', 'none', 'formatStrikeThrough']],
     ['subscript', ['sub', 'vertical-align', 'sub', 'baseline', 'formatSubscript']],
     ['superscript', ['sup', 'vertical-align', 'super', 'baseline', 'formatSuperscript']],
   ]);
@@ -189,7 +189,7 @@
       const parent = el.parentElement;
       const scripts = isScriptFormat(cmd);
       const semantic = scripts && (el.localName === 'sup' || el.localName === 'sub') || el.localName === tag || (cmd === 'bold' && el.localName === 'strong') ||
-        (cmd === 'italic' && el.localName === 'em') || (cmd === 'strikethrough' && el.localName === 'strike');
+        (cmd === 'italic' && el.localName === 'em') || (cmd === 'strikethrough' && el.localName === 's');
       const inline = !scripts && (el.style.getPropertyValue(prop) ||
         (prop === 'text-decoration-line' && el.style.getPropertyValue('text-decoration')));
       const attr = valued?.[1];

@@ -3144,7 +3144,7 @@ function forcedElementName(command, newValue) {
             return "i";
         }
         if (command == "strikethrough" && newValue == "line-through") {
-            return "s";
+            return "strike";
         }
         if (command == "underline" && newValue == "underline") {
             return "u";
@@ -3288,7 +3288,7 @@ function forceValue(node, command, newValue) {
         // new parent be the result of calling createElement("s") on the
         // ownerDocument of node."
         if (command == "strikethrough" && newValue == "line-through") {
-            newParent = node.ownerDocument.createElement("s");
+            newParent = node.ownerDocument.createElement("strike");
         }
 
         // "If command is "underline" and new value is "underline", let new
