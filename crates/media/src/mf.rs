@@ -76,14 +76,9 @@ fn com_init() {
 /// so the caller's COM apartment is untouched.)
 pub fn h264_available() -> bool {
     static OK: OnceLock<bool> = OnceLock::new();
-    *OK.get_or_init(|| {
-        std::thread::spawn(|| {
-            com_init();
-            api().is_some() && create_transform().is_some()
-        })
-        .join()
-        .unwrap_or(false)
-    })
+    // Test the same H.264 input and NV12 output negotiation used for
+    // playback. The avcC parameter sets are only needed on the first IDR.
+    *OK.get_or_init(|| std::thread::spawn(|| MfH264Decoder::new(&[]).is_some()).join().unwrap_or(false))
 }
 
 // ---------------------------------------------------------------- vtables
