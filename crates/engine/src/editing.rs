@@ -13,7 +13,7 @@ impl Engine {
         let shortcut = mods.ctrl || mods.meta;
         if mods.alt { return None; }
         let (command, input_type, text) = match key {
-            "Enter" if !shortcut && mods.shift => ("insertlinebreak", "insertLineBreak", None),
+            "Enter" if !shortcut && (mods.shift || page.doc.attr(target, "contenteditable").is_some_and(|v| v.eq_ignore_ascii_case("plaintext-only"))) => ("insertlinebreak", "insertLineBreak", None),
             "Enter" if !shortcut => ("insertparagraph", "insertParagraph", None),
             "Backspace" if !shortcut => ("delete", "deleteContentBackward", None),
             "Delete" if !shortcut => ("forwarddelete", "deleteContentForward", None),

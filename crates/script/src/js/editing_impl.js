@@ -1113,7 +1113,7 @@
   function input(host, inputType, data = null) {
     const state = contexts.get(host.ownerDocument);
     if (state?.userEdit) { state.changed = true; return; }
-    host.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType, data }));
+    N.editingInput(host, inputType, data);
   }
   const inputTypeFor = cmd => cmd === 'delete' ? 'deleteContentBackward'
     : cmd === 'forwarddelete' ? 'deleteContentForward' : 'insertText';
@@ -1528,7 +1528,7 @@
     let block = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
     while (block !== host && (!isBlock(block) || !['address','div','p','pre','li','blockquote','h1','h2','h3','h4','h5','h6'].includes(block.localName)))
       block = block.parentElement;
-    if (!isBlock(block) || block.localName === 'pre' || host.contentEditable === 'plaintext-only') {
+    if (!isBlock(block) || block.localName === 'pre' || (block === host && inlineContents.has(host.localName)) || (block === host && host.contentEditable === 'plaintext-only')) {
       insertLineBreak(doc, t);
       return;
     }
@@ -1714,6 +1714,9 @@
     // The specification assumes block editing hosts: an inline host gets
     // line breaks instead of paragraphs, as in other browsers.
     if (getComputedStyle(t.host).display.startsWith('inline')) return false;
+    // A CSS display override does not change the host's HTML content model.
+    if (inlineContents.has(t.host.localName) &&
+        (cmd === 'insertparagraph' || cmd === 'insertlinebreak' || (cmd === 'inserttext' && /[\r\n]/.test(value)))) return false;
     // A link typed inside a link splits it; lists inside table cells keep
     // their boundaries and items moved to another kind of list keep their
     // sublists: the implementation above does these as browsers do.

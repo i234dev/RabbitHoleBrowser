@@ -235,6 +235,20 @@ fn editing_impl(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     }
 }
 
+/// Notify the editing host after execCommand actually changed its contents.
+fn editing_input(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let target = this_node(realm, &arg(args, 0), "editingInput")?;
+    let input_type = arg_str(realm, args, 1)?;
+    let data = match arg(args, 2).v() {
+        V::String(s) => Some(s.to_rust_string()),
+        _ => None,
+    };
+    let detail = crate::EventDetail::Input { data, input_type, is_composing: false, target_range: None };
+    let init = crate::EventInit { bubbles: true, cancelable: false, detail: Some(detail) };
+    crate::events::dispatch(realm, TargetKey::Node(target), "input", init, true);
+    Ok(Value::Undefined)
+}
+
 fn set_factory(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let name = arg_str(realm, args, 0)?;
     let f = arg(args, 1);
@@ -561,6 +575,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
     realm.define_method(o, "canvasColor", 1, crate::cssom::canvas_color);
+    realm.define_method(o, "editingInput", 3, editing_input);
+    realm.mark_gc_safe(o, "editingInput");
     realm.define_method(o, "editingImpl", 1, editing_impl);
     realm.define_method(o, "computedValue", 2, crate::cssom::computed_value_native);
     realm.define_method(o, "exSize", 1, crate::cssom::ex_size_native);
