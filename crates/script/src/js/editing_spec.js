@@ -8196,6 +8196,20 @@ commands.inserthtml = {
             fixDisallowedAncestors(descendants[i]);
         }
 
+        // Continue typing in the last visible text run of an inserted
+        // inline format after repairing its ancestors.
+        if (isHtmlElement(lastChild, formattingElementNames) && !isHtmlElement(lastChild, "a")) {
+            var end = lastChild;
+            while (isHtmlElement(end, formattingElementNames) && !isHtmlElement(end, "a") && end.lastChild) {
+                end = end.lastChild;
+            }
+            if (end.nodeType == Node.TEXT_NODE && end.length && isEditable(end) && isVisible(end)) {
+                getActiveRange().setStart(end, end.length);
+                getActiveRange().collapse(true);
+                getSelection().collapse(end, end.length);
+            }
+        }
+
         // "Return true."
         return true;
     }
