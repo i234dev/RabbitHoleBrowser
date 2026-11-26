@@ -33,3 +33,5 @@ pub use canvas::{Canvas, Color, ColorStop, FillRule, LineCap, LineJoin, Matrix, 
 pub use canvas_ext::{blend_mode_index, blend_pixel, ellipse_path, parse_svg_path, rounded_rect_path};
 pub use font::{FaceInfo, Family, FontContext, FontId, FontLimits, GlyphBitmap, LineMetrics, ShapedGlyph};
 pub use image::Image;
+
+mod video_scale;
