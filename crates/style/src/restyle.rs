@@ -1637,6 +1637,15 @@ impl StyleEngine {
         crate::cascade::index_has_pseudo(&self.index, which)
     }
 
+    /// Whether the whitespace formatting an edit would move was specified
+    /// by the author, including inherited formatting in the flat tree.
+    pub fn author_white_space(&self, doc: &Document, opts: &StyleOptions, tree: &StyledTree, node: NodeId) -> bool {
+        let matcher = SelectorMatcher::new(doc, opts.state);
+        let styles = crate::cascade::StyledSoFar { styles: &tree.styles, vars: &self.vars };
+        let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: None, style_source: Some(&styles) };
+        crate::cascade::editing_origin::author_white_space(doc, node, &cx)
+    }
+
     /// `::selection` styles of `elements` (see [`Self::highlight_styles`]).
     pub fn selection_styles(&self, doc: &Document, opts: &StyleOptions, tree: &StyledTree, elements: &[NodeId]) -> crate::highlight::SelectionStyles {
         self.highlight_styles(doc, opts, tree, elements, rabbithole_css::PseudoElement::Selection)

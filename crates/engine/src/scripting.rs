@@ -343,6 +343,20 @@ impl HostEnv for EngineEnv<'_> {
         let _fonts = rabbithole_style::values::scope_unit_fonts(Some(self.page.fonts.clone()), rabbithole_style::values::font_unit_skip(&self.page.styles.font_faces));
         Some(rabbithole_style::values::font_units(&s).1 * s.computed_font_size())
     }
+    fn author_white_space(&mut self, frame: Option<u64>, node: NodeId) -> bool {
+        let read = |page: &Page| {
+            let se = page.incr.style_engine()?;
+            let opts = rabbithole_style::StyleOptions {
+                state: &page.state, resolve_url: &crate::resolve_url, document_base: &page.base_url.to_string(),
+            };
+            Some(se.author_white_space(&page.doc, &opts, &page.styles, node))
+        };
+        if frame.is_none() {
+            self.engine.flush_style(self.page);
+            return read(self.page).unwrap_or(false);
+        }
+        self.with_frame_layout(frame, read).unwrap_or(false)
+    }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>> {
         let r = if self.page.script.dom_dirty {
             // The DOM changed: compute just this element's chain instead of

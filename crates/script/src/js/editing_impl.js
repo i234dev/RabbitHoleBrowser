@@ -1244,7 +1244,9 @@
     const after = move.endContainer === src ? src.childNodes[move.endOffset] :
         branchIn(move.endContainer,src).nextSibling;
     for (let part = first; part && part !== after; part = part.nextSibling) {
-      styles.push(part.nodeType === 1 ? getComputedStyle(part).whiteSpace : whiteSpace);
+      const el = part.nodeType === 1 ? part : src;
+      const value = el === src ? whiteSpace : getComputedStyle(el).whiteSpace;
+      styles.push(value !== destinationSpace && N.editingAuthorWhiteSpace(el) ? value : null);
     }
     const before = branchIn(left, dest).nextSibling;
     const fragment = move.extractContents();
@@ -1263,14 +1265,14 @@
     }
     let wrapper = null;
     for (const [i,part] of Array.from(fragment.childNodes).entries()) {
-      const value = styles[i] || whiteSpace;
-      if (part.nodeType === 1 && value !== whiteSpace) {
+      const value = styles[i];
+      if (part.nodeType === 1 && value) {
         // Carry a contextual class's computed whitespace across the block
         // boundary even if the class stops matching in the destination.
         if (part.style.whiteSpace !== value) part.style.whiteSpace = value;
         dest.insertBefore(part,before);
         wrapper = null;
-      } else if (value !== destinationSpace) {
+      } else if (value) {
         if (!wrapper) {
           wrapper = doc.createElement('span');
           wrapper.style.whiteSpace = value;
