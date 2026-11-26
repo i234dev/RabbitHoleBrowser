@@ -563,8 +563,8 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
                     continue;
                 }
                 let Some(dec) = decoder.as_mut() else { continue };
-                match dec.decode(&p.data) {
-                    Ok(pcm) => {
+                match dec.decode_at(&p.data, pts) {
+                    Ok((pts, pcm)) => {
                         if push_pcm(shared, pts, pcm, trim_from) && !pushed_since_seek {
                             pushed_since_seek = true;
                             if shared.status().seeking {
@@ -820,9 +820,9 @@ fn run_mse(shared: &Arc<Shared>, mse: MseHandle) {
             Some(f) if f.pts <= cursor + 0.1 => {
                 let Some((_, _, dec)) = decoder.as_mut() else { continue };
                 cursor = f.pts + f.dur.max(1e-4);
-                if let Ok(pcm) = dec.decode(&f.data) {
+                if let Ok((pts, pcm)) = dec.decode_at(&f.data, f.pts) {
                     let from = if pushed_since_seek { 0.0 } else { shared.ctl().wall_time };
-                    if push_pcm(shared, f.pts, pcm, from) && !pushed_since_seek {
+                    if push_pcm(shared, pts, pcm, from) && !pushed_since_seek {
                         pushed_since_seek = true;
                     }
                 }

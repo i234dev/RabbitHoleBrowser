@@ -106,7 +106,13 @@ impl Decoder {
 
     /// Decode one packet (one container frame / block).
     pub fn decode(&mut self, data: &[u8]) -> Result<Pcm, String> {
-        match &mut self.inner {
+        self.decode_at(data, 0.0).map(|(_, pcm)| pcm)
+    }
+
+    /// Return the timestamp of the first retained sample. Packet PTS refers
+    /// to the encoded block, including any priming discarded by the decoder.
+    pub(crate) fn decode_at(&mut self, data: &[u8], pts: f64) -> Result<(f64, Pcm), String> {
+        let pcm = match &mut self.inner {
             Inner::Symphonia(dec) => {
                 let packet = Packet::new(0, Timestamp::new(0), SymDuration::new(0), data.to_vec());
                 match dec.decode(&packet) {
@@ -123,10 +129,11 @@ impl Decoder {
                     Err(e) => Err(e.to_string()),
                 }
             }
-            Inner::Opus(o) => o.decode(data),
+            Inner::Opus(o) => return o.decode(data, pts),
             #[cfg(windows)]
             Inner::MfAac(d) => d.decode(data).map(|(rate, channels, samples)| Pcm { rate, channels, samples }),
-        }
+        }?;
+        Ok((pts, pcm))
     }
 
     /// Forget decoder state (after a seek). `at_start`: the next packet is
@@ -184,7 +191,7 @@ impl OpusState {
         Ok(OpusState { decoder, channels, pre_skip, skip_left: pre_skip, gain, buf: vec![0.0; 5760 * channels] })
     }
 
-    fn decode(&mut self, data: &[u8]) -> Result<Pcm, String> {
+    fn decode(&mut self, data: &[u8], pts: f64) -> Result<(f64, Pcm), String> {
         if self.buf.len() < 5760 * self.channels {
             self.buf.resize(5760 * self.channels, 0.0);
         }
@@ -197,18 +204,16 @@ impl OpusState {
             OpusDecoder::Single(d) => d.decode_float(data, &mut self.buf, false),
             OpusDecoder::Multi(d) => d.decode_float(data, &mut self.buf, false),
         }.map_err(|e| format!("opus: {e}"))?;
-        let mut pcm = Pcm { rate: 48_000, channels: self.channels, samples: self.buf[..n * self.channels].to_vec() };
+        let skipped = self.skip_left.min(n);
+        self.skip_left -= skipped;
+        let samples = self.buf[skipped * self.channels..n * self.channels].to_vec();
+        let mut pcm = Pcm { rate: 48_000, channels: self.channels, samples };
         if (self.gain - 1.0).abs() > 1e-6 {
             for s in &mut pcm.samples {
                 *s *= self.gain;
             }
         }
-        if self.skip_left > 0 {
-            let k = self.skip_left.min(n);
-            pcm.skip_frames(k);
-            self.skip_left -= k;
-        }
-        Ok(pcm)
+        Ok((pts + skipped as f64 / 48_000.0, pcm))
     }
 }
 
@@ -232,12 +237,15 @@ mod tests {
         // A CELT-only 20 ms fullband stereo frame with no payload (TOC
         // config 31, stereo, one frame): decodes to silence.
         let toc = (31u8 << 3) | 0b100;
-        let pcm = d.decode(&[toc]).unwrap();
+        let (first_pts, pcm) = d.decode_at(&[toc], 0.0).unwrap();
+        assert_eq!(first_pts, 312.0 / 48_000.0);
         assert_eq!(pcm.rate, 48_000);
         assert_eq!(pcm.channels, 2);
         // 960 frames minus the 312 pre-skip.
         assert_eq!(pcm.frames(), 960 - 312);
-        let pcm = d.decode(&[toc]).unwrap();
+        let end = first_pts + pcm.frames() as f64 / 48_000.0;
+        let (second_pts, pcm) = d.decode_at(&[toc], 0.020).unwrap();
+        assert!((end - second_pts).abs() < 1e-12);
         assert_eq!(pcm.frames(), 960);
         d.reset(false);
         assert_eq!(d.decode(&[toc]).unwrap().frames(), 960);
