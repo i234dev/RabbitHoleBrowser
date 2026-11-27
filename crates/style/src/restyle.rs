@@ -1419,7 +1419,7 @@ impl StyleEngine {
             Enter { node: NodeId, parent: Rc<ComputedStyle>, pvars: Rc<Vars>, root_fs: f32, force: bool, pchange: u8 },
             Exit(NodeId),
         }
-        let matcher = SelectorMatcher::new(doc, opts.state);
+        let matcher = SelectorMatcher::new(doc, opts.state).with_class_filter();
         let mut bloom = AncestorBloom::default();
         let mut candidates = Vec::new();
         let mut matched: Vec<Matched> = Vec::new();

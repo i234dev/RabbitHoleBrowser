@@ -1122,13 +1122,40 @@ pub struct SelectorMatcher<'d, 's> {
     nth: RefCell<HashMap<(usize, NodeId), Arc<NthRanks>>>,
     cached_nodes: Cell<usize>,
     selectors: PhantomData<Cell<&'s Selector>>,
-    /// Per element: a 63-bit filter of its class names (bit 63 = computed).
-    /// The document cannot change while the matcher borrows it.
-    class_bits: RefCell<Vec<u64>>,
-    /// Class checks so far: short-lived matchers (one query) skip the filter.
-    class_checks: Cell<u32>,
+    /// Per element checked: a 63-bit filter of its class names (bit 63 set).
+    /// The document cannot change while the matcher borrows it. Only
+    /// matchers that style many elements use it (see
+    /// [`SelectorMatcher::with_class_filter`]).
+    class_bits: Option<RefCell<HashMap<NodeId, u64, BuildNodeHasher>>>,
     #[cfg(test)]
     rank_builds: Cell<usize>,
+}
+
+/// A multiplicative hasher for node ids (class filter cache).
+#[derive(Default, Clone, Copy)]
+pub struct BuildNodeHasher;
+
+pub struct NodeHasher(u64);
+
+impl std::hash::BuildHasher for BuildNodeHasher {
+    type Hasher = NodeHasher;
+    fn build_hasher(&self) -> NodeHasher {
+        NodeHasher(0)
+    }
+}
+
+impl std::hash::Hasher for NodeHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
 }
 
 /// The filter bit of a class name.
@@ -1147,26 +1174,22 @@ struct NthRanks { indices: HashMap<NodeId, i32>, count: i32 }
 impl<'d, 's> SelectorMatcher<'d, 's> {
     pub fn new(doc: &'d Document, state: &'d MatchState) -> Self {
         Self { doc, state, nth: RefCell::new(HashMap::new()), cached_nodes: Cell::new(0), selectors: PhantomData,
-            class_bits: RefCell::new(Vec::new()), class_checks: Cell::new(0),
+            class_bits: None,
             #[cfg(test)] rank_builds: Cell::new(0) }
     }
 
+    /// Keep per-element class filters: for matchers that match many
+    /// selectors against the same elements (styling a document).
+    pub fn with_class_filter(mut self) -> Self {
+        self.class_bits = Some(RefCell::new(HashMap::default()));
+        self
+    }
+
     /// The class filter of `node` (whose `class` attribute is `classes`),
-    /// or all bits for the first checks of a matcher.
+    /// or all bits when the matcher keeps none.
     fn class_filter(&self, node: NodeId, classes: &str) -> u64 {
-        let n = self.class_checks.get();
-        if n < 64 {
-            self.class_checks.set(n + 1);
-            return u64::MAX;
-        }
-        let mut v = self.class_bits.borrow_mut();
-        if node >= v.len() {
-            v.resize(self.doc.nodes.len().max(node + 1), 0);
-        }
-        if v[node] & CLASS_BITS_DONE == 0 {
-            v[node] = classes.split_ascii_whitespace().fold(CLASS_BITS_DONE, |bits, c| bits | class_bit(c));
-        }
-        v[node]
+        let Some(cache) = &self.class_bits else { return u64::MAX };
+        *cache.borrow_mut().entry(node).or_insert_with(|| classes.split_ascii_whitespace().fold(CLASS_BITS_DONE, |bits, c| bits | class_bit(c)))
     }
 
     pub fn matches(&self, selector: &'s Selector, node: NodeId) -> bool {
