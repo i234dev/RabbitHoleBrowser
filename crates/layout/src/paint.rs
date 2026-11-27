@@ -20,9 +20,26 @@ pub struct VideoPlane {
     pub clip: Rect,
     pub pixelated: bool,
     pub foreground: Option<std::sync::Arc<VideoForeground>>,
+    // Underlying page colours of partially covered device pixels only.
+    edges: std::sync::Arc<[(u32, u32, u32)]>,
+    device_clip: Rect,
+    // Difference between the first visible raster row and the logical scroll.
+    raster_offset_y: f32,
 }
 
 pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::Image>, viewport: Rect, scale: f32, fonts: &FontContext) -> Option<VideoPlane> {
+    video_plane_on_background(list, target, viewport, scale, fonts, Color::WHITE)
+}
+
+pub fn video_plane_on_background(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::Image>,
+    viewport: Rect, scale: f32, fonts: &FontContext, background: Color) -> Option<VideoPlane> {
+    video_plane_in_raster(list, target, viewport, scale, fonts, background, viewport.y)
+}
+
+/// Place the video on the device grid used to blit the backing canvas. Fixed
+/// content still uses the logical viewport, including its fractional scroll.
+pub fn video_plane_in_raster(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::Image>,
+    viewport: Rect, scale: f32, fonts: &FontContext, background: Color, canvas_y: f32) -> Option<VideoPlane> {
     use DisplayItem as D;
     macro_rules! fallback {
         ($reason:expr, $index:expr) => {{
@@ -37,13 +54,25 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
     let mut origins = Vec::new();
     // An irregular clip still bounds later draws, but a picture inside it
     // cannot be composited with a single rectangular clip.
-    let mut clips = vec![(viewport, false)];
+    if !scale.is_finite() || scale <= 0.0 { return None; }
+    // The GUI blits the overscanned page at this whole-device-pixel offset.
+    let blit_y = ((canvas_y - viewport.y) * scale).round();
+    let raster_y = canvas_y - blit_y / scale;
+    let raster_view = Rect::new(viewport.x, raster_y, viewport.w, viewport.h);
+    let mut clips = vec![(raster_view, false)];
     let mut layers: Vec<Rect> = Vec::new();
     let mut plane: Option<VideoPlane> = None;
     let mut target_index = 0;
     let mut foreground_items = Vec::new();
-    let aligned = |r: Rect| [r.x - viewport.x, r.y - viewport.y, r.w, r.h]
-        .iter().all(|v| (v * scale).fract() == 0.0);
+    // The content image and rectangular clip both use snap() at unit
+    // scale. At other scales they retain the original CSS coordinates.
+    let image_rect = |rect: Rect| {
+        if scale == 1.0 {
+            snap_edges(rect.translate(-viewport.x, -canvas_y)).translate(viewport.x, canvas_y)
+        } else {
+            rect
+        }
+    };
     for (index, item) in list.items.iter().enumerate() {
         let (clip, irregular) = *clips.last()?;
         match item {
@@ -58,7 +87,10 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
             }
             D::PopFixed | D::PopTransform => origin = origins.pop()?,
             D::PushClip(r) | D::PushClipRounded(r, _) | D::PushClipPath { bounds: r, .. } => {
-                let bounds = origin.map_or(clip, |(x, y)| clip.intersect(&r.translate(x, y)));
+                let bounds = origin.map_or(clip, |(x, y)| {
+                    let r = r.translate(x, y);
+                    clip.intersect(&if matches!(item, D::PushClip(_)) { image_rect(r) } else { r })
+                });
                 clips.push((bounds, irregular || origin.is_none() || !matches!(item, D::PushClip(_))));
             }
             D::PopClip => { clips.pop()?; }
@@ -71,13 +103,20 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
             D::PopLayer(_) => { layers.pop()?; }
             D::Image { rect, src, image, opacity, pixelated } if std::sync::Arc::ptr_eq(image, target) => {
                 let Some((x,y)) = origin else { fallback!("transformed-video", index) };
-                let dest = rect.translate(x, y);
+                let dest = image_rect(rect.translate(x, y));
                 let visible = dest.intersect(&clip);
                 if plane.is_some() { fallback!("multiple-images", index); }
                 if irregular { fallback!("nonrectangular-video-clip", index); }
                 if !layers.is_empty() || *opacity != 1.0 { fallback!("video-opacity-group", index); }
                 if visible.is_empty() { fallback!("outside-viewport", index); }
-                if !aligned(dest) || !aligned(visible) { fallback!("fractional-video-edge", index); }
+                let device = |v: f32, origin: f32| (v - origin) * scale;
+                let left = device(visible.x, viewport.x).floor();
+                let top = device(visible.y, raster_y).floor();
+                let right = device(visible.right(), viewport.x).ceil();
+                let bottom = device(visible.bottom(), raster_y).ceil();
+                let device_clip = Rect::new(left, top, right - left, bottom - top);
+                let visible = Rect::new(viewport.x + left / scale, raster_y + top / scale,
+                    device_clip.w / scale, device_clip.h / scale);
                 // The normal image painter treats near-full crops as full.
                 let src = if src.x <= 0.0 && src.y <= 0.0 && (src.w - image.width as f32).abs() < 0.5 &&
                     (src.h - image.height as f32).abs() < 0.5 {
@@ -85,7 +124,7 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
                 } else { *src };
                 if !*pixelated && (src.w > 4.0 * dest.w * scale || src.h > 4.0 * dest.h * scale) { return None; }
                 target_index = index;
-                plane = Some(VideoPlane { dest, src, clip: visible, pixelated: *pixelated, foreground: None });
+                plane = Some(VideoPlane { dest, src, clip: visible, pixelated: *pixelated, foreground: None, edges: Default::default(), device_clip, raster_offset_y: raster_y - viewport.y });
             }
             _ => {
                 let Some(v) = &plane else { continue };
@@ -120,7 +159,67 @@ pub fn video_plane(list: &DisplayList, target: &std::sync::Arc<rabbithole_gfx::I
     if !foreground_items.is_empty() {
         plane.foreground = VideoForeground::raster(list, target_index, &foreground_items, plane.clip, viewport, scale, fonts)?;
     }
+    let device_dest = Rect::new((plane.dest.x - viewport.x) * scale, (plane.dest.y - raster_y) * scale,
+        plane.dest.w * scale, plane.dest.h * scale);
+    if [device_dest.x, device_dest.y, device_dest.right(), device_dest.bottom()].iter().any(|v| v.fract() != 0.0) {
+        plane.capture_edges(list, target_index, viewport, scale, fonts, background, device_dest);
+    }
     Some(plane)
+}
+
+impl VideoPlane {
+    fn capture_edges(&mut self, list: &DisplayList, target: usize, viewport: Rect, scale: f32,
+        fonts: &FontContext, background: Color, dest: Rect) {
+        let clip = self.device_clip;
+        let (w, h) = (clip.w as u32, clip.h as u32);
+        if w == 0 || h == 0 { return; }
+        let mut coords = Vec::new();
+        for y in 0..h {
+            let py = clip.y + y as f32;
+            if py < dest.y || py + 1.0 > dest.bottom() {
+                coords.extend((0..w).map(|x| (x, y)));
+            } else {
+                if clip.x < dest.x { coords.push((0, y)); }
+                if clip.right() > dest.right() && (w > 1 || clip.x >= dest.x) { coords.push((w - 1, y)); }
+            }
+        }
+        if coords.is_empty() { return; }
+        // Replay the prefix before the video. The decoded image is translucent
+        // only on its perimeter, so retain at most two rows and two columns.
+        let mut canvas = Canvas::new(w, h);
+        canvas.clear(Color::WHITE);
+        if background.a != 0 { canvas.fill_rect(Rect::new(0.0, 0.0, clip.w, clip.h), background); }
+        canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+        let fixed = (viewport.x - self.clip.x, viewport.y - self.clip.y);
+        let mut state = State::nested(-self.clip.x, -self.clip.y, fixed, gfx_ext_available());
+        let view = Rect::new(-1e7, -1e7, 2e7, 2e7);
+        for item in &list.items[..target] { paint_item(item, &mut canvas, fonts, &mut state, view); }
+        self.edges = coords.into_iter().map(|(x, y)| (x, y, canvas.data[(y * w + x) as usize])).collect();
+    }
+
+    /// Composite onto the same device grid as the cached page raster. Restore
+    /// the background before blending fractional edges of the new picture.
+    pub fn composite(&self, canvas: &mut Canvas, pixels: &[u8], size: (u32, u32),
+        area: Rect, scroll: (f32, f32), scale: f32) -> bool {
+        let dest = Rect::new(area.x + (self.dest.x - scroll.0) * scale,
+            area.y + (self.dest.y - (scroll.1 + self.raster_offset_y)) * scale, self.dest.w * scale, self.dest.h * scale);
+        let clip = self.device_clip.translate(area.x, area.y);
+        let visible = clip.intersect(&area);
+        let drawn = canvas.composite_video_with_background(pixels, size, self.src, dest, visible,
+            self.pixelated, |canvas| {
+                let v = visible.intersect(&Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32));
+                for &(x, y, color) in self.edges.iter() {
+                    let (px, py) = (clip.x + x as f32, clip.y + y as f32);
+                    if px >= v.x && px < v.right() && py >= v.y && py < v.bottom() {
+                        canvas.data[py as usize * canvas.width as usize + px as usize] = color;
+                    }
+                }
+            });
+        if drawn {
+            if let Some(foreground) = &self.foreground { foreground.paint(canvas, clip, area); }
+        }
+        drawn
+    }
 }
 
 /// Premultiplied ARGB8 in device pixels, cropped to the visible video.
@@ -272,6 +371,10 @@ fn snap(r: Rect, canvas: &Canvas) -> Rect {
         }
         return r;
     }
+    snap_edges(r)
+}
+
+fn snap_edges(r: Rect) -> Rect {
     let (x0, y0) = (r.x.round(), r.y.round());
     let (x1, y1) = ((r.x + r.w).round(), (r.y + r.h).round());
     if (x1 <= x0 && r.w > 0.0) || (y1 <= y0 && r.h > 0.0) {
@@ -1313,6 +1416,126 @@ mod video_plane_tests {
         list.items.insert(0, DisplayItem::PushLayer(viewport));
         list.items.push(DisplayItem::PopLayer(0.5));
         assert!(video_plane(&list, &image, viewport, 2.0, &FontContext::new()).is_none());
+    }
+
+    #[test]
+    fn fractional_video_matches_updated_content_on_the_device_grid() {
+        let fonts = FontContext::new();
+        let viewport = Rect::new(0.0, 8.0, 64.0, 48.0);
+        let background = Color::rgb(27, 53, 91);
+        let picture = |phase: u8| {
+            let pixels = (0..72*48).flat_map(|i| [(i*19) as u8 ^ phase, (i*81) as u8,
+                (i*13) as u8 ^ phase, 255]).collect();
+            let mut image = Image::new(72, 48, pixels);
+            image.video_frame = true;
+            Arc::new(image)
+        };
+        let old = picture(0);
+        let next = picture(219);
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let small = Rect::new(0.5, 0.25, 19.0, 15.0);
+            let large = Rect::new(1.5, 0.25, 57.0, 41.0);
+            for (pixelated, src) in [(false, small), (true, small), (false, large), (true, large)] {
+                for controls in [false, true] {
+                    let rect = Rect::new(3.25, 12.75, 26.5, 15.75);
+                    let scene = |image: Arc<Image>| {
+                        let mut list = DisplayList::default();
+                        list.items.push(DisplayItem::Rect { rect: Rect::new(2.0, 9.0, 13.0, 24.0),
+                            color: Color::rgb(187, 91, 29), radius: 0.0 });
+                        list.items.push(DisplayItem::PushClip(Rect::new(4.25, 8.0, 38.0, 33.75)));
+                        list.items.push(DisplayItem::Image { rect, src,
+                            image, opacity: 1.0, pixelated });
+                        if controls {
+                            list.items.push(DisplayItem::Rect { rect: Rect::new(13.5, 16.0, 22.0, 7.5),
+                                color: Color::rgba(170, 80, 10, 140), radius: 1.0 });
+                        }
+                        list.items.push(DisplayItem::PopClip);
+                        list
+                    };
+                    let paint = |list: &DisplayList| {
+                        let mut c = Canvas::new((viewport.w * scale) as u32, (viewport.h * scale) as u32);
+                        c.clear(background);
+                        c.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+                        paint_with_fixed_origin(list, &mut c, &fonts, viewport.x, viewport.y, (0.0, 0.0));
+                        c.pop_transform();
+                        c
+                    };
+                    let first = scene(old.clone());
+                    let mut actual = paint(&first);
+                    let plane = video_plane_on_background(&first, &old, viewport, scale, &fonts, background).unwrap();
+                    let area = Rect::new(0.0, 0.0, actual.width as f32, actual.height as f32);
+                    for image in [&next, &old] {
+                        let expected = paint(&scene(Arc::clone(image)));
+                        assert!(plane.composite(&mut actual, image.pixels(), (72, 48), area,
+                            (viewport.x, viewport.y), scale));
+                        for (i, (&a,&b)) in actual.data.iter().zip(&expected.data).enumerate() {
+                            for shift in [0,8,16] {
+                                assert!(((a>>shift)&255u32).abs_diff((b>>shift)&255) <= if controls { 2 } else { 0 },
+                                    "scale={scale} pixelated={pixelated} controls={controls} pixel={i} {a:x} {b:x}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scrolled_video_matches_the_overscanned_page_blit() {
+        let fonts = FontContext::new();
+        let picture = |value: u8| {
+            let mut image = Image::new(8, 6, (0..48).flat_map(|i|
+                [value ^ (i * 19) as u8, (i * 7) as u8, value, 255]).collect());
+            image.video_frame = true;
+            Arc::new(image)
+        };
+        let old = picture(0x38);
+        let new = picture(0xb5);
+        let scene = |picture: &Arc<Image>, fixed: bool| {
+            let mut list = DisplayList::default();
+            if fixed { list.items.push(DisplayItem::PushFixed); }
+            list.items.push(DisplayItem::PushClip(Rect::new(2.5, 3.75, 21.5, 24.75)));
+            list.items.push(DisplayItem::Image { rect: Rect::new(1.75, 4.5, 18.5, 15.25),
+                src: Rect::new(0.0, 0.0, 8.0, 6.0), image: picture.clone(), opacity: 1.0, pixelated: false });
+            list.items.push(DisplayItem::PopClip);
+            if fixed { list.items.push(DisplayItem::PopFixed); }
+            list.items.push(DisplayItem::PushFixed);
+            list.items.push(DisplayItem::Rect { rect: Rect::new(4.25, 4.5, 11.0, 2.75),
+                color: Color::rgba(110, 43, 92, 131), radius: 0.0 });
+            list.items.push(DisplayItem::PopFixed);
+            list
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for phase in [0.25, 0.5, 0.75] {
+                let canvas_y = 2.0 / scale;
+                let viewport = Rect::new(0.0, canvas_y + (5.0 + phase) / scale, 32.0, 24.0);
+                for fixed in [false, true] {
+                    let render = |list: &DisplayList| {
+                        let mut backing = Canvas::new((viewport.w * scale) as u32, (40.0 * scale) as u32);
+                        backing.clear(Color::WHITE);
+                        backing.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+                        paint_with_fixed_origin(list, &mut backing, &fonts, 0.0, canvas_y, (0.0, viewport.y - canvas_y));
+                        let mut view = Canvas::new(backing.width, (viewport.h * scale) as u32);
+                        let top = ((viewport.y - canvas_y) * scale).round() as usize * backing.width as usize;
+                        let len = view.data.len();
+                        view.data.copy_from_slice(&backing.data[top..top + len]);
+                        view
+                    };
+                    let first = scene(&old, fixed);
+                    let mut actual = render(&first);
+                    let expected = render(&scene(&new, fixed));
+                    let plane = video_plane_in_raster(&first, &old, viewport, scale, &fonts, Color::WHITE, canvas_y).unwrap();
+                    let area = Rect::new(0.0, 0.0, actual.width as f32, actual.height as f32);
+                    assert!(plane.composite(&mut actual, new.pixels(), (8, 6), area, (0.0, viewport.y), scale));
+                    for (i, (&a, &b)) in actual.data.iter().zip(&expected.data).enumerate() {
+                        for shift in [0, 8, 16] {
+                            assert!(((a >> shift) & 255u32).abs_diff((b >> shift) & 255) <= 2,
+                                "scale {scale}, phase {phase}, fixed {fixed}, pixel {i}: {a:x} vs {b:x}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
