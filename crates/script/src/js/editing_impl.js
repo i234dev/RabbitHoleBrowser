@@ -2160,7 +2160,12 @@
       const start = control.selectionStart, end = control.selectionEnd;
       let inserted = paste ? text.replace(/\r\n?/g, '\n') : '';
       if (control.localName === 'input') inserted = inserted.replace(/\n/g, '');
-      if (control.maxLength >= 0) inserted = inserted.slice(0, Math.max(0, control.maxLength - control.value.length + end - start));
+      if (!paste) {
+        // beforeinput may change the type, value or selection of a control.
+        if (control.type === 'password' || start === end) return true;
+        text = control.value.slice(start, end);
+      }
+      if (paste && control.maxLength >= 0) inserted = inserted.slice(0, Math.max(0, control.maxLength - control.value.length + end - start));
       if (start === end && !inserted) return true;
       control.value = control.value.slice(0, start) + inserted + control.value.slice(end);
       control.setSelectionRange(start + inserted.length, start + inserted.length);
