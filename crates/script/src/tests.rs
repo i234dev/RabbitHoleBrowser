@@ -1961,3 +1961,121 @@ fn window_attributes_are_accessors() {
     assert_eq!(out, ["function function function function function function", "false true", "5 number"]);
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
+
+/// Remove the last script reference without allocating more JS objects, so
+/// that a collected object's slot cannot be reused before the assertion.
+fn release_observer_global(host: &mut ScriptHost) -> rabbithole_js::ObjectId {
+    let realm = host.realm();
+    let global = rabbithole_js::Value::Object(realm.global());
+    let id = realm.get_str(global, "testObserver").unwrap().as_object().unwrap();
+    realm.define_global("testObserver", rabbithole_js::Value::Undefined);
+    realm.gc();
+    id
+}
+
+#[test]
+fn observer_lifetime_disconnect_and_unregistered() {
+    let (mut env, mut host) = setup("<div></div>");
+    for ctor in ["MutationObserver", "PerformanceObserver"] {
+        run(&mut env, &mut host, &format!("globalThis.testObserver = new {ctor}(() => {{}});"));
+        let id = release_observer_global(&mut host);
+        assert!(host.realm().heap.try_get(id).is_none(), "{ctor} before observe");
+    }
+    run(&mut env, &mut host, r#"
+        globalThis.testObserver = new MutationObserver(() => {});
+        testObserver.observe(document.body, {childList: true});
+        document.body.appendChild(document.createElement('b'));
+        testObserver.disconnect();
+    "#);
+    let id = release_observer_global(&mut host);
+    assert!(host.realm().heap.try_get(id).is_none());
+}
+
+#[test]
+fn observer_lifetime_live_target_and_delivery() {
+    let (mut env, mut host) = setup("<div></div>");
+    run(&mut env, &mut host, r#"
+        globalThis.testObserver = new MutationObserver((records, observer) => {
+            console.log(records[0].attributeName);
+            observer.disconnect();
+        });
+        testObserver.observe(document.querySelector('div'), {attributes:true});
+    "#);
+    let id = release_observer_global(&mut host);
+    assert!(host.realm().heap.try_get(id).is_some());
+    assert_eq!(run(&mut env, &mut host, "document.querySelector('div').setAttribute('title', 'a')"), ["title"]);
+    host.realm().gc();
+    assert!(host.realm().heap.try_get(id).is_none());
+}
+
+#[test]
+fn observer_lifetime_transient_moved_subtree() {
+    let (mut env, mut host) = setup("<div><span></span></div><p></p>");
+    run(&mut env, &mut host, r#"
+        globalThis.testObserver = new MutationObserver((records, observer) => {
+            console.log(records.map(r => r.type).join(','));
+            globalThis.testObserver = observer;
+        });
+        testObserver.observe(document.querySelector('div'), {attributes:true, subtree:true});
+    "#);
+    let id = release_observer_global(&mut host);
+    assert!(host.realm().heap.try_get(id).is_some());
+    assert_eq!(run(&mut env, &mut host, r#"
+        var span = document.querySelector('span');
+        document.querySelector('p').appendChild(span);
+        span.setAttribute('title', 'before notification');
+    "#), ["attributes"]);
+    assert!(run(&mut env, &mut host, "span.setAttribute('title','after notification');testObserver.disconnect();").is_empty());
+    assert_eq!(release_observer_global(&mut host), id);
+    assert!(host.realm().heap.try_get(id).is_none());
+}
+
+#[test]
+fn observer_lifetime_performance_types() {
+    let (mut env, mut host) = setup("<div></div>");
+    run(&mut env, &mut host, r#"
+        globalThis.testObserver = new PerformanceObserver((list, observer) => {
+            console.log(list.getEntries()[0].name);
+            observer.disconnect();
+        });
+        testObserver.observe({entryTypes:['mark']});
+        testObserver.observe({entryTypes:['unsupported']});
+    "#);
+    let id = release_observer_global(&mut host);
+    assert!(host.realm().heap.try_get(id).is_some());
+    run(&mut env, &mut host, "performance.mark('observed')");
+    host.run_timers(&mut env, 10000.0);
+    assert!(env.logs.iter().any(|(_, msg)| msg == "observed"));
+    host.realm().gc();
+    assert!(host.realm().heap.try_get(id).is_none());
+}
+
+#[test]
+fn observer_lifetime_fragment_and_reregistration() {
+    let (mut env, mut host) = setup("<div></div>");
+    assert_eq!(run(&mut env, &mut host, r#"
+        const frag = document.createDocumentFragment();
+        const node = document.createElement('span');
+        frag.appendChild(node);
+        const obs = new MutationObserver(() => console.log('unexpected'));
+        obs.observe(frag, {childList:true, attributes:true, subtree:true});
+        document.body.appendChild(frag);
+        node.setAttribute('title', 'before');
+        console.log(obs.takeRecords().map(r => r.type).join(','));
+        obs.observe(frag, {attributes:true, subtree:true});
+        node.setAttribute('title', 'after');
+        console.log(obs.takeRecords().length);
+        obs.disconnect();
+    "#), ["childList,attributes", "0"]);
+}
+
+#[test]
+fn observer_lifetime_disconnect_during_delivery() {
+    let (mut env, mut host) = setup("<div></div>");
+    assert_eq!(run(&mut env, &mut host, r#"
+        const first = new MutationObserver(() => { second.disconnect(); console.log('first'); });
+        const second = new MutationObserver(() => console.log('second'));
+        for (const obs of [first, second]) obs.observe(document.body, {attributes:true});
+        document.body.setAttribute('title', 'changed');
+    "#), ["first"]);
+}

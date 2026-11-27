@@ -21,7 +21,6 @@ fn new_observer(realm: &mut Realm, class: &str, cb: Value) -> ObjectId {
     let o = realm.new_object_with_proto(Some(p));
     realm.set_class_name(o, class);
     set_hidden(realm, o, "__callback", cb);
-    realm.extra_roots.push(Value::Object(o));
     o
 }
 
@@ -36,7 +35,8 @@ fn mo_observe(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
     let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
-    let Some(target) = node_of(realm, &arg(args, 0)) else {
+    let wrapper = host_obj(realm, &arg(args, 0));
+    let Some((target_object, target)) = wrapper.and_then(|id| realm.host_data::<NodeRef>(id).map(|&node| (id, node))) else {
         return Err(realm.throw_type_error("parameter 1 is not of type 'Node'."));
     };
     let opts = arg(args, 1);
@@ -59,11 +59,29 @@ fn mo_observe(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
     if !(child_list || attributes || character_data) {
         return Err(realm.throw_type_error("The options object must set at least one of 'attributes', 'characterData', or 'childList' to true."));
     }
+    let reg = ObserverReg { observer: o, target, target_object, transient_targets: Vec::new(), child_list, attributes, character_data, subtree, attribute_old_value, attribute_filter };
     let st = state();
     let mut st = st.borrow_mut();
-    st.observers.retain(|r| !(r.observer == o && r.target == target));
-    st.observers.push(ObserverReg { observer: o, target, child_list, attributes, character_data, subtree, attribute_old_value, attribute_filter });
+    if let Some(old) = st.observers.iter_mut().find(|r| r.observer == o && r.target == target) {
+        *old = ObserverReg { target_object: old.target_object, ..reg };
+    } else {
+        st.observers.push(reg);
+        update_node_links(realm, &mut st, target_object);
+    }
     Ok(Value::Undefined)
+}
+
+/// The node owns its observers. A private property keeps this edge visible
+/// to the collector without making the observer a permanent realm root.
+fn update_node_links(realm: &mut Realm, st: &mut HostState, target: ObjectId) {
+    let key = *st.observer_links.get_or_insert_with(|| realm.new_private_symbol(rabbithole_js::JsStr::new("node.observers")));
+    let mut observers = st.observers.iter().filter(|r| r.target_object == target).map(|r| Value::Object(r.observer));
+    let links = match (observers.next(), observers.next()) {
+        (None, _) => Value::Null,
+        (Some(one), None) => one,
+        (Some(one), Some(two)) => realm.new_array_value([one, two].into_iter().chain(observers).collect()),
+    };
+    realm.define_property(target, key, links, 0);
 }
 
 fn mo_disconnect(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -72,8 +90,17 @@ fn mo_disconnect(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
     };
     let st = state();
     let mut st = st.borrow_mut();
-    st.observers.retain(|r| r.observer != o);
-    st.mutation_records.retain(|r| r.observer != o);
+    let mut targets = Vec::new();
+    st.observers.retain(|reg| {
+        if reg.observer != o { return true; }
+        targets.push(reg.target_object);
+        false
+    });
+    for target in targets {
+        update_node_links(realm, &mut st, target);
+    }
+    st.mutation_records.remove(&o);
+    st.pending_observers.retain(|&id| id != o);
     Ok(Value::Undefined)
 }
 
@@ -110,33 +137,28 @@ fn mo_take_records(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
     let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
-    let recs: Vec<MutationRecord> = {
-        let st = state();
-        let mut st = st.borrow_mut();
-        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut st.mutation_records).into_iter().partition(|r| r.observer == o);
-        st.mutation_records = rest;
-        mine
-    };
+    let recs = state().borrow_mut().mutation_records.remove(&o).unwrap_or_default();
     Ok(records_to_js(realm, recs))
 }
 
 /// Deliver queued mutation records (called from `ScriptHost::run_jobs`).
 pub(crate) fn deliver_mutations(realm: &mut Realm) {
     loop {
-        let recs = std::mem::take(&mut state().borrow_mut().mutation_records);
-        state().borrow_mut().mutation_scheduled = false;
-        if recs.is_empty() {
-            break;
-        }
-        // Group by observer, preserving order.
-        let mut groups: Vec<(ObjectId, Vec<MutationRecord>)> = Vec::new();
-        for r in recs {
-            match groups.iter_mut().find(|(o, _)| *o == r.observer) {
-                Some((_, v)) => v.push(r),
-                None => groups.push((r.observer, vec![r])),
-            }
-        }
-        for (observer, list) in groups {
+        let pending = std::mem::take(&mut state().borrow_mut().pending_observers);
+        if pending.is_empty() { break; }
+        // A callback may disconnect a later observer, then run the GC.
+        let notify: Vec<_> = pending.into_iter().map(|id| realm.root_object(id)).collect();
+        for root in notify {
+            let observer = root.object().expect("rooted observer");
+            let list = {
+                let st = state();
+                let mut st = st.borrow_mut();
+                for reg in st.observers.iter_mut().filter(|r| r.observer == observer) {
+                    reg.transient_targets.clear();
+                }
+                st.mutation_records.remove(&observer).unwrap_or_default()
+            };
+            if list.is_empty() { continue; }
             let cb = get_hidden(realm, observer, "__callback");
             if !realm.is_callable(&cb) {
                 continue;
@@ -148,7 +170,7 @@ pub(crate) fn deliver_mutations(realm: &mut Realm) {
 }
 
 pub(crate) fn has_pending_mutations() -> bool {
-    !state().borrow().mutation_records.is_empty()
+    !state().borrow().pending_observers.is_empty()
 }
 
 // ------------------------------------------------------ PerformanceObserver

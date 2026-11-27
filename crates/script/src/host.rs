@@ -66,7 +66,6 @@ pub struct RafCallback {
 
 /// A queued MutationObserver record.
 pub struct MutationRecord {
-    pub observer: ObjectId,
     pub ty: &'static str,
     pub target: NodeRef,
     pub added: Vec<NodeRef>,
@@ -78,6 +77,9 @@ pub struct MutationRecord {
 pub struct ObserverReg {
     pub observer: ObjectId,
     pub target: NodeRef,
+    pub target_object: ObjectId,
+    /// Removed subtrees still covered by this registration until notification.
+    pub transient_targets: Vec<NodeRef>,
     pub child_list: bool,
     pub attributes: bool,
     pub character_data: bool,
@@ -124,8 +126,9 @@ pub struct HostState {
     pub ran_scripts: HashSet<NodeId>,
     pub inline_handlers: HashMap<(NodeRef, String), Value>,
     pub observers: Vec<ObserverReg>,
-    pub mutation_records: Vec<MutationRecord>,
-    pub mutation_scheduled: bool,
+    pub mutation_records: HashMap<ObjectId, Vec<MutationRecord>>,
+    pub pending_observers: Vec<ObjectId>,
+    pub observer_links: Option<rabbithole_js::SymbolId>,
     pub custom_elements: HashMap<String, Value>,
     /// Element an `HTMLElement` super constructor must return (set while a
     /// custom element is being created or upgraded).

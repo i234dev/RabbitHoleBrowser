@@ -270,6 +270,18 @@ pub(crate) fn adopt(realm: &mut Realm, child: NodeRef, target_doc: u32) -> NodeR
 fn repoint_wrappers(realm: &mut Realm, moves: &[(NodeRef, NodeRef)]) {
     let st = state();
     let mut st = st.borrow_mut();
+    if !st.observers.is_empty() {
+        let identities: HashMap<_, _> = moves.iter().copied().collect();
+        let remap = |n: &mut NodeRef| { if let Some(&new) = identities.get(n) { *n = new; } };
+        for reg in &mut st.observers {
+            remap(&mut reg.target);
+            reg.transient_targets.iter_mut().for_each(&remap);
+        }
+        for rec in st.mutation_records.values_mut().flatten() {
+            remap(&mut rec.target);
+            rec.added.iter_mut().chain(&mut rec.removed).for_each(&remap);
+        }
+    }
     for &(from, to) in moves {
         if let Some(obj) = st.wrappers.remove(&from) {
             if let Some(h) = realm.host_data_mut::<NodeRef>(obj) {
@@ -389,6 +401,30 @@ impl SubtreeClone for Document {
     }
 }
 
+impl ObserverReg {
+    fn covers(&self, st: &HostState, node: NodeRef) -> bool {
+        if self.target == node { return true; }
+        if !self.subtree || (self.target.doc != node.doc && !self.transient_targets.iter().any(|root| root.doc == node.doc)) {
+            return false;
+        }
+        with_doc_in_state(st, node.doc, |doc| {
+            std::iter::once(&self.target).chain(&self.transient_targets)
+                .any(|root| *root == node || root.doc == node.doc && doc.is_ancestor(root.node, node.node))
+        })
+    }
+}
+
+impl HostState {
+    fn notify_observer(&mut self, observer: ObjectId) {
+        if !self.pending_observers.contains(&observer) { self.pending_observers.push(observer); }
+    }
+
+    fn queue_record(&mut self, observer: ObjectId, record: MutationRecord) {
+        self.notify_observer(observer);
+        self.mutation_records.entry(observer).or_default().push(record);
+    }
+}
+
 /// Record a childList mutation for observers watching `parent`.
 pub(crate) fn record_child_list(parent: NodeRef, added: Vec<NodeRef>, removed: Vec<NodeRef>) {
     crate::shadow::on_child_list(parent, &added, &removed);
@@ -399,19 +435,23 @@ pub(crate) fn record_child_list(parent: NodeRef, added: Vec<NodeRef>, removed: V
         return;
     }
     let mut hits: Vec<ObjectId> = Vec::new();
-    for reg in &st.observers {
-        if !reg.child_list || reg.target.doc != parent.doc {
+    for index in 0..st.observers.len() {
+        let reg = &st.observers[index];
+        if !(reg.child_list || reg.subtree && !removed.is_empty()) || !reg.covers(&st, parent) {
             continue;
         }
-        let ok = reg.target.node == parent.node
-            || (reg.subtree && with_doc_in_state(&st, parent.doc, |doc| doc.is_ancestor(reg.target.node, parent.node)));
-        if ok && !hits.contains(&reg.observer) {
-            hits.push(reg.observer);
+        let observer = reg.observer;
+        if reg.child_list && !hits.contains(&observer) { hits.push(observer); }
+        if reg.subtree && !removed.is_empty() {
+            let transient = &mut st.observers[index].transient_targets;
+            for &child in &removed {
+                if !transient.contains(&child) { transient.push(child); }
+            }
+            st.notify_observer(observer);
         }
     }
     for observer in hits {
-        st.mutation_records.push(MutationRecord {
-            observer,
+        st.queue_record(observer, MutationRecord {
             ty: "childList",
             target: parent,
             added: added.clone(),
@@ -430,7 +470,7 @@ pub(crate) fn record_attribute(target: NodeRef, name: &str, old: Option<String>)
     }
     let mut hits: Vec<(ObjectId, bool)> = Vec::new();
     for reg in &st.observers {
-        if !reg.attributes || reg.target.doc != target.doc {
+        if !reg.attributes {
             continue;
         }
         if let Some(filter) = &reg.attribute_filter {
@@ -438,15 +478,17 @@ pub(crate) fn record_attribute(target: NodeRef, name: &str, old: Option<String>)
                 continue;
             }
         }
-        let ok = reg.target.node == target.node
-            || (reg.subtree && with_doc_in_state(&st, target.doc, |doc| doc.is_ancestor(reg.target.node, target.node)));
-        if ok && !hits.iter().any(|(o, _)| *o == reg.observer) {
-            hits.push((reg.observer, reg.attribute_old_value));
+        let ok = reg.covers(&st, target);
+        if ok {
+            if let Some((_, old)) = hits.iter_mut().find(|(o, _)| *o == reg.observer) {
+                *old |= reg.attribute_old_value;
+            } else {
+                hits.push((reg.observer, reg.attribute_old_value));
+            }
         }
     }
     for (observer, want_old) in hits {
-        st.mutation_records.push(MutationRecord {
-            observer,
+        st.queue_record(observer, MutationRecord {
             ty: "attributes",
             target,
             added: Vec::new(),
@@ -465,17 +507,16 @@ pub(crate) fn record_character_data(target: NodeRef, old: Option<String>) {
     }
     let mut hits: Vec<ObjectId> = Vec::new();
     for reg in &st.observers {
-        if !reg.character_data || reg.target.doc != target.doc {
+        if !reg.character_data {
             continue;
         }
-        let ok = reg.target.node == target.node
-            || (reg.subtree && with_doc_in_state(&st, target.doc, |doc| doc.is_ancestor(reg.target.node, target.node)));
+        let ok = reg.covers(&st, target);
         if ok && !hits.contains(&reg.observer) {
             hits.push(reg.observer);
         }
     }
     for observer in hits {
-        st.mutation_records.push(MutationRecord { observer, ty: "characterData", target, added: Vec::new(), removed: Vec::new(), attribute_name: None, old_value: old.clone() });
+        st.queue_record(observer, MutationRecord { ty: "characterData", target, added: Vec::new(), removed: Vec::new(), attribute_name: None, old_value: old.clone() });
     }
 }
 
@@ -498,6 +539,9 @@ pub(crate) fn insert_node_checked(realm: &mut Realm, parent: NodeRef, child: Nod
                 doc.insert_before(parent.node, k.node, before);
             }
         });
+        if !kids.is_empty() && !state().borrow().observers.is_empty() {
+            record_child_list(child, Vec::new(), kids.clone());
+        }
         kids
     } else {
         let old_parent = with_doc(parent.doc, |doc| doc.parent(child.node));

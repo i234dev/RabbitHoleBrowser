@@ -256,9 +256,14 @@
       const types = options.entryTypes ? Array.from(options.entryTypes) : options.type !== undefined ? [options.type] : null;
       if (!types) throw new TypeError("Failed to execute 'observe' on 'PerformanceObserver': An observe() call must include either entryTypes or type arguments.");
       if (options.entryTypes && options.type !== undefined) throw new TypeError("Failed to execute 'observe' on 'PerformanceObserver': An observe() call must not include both entryTypes and type arguments.");
+      const supported = [];
+      for (const t of types) {
+        const type = String(t);
+        if (SUPPORTED.includes(type)) supported.push(type);
+      }
+      if (!supported.length) return;
       if (options.entryTypes) this[S].types.clear();
-      for (const t of types) if (SUPPORTED.includes(String(t))) this[S].types.add(String(t));
-      if (!this[S].types.size) return;
+      for (const t of supported) this[S].types.add(t);
       observers.add(this);
       if (options.buffered && options.type !== undefined) {
         const buffered = entries.filter((e) => e.entryType === String(options.type));
