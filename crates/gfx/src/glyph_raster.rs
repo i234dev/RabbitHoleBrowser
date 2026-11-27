@@ -143,8 +143,11 @@ impl HintFace {
     /// The outline of `glyph` in font units (None: no outline).
     pub(crate) fn outline(&self, glyph: u16) -> Option<Vec<Cmd>> {
         let mut c = Collect(Vec::with_capacity(64));
-        self.face.outline_glyph(GlyphId(glyph), &mut c)?;
-        Some(c.0)
+        let outline = self.face.outline_glyph(GlyphId(glyph), &mut c);
+        if outline.is_some() { return Some(c.0); }
+        // Valid advance-only glyphs (notably space) have no coverage.
+        // An incomplete outline still goes through the fallback painter.
+        (c.0.is_empty() && glyph < self.face.number_of_glyphs()).then(Vec::new)
     }
 }
 

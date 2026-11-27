@@ -100,6 +100,31 @@ pub(crate) enum FaceSource {
     Path(PathBuf, u32),
 }
 
+/// fontdue builds outlines for the entire face when parsing a font. Layout
+/// needs its cmap, advances and kerning, while the normal painter already
+/// reads individual outlines from the original SFNT.
+pub(crate) struct ParsedFace {
+    metrics: fontdue::Font,
+    // Only populated if the outline painter cannot handle a glyph.
+    raster: std::cell::OnceCell<Option<fontdue::Font>>,
+    source: Rc<Vec<u8>>,
+}
+
+impl ParsedFace {
+    pub(crate) fn new(source: Rc<Vec<u8>>) -> Option<Rc<Self>> {
+        let tables = crate::font_ext::sfnt::metric_tables(&source);
+        let metrics = fontdue::Font::from_bytes(tables.as_deref().unwrap_or(source.as_slice()), fontdue_settings()).ok()?;
+        Some(Rc::new(Self { metrics, raster: Default::default(), source }))
+    }
+
+    fn rasterize(&self, glyph: u16, size: f32) -> (fontdue::Metrics, Vec<u8>) {
+        match self.raster.get_or_init(|| fontdue::Font::from_bytes(self.source.as_slice(), fontdue_settings()).ok()) {
+            Some(font) => font.rasterize_indexed(glyph, size),
+            None => (fontdue::Metrics::default(), Vec::new()),
+        }
+    }
+}
+
 /// One registered face.
 pub(crate) struct FaceSlot {
     pub name: String,
@@ -117,7 +142,7 @@ pub(crate) struct FaceSlot {
     /// `@font-face` metric override descriptors.
     pub metric_overrides: crate::MetricOverrides,
     pub source: FaceSource,
-    pub font: RefCell<Option<Rc<fontdue::Font>>>,
+    pub font: RefCell<Option<Rc<ParsedFace>>>,
     pub failed: Cell<bool>,
 }
 
@@ -455,7 +480,7 @@ impl FontContext {
 
     /// The parsed font for a face index, loading it on first use. Faces
     /// that fail to load (or out-of-range ids) resolve to the bundled sans.
-    pub(crate) fn face(&self, idx: usize) -> Rc<fontdue::Font> {
+    pub(crate) fn face(&self, idx: usize) -> Rc<ParsedFace> {
         match self.try_face(idx) {
             Some(f) => f,
             None => self.try_face(SANS).expect("bundled sans"),
@@ -471,7 +496,7 @@ impl FontContext {
         }
     }
 
-    pub(crate) fn try_face(&self, idx: usize) -> Option<Rc<fontdue::Font>> {
+    pub(crate) fn try_face(&self, idx: usize) -> Option<Rc<ParsedFace>> {
         let faces = self.faces.borrow();
         let slot = faces.get(idx)?;
         if let Some(f) = slot.font.borrow().as_ref() {
@@ -480,18 +505,10 @@ impl FontContext {
         if slot.failed.get() {
             return None;
         }
-        let parsed = match &slot.source {
-            FaceSource::Bytes(b) => fontdue::Font::from_bytes(b.as_slice(), fontdue_settings()).ok(),
-            FaceSource::Path(p, index) => std::fs::read(p).ok().and_then(|data| {
-                let sfnt = crate::font_ext::sfnt::extract_face(&data, *index)?;
-                fontdue::Font::from_bytes(sfnt.as_slice(), fontdue_settings()).ok()
-            }),
-        };
-        match parsed {
-            Some(f) => {
-                let rc = Rc::new(f);
-                *slot.font.borrow_mut() = Some(Rc::clone(&rc));
-                Some(rc)
+        match self.face_bytes(idx).and_then(ParsedFace::new) {
+            Some(face) => {
+                *slot.font.borrow_mut() = Some(Rc::clone(&face));
+                Some(face)
             }
             None => {
                 slot.failed.set(true);
@@ -506,7 +523,7 @@ impl FontContext {
     /// are zero), as Chrome reads them on Linux; then the face's
     /// `@font-face` metric overrides.
     pub fn metrics(&self, font: FontId, size: f32) -> LineMetrics {
-        let mut m = match self.face(font.0).horizontal_line_metrics(size) {
+        let mut m = match self.face(font.0).metrics.horizontal_line_metrics(size) {
             Some(m) => LineMetrics {
                 ascent: m.ascent.max(0.0),
                 descent: m.descent.abs(),
@@ -631,7 +648,7 @@ impl FontContext {
         let face = self.face(idx);
         let mut cover = 0u128;
         for b in 0x21u8..0x7F {
-            if self.covers(idx, b as u32) && face.lookup_glyph_index(b as char) != 0 {
+            if self.covers(idx, b as u32) && face.metrics.lookup_glyph_index(b as char) != 0 {
                 cover |= 1u128 << b;
             }
         }
@@ -659,14 +676,14 @@ impl FontContext {
     /// Find a face that has `ch`: the primary face first, then fallbacks.
     fn lookup(&self, primary: usize, ch: char) -> (usize, u16) {
         if self.covers(primary, ch as u32) {
-            let g = self.face(primary).lookup_glyph_index(ch);
+            let g = self.face(primary).metrics.lookup_glyph_index(ch);
             if g != 0 {
                 return (primary, g);
             }
         }
         match self.fallback_for_char(ch, FontId(primary)) {
             Some(FontId(f)) => {
-                let g = self.face(f).lookup_glyph_index(ch);
+                let g = self.face(f).metrics.lookup_glyph_index(ch);
                 (f, g)
             }
             None => (primary, 0),
@@ -703,7 +720,7 @@ impl FontContext {
             }
             let loaded = self.faces.borrow().get(idx).and_then(|s| s.font.borrow().clone());
             if let Some(f) = loaded {
-                return f.lookup_glyph_index(ch) != 0;
+                return f.metrics.lookup_glyph_index(ch) != 0;
             }
             if self.faces.borrow().get(idx).is_none_or(|s| s.failed.get()) {
                 return false;
@@ -711,7 +728,7 @@ impl FontContext {
             let mapped = self.face_bytes(idx).is_some_and(|b| {
                 rustybuzz::ttf_parser::Face::parse(&b, 0).ok().and_then(|f| f.glyph_index(ch)).is_some_and(|g| g.0 != 0)
             });
-            mapped && self.try_face(idx).is_some_and(|f| f.lookup_glyph_index(ch) != 0)
+            mapped && self.try_face(idx).is_some_and(|f| f.metrics.lookup_glyph_index(ch) != 0)
         };
         if has(primary) {
             return Some(primary);
@@ -876,7 +893,7 @@ impl FontContext {
                 // them.
                 let prev = segs.last().map(|s| s.2).filter(|&f| f != SPECIAL);
                 match prev {
-                    Some(pf) if is_mark_like(ch) && (joiner || self.face(pf).lookup_glyph_index(ch) != 0) => pf,
+                    Some(pf) if is_mark_like(ch) && (joiner || self.face(pf).metrics.lookup_glyph_index(ch) != 0) => pf,
                     _ if joiner => prev.unwrap_or(SPECIAL),
                     _ => self.lookup(primary, ch).0,
                 }
@@ -895,8 +912,8 @@ impl FontContext {
             if face_idx == SPECIAL {
                 let ch = run.chars().next().unwrap_or(' ');
                 let adv = if ch == '\t' {
-                    let space = primary_face.lookup_glyph_index(' ');
-                    primary_face.metrics_indexed(space, size).advance_width * 4.0 + letter_spacing
+                    let space = primary_face.metrics.lookup_glyph_index(' ');
+                    primary_face.metrics.metrics_indexed(space, size).advance_width * 4.0 + letter_spacing
                 } else {
                     0.0
                 };
@@ -937,13 +954,13 @@ impl FontContext {
                 run.char_indices().collect()
             };
             for (bi, ch) in chars {
-                let glyph = face.lookup_glyph_index(ch);
+                let glyph = face.metrics.lookup_glyph_index(ch);
                 if let Some(pg) = prev {
-                    if let Some(k) = face.horizontal_kern_indexed(pg, glyph, size) {
+                    if let Some(k) = face.metrics.horizontal_kern_indexed(pg, glyph, size) {
                         x += k;
                     }
                 }
-                let adv = face.metrics_indexed(glyph, size).advance_width + letter_spacing;
+                let adv = face.metrics.metrics_indexed(glyph, size).advance_width + letter_spacing;
                 out.push(ShapedGlyph { font: FontId(face_idx), glyph, x, advance: adv, dx: 0.0, dy: 0.0, byte_index: start + bi });
                 x += adv;
                 prev = Some(glyph);
@@ -990,7 +1007,7 @@ impl FontContext {
             // Skia does: the same glyph renders the same at any position.
             b
         } else {
-            let (m, coverage) = self.face(face_idx).rasterize_indexed(glyph, size);
+            let (m, coverage) = self.face(face_idx).rasterize(glyph, size);
             let base = GlyphBitmap {
                 width: m.width as u32,
                 height: m.height as u32,
@@ -1046,11 +1063,11 @@ impl FontContext {
         let primary = self.resolve_index(font.0);
         let face = self.face(primary);
         if ch == '\t' {
-            let space = face.lookup_glyph_index(' ');
-            return face.metrics_indexed(space, size).advance_width * 4.0;
+            let space = face.metrics.lookup_glyph_index(' ');
+            return face.metrics.metrics_indexed(space, size).advance_width * 4.0;
         }
         let (face_idx, glyph) = self.lookup(primary, ch);
-        self.face(face_idx).metrics_indexed(glyph, size).advance_width
+        self.face(face_idx).metrics.metrics_indexed(glyph, size).advance_width
     }
 
     pub fn face_name(&self, font: FontId) -> String {
@@ -1065,7 +1082,7 @@ impl FontContext {
 
     /// Whether `font` has a real glyph for `ch` (no fallback considered).
     pub fn has_glyph(&self, font: FontId, ch: char) -> bool {
-        self.face(font.0).lookup_glyph_index(ch) != 0
+        self.face(font.0).metrics.lookup_glyph_index(ch) != 0
     }
 
     /// Among candidate faces, the one best matching weight/style (CSS font
@@ -1169,6 +1186,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn layout_and_outline_raster_leave_fallback_geometry_unloaded() {
+        let fc = FontContext::new();
+        let font = fc.select(Family::Sans, 400, false);
+        let parsed = fc.face(font.0);
+        let original = fontdue::Font::from_bytes(parsed.source.as_slice(), fontdue_settings()).unwrap();
+        for ch in ['W', ' ', 'é', 'Ж', 'א'] {
+            let glyph = parsed.metrics.lookup_glyph_index(ch);
+            assert_eq!(glyph, original.lookup_glyph_index(ch));
+            for size in [11.0, 18.5, 32.0] {
+                assert_eq!(parsed.metrics.metrics_indexed(glyph, size).advance_width,
+                           original.metrics_indexed(glyph, size).advance_width);
+                let bitmap = fc.rasterize(font, glyph, size);
+                assert_eq!(bitmap.is_empty(), ch == ' ');
+            }
+        }
+        assert!(parsed.raster.get().is_none());
+    }
+
+    #[test]
     fn kerning_can_be_turned_off_with_a_feature_variant() {
         let fc = FontContext::new();
         let f = fc.select(Family::Sans, 400, false);
@@ -1233,7 +1269,7 @@ mod tests {
             assert_eq!(a, b, "fallback for {ch:?} depends on loaded faces");
             if let Some(f) = a {
                 let face = cold.try_face(cold.resolve_index(f.0)).expect("chosen face loads");
-                assert_ne!(face.lookup_glyph_index(ch), 0, "chosen face lacks {ch:?}");
+                assert_ne!(face.metrics.lookup_glyph_index(ch), 0, "chosen face lacks {ch:?}");
             }
         }
     }
@@ -1300,7 +1336,7 @@ mod tests {
         // isolated ones of the cmap).
         let word = fc.shape(f, 20.0, "\u{0633}\u{0644}\u{0627}\u{0645}", 0.0);
         let face = fc.face(f.0);
-        let isolated: Vec<u16> = "\u{0633}\u{0644}\u{0627}\u{0645}".chars().map(|c| face.lookup_glyph_index(c)).collect();
+        let isolated: Vec<u16> = "\u{0633}\u{0644}\u{0627}\u{0645}".chars().map(|c| face.metrics.lookup_glyph_index(c)).collect();
         assert!(isolated.iter().all(|g| *g != 0), "DejaVu Sans has Arabic");
         let shaped: Vec<u16> = word.iter().map(|g| g.glyph).collect();
         assert!(shaped.iter().any(|g| !isolated.contains(g)), "joining forms: {shaped:?} vs {isolated:?}");

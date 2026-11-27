@@ -84,6 +84,29 @@ pub fn extract_face(data: &[u8], index: u32) -> Option<Vec<u8>> {
     Some(build_sfnt(flavor, &tables))
 }
 
+/// Standalone font for fontdue's layout metrics. Keep the mapping and
+/// substitution tables so glyph IDs, validation and advances match the
+/// original. With no outline tables fontdue allocates no edge geometry.
+pub(crate) fn metric_tables(data: &[u8]) -> Option<Vec<u8>> {
+    let base = face_offset(data, 0)?;
+    let dir = table_directory(data, base)?;
+    let mut tables = Vec::new();
+    let mut total = 0usize;
+    for tag in [b"head", b"hhea", b"maxp", b"hmtx", b"cmap", b"kern", b"GSUB", b"OS/2",
+                b"vhea", b"vmtx", b"name", b"fvar", b"avar", b"MVAR", b"HVAR", b"VVAR"] {
+        if let Some(t) = find_table(&dir, tag) {
+            let start = t.offset as usize;
+            let size = t.length as usize;
+            total = total.checked_add(size)?;
+            if total > data.len() { return None; }
+            if let Some(bytes) = data.get(start..start.checked_add(size)?) {
+                tables.push((*tag, bytes));
+            }
+        }
+    }
+    Some(build_sfnt(rd32(data, base)?, &tables))
+}
+
 /// Assemble tables into an SFNT file (directory sorted by tag, 4-byte
 /// aligned data, checksums computed).
 pub fn build_sfnt(flavor: u32, tables: &[([u8; 4], &[u8])]) -> Vec<u8> {

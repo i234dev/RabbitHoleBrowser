@@ -195,11 +195,10 @@ impl FontContext {
         if self.web_bindings.get() >= self.limits.max_web_bindings || retained_bytes > self.limits.max_sfnt_bytes {
             return None;
         }
-        let (bytes, font) = if let Some((bytes, Some(font))) = existing_data {
-            (bytes, font)
-        } else {
-            let font = fontdue::Font::from_bytes(sfnt.as_ref(), crate::font::fontdue_settings()).ok()?;
-            (Rc::new(sfnt.into_owned()), Rc::new(font))
+        let (bytes, parsed) = existing_data.unwrap_or_else(|| (Rc::new(sfnt.into_owned()), None));
+        let font = match parsed {
+            Some(font) => font,
+            None => crate::font::ParsedFace::new(bytes.clone())?,
         };
         if !metric_overrides.is_empty() {
             self.shaping.any_metric_overrides.set(true);
