@@ -17,7 +17,7 @@ dir css/css-images 437 482
 dir css/css-masking 271 384
 dir css/css-nesting 13 17
 dir css/css-overflow 451 719
-dir css/css-position 164 251
+dir css/css-position 165 251
 dir css/css-sizing 403 568
 dir css/css-text 1203 1550
 dir css/css-text-decor 284 339
@@ -25,7 +25,7 @@ dir css/css-transforms 749 794
 dir css/css-ui 877 962
 dir css/css-values 116 192
 dir css/css-writing-modes 944 1162
-dir css/filter-effects 281 370
+dir css/filter-effects 282 370
 dir css/selectors 208 229
 fail css/CSS2/abspos/abspos-containing-block-initial-004a.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004b.xht
@@ -1953,7 +1953,6 @@ fail css/css-position/sticky/position-sticky-change-top.html
 fail css/css-position/sticky/position-sticky-escape-scroller-001.html
 fail css/css-position/sticky/position-sticky-escape-scroller-002.html
 fail css/css-position/sticky/position-sticky-escape-scroller-003.html
-fail css/css-position/sticky/position-sticky-fixed-ancestor-iframe.html
 fail css/css-position/sticky/position-sticky-fixed-ancestor.html
 fail css/css-position/sticky/position-sticky-flexbox.html
 fail css/css-position/sticky/position-sticky-grid.html
@@ -3053,7 +3052,6 @@ fail css/filter-effects/invert-scale.html
 fail css/filter-effects/svg-empty-hidden-foreignobject-with-filter-001.html
 fail css/filter-effects/svg-external-filter-resource.html
 fail css/filter-effects/svg-image-root-filter.html
-fail css/filter-effects/svg-relative-urls-001.html
 fail css/filter-effects/svg-visibility-hidden-element-with-filter-002.html
 fail css/filter-effects/tainting-css-dropshadow-001.html
 fail css/filter-effects/will-change-blur-filter-under-clip.html

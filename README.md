@@ -32,6 +32,15 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.2.50 presents video frames independently of the page's script
+thread (a public video page on Windows went from 5–10 to 20–22 fps), plays
+Opus audio in real time, and builds font glyph geometry only for glyphs that
+are drawn: 190 MiB less on the video page, and a text-heavy page renders 5.9×
+faster. Editing passes 98.6 % of WPT (from 96.5 %), IndexedDB, WebGL, Web
+Audio and WebRTC load on first use, and mutation observers are notified in
+the specified microtask order. WPT testharness: 91.7 % of 2,118,802 subtests
+([record](docs/benchmarks/wpt-2026-11-27-v0.2.50.md)); Speedometer 3.1 1.009×.
+
 Version 0.2.49 makes small DOM changes on large pages up to two orders of
 magnitude cheaper: a class change on a developer reference page went from
 31 ms to 0.08 ms, appending text on a repository page from 31 ms to 2.5 ms
@@ -276,8 +285,8 @@ CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 | Suite | Result | Notes |
 |---|---|---|
 | **test262** (ECMAScript) | **99.90 %** (46,017 / 46,064 run) | 2026-11-18, 0.1.34 JavaScript code `fe3d71e`, JIT on, 8 workers, profile ci; **99.93 % excluding Intl**, ECMA-402 98.6 %; multi-agent `Atomics` and `Intl.NumberFormat` v3 tests included; [measurement](docs/benchmarks/test262-2026-11-18-v0.1.34.md) and `crates/js/tests/test262_baseline.txt` |
-| **WPT testharness** (web APIs: DOM, HTML, Encoding, Fetch, WebCrypto, editing, CSSOM, …) | **89.8 %** (1,578,581 / 1,757,120 subtests, 38,226 pages) | 2026-11-25, 0.2.46 engine `7b235dfb`, WPT `831baf28`, natively discovered browser pages (1,946 wptserve variants not run); 0.2.45 had 87.4 % and 0.1.44 44.0 % on the same pages; [measurement](docs/benchmarks/wpt-apis-2026-11-25-v0.2.46.md) and `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **84.5 %** (16,576 / 19,627) | 2026-11-25, 0.2.46 source `7b235dfb`; color 96.5 %, box 95.2 %, transforms 94.3 %, CSS2 92.9 %, css-ui 91.2 %, images 90.7 %, flexbox 85.8 %, grid 84.2 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-25-v0.2.46.md) and `crates/engine/tests/wpt-css-baseline.txt` |
+| **WPT testharness** (web APIs: DOM, HTML, Encoding, Fetch, WebCrypto, editing, CSSOM, …) | **91.7 %** (1,943,677 / 2,118,802 subtests, 38,226 pages) | 2026-11-27, 0.2.50 engine `ea1b94b4`, WPT `831baf28`, natively discovered browser pages (1,946 wptserve variants not run); 0.2.48 had 89.8 % of 1,757,131 (pages that now complete add subtests), 0.2.45 87.4 % and 0.1.44 44.0 %; [measurement](docs/benchmarks/wpt-2026-11-27-v0.2.50.md) and `tools/wpt/` |
+| **WPT CSS reftests** (pixel comparison) | **84.5 %** (16,578 / 19,627) | 2026-11-27, 0.2.50 source `ea1b94b4` (0.2.46: 16,576); color 96.5 %, box 95.2 %, transforms 94.3 %, CSS2 92.9 %, css-ui 91.2 %, images 90.7 %, flexbox 85.8 %, grid 84.2 %; any-match rule for multiple references; [measurement](docs/benchmarks/wpt-css-2026-11-25-v0.2.46.md) and `crates/engine/tests/wpt-css-baseline.txt` |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
