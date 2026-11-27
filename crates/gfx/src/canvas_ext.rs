@@ -730,7 +730,6 @@ impl Canvas {
             }
             let sx = src.w / d.w;
             let sy = src.h / d.h;
-            let downscale = sx > 1.0 || sy > 1.0;
             // Unscaled at whole-pixel offsets (a canvas or image shown at its
             // own size): every device pixel is exactly one source pixel, so
             // sampling (bilinear or nearest, at the pixel centre) returns it
@@ -790,34 +789,7 @@ impl Canvas {
                 crate::video_scale::paint(self, image.pixels(), image.width as usize, image.height as usize, src, d, b);
                 return;
             }
-            for py in b.y0..b.y1 {
-                let drow = py as usize * w;
-                let v0 = src.y + (py as f32 - d.y) * sy;
-                let v1 = src.y + (py as f32 + 1.0 - d.y) * sy;
-                let cy = span_coverage(py as f32, d.y, d.bottom());
-                for px in b.x0..b.x1 {
-                    let u0 = src.x + (px as f32 - d.x) * sx;
-                    let u1 = src.x + (px as f32 + 1.0 - d.x) * sx;
-                    let [r, g, bl, a] = if !self.image_smoothing {
-                        crate::canvas::sample_nearest(image, (u0 + u1) * 0.5, (v0 + v1) * 0.5)
-                    } else if downscale {
-                        crate::canvas::sample_box(image, u0.max(src.x), v0.max(src.y), u1.min(src.right()), v1.min(src.bottom()))
-                    } else {
-                        // Filtering never reads outside the source rect.
-                        crate::canvas::sample_bilinear(image, clamp_center((u0 + u1) * 0.5, src.x, src.right()) - 0.5, clamp_center((v0 + v1) * 0.5, src.y, src.bottom()) - 0.5)
-                    };
-                    let cx = span_coverage(px as f32, d.x, d.right());
-                    let mut alpha = (a * op * cx * cy + 0.5) as u32;
-                    if let Some(mk) = &mask {
-                        alpha = (alpha * mk.get(px, py) as u32 + 127) / 255;
-                    }
-                    if alpha == 0 {
-                        continue;
-                    }
-                    let idx = drow + px as usize;
-                    self.data[idx] = blend_image(self.data[idx], [r, g, bl], alpha);
-                }
-            }
+            self.draw_sampled_image(image.into(), src, d, b, self.image_smoothing, op, mask.as_deref());
             return;
         }
         // General transform: inverse-map each device pixel.
@@ -851,9 +823,9 @@ impl Canvas {
                     let u = src.x + (p.x - dest.x) * sx;
                     let v = src.y + (p.y - dest.y) * sy;
                     let s = if self.image_smoothing {
-                        crate::canvas::sample_bilinear(image, clamp_center(u, src.x, src.right()) - 0.5, clamp_center(v, src.y, src.bottom()) - 0.5)
+                        crate::canvas::sample_bilinear(image.into(), clamp_center(u, src.x, src.right()) - 0.5, clamp_center(v, src.y, src.bottom()) - 0.5)
                     } else {
-                        crate::canvas::sample_nearest(image, u, v)
+                        crate::canvas::sample_nearest(image.into(), u, v)
                     };
                     for i in 0..3 {
                         acc[i] += s[i] * s[3];
@@ -881,20 +853,69 @@ impl Canvas {
         }
     }
 
+    fn draw_sampled_image(&mut self, image: crate::canvas::Samples<'_>, src: Rect, d: Rect,
+        b: Bounds, smooth: bool, op: f32, mask: Option<&Mask>) {
+        let (sx, sy) = (src.w / d.w, src.h / d.h);
+        let downscale = sx > 1.0 || sy > 1.0;
+        let w = self.width as usize;
+        for py in b.y0..b.y1 {
+            let drow = py as usize * w;
+            let v0 = src.y + (py as f32 - d.y) * sy;
+            let v1 = src.y + (py as f32 + 1.0 - d.y) * sy;
+            let cy = span_coverage(py as f32, d.y, d.bottom());
+            for px in b.x0..b.x1 {
+                let u0 = src.x + (px as f32 - d.x) * sx;
+                let u1 = src.x + (px as f32 + 1.0 - d.x) * sx;
+                let [r, g, bl, a] = if !smooth {
+                    crate::canvas::sample_nearest(image, (u0 + u1) * 0.5, (v0 + v1) * 0.5)
+                } else if downscale {
+                    crate::canvas::sample_box(image, u0.max(src.x), v0.max(src.y), u1.min(src.right()), v1.min(src.bottom()))
+                } else {
+                    // Filtering never reads outside the source rect.
+                    crate::canvas::sample_bilinear(image, clamp_center((u0 + u1) * 0.5, src.x, src.right()) - 0.5, clamp_center((v0 + v1) * 0.5, src.y, src.bottom()) - 0.5)
+                };
+                let cx = span_coverage(px as f32, d.x, d.right());
+                let mut alpha = (a * op * cx * cy + 0.5) as u32;
+                if let Some(mk) = mask {
+                    alpha = (alpha * mk.get(px, py) as u32 + 127) / 255;
+                }
+                if alpha == 0 {
+                    continue;
+                }
+                let idx = drow + px as usize;
+                self.data[idx] = blend_image(self.data[idx], [r, g, bl], alpha);
+            }
+        }
+    }
+
     /// Composite an opaque decoder buffer in device coordinates. Unsupported
     /// geometry retains the image already rasterized in the content frame.
     pub fn composite_video(&mut self, pixels: &[u8], size: (u32, u32), src: Rect, dest: Rect, clip: Rect, pixelated: bool) -> bool {
+        self.composite_video_with_background(pixels, size, src, dest, clip, pixelated, |_| {})
+    }
+
+    /// A fractional destination exposes the background through its edge
+    /// pixels. Restore those pixels after validation, before drawing.
+    pub fn composite_video_with_background(&mut self, pixels: &[u8], size: (u32, u32), src: Rect,
+        dest: Rect, clip: Rect, pixelated: bool, restore: impl FnOnce(&mut Self)) -> bool {
         let (w, h) = (size.0 as usize, size.1 as usize);
         if w.checked_mul(h).and_then(|n| n.checked_mul(4)) != Some(pixels.len())
             || src.is_empty() || dest.is_empty() || src.x < 0.0 || src.y < 0.0
             || src.right() > w as f32 || src.bottom() > h as f32
-            || ![dest.x, dest.y, dest.w, dest.h, clip.x, clip.y, clip.w, clip.h].iter().all(|n| n.is_finite() && n.fract() == 0.0)
+            || ![src.x, src.y, src.w, src.h, dest.x, dest.y, dest.w, dest.h, clip.x, clip.y, clip.w, clip.h].iter().all(|n| n.is_finite())
             || self.current_mask().is_some() || !is_identity(&self.transform()) {
             return false;
         }
         let b = self.bounds(&dest.intersect(&clip));
         if b.is_empty() { return false; }
         let (sx, sy) = (src.w / dest.w, src.h / dest.h);
+        if !pixelated && (sx > 4.0 || sy > 4.0) { return false; }
+        if [dest.x, dest.y, dest.w, dest.h].iter().any(|v| v.fract() != 0.0) {
+            restore(self);
+            self.draw_sampled_image(crate::canvas::Samples { width: size.0, height: size.1, pixels },
+                src, dest, b, !pixelated, 1.0, None);
+            return true;
+        }
         let exact = sx == 1.0 && sy == 1.0 && src.x.fract() == 0.0 && src.y.fract() == 0.0;
         if pixelated || exact {
             for y in b.y0..b.y1 {
@@ -906,10 +927,8 @@ impl Canvas {
                         u32::from_be_bytes([0, pixels[i], pixels[i + 1], pixels[i + 2]]);
                 }
             }
-        } else if sx <= 4.0 && sy <= 4.0 {
-            crate::video_scale::paint(self, pixels, w, h, src, dest, b);
         } else {
-            return false;
+            crate::video_scale::paint(self, pixels, w, h, src, dest, b);
         }
         true
     }

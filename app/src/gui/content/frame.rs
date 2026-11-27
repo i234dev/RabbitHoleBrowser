@@ -31,12 +31,7 @@ impl VideoLayer {
         self.pending.store(false, Ordering::Release);
         let (_, pic) = self.reader.current()?;
         if (pic.width, pic.height) != self.size { return None; }
-        let map = |r: Rect| Rect::new(area.x + (r.x - scroll.0) * scale,
-            area.y + (r.y - scroll.1) * scale, r.w * scale, r.h * scale);
-        if dst.composite_video(&pic.rgba, self.size, self.plane.src, map(self.plane.dest), map(self.plane.clip).intersect(&area), self.plane.pixelated) {
-            if let Some(foreground) = &self.plane.foreground {
-                foreground.paint(dst, map(self.plane.clip), area);
-            }
+        if self.plane.composite(dst, &pic.rgba, self.size, area, scroll, scale) {
             return pic.timing;
         }
         None

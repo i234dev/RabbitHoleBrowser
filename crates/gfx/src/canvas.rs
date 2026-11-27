@@ -601,10 +601,25 @@ impl Canvas {
     }
 }
 
+/// A borrowed RGBA frame. An animated image and a decoder buffer use the
+/// same sampling arithmetic without copying their pixels.
+#[derive(Clone, Copy)]
+pub(crate) struct Samples<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: &'a [u8],
+}
+
+impl<'a> From<&'a Image> for Samples<'a> {
+    fn from(image: &'a Image) -> Self {
+        Self { width: image.width, height: image.height, pixels: image.pixels() }
+    }
+}
+
 /// Average of the source pixels covering [u0,u1)×[v0,v1) (premultiplied
 /// average so transparent pixels don't bleed colour). Returns straight RGBA
 /// as f32 0..255.
-pub(crate) fn sample_box(img: &Image, u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 4] {
+pub(crate) fn sample_box(img: Samples<'_>, u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 4] {
     let x0 = u0.floor().max(0.0) as u32;
     let y0 = v0.floor().max(0.0) as u32;
     let x1 = (u1.ceil() as u32).min(img.width).max(x0 + 1);
@@ -614,7 +629,7 @@ pub(crate) fn sample_box(img: &Image, u0: f32, v0: f32, u1: f32, v1: f32) -> [f3
     let mut b = 0.0f32;
     let mut a = 0.0f32;
     let mut wsum = 0.0f32;
-    let px = img.pixels();
+    let px = img.pixels;
     for y in y0..y1 {
         let wy = span_coverage(y as f32, v0, v1);
         if wy <= 0.0 {
@@ -643,17 +658,17 @@ pub(crate) fn sample_box(img: &Image, u0: f32, v0: f32, u1: f32, v1: f32) -> [f3
 }
 
 /// Nearest-neighbour sample at source pixel coordinates (straight RGBA).
-pub(crate) fn sample_nearest(img: &Image, u: f32, v: f32) -> [f32; 4] {
+pub(crate) fn sample_nearest(img: Samples<'_>, u: f32, v: f32) -> [f32; 4] {
     let x = (u.floor().max(0.0) as u32).min(img.width - 1);
     let y = (v.floor().max(0.0) as u32).min(img.height - 1);
     let i = ((y * img.width + x) * 4) as usize;
-    let px = img.pixels();
+    let px = img.pixels;
     [px[i] as f32, px[i + 1] as f32, px[i + 2] as f32, px[i + 3] as f32]
 }
 
 /// Bilinear sample at source coordinates (u, v) in pixel units (centre at .5
 /// already subtracted by the caller). Returns straight RGBA 0..255.
-pub(crate) fn sample_bilinear(img: &Image, u: f32, v: f32) -> [f32; 4] {
+pub(crate) fn sample_bilinear(img: Samples<'_>, u: f32, v: f32) -> [f32; 4] {
     let maxx = (img.width - 1) as f32;
     let maxy = (img.height - 1) as f32;
     let u = u.clamp(0.0, maxx);
@@ -664,7 +679,7 @@ pub(crate) fn sample_bilinear(img: &Image, u: f32, v: f32) -> [f32; 4] {
     let y1 = (y0 + 1).min(img.height - 1);
     let fx = u - x0 as f32;
     let fy = v - y0 as f32;
-    let px = img.pixels();
+    let px = img.pixels;
     let p = |x: u32, y: u32| {
         let i = ((y * img.width + x) * 4) as usize;
         let a = px[i + 3] as f32;
@@ -858,7 +873,7 @@ mod tests {
             for x in 0..12u32 {
                 let inside = (2..2 + iw).contains(&x) && (3..3 + ih).contains(&y);
                 let want = if inside {
-                    let [r, g, b, a] = sample_bilinear(&img, (x - 2) as f32, (y - 3) as f32);
+                    let [r, g, b, a] = sample_bilinear((&img).into(), (x - 2) as f32, (y - 3) as f32);
                     let alpha = (a * 0.7 + 0.5) as u32;
                     if alpha == 0 { bg.to_u32() } else { blend_image(bg.to_u32(), [r, g, b], alpha) }
                 } else {

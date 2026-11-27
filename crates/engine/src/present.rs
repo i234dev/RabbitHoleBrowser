@@ -168,7 +168,7 @@ impl Page {
             }
         }
         let plane = if self.images.values().filter(|i| i.video_frame).take(2).count() == 1 {
-            rabbithole_layout::paint::video_plane(&self.display_list, image, viewport, scale, &self.fonts)
+            rabbithole_layout::paint::video_plane_on_background(&self.display_list, image, viewport, scale, &self.fonts, self.background)
         } else { None };
         source.geometry = Some(VideoGeometry { generation, viewport, scale, size, plane: plane.clone() });
         Some((plane?, source.reader.clone(), size))
