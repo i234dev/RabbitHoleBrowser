@@ -24,7 +24,7 @@
     ['bold', ['b', 'font-weight', 'bold', 'normal', 'formatBold']],
     ['italic', ['i', 'font-style', 'italic', 'normal', 'formatItalic']],
     ['underline', ['u', 'text-decoration-line', 'underline', 'none', 'formatUnderline']],
-    ['strikethrough', ['s', 'text-decoration-line', 'line-through', 'none', 'formatStrikeThrough']],
+    ['strikethrough', ['strike', 'text-decoration-line', 'line-through', 'none', 'formatStrikeThrough']],
     ['subscript', ['sub', 'vertical-align', 'sub', 'baseline', 'formatSubscript']],
     ['superscript', ['sup', 'vertical-align', 'super', 'baseline', 'formatSuperscript']],
   ]);
@@ -189,7 +189,7 @@
       const parent = el.parentElement;
       const scripts = isScriptFormat(cmd);
       const semantic = scripts && (el.localName === 'sup' || el.localName === 'sub') || el.localName === tag || (cmd === 'bold' && el.localName === 'strong') ||
-        (cmd === 'italic' && el.localName === 'em') || (cmd === 'strikethrough' && el.localName === 'strike');
+        (cmd === 'italic' && el.localName === 'em') || (cmd === 'strikethrough' && el.localName === 's');
       const inline = !scripts && (el.style.getPropertyValue(prop) ||
         (prop === 'text-decoration-line' && el.style.getPropertyValue('text-decoration')));
       const attr = valued?.[1];
@@ -414,7 +414,7 @@
   const alignments = new Map([
     ['justifyleft','left'], ['justifyright','right'], ['justifycenter','center'], ['justifyfull','justify']
   ]);
-  const blockTags = new Set(['address','dd','div','dt','h1','h2','h3','h4','h5','h6','p','pre']);
+  const blockTags = new Set(spec.formattableBlockNames);
   const listCommands = new Map([['insertorderedlist','ol'],['insertunorderedlist','ul']]);
   const blockCommand = cmd => alignments.has(cmd) || cmd === 'formatblock' || listCommands.has(cmd);
   function isBlock(node) {
@@ -1080,13 +1080,21 @@
   const textCommands = new Set(['inserttext', 'delete', 'forwarddelete']);
   const richCommands = new Set(['createlink', 'unlink', 'indent', 'outdent', 'removeformat', 'inserthtml', 'insertimage', 'inserthorizontalrule', 'insertlinebreak', 'insertparagraph']);
   function supported(cmd) {
-    return blockCommand(cmd) || valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall';
+    return blockCommand(cmd) || valueFormats.has(cmd) || formats.has(cmd) || preferences.has(cmd) || textCommands.has(cmd) || richCommands.has(cmd) || cmd === 'selectall' || cmd === 'copy' || cmd === 'cut';
   }
   function editingHost(node) {
     let el = node?.nodeType === 1 ? node : node?.parentElement;
     if (!el?.isContentEditable || el.closest('select,textarea,input')) return null;
     while (el.parentElement?.isContentEditable) el = el.parentElement;
     return el;
+  }
+  // A programmatic selection can put the caret inside an HTML void element.
+  // Its editing insertion point is immediately before the element.
+  const voidTags = new Set(['area','base','br','col','embed','hr','img','input','link','meta','param','source','track','wbr']);
+  function voidCaret(range) {
+    const node = range.startContainer;
+    return range.collapsed && node.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+      voidTags.has(node.localName) && node.isContentEditable && node.parentElement ? node : null;
   }
   function target(doc) {
     const control = doc.activeElement;
@@ -1098,14 +1106,23 @@
     const sel = doc.getSelection();
     if (!sel?.rangeCount) return null;
     const range = sel.getRangeAt(0);
+    const leaf = voidCaret(range);
+    if (leaf) {
+      const host = editingHost(leaf.parentElement);
+      return host ? { sel, range, host, leaf } : null;
+    }
     const host = editingHost(range.startContainer);
     if (!host || host !== editingHost(range.endContainer)) return null;
     return { sel, range, host };
   }
   function enabled(cmd, t) {
-    if (preferences.has(cmd) || cmd === 'selectall') return true;
+    if (preferences.has(cmd)) return !t?.control || t.control.isContentEditable;
+    if (cmd === 'selectall') return true;
     if (!t) return false;
-    if (textCommands.has(cmd)) return true;
+    if (cmd === 'copy' || cmd === 'cut') return t.control ? t.control.type !== 'password' &&
+      t.control.selectionStart !== t.control.selectionEnd : !t.range.collapsed;
+    if (textCommands.has(cmd) || cmd === 'inserthtml') return true;
+    if (t.control && (cmd === 'insertlinebreak' || cmd === 'insertparagraph')) return t.control.localName === 'textarea';
     return !t.control && (richCommands.has(cmd) || formats.has(cmd) || valueFormats.has(cmd) || blockCommand(cmd)) &&
       (t.host.contentEditable !== 'plaintext-only' || cmd === 'insertlinebreak' || cmd === 'insertparagraph');
   }
@@ -1113,14 +1130,17 @@
   function input(host, inputType, data = null) {
     const state = contexts.get(host.ownerDocument);
     if (state?.userEdit) { state.changed = true; return; }
-    host.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType, data }));
+    N.editingInput(host, inputType, data);
   }
   const inputTypeFor = cmd => cmd === 'delete' ? 'deleteContentBackward'
     : cmd === 'forwarddelete' ? 'deleteContentForward' : 'insertText';
   function editControl(control, cmd, text) {
     let start = control.selectionStart, end = control.selectionEnd;
     const old = control.value;
-    if (cmd !== 'inserttext') {
+    const line = cmd === 'insertlinebreak' || cmd === 'insertparagraph';
+    if (line) text = '\n';
+    else if (cmd === 'inserttext' && control.localName === 'input') text = text.replace(/[\r\n]/g, '');
+    else if (cmd !== 'inserttext') {
       text = '';
       if (start === end) {
         if (cmd === 'delete' && start) {
@@ -1134,7 +1154,7 @@
     if (start === end && !text) return;
     control.value = old.slice(0, start) + text + old.slice(end);
     control.setSelectionRange(start + text.length, start + text.length);
-    input(control, inputTypeFor(cmd), cmd === 'inserttext' ? text : null);
+    input(control, line ? (cmd === 'insertparagraph' ? 'insertParagraph' : 'insertLineBreak') : inputTypeFor(cmd), cmd === 'inserttext' ? text : null);
   }
   function adjacentNode(node, host, forward) {
     while (node && node !== host) {
@@ -1240,11 +1260,17 @@
     const destinationSpace = getComputedStyle(dest).whiteSpace;
     // Extraction can clone a partial inline ancestor. Save the formatting
     // of the source line while its elements still match their old selectors.
+    // An inline line of the enclosing block keeps its ambient whitespace
+    // when moved inside a differently formatted child paragraph. A sibling
+    // block loses its UA formatting when the block itself is discarded.
+    const enclosingLine = src.contains(dest);
     const styles = [];
     const after = move.endContainer === src ? src.childNodes[move.endOffset] :
         branchIn(move.endContainer,src).nextSibling;
     for (let part = first; part && part !== after; part = part.nextSibling) {
-      styles.push(part.nodeType === 1 ? getComputedStyle(part).whiteSpace : whiteSpace);
+      const el = part.nodeType === 1 ? part : src;
+      const value = el === src ? whiteSpace : getComputedStyle(el).whiteSpace;
+      styles.push(value !== destinationSpace && (enclosingLine || N.editingAuthorWhiteSpace(el)) ? value : null);
     }
     const before = branchIn(left, dest).nextSibling;
     const fragment = move.extractContents();
@@ -1263,14 +1289,14 @@
     }
     let wrapper = null;
     for (const [i,part] of Array.from(fragment.childNodes).entries()) {
-      const value = styles[i] || whiteSpace;
-      if (part.nodeType === 1 && value !== whiteSpace) {
+      const value = styles[i];
+      if (part.nodeType === 1 && value) {
         // Carry a contextual class's computed whitespace across the block
         // boundary even if the class stops matching in the destination.
         if (part.style.whiteSpace !== value) part.style.whiteSpace = value;
         dest.insertBefore(part,before);
         wrapper = null;
-      } else if (value !== destinationSpace) {
+      } else if (value) {
         if (!wrapper) {
           wrapper = doc.createElement('span');
           wrapper.style.whiteSpace = value;
@@ -1368,7 +1394,33 @@
       if (replacement !== text.data.slice(from,to)) text.replaceData(from,to-from,replacement);
     }
   }
+  // A now-empty inline editor needs a caret line if removing it would
+  // collapse the entire line in the surrounding block formatting context.
+  function inlineLineBoundary(host, forward) {
+    for (let node = host; node;) {
+      const next = forward ? node.nextSibling : node.previousSibling;
+      if (!next) {
+        node = node.parentElement;
+        if (!node || isBlock(node)) return true;
+        continue;
+      }
+      node = next;
+      if (node.nodeType === 3) {
+        if (!node.length) continue;
+        return false;
+      }
+      if (node.nodeType !== 1 || getComputedStyle(node).display === 'none') continue;
+      if (node.localName === 'br') return !forward;
+      return isBlock(node);
+    }
+    return true;
+  }
+
   function deleteSelection(t, cmd) {
+    if (endsInChildBlock(t)) {
+      deleteIntoChildBlock(t);
+      return true;
+    }
     if (joinParagraphs(t, cmd)) return true;
     const { sel, host } = t;
     if (sel.isCollapsed) {
@@ -1379,11 +1431,19 @@
     }
     const range = sel.getRangeAt(0);
     const touchedSpace = /[ \u00a0]/.test(range.toString());
+    const last = host.lastChild;
+    const hadLineBreak = last?.localName === 'br' || last?.nodeType === 3 && last.data.endsWith('\n');
     range.deleteContents();
     let caret = range.startContainer, offset = range.startOffset;
     if (touchedSpace) rebalanceSpaces(caret,offset,host,true);
     // A caret left right before a child block is in its first line, as in
     // other browsers (typing goes there).
+    if (hadLineBreak && !host.textContent && !host.firstElementChild && getComputedStyle(host).display === 'inline' &&
+        inlineLineBoundary(host, false) && inlineLineBoundary(host, true)) {
+      host.appendChild(caretBreak(host.ownerDocument));
+      caret = host;
+      offset = 0;
+    }
     const following = caret.nodeType === 1 ? caret.childNodes[offset] : null;
     if (following?.nodeType === 1 && isBlock(following) && following.isContentEditable &&
         (!caret.childNodes[offset - 1] || caret.childNodes[offset - 1].localName === 'br') &&
@@ -1402,6 +1462,7 @@
   const paragraphProhibited = new Set(['address','article','aside','blockquote','caption','center','col','colgroup','dd','details',
     'dir','div','dl','dt','fieldset','figcaption','figure','footer','form','h1','h2','h3','h4','h5','h6','header','hgroup','hr','li',
     'listing','menu','nav','ol','p','plaintext','pre','section','summary','table','tbody','td','tfoot','th','thead','tr','ul','xmp']);
+  const insideParagraphInvalid = Array.from(paragraphProhibited).join(',');
   const headings = new Set(['h1','h2','h3','h4','h5','h6']);
   const onlyChildren = { colgroup: ['col'], table: ['caption','col','colgroup','tbody','td','tfoot','th','thead','tr'],
     tbody: ['td','th','tr'], tfoot: ['td','th','tr'], thead: ['td','th','tr'], tr: ['td','th'], dl: ['dt','dd'],
@@ -1495,10 +1556,25 @@
     }
     return null;
   }
+  // These editable HTML elements can only represent a line break as text.
+  function textOnlyContainer(range) {
+    const node = range.startContainer;
+    const el = node.nodeType === 1 ? node : node.parentElement;
+    return el?.closest('title,script,style,xmp,plaintext');
+  }
   function insertLineBreak(doc, t) {
     const {host, range, sel} = t;
     const point = range.startContainer;
     const parent = point.nodeType === 3 ? point.parentElement : point;
+    const textOnly = textOnlyContainer(range);
+    if (textOnly) {
+      if (!checkVisibility.call(textOnly, { visibilityProperty: true })) return;
+      const trailing = !followingContent(range, textOnly) &&
+        ['pre','pre-line','pre-wrap','break-spaces'].includes(getComputedStyle(parent).whiteSpace);
+      insertText(doc, range, sel, trailing ? '\n\n' : '\n');
+      if (trailing) sel.collapse(sel.focusNode, sel.focusOffset - 1);
+      return;
+    }
     const block = parent === host || isBlock(parent) ? parent : containingBlock(parent, host);
     const atEnd = !followingContent(range, block);
     if (['pre','pre-line','pre-wrap','break-spaces'].includes(getComputedStyle(parent).whiteSpace)) {
@@ -1526,9 +1602,11 @@
   function splitParagraph(doc, t, separator) {
     const { host, range, sel } = t;
     let block = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
-    while (block !== host && (!isBlock(block) || !['address','div','p','pre','li','blockquote','h1','h2','h3','h4','h5','h6'].includes(block.localName)))
+    if (textOnlyContainer(range)) return insertLineBreak(doc, t);
+    while (block !== host && (!isBlock(block) || !(inlineContents.has(block.localName) ||
+        ['address','div','li','blockquote'].includes(block.localName))))
       block = block.parentElement;
-    if (!isBlock(block) || block.localName === 'pre' || host.contentEditable === 'plaintext-only') {
+    if (!isBlock(block) || block.localName === 'pre' || (block === host && inlineContents.has(host.localName)) || (block === host && host.contentEditable === 'plaintext-only')) {
       insertLineBreak(doc, t);
       return;
     }
@@ -1536,6 +1614,9 @@
     tail.selectNodeContents(block);
     tail.setStart(range.startContainer, range.startOffset);
     const after = tail.extractContents();
+    // CSS can make a paragraph or div inline. Its clone still has the HTML
+    // content model of that element and cannot be nested inside a new p.
+    if (block === host && separator === 'p' && after.querySelector(insideParagraphInvalid)) separator = 'div';
     const next = block === host ? doc.createElement(separator) : block.cloneNode(false);
     next.removeAttribute('id');
     next.appendChild(after);
@@ -1557,6 +1638,8 @@
     else sel.collapse(caret, 0);
   }
   function execute(doc, state, cmd, value) {
+    const t = target(doc);
+    if (preferences.has(cmd) && !enabled(cmd, t)) return false;
     if (cmd === 'stylewithcss' || cmd === 'usecss') {
       state.css = (value.toLowerCase() !== 'false') === (cmd === 'stylewithcss');
       return true;
@@ -1567,8 +1650,25 @@
       state.separator = tag;
       return true;
     }
-    const t = target(doc);
+    if (cmd === 'copy' || cmd === 'cut') {
+      if (!doc.defaultView?.navigator.userActivation?.isActive) return false;
+      return clipboardGesture(doc, cmd) !== false;
+    }
     if (!enabled(cmd, t)) return false;
+    // An empty list item ends the list when entering at its boundary. A
+    // caret inside its placeholder still belongs to the item being split.
+    const listPlaceholder = cmd === 'insertparagraph' && t?.leaf?.localName === 'br' &&
+      t.leaf.parentElement.localName === 'li' && t.leaf.parentElement.childNodes.length === 1;
+    if (t?.leaf && !listPlaceholder && ['inserttext','inserthtml','insertlinebreak','insertparagraph'].includes(cmd)) {
+      t.range.setStartBefore(t.leaf);
+      t.range.collapse(true);
+      t.sel.collapse(t.range.startContainer, t.range.startOffset);
+      t.range = t.sel.getRangeAt(0);
+    }
+    if (cmd === 'inserthtml' && (t.control || t.host.contentEditable === 'plaintext-only')) {
+      value = N.editingPlaintext(value);
+      cmd = 'inserttext';
+    }
     // A link being typed (createLink at the caret) splits the surrounding
     // link in the implementation above.
     const typingLink = cmd === 'inserttext' && t && !t.control && typingStyle(state, t.range)?.has('createlink');
@@ -1627,7 +1727,8 @@
     }
     const toggles = range.collapsed && ['inserttext','insertlinebreak','insertparagraph'].includes(cmd) ? typingStyle(state, range) : null;
     state.typing = null;
-    range.deleteContents();
+    if (cmd === 'inserttext' && endsInChildBlock(t)) deleteIntoChildBlock(t);
+    else range.deleteContents();
     if (cmd === 'insertparagraph' || cmd === 'insertlinebreak') {
       if (cmd === 'insertparagraph') splitParagraph(doc, t, state.separator);
       else insertLineBreak(doc, t);
@@ -1636,7 +1737,12 @@
     } else if (cmd === 'inserttext') {
       const lines = value.replace(/\r\n?/g, '\n').split('\n');
       for (let i = 0; i < lines.length; ++i) {
-        if (i) splitParagraph(doc, {host, sel, range:sel.getRangeAt(0)}, state.separator);
+        if (i) {
+          const caret = { host, sel, range: sel.getRangeAt(0) };
+          if (host.contentEditable === 'plaintext-only') insertLineBreak(doc, caret);
+          else splitParagraph(doc, caret, state.separator);
+          if (toggles?.size) state.typing = { node: sel.focusNode, offset: sel.focusOffset, formats: toggles };
+        }
         if (!lines[i]) continue;
         const caret = sel.getRangeAt(0);
         const point = caret.startContainer, offset = caret.startOffset;
@@ -1714,6 +1820,10 @@
     // The specification assumes block editing hosts: an inline host gets
     // line breaks instead of paragraphs, as in other browsers.
     if (getComputedStyle(t.host).display.startsWith('inline')) return false;
+    if ((cmd === 'insertparagraph' || cmd === 'insertlinebreak') && textOnlyContainer(t.range)) return false;
+    // A CSS display override does not change the host's HTML content model.
+    if (inlineContents.has(t.host.localName) &&
+        (cmd === 'insertparagraph' || cmd === 'insertlinebreak' || (cmd === 'inserttext' && /[\r\n]/.test(value)))) return false;
     // A link typed inside a link splits it; lists inside table cells keep
     // their boundaries and items moved to another kind of list keep their
     // sublists: the implementation above does these as browsers do.
@@ -1803,6 +1913,15 @@
       else others++;
     }
     return breaks <= 1 && others <= ancestors;
+  }
+  // The DOM deletion algorithm collapses at the common ancestor. Editing a
+  // whole line into a nested paragraph instead continues typing at the
+  // surviving end of that paragraph, including its inline formatting.
+  function deleteIntoChildBlock({ range, sel }) {
+    const endpoint = range.cloneRange();
+    endpoint.collapse(false);
+    range.deleteContents();
+    sel.collapse(endpoint.startContainer, endpoint.startOffset);
   }
   function endsInChildBlock({ range, host }) {
     if (range.collapsed) return false;
@@ -1990,6 +2109,81 @@
     return spec.run(doc, state, () => spec[method](name));
   }
 
+  // Only a user paste receives a payload from the embedder. Copy and cut
+  // write the current selection or the formats set by a canceled event.
+  function clipboardGesture(doc, cmd, text = '', html = null) {
+    const t = target(doc), control = t?.control;
+    const active = doc.activeElement;
+    const field = active && /^(input|textarea)$/.test(active.localName) ? active : null;
+    if (field && (field.disabled || cmd !== 'copy' && field.readOnly || cmd !== 'paste' && field.type === 'password')) return false;
+    const sel = doc.getSelection();
+    const host = field || t?.host || doc.body;
+    if (!host) return false;
+    const paste = cmd === 'paste';
+    const transfer = N.editingTransfer(paste ? text : null, paste ? html : null);
+    if (!N.editingClipboardEvent(host, cmd, '', transfer, null)) {
+      if (!paste && transfer.types.length) {
+        const copied = transfer.getData('text/plain');
+        N.editingStoreClipboard(copied, transfer.types.includes('text/html') ? transfer.getData('text/html') : null);
+        return copied;
+      }
+      return true;
+    }
+    if (doc.activeElement !== active || !host.isConnected) return true;
+    if (!paste) {
+      if (field) {
+        if (field.type === 'password' || field.selectionStart == null || field.selectionStart === field.selectionEnd) return false;
+        text = field.value.slice(field.selectionStart, field.selectionEnd);
+      } else {
+        if (!sel?.rangeCount || sel.isCollapsed) return false;
+        const container = doc.createElement('div');
+        container.appendChild(sel.getRangeAt(0).cloneContents());
+        html = container.innerHTML;
+        text = sel.toString();
+        // Selection stringification collects text nodes and may omit a
+        // selected line break. The clipboard represents rendered breaks.
+        if (container.querySelector('br')) text = N.editingPlaintext(html);
+      }
+      if (cmd === 'copy') {
+        N.editingStoreClipboard(text, html);
+        return text;
+      }
+    }
+    if (!t || field && (!control || field.readOnly || field.disabled)) return false;
+    const type = paste ? 'insertFromPaste' : 'deleteByCut';
+    const data = paste && control ? text : null;
+    const payload = paste && !control ? transfer : null;
+    if (!N.editingClipboardEvent(host, 'beforeinput', type, payload, data)) return true;
+    const live = target(doc);
+    if (doc.activeElement !== active || !live || (live.control || live.host) !== host) return true;
+    if (control) {
+      const start = control.selectionStart, end = control.selectionEnd;
+      let inserted = paste ? text.replace(/\r\n?/g, '\n') : '';
+      if (control.localName === 'input') inserted = inserted.replace(/\n/g, '');
+      if (!paste) {
+        // beforeinput may change the type, value or selection of a control.
+        if (control.type === 'password' || start === end) return true;
+        text = control.value.slice(start, end);
+      }
+      if (paste && control.maxLength >= 0) inserted = inserted.slice(0, Math.max(0, control.maxLength - control.value.length + end - start));
+      if (start === end && !inserted) return true;
+      control.value = control.value.slice(0, start) + inserted + control.value.slice(end);
+      control.setSelectionRange(start + inserted.length, start + inserted.length);
+    } else {
+      if (paste && !text && live.range.collapsed || !paste && live.range.collapsed) return true;
+      const state = context(doc);
+      // The gesture owns its input event and may run as a legacy copy/cut
+      // command. The normal edit still supplies the DOM and caret behavior.
+      const prior = state.userEdit;
+      state.userEdit = true;
+      try { execute(doc, state, paste ? 'inserttext' : 'delete', paste ? text : ''); }
+      finally { state.userEdit = prior; }
+    }
+    if (!paste) N.editingStoreClipboard(text, html);
+    N.editingClipboardEvent(host, 'input', type, payload, data);
+    return paste ? true : text;
+  }
+
   function userEdit(host, cmd, value) {
     const doc = host.ownerDocument, state = context(doc), t = target(doc);
     if (state.executing || !t || t.host !== host) return false;
@@ -2049,5 +2243,5 @@
       return valueFormats.has(cmd) ? selectedValue(state, target(this), cmd, false) : cmd === 'defaultparagraphseparator' ? state.separator : '';
     },
   };
-  return { userEdit, methods };
+  return { userEdit, clipboardGesture, methods };
 })

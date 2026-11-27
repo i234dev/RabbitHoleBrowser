@@ -1139,6 +1139,7 @@ pub struct Engine {
     /// Registrations survive document navigation within this Engine; no disk persistence yet.
     pub service_workers: rabbithole_script::ServiceWorkerRegistry,
     pub fonts: Rc<FontContext>,
+    pub(crate) edit_clipboard: std::cell::RefCell<editing::EditClipboard>,
     pub loader: Loader,
     /// Run page scripts (JavaScript) when building pages.
     pub scripting: bool,
@@ -1256,6 +1257,7 @@ impl Engine {
             dialog_policy: scripting::DialogPolicy::default(),
             window_context: None,
             frames: Default::default(),
+            edit_clipboard: Default::default(),
             frame_context: Default::default(),
             visited: Default::default(),
         }
@@ -1277,6 +1279,7 @@ impl Engine {
             dialog_policy: scripting::DialogPolicy::default(),
             window_context: None,
             frames: Default::default(),
+            edit_clipboard: Default::default(),
             frame_context: Default::default(),
             visited: Default::default(),
         }

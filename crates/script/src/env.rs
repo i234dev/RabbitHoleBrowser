@@ -22,6 +22,8 @@ pub trait HostEnv {
     fn referrer_policy(&self) -> rabbithole_net::ReferrerPolicy { Default::default() }
     /// The document can finish loading before its first script realm exists.
     fn document_is_complete(&self) -> bool { false }
+    /// Parsing finished while a child still delays the load event.
+    fn document_is_interactive(&self) -> bool { false }
     /// Effective origin, including inheritance by an initial about:blank.
     fn security_origin(&self) -> String { self.document_url().origin() }
     /// Top-level context owned by the embedder; absent in workers/headless hosts.
@@ -59,6 +61,9 @@ pub trait HostEnv {
     fn elements_from_point(&mut self, _x: f32, _y: f32) -> Option<Vec<NodeId>> {
         None
     }
+    /// Update the embedder's in-memory editing clipboard.
+    fn write_edit_clipboard(&mut self, _text: String, _html: Option<String>) {}
+    fn author_white_space(&mut self, _frame: Option<u64>, _node: NodeId) -> bool { false }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>>;
     /// The x-height (in px) of the first available font of a node's
     /// computed style (what `1ex` is worth on it).

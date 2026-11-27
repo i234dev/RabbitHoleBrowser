@@ -648,3 +648,39 @@ fn same_origin_frames_share_detached_documents_and_their_live_ranges() {
     })()"#);
     assert_eq!(result, "true|true|true|true|lphab|lphab|separate");
 }
+
+#[test]
+fn srcdoc_loads_before_its_owner_and_reloads_on_an_identical_assignment() {
+    let mut engine = engine();
+    let mut page = load(&mut engine, r#"<iframe id="f" srcdoc="<script>window.ready=1</script>"></iframe>
+      <script>
+        var events = [];
+        document.addEventListener('DOMContentLoaded', () => events.push(document.readyState));
+        f.onload = () => events.push('child:' + f.contentWindow.ready);
+        window.onload = () => events.push('parent:' + f.contentWindow.ready);
+      </script>"#);
+    assert_eq!(eval(&engine, &mut page, "events.join('|')"), "interactive|child:1|parent:1");
+    eval(&engine, &mut page, "f.contentWindow.ready=2; f.srcdoc=f.srcdoc");
+    settle(&engine, &mut page);
+    assert_eq!(eval(&engine, &mut page, "events.join('|')"), "interactive|child:1|parent:1|child:1");
+}
+
+#[test]
+fn clipboard_shortcuts_share_memory_only_with_pages_of_the_same_engine() {
+    let mut e = engine();
+    let mut source = load(&mut e, "<p id=s>one <b>two</b></p>");
+    let mut dest = load(&mut e, "<div id=t contenteditable=plaintext-only></div>");
+    e.eval_in_page(&mut source, "getSelection().selectAllChildren(s)");
+    let ctrl = Modifiers { ctrl: true, ..Default::default() };
+    e.key_input(&mut source, "c", "KeyC", true, ctrl);
+    e.eval_in_page(&mut dest, "t.focus();getSelection().collapse(t,0);var events=[];for (const k of ['paste','beforeinput','input']) t.addEventListener(k,e=>events.push([k,e.isTrusted,(e.clipboardData||e.dataTransfer)?.getData('text/plain')]))");
+    e.key_input(&mut dest, "v", "KeyV", true, ctrl);
+    assert_eq!(e.eval_in_page(&mut dest, "t.textContent"), "'one two'");
+    assert_eq!(e.eval_in_page(&mut dest, "events.length===3&&events.every(x=>x[1]&&x[2]==='one two')"), "true");
+    assert_eq!(e.eval_in_page(&mut dest, "document.execCommand('paste')"), "false");
+    let mut other = engine();
+    let mut blank = load(&mut other, "<textarea id=t></textarea>");
+    other.eval_in_page(&mut blank, "t.focus()");
+    other.key_input(&mut blank, "v", "KeyV", true, ctrl);
+    assert_eq!(other.eval_in_page(&mut blank, "t.value"), "''");
+}

@@ -108,18 +108,15 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:observers.js", include_str!("js/observers.js")),
     ("rabbithole:platform.js", include_str!("js/platform.js")),
     ("rabbithole:editing.js", include_str!("js/editing.js")),
-    ("rabbithole:idb.js", include_str!("js/idb.js")),
     ("rabbithole:crypto.js", include_str!("js/crypto.js")),
     ("rabbithole:canvas.js", include_str!("js/canvas.js")),
-    ("rabbithole:webgl.js", include_str!("js/webgl.js")),
+    ("rabbithole:lazy.js", include_str!("js/lazy.js")),
     ("rabbithole:navigation.js", include_str!("js/navigation.js")),
     ("rabbithole:animations.js", include_str!("js/animations.js")),
     ("rabbithole:fonts.js", include_str!("js/fonts.js")),
     ("rabbithole:extras.js", include_str!("js/extras.js")),
     ("rabbithole:svg.js", include_str!("js/svg.js")),
     ("rabbithole:media.js", include_str!("js/media.js")),
-    ("rabbithole:webaudio.js", include_str!("js/webaudio.js")),
-    ("rabbithole:webrtc.js", include_str!("js/webrtc.js")),
     ("rabbithole:observable.js", include_str!("js/observable.js")),
     ("rabbithole:webidl.js", include_str!("js/webidl.js")),
 ];
@@ -192,6 +189,16 @@ pub enum DefaultAction {
 }
 
 /// What a [`ScriptHost`] entry point returns when a Rust panic stopped it.
+pub enum ClipboardGesture {
+    Ignored,
+    Handled,
+    Copied(String),
+}
+
+impl PanicFallback for ClipboardGesture {
+    fn after_panic(_: &str) -> Self { Self::Ignored }
+}
+
 pub(crate) trait PanicFallback {
     fn after_panic(msg: &str) -> Self;
 }
@@ -322,7 +329,9 @@ impl ScriptHost {
         realm.set_task_budget(Some(task_budget()));
         rabbithole_wasm_js::install(&mut realm);
         let now = env.now_ms();
-        let document_complete = env.document_is_complete();
+        let ready_state = if env.document_is_complete() { "complete" }
+            else if env.document_is_interactive() { "interactive" }
+            else { "loading" };
         let url_links = (
             realm.new_private_symbol(rabbithole_js::JsStr::new("URL.queryList")),
             realm.new_private_symbol(rabbithole_js::JsStr::new("URLSearchParams.url")),
@@ -342,8 +351,8 @@ impl ScriptHost {
             last_frame: now,
             last_tick: 0.0,
             dirty: false,
-            ready_state: if document_complete { "complete" } else { "loading" },
-            loading: !document_complete,
+            ready_state,
+            loading: ready_state == "loading",
             current_script: None,
             focused: None,
             extra_docs: Vec::new(),
@@ -608,6 +617,22 @@ impl ScriptHost {
         })
     }
 
+    /// A clipboard gesture delivered by the embedder. Only this entry point
+    /// receives data supplied by the UI for the current paste.
+    pub fn clipboard_gesture(&mut self, env: &mut dyn HostEnv, command: &str, text: &str, html: Option<&str>) -> ClipboardGesture {
+        self.enter(env, |realm| {
+            let Some(f) = state().borrow().factories.get("clipboardGesture").cloned() else { return ClipboardGesture::Ignored };
+            let args = [Value::str(command), Value::str(text), html.map(Value::str).unwrap_or(Value::Null)];
+            let result = host::call_logged(realm, &f, Value::Undefined, &args, "clipboard editing");
+            shadow::flush(realm);
+            match result.v() {
+                V::String(text) => ClipboardGesture::Copied(text.to_rust_string()),
+                V::Bool(true) => ClipboardGesture::Handled,
+                _ => ClipboardGesture::Ignored,
+            }
+        })
+    }
+
     /// Run a request from a same-origin ancestor's realm in this realm
     /// (see [`FrameCall`]). Microtasks it queues run at the caller's next
     /// microtask checkpoint ([`HostEnv::frame_checkpoint`]).
@@ -676,6 +701,12 @@ impl ScriptHost {
     /// Finish loading: `readyState` → interactive, `DOMContentLoaded`,
     /// then `complete` and `load`.
     pub fn document_ready(&mut self, env: &mut dyn HostEnv) {
+        self.document_parsed(env);
+        self.document_loaded(env);
+    }
+
+    /// The parser finished. Eager child browsing contexts may still delay load.
+    pub fn document_parsed(&mut self, env: &mut dyn HostEnv) {
         self.enter(env, |realm| {
             docparser::finish_snapshot(realm);
             {
@@ -688,6 +719,12 @@ impl ScriptHost {
             events::dispatch(realm, TargetKey::Node(NodeRef::main(Document::ROOT)), "DOMContentLoaded", EventInit::simple(true, false), true);
             realm.begin_task();
             realm.run_jobs();
+        });
+    }
+
+    /// The document and its load-delaying resources have finished.
+    pub fn document_loaded(&mut self, env: &mut dyn HostEnv) {
+        self.enter(env, |realm| {
             state().borrow_mut().ready_state = "complete";
             events::dispatch(realm, TargetKey::Node(NodeRef::main(Document::ROOT)), "readystatechange", EventInit::simple(false, false), true);
             events::dispatch(realm, TargetKey::Window, "load", EventInit::simple(false, false), true);

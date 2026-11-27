@@ -235,6 +235,65 @@ fn editing_impl(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     }
 }
 
+fn editing_store_clipboard(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let text = arg_str(realm, args, 0)?;
+    let html = match arg(args, 1).v() { V::String(s) => Some(s.to_rust_string()), _ => None };
+    with_env(|env| env.write_edit_clipboard(text, html));
+    Ok(Value::Undefined)
+}
+
+/// The private editing implementation attaches the operation's DataTransfer
+/// to clipboard/input events. Script-created events retain their own trust.
+fn editing_clipboard_event(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let target = this_node(realm, &arg(args, 0), "editingClipboardEvent")?;
+    let ty = arg_str(realm, args, 1)?;
+    let op = arg_str(realm, args, 2)?;
+    let editing = matches!(ty.as_str(), "beforeinput" | "input");
+    if !(editing && matches!(op.as_str(), "insertFromPaste" | "deleteByCut") ||
+        matches!(ty.as_str(), "copy" | "cut" | "paste") && op.is_empty()) {
+        return Ok(Value::Bool(false));
+    }
+    let transfer = arg(args, 3);
+    let data = match arg(args, 4).v() { V::String(s) => Some(s.to_rust_string()), _ => None };
+    let target_range = if editing && ty == "beforeinput" && !matches!(with_doc(target.doc, |d| d.tag(target.node).map(str::to_owned)).as_deref(), Some("input" | "textarea")) {
+        with_doc(target.doc, |d| d.selection().map(|s| (s.start, s.end)))
+    } else { None };
+    let detail = editing.then_some(crate::EventDetail::Input { data, input_type: op, is_composing: false, target_range });
+    let init = crate::EventInit { bubbles: true, cancelable: ty != "input", detail };
+    let class = if editing { "InputEvent" } else { "ClipboardEvent" };
+    let id = crate::events::create_event(realm, class, &ty, &init, true);
+    realm.define_property(id, if editing { "dataTransfer" } else { "clipboardData" }, transfer, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
+    if let Some(e) = realm.host_data_mut::<crate::events::EventData>(id) { e.composed = true; }
+    let result = crate::events::dispatch_object(realm, TargetKey::Node(target), id, None);
+    Ok(Value::Bool(!result.default_prevented))
+}
+
+fn editing_plaintext(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let html = arg_str(realm, args, 0)?;
+    let (w, h) = with_env(|env| env.viewport());
+    Ok(Value::str(&crate::inner_text::text_from_html(&html, w, h)))
+}
+
+fn editing_author_white_space(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &arg(args, 0), "editingAuthorWhiteSpace")?;
+    let frame = (n.doc & FRAME_DOC != 0).then_some((n.doc & !FRAME_DOC) as u64);
+    Ok(Value::Bool((n.doc == 0 || frame.is_some()) && with_env(|env| env.author_white_space(frame, n.node))))
+}
+
+/// Notify the editing host after execCommand actually changed its contents.
+fn editing_input(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let target = this_node(realm, &arg(args, 0), "editingInput")?;
+    let input_type = arg_str(realm, args, 1)?;
+    let data = match arg(args, 2).v() {
+        V::String(s) => Some(s.to_rust_string()),
+        _ => None,
+    };
+    let detail = crate::EventDetail::Input { data, input_type, is_composing: false, target_range: None };
+    let init = crate::EventInit { bubbles: true, cancelable: false, detail: Some(detail) };
+    crate::events::dispatch(realm, TargetKey::Node(target), "input", init, true);
+    Ok(Value::Undefined)
+}
+
 fn set_factory(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let name = arg_str(realm, args, 0)?;
     let f = arg(args, 1);
@@ -441,7 +500,7 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
         }
     }
     let is_proxy = |realm: &Realm, id| matches!(realm.obj(id).kind, rabbithole_js::ObjectKind::Proxy { .. });
-    let g = realm.global();
+    let g = args.get(1).and_then(Value::as_object).unwrap_or_else(|| realm.global());
     if is_proxy(realm, g) {
         return Ok(Value::Bool(false));
     }
@@ -504,8 +563,26 @@ fn webidl_enumerable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
     Ok(Value::Bool(true))
 }
 
+/// Return the module factory to its JS caller. Its invocation and every
+/// live binding across that call are traced by the ordinary VM frames.
+fn lazy_initializer(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(V::String(name)) = args.first().map(Value::v) else {
+        return realm.type_error("Expected a built-in API name");
+    };
+    let (src, file) = match name.to_rust_string().as_str() {
+        "idb" => (include_str!("js/idb.js"), "rabbithole:idb.js"),
+        "webgl" => (include_str!("js/webgl.js"), "rabbithole:webgl.js"),
+        "webaudio" => (include_str!("js/webaudio.js"), "rabbithole:webaudio.js"),
+        "webrtc" => (include_str!("js/webrtc.js"), "rabbithole:webrtc.js"),
+        _ => return realm.type_error("Unknown built-in API"),
+    };
+    realm.eval_builtin(src, file)
+}
+
 pub(crate) fn install(realm: &mut Realm) {
     let o = realm.new_object();
+    realm.define_method(o, "lazyInitializer", 1, lazy_initializer);
+    realm.mark_gc_safe(o, "lazyInitializer");
     realm.define_method(o, "webidlEnumerable", 1, webidl_enumerable);
     realm.define_method(o, "inflate", 2, native_inflate);
     realm.define_method(o, "deflate", 2, native_deflate);
@@ -543,6 +620,15 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "cssomSpecifiedValue", 2, crate::cssom::cssom_specified_value);
     realm.define_method(o, "editingColor", 1, crate::cssom::editing_color);
     realm.define_method(o, "canvasColor", 1, crate::cssom::canvas_color);
+    realm.define_method(o, "editingStoreClipboard", 2, editing_store_clipboard);
+    realm.define_method(o, "editingClipboardEvent", 5, editing_clipboard_event);
+    realm.mark_gc_safe(o, "editingClipboardEvent");
+    realm.define_method(o, "editingPlaintext", 1, editing_plaintext);
+    realm.mark_gc_safe(o, "editingPlaintext");
+    realm.define_method(o, "editingAuthorWhiteSpace", 1, editing_author_white_space);
+    realm.mark_gc_safe(o, "editingAuthorWhiteSpace");
+    realm.define_method(o, "editingInput", 3, editing_input);
+    realm.mark_gc_safe(o, "editingInput");
     realm.define_method(o, "editingImpl", 1, editing_impl);
     realm.define_method(o, "computedValue", 2, crate::cssom::computed_value_native);
     realm.define_method(o, "exSize", 1, crate::cssom::ex_size_native);

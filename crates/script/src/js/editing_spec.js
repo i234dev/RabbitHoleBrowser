@@ -2498,6 +2498,10 @@ function reorderModifiableDescendants(node, command, newValue) {
         return;
     }
 
+    liftFormattingElement(candidate, node);
+}
+
+function liftFormattingElement(candidate, node) {
     // "While candidate has children, insert the first child of candidate into
     // candidate's parent immediately before candidate, preserving ranges."
     while (candidate.hasChildNodes()) {
@@ -3004,6 +3008,15 @@ function moveCaretOutOfLinkEdge() {
     var carried = inside.filter(function(pair, i) {
         return pair[0] != "createlink" && pair[1] !== atLink[i][1];
     });
+    // When all of a link has the same formatting, put the existing
+    // formatting element around the link and the new caret. This lets
+    // typing keep its style without extending the hyperlink.
+    while (link.childNodes.length == 1 && isHtmlElement(link.firstChild,
+        ["b", "i", "u", "s", "strike", "strong", "em", "sub", "sup"])
+        && link.firstChild.attributes.length == 0 && isInlineNode(link.firstChild)
+        && isEditable(link.firstChild)) {
+        liftFormattingElement(link.firstChild, link);
+    }
     var parent = link.parentNode, index = getNodeIndex(link) + (atEnd ? 1 : 0);
     getSelection().collapse(parent, index);
     range.setStart(parent, index);
@@ -3144,7 +3157,8 @@ function forcedElementName(command, newValue) {
             return "i";
         }
         if (command == "strikethrough" && newValue == "line-through") {
-            return "s";
+            // Rebuilding decorations while joining content preserves semantic markup.
+            return currentCommand == "strikethrough" ? "strike" : "s";
         }
         if (command == "underline" && newValue == "underline") {
             return "u";
@@ -3288,7 +3302,7 @@ function forceValue(node, command, newValue) {
         // new parent be the result of calling createElement("s") on the
         // ownerDocument of node."
         if (command == "strikethrough" && newValue == "line-through") {
-            newParent = node.ownerDocument.createElement("s");
+            newParent = node.ownerDocument.createElement(forcedElementName(command, newValue));
         }
 
         // "If command is "underline" and new value is "underline", let new
@@ -7404,8 +7418,11 @@ commands["delete"] = {
 //@{
 // "A formattable block name is "address", "dd", "div", "dt", "h1", "h2", "h3",
 // "h4", "h5", "h6", "p", or "pre"."
-var formattableBlockNames = ["address", "dd", "div", "dt", "h1", "h2", "h3",
-    "h4", "h5", "h6", "p", "pre"];
+// RabbitHole: formatBlock also recognizes semantic paragraph containers
+// used by HTML editors. This list is specific to formatBlock.
+var formattableBlockNames = ["address", "article", "aside", "blockquote", "dd",
+    "div", "dt", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+    "header", "hgroup", "main", "nav", "p", "pre", "section"];
 
 commands.formatblock = {
     preservesOverrides: true,
@@ -7438,7 +7455,7 @@ commands.formatblock = {
             return isEditableOrInlineIsland(node)
                 && (isNonListSingleLineContainer(node)
                 || isAllowedChild(node, "p")
-                || isHtmlElement(node, ["dd", "dt"]))
+                || isHtmlElement(node, formattableBlockNames))
                 && !getDescendants(node).some(isProhibitedParagraphChild);
         });
 
@@ -7472,7 +7489,7 @@ commands.formatblock = {
 
             // "If the first member of node list is a single-line
             // container:"
-            if (isSingleLineContainer(nodeList[0])) {
+            if (isSingleLineContainer(nodeList[0]) || isHtmlElement(nodeList[0], formattableBlockNames)) {
                 // "Let sublist be the children of the first member of node
                 // list."
                 sublist = [].slice.call(nodeList[0].childNodes);
@@ -7518,7 +7535,7 @@ commands.formatblock = {
                 // append it to sublist."
                 while (nodeList.length
                 && nodeList[0] == sublist[sublist.length - 1].nextSibling
-                && !isSingleLineContainer(nodeList[0])
+                && !isSingleLineContainer(nodeList[0]) && !isHtmlElement(nodeList[0], formattableBlockNames)
                 && !isHtmlElement(sublist[sublist.length - 1], "BR")) {
                     sublist.push(nodeList.shift());
                 }
@@ -8177,6 +8194,20 @@ commands.inserthtml = {
         // "Fix disallowed ancestors of each member of descendants."
         for (var i = 0; i < descendants.length; i++) {
             fixDisallowedAncestors(descendants[i]);
+        }
+
+        // Continue typing in the last visible text run of an inserted
+        // inline format after repairing its ancestors.
+        if (isHtmlElement(lastChild, formattingElementNames) && !isHtmlElement(lastChild, "a")) {
+            var end = lastChild;
+            while (isHtmlElement(end, formattingElementNames) && !isHtmlElement(end, "a") && end.lastChild) {
+                end = end.lastChild;
+            }
+            if (end.nodeType == Node.TEXT_NODE && end.length && isEditable(end) && isVisible(end)) {
+                getActiveRange().setStart(end, end.length);
+                getActiveRange().collapse(true);
+                getSelection().collapse(end, end.length);
+            }
         }
 
         // "Return true."
@@ -9564,6 +9595,7 @@ function run(doc, state, callback, command) {
 
 return {
     run: run,
+    formattableBlockNames: formattableBlockNames,
     moveCaret: moveCaretKeepingOverrides,
     // The typing style (state and value overrides) at the caret, as
     // [command, boolean or string] pairs, and setting it.

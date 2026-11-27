@@ -136,6 +136,9 @@ pub struct ChildFrame {
     pub source: FrameSource,
     pub page: Option<Box<Page>>,
     pending: Option<Receiver<Result<Loaded, String>>>,
+    /// A location navigation superseded the child resource that delayed
+    /// the owner. Its replacement has its own navigation lifecycle.
+    replaced_load: bool,
     /// When the pending load started (young loads are polled more often).
     pending_since: Option<std::time::Instant>,
     /// The page shows a previous source; the current one must be loaded.
@@ -476,6 +479,16 @@ impl Page {
         }
     }
 
+    /// Lazy embeds do not delay the owner's load event. Eager children
+    /// finish after their own load-delaying descendants.
+    pub(crate) fn has_load_delaying_frame(&self) -> bool {
+        self.frames.children.iter().any(|c| {
+            !c.replaced_load && !self.doc.attr(c.node, "loading").is_some_and(|v| v.eq_ignore_ascii_case("lazy"))
+                && (c.pending.is_some() || c.page.as_ref().is_some_and(|p|
+                    p.script.waiting_for_frame_load || p.script.frame_initial_load_pending || p.script.frame_load_pending))
+        })
+    }
+
     /// Any frame load still in progress (this page or below)?
     pub fn frames_loading(&self) -> bool {
         self.frames.children.iter().any(|c| c.pending.is_some() || c.page.as_ref().map(|p| p.script.frame_load_pending || p.script.frame_initial_load_pending || p.frames_loading()).unwrap_or(false))
@@ -552,6 +565,7 @@ impl Engine {
             let sources = nodes.iter().map(|&n| frame_source(page, n)).collect();
             page.frames.scan = Some(FrameScan { doc: page.doc.weak_identity(), epoch, base: page.base_url.clone(), scripting: self.scripting, nodes, sources });
         }
+        let repeated_srcdoc = std::mem::take(&mut page.doc.pending_srcdoc);
         let scan = page.frames.scan.as_ref().expect("frame scan");
         if scan.nodes.is_empty() && page.frames.children.is_empty() {
             return;
@@ -571,12 +585,13 @@ impl Engine {
         let mut changed = before != page.frames.children.len();
         for (&node, source) in iframes.iter().zip(sources) {
             match page.frames.children.iter_mut().find(|c| c.node == node) {
-                Some(c) if c.source == source => {}
+                Some(c) if c.source == source && !repeated_srcdoc.contains(&node) => {}
                 Some(c) => {
                     // `src` changed: navigate the frame. The current
                     // document stays until the new one arrives (scripts
                     // keep seeing the initial about:blank document).
                     c.source = source;
+                    c.replaced_load = false;
                     c.pending = None;
                     c.stale = true;
                     if let Some(p) = c.page.as_mut() {
@@ -586,7 +601,7 @@ impl Engine {
                     changed = true;
                 }
                 None => {
-                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, pending_since: None, stale: false, size: attr_size(&page.doc, node), dirty: true, unpainted: false, image: None, canvas: None });
+                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, replaced_load: false, pending_since: None, stale: false, size: attr_size(&page.doc, node), dirty: true, unpainted: false, image: None, canvas: None });
                     changed = true;
                 }
             }
@@ -742,7 +757,7 @@ impl Engine {
         }
         // Source Blank: a `src` attribute shows up as a change on the next
         // sync and starts the real load.
-        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, pending_since: None, stale: false, size, dirty: true, unpainted: false, image: None, canvas: None });
+        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, replaced_load: false, pending_since: None, stale: false, size, dirty: true, unpainted: false, image: None, canvas: None });
         Some(id)
     }
 
@@ -1083,8 +1098,8 @@ impl Engine {
         if let Some(nav) = nav {
             self.navigate_frame_node(page, node, nav.request.url);
         }
-        // The iframe's `load` event in the parent.
-        if page.script.host.is_some() {
+        // Nested eager frames may still delay this document's window load.
+        if page.script.host.is_some() && !page.frames.children[i].page.as_ref().is_some_and(|p| p.script.waiting_for_frame_load) {
             let o = self.dispatch_event(page, node, "load", EventInit::simple(false, false));
             out.merge(o);
         }
@@ -1111,6 +1126,17 @@ impl Engine {
         if let Some(nav) = o.navigation {
             self.navigate_frame_node(page, node, nav.request.url);
         }
+    }
+
+    /// Cancel the old receiver before a ready response can install its
+    /// document. Starting a network navigation here cannot run child JS.
+    pub(crate) fn replace_pending_frame_navigation(&self, page: &mut Page, id: u64, url: &Url) -> bool {
+        if url.scheme == "javascript" { return false; }
+        let Some(c) = page.frames.children.iter_mut().find(|c| c.id == id && c.pending.is_some()) else { return false };
+        c.replaced_load = true;
+        let node = c.node;
+        self.navigate_frame_node(page, node, url.clone());
+        true
     }
 
     /// Load `url` in the frame hosted by `node`.
@@ -1312,12 +1338,16 @@ impl Engine {
     /// child's focused element (or body), and printable keys / Backspace
     /// edit a focused text control there. None when no frame has focus.
     pub fn frame_key_event(&self, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers) -> Option<ScriptOutcome> {
+        self.frame_key_event_with_paste(page, key, code, pressed, m, None)
+    }
+
+    pub fn frame_key_event_with_paste(&self, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers, paste: Option<&str>) -> Option<ScriptOutcome> {
         let node = page.state.focused?;
         let i = Self::child_index(page, node)?;
         page.frames.children[i].page.as_ref()?;
-        let mut o = self.with_child(page, i, |child| match self.frame_key_event(child, key, code, pressed, m) {
+        let mut o = self.with_child(page, i, |child| match self.frame_key_event_with_paste(child, key, code, pressed, m, paste) {
             Some(o) => o,
-            None => key_into_page(self, child, key, code, pressed, m),
+            None => key_into_page(self, child, key, code, pressed, m, paste),
         })?;
         if o.relayout {
             page.frames.children[i].dirty = true;
@@ -1350,13 +1380,13 @@ impl Engine {
     /// (frames, WebDriver-style test automation): `keydown`/`keyup` to the
     /// focused element and simple text editing.
     pub fn key_input(&self, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers) -> ScriptOutcome {
-        key_into_page(self, page, key, code, pressed, m)
+        key_into_page(self, page, key, code, pressed, m, None)
     }
 }
 
 /// Keyboard input for a page without the embedder's editing machinery
 /// (a frame): key events to the focused element, simple text editing.
-fn key_into_page(engine: &Engine, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers) -> ScriptOutcome {
+fn key_into_page(engine: &Engine, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers, paste: Option<&str>) -> ScriptOutcome {
     let target = page.state.focused.or_else(|| page.doc.body());
     let Some(target) = target else { return ScriptOutcome::default() };
     let init = crate::scripting::key_init(key, code, m.ctrl, m.shift, m.alt, m.meta, false);
@@ -1364,7 +1394,7 @@ fn key_into_page(engine: &Engine, page: &mut Page, key: &str, code: &str, presse
     if !pressed || out.default_prevented || out.navigation.is_some() {
         return out;
     }
-    if let Some(edit) = engine.editable_key_default(page, key, m) {
+    if let Some(edit) = engine.clipboard_key_default(page, key, m, paste).or_else(|| engine.editable_key_default(page, key, m)) {
         out.merge(edit);
         return out;
     }

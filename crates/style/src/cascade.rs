@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
+#[path = "editing_origin.rs"]
+pub(crate) mod editing_origin;
+
 fn ua_sheet() -> &'static Stylesheet {
     static UA: OnceLock<Stylesheet> = OnceLock::new();
     UA.get_or_init(|| parse_stylesheet(crate::ua::UA_CSS))

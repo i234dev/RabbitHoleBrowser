@@ -219,7 +219,12 @@
       return item ? item.getType('text/plain').then((b) => b.text()) : Promise.resolve('');
     }
     write(items) { clipboardItems = Array.from(items); document.dispatchEvent(new Event('clipboardchange')); return Promise.resolve(); }
-    writeText(text) { clipboardItems = [new ClipboardItem({ 'text/plain': String(text) })]; return Promise.resolve(); }
+    writeText(text) {
+      const value = String(text);
+      clipboardItems = [new ClipboardItem({ 'text/plain': value })];
+      N.editingStoreClipboard(value, null);
+      return Promise.resolve();
+    }
   }
   tag(Clipboard, 'Clipboard');
   define('Clipboard', Clipboard);
@@ -601,6 +606,7 @@
     constructor() { ILLEGAL(); }
     get length() { return this[S].items.length; }
     add(data, type) {
+      if (this[S].readonly) return null;
       if (data instanceof g.File) { const it = make(DataTransferItem, { kind: 'file', type: data.type, data }); this[S].items.push(it); return it; }
       type = String(type).toLowerCase();
       if (this[S].items.some((i) => i.kind === 'string' && i.type === type)) throw domError("Failed to execute 'add' on 'DataTransferItemList': An item already exists for type '" + type + "'.", 'NotSupportedError');
@@ -608,8 +614,8 @@
       this[S].items.push(it);
       return it;
     }
-    remove(i) { this[S].items.splice(i, 1); }
-    clear() { this[S].items.length = 0; }
+    remove(i) { if (!this[S].readonly) this[S].items.splice(i, 1); }
+    clear() { if (!this[S].readonly) this[S].items.length = 0; }
     [Symbol.iterator]() { return this[S].items[Symbol.iterator](); }
   }
   tag(DataTransferItemList, 'DataTransferItemList');
@@ -630,9 +636,18 @@
     get files() { return g.__rhFileList ? g.__rhFileList(this[S].items.filter((i) => i.kind === 'file').map((i) => i.getAsFile())) : []; }
     setDragImage() {}
     getData(format) { format = String(format).toLowerCase(); if (format === 'text') format = 'text/plain'; if (format === 'url') format = 'text/uri-list'; const it = this[S].items.find((i) => i.kind === 'string' && i.type === format); return it ? it[S].data : ''; }
-    setData(format, data) { format = String(format).toLowerCase(); if (format === 'text') format = 'text/plain'; if (format === 'url') format = 'text/uri-list'; const i = this[S].items.findIndex((x) => x.kind === 'string' && x.type === format); if (i >= 0) this[S].items.splice(i, 1); this[S].list.add(String(data), format); }
-    clearData(format) { if (format === undefined) { for (let i = this[S].items.length - 1; i >= 0; i--) if (this[S].items[i].kind === 'string') this[S].items.splice(i, 1); } else { format = String(format).toLowerCase(); const i = this[S].items.findIndex((x) => x.kind === 'string' && x.type === format); if (i >= 0) this[S].items.splice(i, 1); } }
+    setData(format, data) { if (this[S].list[S].readonly) return; format = String(format).toLowerCase(); if (format === 'text') format = 'text/plain'; if (format === 'url') format = 'text/uri-list'; const i = this[S].items.findIndex((x) => x.kind === 'string' && x.type === format); if (i >= 0) this[S].items.splice(i, 1); this[S].list.add(String(data), format); }
+    clearData(format) { if (this[S].list[S].readonly) return; if (format === undefined) { for (let i = this[S].items.length - 1; i >= 0; i--) if (this[S].items[i].kind === 'string') this[S].items.splice(i, 1); } else { format = String(format).toLowerCase(); const i = this[S].items.findIndex((x) => x.kind === 'string' && x.type === format); if (i >= 0) this[S].items.splice(i, 1); } }
   }
+  N.editingTransfer = (text, html) => {
+    const result = new DataTransfer();
+    if (text !== null) {
+      result.setData('text/plain', text);
+      if (html !== null) result.setData('text/html', html);
+      result[S].list[S].readonly = true;
+    }
+    return result;
+  };
   tag(DataTransfer, 'DataTransfer');
   define('DataTransfer', DataTransfer);
   define('DataTransferItem', DataTransferItem);

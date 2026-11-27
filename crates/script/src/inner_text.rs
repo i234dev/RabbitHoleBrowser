@@ -63,28 +63,46 @@ fn svg_unrendered(tag: &str) -> bool {
     )
 }
 
-struct Collector {
-    doc: u32,
+#[derive(Clone, Copy)]
+enum TextDocument<'a> {
+    Live(u32),
+    Parsed(&'a Document, &'a rabbithole_style::StyledTree),
+}
+
+impl TextDocument<'_> {
+    fn read<R>(self, f: impl FnOnce(&Document) -> R) -> R {
+        match self {
+            Self::Live(id) => with_doc(id, |doc| f(doc)),
+            Self::Parsed(doc, _) => f(doc),
+        }
+    }
+}
+
+struct Collector<'a> {
+    doc: TextDocument<'a>,
     items: Vec<Item>,
     /// The text before the element ends inside a word (capitalization).
     before_in_word: bool,
 }
 
-impl Collector {
+impl Collector<'_> {
     fn style(&self, id: NodeId) -> Option<Rc<ComputedStyle>> {
-        style_of(self.doc, id)
+        match self.doc {
+            TextDocument::Live(doc) => style_of(doc, id),
+            TextDocument::Parsed(_, styles) => styles.get(id).cloned(),
+        }
     }
 
     fn info(&self, id: NodeId) -> Node {
-        with_doc(self.doc, |doc| node_info(doc, id))
+        self.doc.read(|doc| node_info(doc, id))
     }
 
     fn children(&self, id: NodeId) -> Vec<NodeId> {
-        with_doc(self.doc, |doc| doc.children(id).collect())
+        self.doc.read(|doc| doc.children(id).collect())
     }
 
     fn parent(&self, id: NodeId) -> Option<NodeId> {
-        with_doc(self.doc, |doc| doc.parent(id))
+        self.doc.read(|doc| doc.parent(id))
     }
 
     fn tag(&self, id: NodeId) -> Option<(String, Namespace)> {
@@ -186,7 +204,7 @@ impl Collector {
                 // their first <summary>) are not rendered.
                 let skip_children = html && replaced(&tag);
                 if !skip_children {
-                    if html && tag == "details" && with_doc(self.doc, |doc| doc.attr(id, "open").is_none()) {
+                    if html && tag == "details" && self.doc.read(|doc| doc.attr(id, "open").is_none()) {
                         let summary = self.children(id).into_iter().find(|&c| self.tag(c).is_some_and(|(t, n)| t == "summary" && n == Namespace::Html));
                         if let Some(s) = summary {
                             self.collect(s, in_select, in_option);
@@ -221,12 +239,12 @@ impl Collector {
 
     /// Is `cell` the last table-cell box of its row?
     fn last_cell(&self, cell: NodeId) -> bool {
-        let mut next = with_doc(self.doc, |doc| doc.next_sibling(cell));
+        let mut next = self.doc.read(|doc| doc.next_sibling(cell));
         while let Some(n) = next {
             if self.display(n) == Some(Display::TableCell) {
                 return false;
             }
-            next = with_doc(self.doc, |doc| doc.next_sibling(n));
+            next = self.doc.read(|doc| doc.next_sibling(n));
         }
         true
     }
@@ -265,7 +283,7 @@ impl Collector {
 
     fn lang(&self, mut id: NodeId) -> String {
         loop {
-            if let Some(l) = with_doc(self.doc, |doc| doc.attr(id, "lang").map(|s| s.to_ascii_lowercase())) {
+            if let Some(l) = self.doc.read(|doc| doc.attr(id, "lang").map(|s| s.to_ascii_lowercase())) {
                 return l;
             }
             match self.parent(id) {
@@ -307,9 +325,9 @@ impl Collector {
 fn preceding_in_word(c: &Collector, n: NodeId) -> bool {
     let mut cur = n;
     loop {
-        match with_doc(c.doc, |d| d.prev_sibling(cur)) {
+        match c.doc.read(|d| d.prev_sibling(cur)) {
             Some(p) => {
-                let (text, element) = with_doc(c.doc, |d| match &d.node(p).data {
+                let (text, element) = c.doc.read(|d| match &d.node(p).data {
                     NodeData::Text(t) => (Some(t.clone()), false),
                     NodeData::Element(_) => (Some(d.text_content(p)), true),
                     _ => (None, false),
@@ -322,7 +340,7 @@ fn preceding_in_word(c: &Collector, n: NodeId) -> bool {
                 }
                 cur = p;
             }
-            None => match with_doc(c.doc, |d| d.parent(cur)) {
+            None => match c.doc.read(|d| d.parent(cur)) {
                 Some(par) if matches!(c.display(par), Some(Display::Inline)) => cur = par,
                 _ => return false,
             },
@@ -528,12 +546,29 @@ fn being_rendered(n: NodeRef) -> bool {
     true
 }
 
+/// Render HTML to text in a separate tree. A plaintext editor must preserve
+/// visible line breaks without attaching pasted nodes to the active document.
+pub(crate) fn text_from_html(html: &str, width: f32, height: f32) -> String {
+    let doc = rabbithole_html::parse_with_scripting(html, true);
+    let Some(body) = doc.body() else { return String::new() };
+    let env = rabbithole_css::MediaEnv { width, height, screen: true, scripting: true };
+    let sheets: Vec<_> = doc.descendants(Document::ROOT)
+        .filter(|&id| doc.element(id).is_some_and(|e| e.ns == Namespace::Html && e.tag == "style"))
+        .filter(|&id| doc.attr(id, "type").is_none_or(|t| t.is_empty() || t.eq_ignore_ascii_case("text/css")) &&
+            doc.attr(id, "media").is_none_or(|m| m.is_empty() || rabbithole_css::parse_media_query(m).evaluate(&env)))
+        .map(|id| rabbithole_css::parse_stylesheet(&doc.text_content(id))).collect();
+    let styles = rabbithole_style::style_tree(&doc, &sheets, &env);
+    let mut c = Collector { doc: TextDocument::Parsed(&doc, &styles), items: Vec::new(), before_in_word: false };
+    c.children_of(body, false, false);
+    assemble(c.items)
+}
+
 /// The innerText getter steps.
 pub(crate) fn inner_text(n: NodeRef) -> String {
     if !being_rendered(n) {
         return with_doc(n.doc, |doc| doc.text_content(n.node));
     }
-    let mut c = Collector { doc: n.doc, items: Vec::new(), before_in_word: false };
+    let mut c = Collector { doc: TextDocument::Live(n.doc), items: Vec::new(), before_in_word: false };
     c.before_in_word = preceding_in_word(&c, n.node);
     let (in_select, in_option) = with_doc(n.doc, |doc| {
         let mut sel = false;
@@ -562,6 +597,11 @@ mod tests {
 
     fn chars(s: &str, collapsible: bool) -> Vec<Item> {
         s.chars().map(|c| Item::Char(c, collapsible && c == ' ')).collect()
+    }
+
+    #[test]
+    fn inert_html_collects_only_rendered_text() {
+        assert_eq!(text_from_html("<style>em{display:none}</style><div>a  b<em>x</em></div><pre>c\nd</pre><script>x</script>", 800., 600.), "a b\nc\nd");
     }
 
     #[test]
