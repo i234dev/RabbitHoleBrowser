@@ -1501,7 +1501,7 @@ mod scrollbar_tests {
             tab.frame = Some(Frame {
                 seq: 1, canvas: Arc::new(Pixels::default()), origin: (0.0, 0.0),
                 scale: zoom, scroll: (0.0, 0.0), content: (3000.0, 5000.0),
-                background: Color::WHITE, scroll_containers: Arc::new(Vec::new()),
+                background: Color::WHITE, video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
             });
             app.tabs.push(tab);
         }

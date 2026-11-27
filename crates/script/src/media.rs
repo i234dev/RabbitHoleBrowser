@@ -116,17 +116,18 @@ fn media_frame(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let Some(n) = node_of(realm, &arg(args, 1)) else { return Ok(Value::Bool(false)) };
     let f = with_media(|m| {
         let last = m.frame_serials.get(&id).copied().unwrap_or(0);
-        let f = m.players.get(&id).and_then(|p| p.video_frame(last));
+        let p = m.players.get(&id)?;
+        let f = p.video_frame(last);
         if let Some((serial, _)) = &f {
             m.frame_serials.insert(id, *serial);
         }
-        f
+        f.map(|(_, frame)| (p.video_reader(), frame))
     });
-    let Some((_, frame)) = f else { return Ok(Value::Bool(false)) };
+    let Some((reader, frame)) = f else { return Ok(Value::Bool(false)) };
     if n.doc == 0 {
         let rgba = frame.rgba.as_ref().clone();
         with_env(|env| {
-            env.set_video_image(n.node, frame.width, frame.height, rgba);
+            env.set_video_image(n.node, frame.width, frame.height, rgba, reader);
             if let Some(timing) = frame.timing {
                 env.trace_video_frame(n.node, timing);
             }

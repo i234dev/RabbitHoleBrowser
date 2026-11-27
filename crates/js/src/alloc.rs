@@ -82,17 +82,13 @@ fn is_ours(p: *mut u8) -> bool {
     }
 }
 
-fn register(base: usize) -> bool {
-    // Keep the table at most half full.
-    if NCHUNKS.load(Ordering::Relaxed) >= (1 << TABLE_BITS) / 2 {
-        return false;
-    }
+fn register(base: usize) {
     let mut i = slot_of(base);
     loop {
         match CHUNKS[i].compare_exchange(0, base, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => {
                 NCHUNKS.fetch_add(1, Ordering::Relaxed);
-                return true;
+                return;
             }
             Err(_) => i = (i + 1) & ((1 << TABLE_BITS) - 1),
         }
@@ -105,6 +101,44 @@ struct Pool {
     lists: [usize; NCLASS],
     carve: usize,
     carve_end: usize,
+    #[cfg(windows)]
+    arena: Arena,
+}
+
+/// Windows' system heap overallocates to satisfy a 256 KiB alignment.
+/// Reserve addresses in groups, then commit only each registered chunk.
+/// The pool lock serializes reservation, commitment and registration.
+#[cfg(windows)]
+struct Arena {
+    next: usize,
+    end: usize,
+}
+
+#[cfg(windows)]
+impl Arena {
+    unsafe fn chunk(&mut self) -> *mut u8 {
+        use std::ffi::c_void;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn VirtualAlloc(address: *mut c_void, size: usize, flags: u32, protection: u32) -> *mut c_void;
+        }
+        const MEM_COMMIT: u32 = 0x1000;
+        const MEM_RESERVE: u32 = 0x2000;
+        const PAGE_NOACCESS: u32 = 1;
+        const PAGE_READWRITE: u32 = 4;
+        const ARENA_BYTES: usize = 32 * CHUNK;
+        if self.next == self.end {
+            let base = VirtualAlloc(null_mut(), ARENA_BYTES, MEM_RESERVE, PAGE_NOACCESS) as usize;
+            if base == 0 { return null_mut(); }
+            // VirtualAlloc guarantees allocation-granularity alignment
+            // (normally 64 KiB), which can be smaller than our chunk.
+            self.next = (base + CHUNK - 1) & !(CHUNK - 1);
+            self.end = (base + ARENA_BYTES) & !(CHUNK - 1);
+        }
+        let p = VirtualAlloc(self.next as *mut c_void, CHUNK, MEM_COMMIT, PAGE_READWRITE);
+        if !p.is_null() { self.next += CHUNK; }
+        p.cast()
+    }
 }
 
 /// A spin lock that never allocates. `std::sync::Mutex` must not be used
@@ -137,7 +171,11 @@ impl PoolLock {
 
 static POOL: PoolLock = PoolLock {
     locked: std::sync::atomic::AtomicBool::new(false),
-    pool: UnsafeCell::new(Pool { lists: [0; NCLASS], carve: 0, carve_end: 0 }),
+    pool: UnsafeCell::new(Pool {
+        lists: [0; NCLASS], carve: 0, carve_end: 0,
+        #[cfg(windows)]
+        arena: Arena { next: 0, end: 0 },
+    }),
 };
 
 struct Cache {
@@ -226,13 +264,15 @@ unsafe fn refill_locked(pool: &mut Pool, c: &mut Cache, k: usize, size: usize) -
     let mut n = 0usize;
     for _ in 0..want {
         if pool.carve + size > pool.carve_end {
+            // Registration is insert-only, serialized here by the pool lock.
+            // Check capacity before committing memory that cannot be released.
+            if NCHUNKS.load(Ordering::Relaxed) >= (1 << TABLE_BITS) / 2 { break; }
+            #[cfg(windows)]
+            let chunk = pool.arena.chunk();
+            #[cfg(not(windows))]
             let chunk = System.alloc(Layout::from_size_align_unchecked(CHUNK, CHUNK));
-            if chunk.is_null() || !register(chunk as usize) {
-                if !chunk.is_null() {
-                    System.dealloc(chunk, Layout::from_size_align_unchecked(CHUNK, CHUNK));
-                }
-                break;
-            }
+            if chunk.is_null() { break; }
+            register(chunk as usize);
             pool.carve = chunk as usize;
             pool.carve_end = chunk as usize + CHUNK;
         }

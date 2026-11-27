@@ -1,7 +1,7 @@
 //! Media playback for RabbitHole: audio output (one mixer thread per
 //! process over WASAPI / PulseAudio / ALSA / CoreAudio or a null sink),
 //! container demuxing, audio decoding (Symphonia for MP3 / AAC / FLAC /
-//! Vorbis / PCM / ALAC, `opus-decoder` for Opus) and the playback pipeline
+//! Vorbis / PCM / ALAC, libopus for Opus) and the playback pipeline
 //! behind `HTMLMediaElement` and Media Source Extensions.
 
 pub mod audio;

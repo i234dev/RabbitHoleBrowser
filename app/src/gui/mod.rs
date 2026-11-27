@@ -608,6 +608,7 @@ impl App {
         let active = idx == self.active;
         let tab = &mut self.tabs[idx];
         tab.content = Some(handle);
+        if let Some(frame) = &mut tab.frame { frame.video = None; }
         tab.view = Some(view);
         tab.loading = None;
         tab.load_phase = None;
@@ -1228,6 +1229,7 @@ impl App {
         {
             let tab = &mut self.tabs[idx];
             tab.reset_page_state();
+            if let Some(frame) = &mut tab.frame { frame.video = None; }
             // A consent click that navigated (consent pages) keeps its
             // indicator on the page it led to.
             if tab.consent.as_ref().map(|(_, t)| t.elapsed() > Duration::from_secs(4)).unwrap_or(false) {
@@ -1500,6 +1502,7 @@ impl App {
         }
         let active = idx == self.active;
         match msg {
+            FromContent::VideoReady => { if active { self.request_redraw(); } }
             FromContent::Frame(frame) => {
                 self.tabs[idx].frame = Some(frame);
                 if active {

@@ -573,7 +573,7 @@ External crates are limited to platform plumbing and codecs, not browser
 functionality: `winit` (windows/input), `softbuffer` (presenting pixels),
 `rustls`/`ring` (TLS), `image`, `zune-jpeg`, `rav1d`/`avif-parse` and
 `moxcms` (image decoding and color management), `rustybuzz` and `fontdue`
-(OpenType shaping and glyph outlines), `symphonia`, `opus-decoder` and
+(OpenType shaping and glyph outlines), `symphonia`, `opus` (bundled libopus, built with CMake) and
 `rusty_vp9` (audio/video decoding), compression crates (`flate2`,
 `brotli-decompressor`, `ruzstd`), and `serde_json` for MCP messages.
 

@@ -13,6 +13,7 @@ pub(crate) fn clock() -> Option<Instant> {
 struct Picture {
     id: u64,
     painted: AtomicBool,
+    composited: AtomicBool,
 }
 
 impl Drop for Picture {
@@ -36,7 +37,7 @@ impl FrameTiming {
         start.map(|start| Self {
             conversion: start.elapsed(),
             start,
-            picture: Arc::new(Picture { id: NEXT.fetch_add(1, Ordering::Relaxed), painted: AtomicBool::new(false) }),
+            picture: Arc::new(Picture { id: NEXT.fetch_add(1, Ordering::Relaxed), painted: AtomicBool::new(false), composited: AtomicBool::new(false) }),
         })
     }
 
@@ -47,6 +48,16 @@ impl FrameTiming {
     pub(crate) fn decoded(&mut self, start: Instant, codec: &str, pts: f64, cost: Duration) {
         self.start = start;
         eprintln!("rh_video decode {} {codec} {pts:.6} {:.3} {:.3}", self.picture.id, ms(cost), ms(self.conversion));
+    }
+
+    /// First successful submission of this picture to the window surface.
+    pub fn composited(&self, path: &'static str) {
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        if !self.picture.composited.swap(true, Ordering::Relaxed) {
+            self.picture.painted.store(true, Ordering::Relaxed);
+            let epoch = EPOCH.get_or_init(Instant::now);
+            eprintln!("rh_video composite {} {:.3} {:.3} {path}", self.picture.id, ms(self.start.elapsed()), ms(epoch.elapsed()));
+        }
     }
 
     /// The content raster containing this update is ready for the embedder.

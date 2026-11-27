@@ -473,10 +473,12 @@ impl HostEnv for EngineEnv<'_> {
         crate::present::canvas_surface_shown(self.page, node, surface, width, height);
         true
     }
-    fn set_video_image(&mut self, node: NodeId, width: u32, height: u32, rgba: Vec<u8>) {
+    fn set_video_image(&mut self, node: NodeId, width: u32, height: u32, rgba: Vec<u8>, reader: rabbithole_script::VideoReader) {
+        self.page.track_video(node, reader);
         self.engine.replace_video_frame(self.page, node, width, height, rgba);
     }
     fn trace_video_frame(&mut self, node: NodeId, timing: rabbithole_script::FrameTiming) {
+        self.page.trace_video_source(node, &timing);
         self.page.incr.video_timings.retain(|(n, _)| *n != node);
         self.page.incr.video_timings.push((node, timing));
     }
@@ -1019,6 +1021,7 @@ impl Engine {
             img_out = self.fire_image_events(page);
         }
         if self.advance_animations(page) {
+            page.invalidate_video_foreground();
             images_changed = true;
         }
         // CSS transitions / animations, then their events (before

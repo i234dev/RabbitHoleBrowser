@@ -15,7 +15,7 @@ use rabbithole_engine::scripting::{input_event_init, input_init, key_init, mouse
 use rabbithole_engine::consent::{ConsentDriver, ConsentReport, ConsentStep};
 use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page, ScriptOutcome, SelectStart};
 
-use super::frame::{Frame, Pixels};
+use super::frame::{Frame, Pixels, VideoLayer};
 use super::{now_ms, ContentConfig, ContentSettings, DomRow, FromContent, Inbox, KeyInput, NodeDetails, PageState, Sink, ToContent, ViewSize};
 use crate::gui::chrome::{ACCENT, FIND_CURRENT, FIND_MATCH, SELECTION, TEXT};
 use crate::gui::input::TextBuffer;
@@ -1223,12 +1223,22 @@ impl Worker {
         self.paint_overlays(&mut frame_canvas, origin);
         self.cache = Some(PaintCache { fixed_scroll, canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
 
-        let page = self.page.as_ref().expect("page");
+        let page = self.page.as_mut().expect("page");
         let mut containers = Vec::new();
         collect_scroll_containers(&page.layout.root, false, &mut containers);
         let covered = Rect::new(origin.0, origin.1, w as f32 / s, h as f32 / s);
         self.frame_seq += 1;
+        let viewport = Rect::new(sx, sy, vp.width, vp.height);
+        let video = if self.inspect.is_none() && self.edit.is_none() && self.find.query.is_empty() && self.focus.is_none() {
+            page.video_plane(viewport, s).map(|(plane, reader, size)| {
+                let sink = self.sink.clone();
+                let (tab, epoch) = (self.tab_id, self.epoch);
+                VideoLayer::new(plane, reader, size, move || sink(tab, epoch, FromContent::VideoReady))
+            })
+        } else { None };
         let frame = Frame {
+            raster_timing: page.raster_video_timing(viewport),
+            video,
             seq: self.frame_seq,
             canvas: Arc::new(Pixels::from_canvas(&mut frame_canvas)),
             origin,

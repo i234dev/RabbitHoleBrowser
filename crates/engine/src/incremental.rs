@@ -364,6 +364,7 @@ impl Engine {
         let side = side_sheet_signature(&page.doc);
         let side_changed = std::mem::replace(&mut page.incr.side_sheets, side) != side;
         let touched = log.overflow || log.entries.iter().any(|m| touches_sheets(&page.doc, m));
+        let mut sheets_changed = false;
         if side_changed || touched {
             // Only the sheets outside the tree changed (adopted sheets,
             // shadow roots attached): collect again without hashing every
@@ -371,6 +372,7 @@ impl Engine {
             // matches no real one, so the next tree change collects again.
             let sig = if touched { stylesheet_signature(&page.doc) } else { page.sheet_signature ^ 1 };
             if sig != page.sheet_signature {
+                sheets_changed = true;
                 page.sheet_signature = sig;
                 page.sheets = self.loader.collect_stylesheets(&page.doc, &page.base_url);
                 page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
@@ -398,7 +400,13 @@ impl Engine {
                 return;
             }
         }
-        let _font_units = rabbithole_style::cascade::font_unit_scope(Some(page.fonts.clone()), &page.sheets, &env, &opts);
+        // The styled tree already holds the active font faces unless the
+        // sheets or media environment changed since its last update.
+        let _font_units = if fresh || sheets_changed {
+            rabbithole_style::cascade::font_unit_scope(Some(page.fonts.clone()), &page.sheets, &env, &opts)
+        } else {
+            rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces))
+        };
         let incr = &mut page.incr;
         let mut anim_changes: Vec<crate::animations::Change> = Vec::new();
         let mut anim_full = fresh;

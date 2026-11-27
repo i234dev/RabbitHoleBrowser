@@ -787,7 +787,7 @@ impl Canvas {
                 && inside
                 && whole(d.x) && whole(d.y) && whole(d.w) && whole(d.h) && sx <= 4.0 && sy <= 4.0
             {
-                crate::video_scale::paint(self, image, src, d, b);
+                crate::video_scale::paint(self, image.pixels(), image.width as usize, image.height as usize, src, d, b);
                 return;
             }
             for py in b.y0..b.y1 {
@@ -879,6 +879,39 @@ impl Canvas {
                 self.data[idx] = blend_image(self.data[idx], [r, g, bl], alpha);
             }
         }
+    }
+
+    /// Composite an opaque decoder buffer in device coordinates. Unsupported
+    /// geometry retains the image already rasterized in the content frame.
+    pub fn composite_video(&mut self, pixels: &[u8], size: (u32, u32), src: Rect, dest: Rect, clip: Rect, pixelated: bool) -> bool {
+        let (w, h) = (size.0 as usize, size.1 as usize);
+        if w.checked_mul(h).and_then(|n| n.checked_mul(4)) != Some(pixels.len())
+            || src.is_empty() || dest.is_empty() || src.x < 0.0 || src.y < 0.0
+            || src.right() > w as f32 || src.bottom() > h as f32
+            || ![dest.x, dest.y, dest.w, dest.h, clip.x, clip.y, clip.w, clip.h].iter().all(|n| n.is_finite() && n.fract() == 0.0)
+            || self.current_mask().is_some() || !is_identity(&self.transform()) {
+            return false;
+        }
+        let b = self.bounds(&dest.intersect(&clip));
+        if b.is_empty() { return false; }
+        let (sx, sy) = (src.w / dest.w, src.h / dest.h);
+        let exact = sx == 1.0 && sy == 1.0 && src.x.fract() == 0.0 && src.y.fract() == 0.0;
+        if pixelated || exact {
+            for y in b.y0..b.y1 {
+                let v = (src.y + (y as f32 + 0.5 - dest.y) * sy).floor().clamp(0.0, (h - 1) as f32) as usize;
+                for x in b.x0..b.x1 {
+                    let u = (src.x + (x as f32 + 0.5 - dest.x) * sx).floor().clamp(0.0, (w - 1) as f32) as usize;
+                    let i = (v * w + u) * 4;
+                    self.data[y as usize * self.width as usize + x as usize] =
+                        u32::from_be_bytes([0, pixels[i], pixels[i + 1], pixels[i + 2]]);
+                }
+            }
+        } else if sx <= 4.0 && sy <= 4.0 {
+            crate::video_scale::paint(self, pixels, w, h, src, dest, b);
+        } else {
+            return false;
+        }
+        true
     }
 
     /// Tile an image across `area` starting at `origin` with the tile size

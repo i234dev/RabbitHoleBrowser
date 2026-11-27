@@ -1,5 +1,5 @@
 //! Audio decoders: Symphonia's (MP3, AAC-LC, FLAC, Vorbis, ALAC, PCM,
-//! ADPCM) and `opus-decoder` for Opus, behind one interface producing
+//! ADPCM) and libopus for Opus, behind one interface producing
 //! interleaved `f32` PCM.
 
 use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
@@ -40,9 +40,13 @@ enum Inner {
     Opus(OpusState),
 }
 
+enum OpusDecoder {
+    Single(opus::Decoder),
+    Multi(opus::MSDecoder),
+}
+
 struct OpusState {
-    single: Option<opus_decoder::OpusDecoder>,
-    multi: Option<opus_decoder::OpusMultistreamDecoder>,
+    decoder: OpusDecoder,
     channels: usize,
     pre_skip: usize,
     /// Pre-skip samples still to drop (start of stream).
@@ -102,7 +106,13 @@ impl Decoder {
 
     /// Decode one packet (one container frame / block).
     pub fn decode(&mut self, data: &[u8]) -> Result<Pcm, String> {
-        match &mut self.inner {
+        self.decode_at(data, 0.0).map(|(_, pcm)| pcm)
+    }
+
+    /// Return the timestamp of the first retained sample. Packet PTS refers
+    /// to the encoded block, including any priming discarded by the decoder.
+    pub(crate) fn decode_at(&mut self, data: &[u8], pts: f64) -> Result<(f64, Pcm), String> {
+        let pcm = match &mut self.inner {
             Inner::Symphonia(dec) => {
                 let packet = Packet::new(0, Timestamp::new(0), SymDuration::new(0), data.to_vec());
                 match dec.decode(&packet) {
@@ -119,10 +129,11 @@ impl Decoder {
                     Err(e) => Err(e.to_string()),
                 }
             }
-            Inner::Opus(o) => o.decode(data),
+            Inner::Opus(o) => return o.decode(data, pts),
             #[cfg(windows)]
             Inner::MfAac(d) => d.decode(data).map(|(rate, channels, samples)| Pcm { rate, channels, samples }),
-        }
+        }?;
+        Ok((pts, pcm))
     }
 
     /// Forget decoder state (after a seek). `at_start`: the next packet is
@@ -133,12 +144,10 @@ impl Decoder {
             #[cfg(windows)]
             Inner::MfAac(d) => d.reset(),
             Inner::Opus(o) => {
-                if let Some(d) = o.single.as_mut() {
-                    d.reset();
-                }
-                if let Some(d) = o.multi.as_mut() {
-                    d.reset();
-                }
+                let _ = match &mut o.decoder {
+                    OpusDecoder::Single(d) => d.reset_state(),
+                    OpusDecoder::Multi(d) => d.reset_state(),
+                };
                 o.skip_left = if at_start { o.pre_skip } else { 0 };
             }
         }
@@ -152,7 +161,7 @@ impl OpusState {
         let mut pre_skip = 0usize;
         let mut gain = 1.0f32;
         let mut family = 0u8;
-        let mut streams = 1usize;
+        let mut streams = 1u8;
         let mut coupled = if channels > 1 { 1 } else { 0 };
         let mut mapping: Vec<u8> = (0..channels as u8).collect();
         if head.len() >= 19 && &head[..8] == b"OpusHead" {
@@ -162,46 +171,49 @@ impl OpusState {
             gain = 10f32.powf(g as f32 / (20.0 * 256.0));
             family = head[18];
             if family != 0 && head.len() >= 21 + channels {
-                streams = head[19] as usize;
-                coupled = head[20] as usize;
+                streams = head[19];
+                coupled = head[20];
                 mapping = head[21..21 + channels].to_vec();
             } else {
                 coupled = if channels > 1 { 1 } else { 0 };
                 mapping = (0..channels as u8).collect();
             }
         }
-        let (single, multi) = if family == 0 && channels <= 2 {
-            (Some(opus_decoder::OpusDecoder::new(48_000, channels).map_err(|e| format!("opus: {e:?}"))?), None)
+        let decoder = if family == 0 && channels <= 2 {
+            let channels = if channels == 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
+            opus::Decoder::new(48_000, channels).map(OpusDecoder::Single)
         } else {
-            (None, Some(opus_decoder::OpusMultistreamDecoder::new(48_000, channels, streams, coupled, &mapping).map_err(|e| format!("opus: {e:?}"))?))
-        };
-        Ok(OpusState { single, multi, channels, pre_skip, skip_left: pre_skip, gain, buf: vec![0.0; 5760 * channels] })
+            if mapping.len() != channels || channels > 255 {
+                return Err("invalid Opus channel mapping".into());
+            }
+            opus::MSDecoder::new(48_000, streams, coupled, &mapping).map(OpusDecoder::Multi)
+        }.map_err(|e| format!("opus: {e}"))?;
+        Ok(OpusState { decoder, channels, pre_skip, skip_left: pre_skip, gain, buf: vec![0.0; 5760 * channels] })
     }
 
-    fn decode(&mut self, data: &[u8]) -> Result<Pcm, String> {
+    fn decode(&mut self, data: &[u8], pts: f64) -> Result<(f64, Pcm), String> {
         if self.buf.len() < 5760 * self.channels {
             self.buf.resize(5760 * self.channels, 0.0);
         }
-        let n = if let Some(d) = self.single.as_mut() {
-            d.decode_float(data, &mut self.buf, false)
-        } else if let Some(d) = self.multi.as_mut() {
-            d.decode_float(data, &mut self.buf, false)
-        } else {
-            return Err("opus: no decoder".into());
+        // libopus uses an empty packet to request packet-loss concealment.
+        // A demuxed empty block has no audio to conceal.
+        if data.is_empty() {
+            return Err("opus: empty packet".into());
         }
-        .map_err(|e| format!("opus: {e:?}"))?;
-        let mut pcm = Pcm { rate: 48_000, channels: self.channels, samples: self.buf[..n * self.channels].to_vec() };
+        let n = match &mut self.decoder {
+            OpusDecoder::Single(d) => d.decode_float(data, &mut self.buf, false),
+            OpusDecoder::Multi(d) => d.decode_float(data, &mut self.buf, false),
+        }.map_err(|e| format!("opus: {e}"))?;
+        let skipped = self.skip_left.min(n);
+        self.skip_left -= skipped;
+        let samples = self.buf[skipped * self.channels..n * self.channels].to_vec();
+        let mut pcm = Pcm { rate: 48_000, channels: self.channels, samples };
         if (self.gain - 1.0).abs() > 1e-6 {
             for s in &mut pcm.samples {
                 *s *= self.gain;
             }
         }
-        if self.skip_left > 0 {
-            let k = self.skip_left.min(n);
-            pcm.skip_frames(k);
-            self.skip_left -= k;
-        }
-        Ok(pcm)
+        Ok((pts + skipped as f64 / 48_000.0, pcm))
     }
 }
 
@@ -225,12 +237,35 @@ mod tests {
         // A CELT-only 20 ms fullband stereo frame with no payload (TOC
         // config 31, stereo, one frame): decodes to silence.
         let toc = (31u8 << 3) | 0b100;
-        let pcm = d.decode(&[toc]).unwrap();
+        let (first_pts, pcm) = d.decode_at(&[toc], 0.0).unwrap();
+        assert_eq!(first_pts, 312.0 / 48_000.0);
         assert_eq!(pcm.rate, 48_000);
         assert_eq!(pcm.channels, 2);
         // 960 frames minus the 312 pre-skip.
         assert_eq!(pcm.frames(), 960 - 312);
-        let pcm = d.decode(&[toc]).unwrap();
+        let end = first_pts + pcm.frames() as f64 / 48_000.0;
+        let (second_pts, pcm) = d.decode_at(&[toc], 0.020).unwrap();
+        assert!((end - second_pts).abs() < 1e-12);
         assert_eq!(pcm.frames(), 960);
+        d.reset(false);
+        assert_eq!(d.decode(&[toc]).unwrap().frames(), 960);
+        d.reset(true);
+        assert_eq!(d.decode(&[toc]).unwrap().frames(), 960 - 312);
+    }
+
+    #[test]
+    fn opus_channel_mapping_and_reset() {
+        // One coupled stream mapped to stereo plus a silent third channel.
+        let mut head = b"OpusHead".to_vec();
+        head.extend_from_slice(&[1, 3, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 1, 1, 1, 0, 1, 255]);
+        let mut params = AudioCodecParameters::new();
+        params.for_codec(CODEC_ID_OPUS).with_extra_data(head.into_boxed_slice());
+        let mut decoder = Decoder::new(&params).unwrap();
+        for at_start in [true, false] {
+            decoder.reset(at_start);
+            let pcm = decoder.decode(&[0xfc]).unwrap();
+            assert_eq!((pcm.rate, pcm.channels, pcm.frames()), (48_000, 3, 960));
+            assert!(pcm.samples.chunks_exact(3).all(|frame| frame[2] == 0.0));
+        }
     }
 }

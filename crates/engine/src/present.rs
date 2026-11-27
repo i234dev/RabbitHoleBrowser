@@ -109,6 +109,72 @@ impl Page {
     }
 }
 
+pub(crate) struct VideoSource {
+    node: NodeId,
+    reader: rabbithole_script::VideoReader,
+    geometry: Option<VideoGeometry>,
+    timing: Option<rabbithole_script::FrameTiming>,
+}
+
+struct VideoGeometry {
+    generation: u64,
+    viewport: rabbithole_gfx::Rect,
+    scale: f32,
+    size: (u32, u32),
+    plane: Option<rabbithole_layout::paint::VideoPlane>,
+}
+
+impl Page {
+    pub(crate) fn trace_video_source(&mut self, node: NodeId, timing: &rabbithole_script::FrameTiming) {
+        if let Some(source) = self.video_source.as_mut().filter(|s| s.node == node) {
+            source.timing = Some(timing.clone());
+        }
+    }
+
+    /// Timing of the content raster when media tracing is enabled.
+    pub fn raster_video_timing(&self, viewport: rabbithole_gfx::Rect) -> Option<rabbithole_script::FrameTiming> {
+        let source = self.video_source.as_ref()?;
+        let timing = source.timing.as_ref()?;
+        let rect = self.rect_of(source.node)?;
+        (!rect.intersect(&viewport).is_empty()).then(|| timing.clone())
+    }
+
+    pub(crate) fn invalidate_video_foreground(&mut self) {
+        if let Some(source) = self.video_source.as_mut() { source.geometry = None; }
+    }
+
+    pub(crate) fn track_video(&mut self, node: NodeId, reader: rabbithole_script::VideoReader) {
+        if let Some(source) = self.video_source.as_mut().filter(|s| s.node == node) {
+            source.reader = reader;
+        } else {
+            self.video_source = Some(Box::new(VideoSource { node, reader, geometry: None, timing: None }));
+        }
+    }
+
+    /// Cache both eligible and obstructed geometry across picture-only
+    /// replacements. Layout, display list rebuilds, scrolling and zoom
+    /// invalidate it. Inner scroll translations rebuild the display list.
+    pub fn video_plane(&mut self, viewport: rabbithole_gfx::Rect, scale: f32) -> Option<(rabbithole_layout::paint::VideoPlane, rabbithole_script::VideoReader, (u32, u32))> {
+        let source = self.video_source.as_mut()?;
+        static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DISABLED.get_or_init(|| std::env::var("RH_MEDIA_DISABLE_VIDEO_LAYER").as_deref() == Ok("1")) { return None; }
+        let image = self.images.get(&source.node)?;
+        if !image.video_frame { return None; }
+        let size = (image.width, image.height);
+        let generation = self.incr.generation();
+        if let Some(g) = &source.geometry {
+            if g.generation == generation && g.viewport == viewport && g.scale == scale && g.size == size {
+                return Some((g.plane.clone()?, source.reader.clone(), size));
+            }
+        }
+        let plane = if self.images.values().filter(|i| i.video_frame).take(2).count() == 1 {
+            rabbithole_layout::paint::video_plane(&self.display_list, image, viewport, scale, &self.fonts)
+        } else { None };
+        source.geometry = Some(VideoGeometry { generation, viewport, scale, size, plane: plane.clone() });
+        Some((plane?, source.reader.clone(), size))
+    }
+}
+
 impl Engine {
     pub(crate) fn replace_video_frame(&self, page: &mut Page, node: NodeId, width: u32, height: u32, rgba: Vec<u8>) {
         let mut image = Image::new(width, height, rgba);
@@ -164,6 +230,7 @@ impl Engine {
             swaps.push((p.placeholder, img));
         }
         page.incr.pending_svgs = keep;
+        if !swaps.is_empty() { page.invalidate_video_foreground(); }
         self.install_rasters(page, &swaps);
     }
 
@@ -185,6 +252,7 @@ impl Engine {
             }
             swaps.push((old, img));
         }
+        if !swaps.is_empty() { page.invalidate_video_foreground(); }
         self.install_rasters(page, &swaps);
     }
 

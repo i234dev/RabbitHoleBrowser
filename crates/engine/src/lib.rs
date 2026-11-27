@@ -659,7 +659,7 @@ impl Loader {
     /// their media query), fetching as needed, up to a fixed depth.
     fn resolve_imports(&self, sheet: &mut Stylesheet, sheet_url: &Url, depth: usize) {
         if depth >= MAX_IMPORT_DEPTH || !self.load_stylesheets {
-            sheet.rules.retain(|r| !matches!(r, Rule::Import { .. }));
+            Arc::make_mut(&mut sheet.rules).retain(|r| !matches!(r, Rule::Import { .. }));
             return;
         }
         let imports: Vec<(usize, Url, MediaQuery)> = sheet
@@ -686,7 +686,7 @@ impl Loader {
 
         let mut new_rules = Vec::with_capacity(sheet.rules.len());
         let mut import_iter = imports.into_iter().peekable();
-        for (i, rule) in std::mem::take(&mut sheet.rules).into_iter().enumerate() {
+        for (i, rule) in Arc::unwrap_or_clone(std::mem::take(&mut sheet.rules)).into_iter().enumerate() {
             if let Some((idx, url, query)) = import_iter.peek().cloned() {
                 if idx == i {
                     import_iter.next();
@@ -700,7 +700,7 @@ impl Loader {
                         // not rewritten, so remember the base per rule group.
                         new_rules.push(Rule::Media {
                             query,
-                            rules: rebase_rules(imported.rules, &url.to_string()),
+                            rules: rebase_rules(Arc::unwrap_or_clone(imported.rules), &url.to_string()),
                         });
                     }
                     continue;
@@ -710,7 +710,7 @@ impl Loader {
                 new_rules.push(rule);
             }
         }
-        sheet.rules = new_rules;
+        sheet.rules = Arc::new(new_rules);
     }
 
     // ------------------------------------------------------------ images
@@ -1190,6 +1190,7 @@ pub struct Page {
     pub layout: LayoutTree,
     pub display_list: DisplayList,
     pub images: HashMap<NodeId, Arc<Image>>,
+    video_source: Option<Box<present::VideoSource>>,
     pub background_images: HashMap<String, Arc<Image>>,
     pub scripts: Vec<ScriptSource>,
     pub viewport: Viewport,
@@ -1469,6 +1470,7 @@ impl Engine {
             layout: empty_layout(),
             display_list: DisplayList::default(),
             images: loaded.images.into_iter().collect(),
+            video_source: None,
             background_images: loaded.background_images.into_iter().collect(),
             scripts: loaded.scripts,
             viewport,
@@ -2238,7 +2240,7 @@ fn discovery_sheets(doc: &Document, sheets: &[Stylesheet], prune: bool) -> Optio
         out
     }
     let vars = sheets.iter().any(|s| uses_var(&s.rules, &keep)) || (0..doc.node_count()).any(|n| doc.attr(n, "style").is_some_and(|v| v.contains("var(")));
-    Some(sheets.iter().map(|s| Stylesheet { rules: filter(&s.rules, vars, &keep), base_url: s.base_url.clone(), shadow_scopes: s.shadow_scopes.clone(), source_id: s.source_id }).collect())
+    Some(sheets.iter().map(|s| Stylesheet { rules: Arc::new(filter(&s.rules, vars, &keep)), base_url: s.base_url.clone(), shadow_scopes: s.shadow_scopes.clone(), source_id: s.source_id }).collect())
 }
 
 fn wrap_media(sheet: Stylesheet, media: Option<&str>) -> Stylesheet {
@@ -2246,7 +2248,7 @@ fn wrap_media(sheet: Stylesheet, media: Option<&str>) -> Stylesheet {
         None => sheet,
         Some(m) => Stylesheet {
             base_url: sheet.base_url.clone(),
-            rules: vec![Rule::Media { query: parse_media_query(m), rules: sheet.rules }],
+            rules: Arc::new(vec![Rule::Media { query: parse_media_query(m), rules: Arc::unwrap_or_clone(sheet.rules) }]),
             shadow_scopes: sheet.shadow_scopes,
             source_id: sheet.source_id,
         },

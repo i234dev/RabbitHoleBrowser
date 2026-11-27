@@ -22,17 +22,19 @@ impl App {
         if self.surface.as_mut().map(|s| s.resize(nw, nh).is_err()).unwrap_or(true) {
             return;
         }
-        self.paint(w, h);
+        let picture = self.paint(w, h);
         let Some(surface) = self.surface.as_mut() else { return };
         if let Ok(mut buffer) = surface.buffer_mut() {
             let n = buffer.len().min(self.canvas.data.len());
             buffer[..n].copy_from_slice(&self.canvas.data[..n]);
-            let _ = buffer.present();
+            if buffer.present().is_ok() {
+                if let Some((timing, path)) = picture { timing.composited(path); }
+            }
         }
     }
 
     /// Paint the whole window into `self.canvas` (`w × h` device px).
-    pub(crate) fn paint(&mut self, w: u32, h: u32) {
+    pub(crate) fn paint(&mut self, w: u32, h: u32) -> Option<(rabbithole_engine::script::FrameTiming, &'static str)> {
         if self.canvas.width != w || self.canvas.height != h {
             self.canvas.resize(w, h);
         }
@@ -42,10 +44,10 @@ impl App {
         let area = chrome.page_area();
         self.canvas.clear(pal().chrome_bg);
         let scale = self.page_scale();
-        match self.tabs.get(self.active).and_then(|t| t.frame.as_ref().map(|f| (f, t.scroll))) {
+        let picture = match self.tabs.get(self.active).and_then(|t| t.frame.as_ref().map(|f| (f, t.scroll))) {
             Some((frame, scroll)) => frame.present(&mut self.canvas, area, scroll, scale),
-            None => self.canvas.fill_rect(area, pal().page_bg),
-        }
+            None => { self.canvas.fill_rect(area, pal().page_bg); None }
+        };
         if let Some(tab) = self.tabs.get(self.active) {
             let vp = self.css_viewport();
             draw_scrollbar(&mut self.canvas, area, chrome.s, tab.content_size().1, vp.height, tab.scroll.1);
@@ -61,6 +63,7 @@ impl App {
         self.draw_status_bar();
         self.draw_stats(area);
         self.draw_popups();
+        picture
     }
 
     /// "This page is not responding" with Wait / Stop buttons.
