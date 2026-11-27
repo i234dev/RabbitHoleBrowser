@@ -119,6 +119,10 @@ pub(crate) struct Layouter<'a> {
     pub(crate) column_retry: bool,
     /// Pooled working storage of flex layout.
     pub(crate) flex_scratch: Vec<crate::flex::FlexScratch>,
+    /// Some absolutely positioned box has an inline element as its
+    /// containing block (computed on first use; see
+    /// [`Self::needs_inline_cbs`]).
+    inline_cbs_needed: Option<bool>,
     /// Whether `FontContext::select_family` & co. are implemented.
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
@@ -420,6 +424,7 @@ impl<'a> Layouter<'a> {
             column_rooms: Vec::new(),
             column_retry: false,
             flex_scratch: Vec::new(),
+            inline_cbs_needed: None,
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
             last_font: None,
@@ -1936,12 +1941,50 @@ impl<'a> Layouter<'a> {
             b.no_abs_below = true;
             return false;
         }
-        let inline_cbs = inline_containing_blocks(b);
+        // Walking every line of the containing block for positioned inline
+        // fragments is only needed when an inline element is the
+        // containing block of some absolutely positioned box.
+        let inline_cbs = if self.needs_inline_cbs() { inline_containing_blocks(b) } else { HashMap::new() };
         let mut ancestors = HashMap::new();
         let mode = if through_positioned { PositionedDescendants::AbsoluteAndFixed } else { PositionedDescendants::Absolute };
         let found = self.layout_abs_descendants_with(b, cb, &inline_cbs, &mut ancestors, mode);
         b.no_abs_below = !found;
         found
+    }
+
+    /// Does any absolutely positioned or fixed box (element, `::before`,
+    /// `::after`) have an inline element as its nearest positioned
+    /// ancestor? Computed once per layouter from the styles.
+    fn needs_inline_cbs(&mut self) -> bool {
+        if let Some(v) = self.inline_cbs_needed {
+            return v;
+        }
+        let ctx = self.ctx;
+        let styles = &ctx.styles;
+        let doc = ctx.doc;
+        let out_of_flow = |s: &rabbithole_style::ComputedStyle| matches!(s.position, Position::Absolute | Position::Fixed);
+        let inline_cb = |mut cur: Option<rabbithole_dom::NodeId>| {
+            while let Some(n) = cur {
+                if let Some(s) = styles.get(n) {
+                    if contains_absolutes(s) {
+                        return s.display == rabbithole_style::Display::Inline;
+                    }
+                }
+                cur = doc.flat_parent(n);
+            }
+            false
+        };
+        let mut needed = false;
+        for n in 0..styles.styles.len() {
+            let own = styles.styles[n].as_deref().is_some_and(out_of_flow);
+            let pseudo = [&styles.before, &styles.after].iter().any(|v| v.get(n).and_then(|s| s.as_deref()).is_some_and(out_of_flow));
+            if (own && inline_cb(doc.flat_parent(n))) || (pseudo && inline_cb(Some(n))) {
+                needed = true;
+                break;
+            }
+        }
+        self.inline_cbs_needed = Some(needed);
+        needed
     }
 
     fn positioned_ancestor(&self, node: rabbithole_dom::NodeId, cache: &mut HashMap<rabbithole_dom::NodeId, Option<rabbithole_dom::NodeId>>) -> Option<rabbithole_dom::NodeId> {

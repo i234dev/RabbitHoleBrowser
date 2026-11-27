@@ -331,7 +331,7 @@ impl InvalidationMap {
         let nested_same: Vec<Compound> = if !nests {
             Vec::new()
         } else if constrains {
-            let plain = Compound { namespace: c.namespace.clone(), tag: c.tag.clone(), id: c.id.clone(), classes: c.classes.clone(), attrs: c.attrs.clone(), pseudos: Vec::new(), pseudo_element: None };
+            let plain = Compound { namespace: c.namespace.clone(), tag: c.tag.clone(), id: c.id.clone(), classes: c.classes.clone(), attrs: c.attrs.clone(), pseudos: Vec::new(), pseudo_element: None, class_mask: Default::default() };
             same.iter().cloned().chain(std::iter::once(plain)).collect()
         } else {
             same.to_vec()
