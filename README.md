@@ -32,6 +32,14 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.2.51 rejects most selectors during style recalculation with a
+per-element filter of class names (about 8 % less CPU on a news front page),
+skips the search for inline containing blocks when no positioned element
+needs one, and composites video with fractional bounds on the content raster
+grid instead of repainting the page (22 fps between 10 and 40 s of a public
+video page on Windows). Speedometer 3.1 1.001×, WPT unchanged
+([record](docs/benchmarks/performance-2026-11-27-v0.2.51.md)).
+
 Version 0.2.50 presents video frames independently of the page's script
 thread (a public video page on Windows went from 5–10 to 20–22 fps), plays
 Opus audio in real time, and builds font glyph geometry only for glyphs that
