@@ -10,6 +10,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+type ScriptCacheEntry = (Rc<str>, bool, Rc<str>, Rc<FunctionCode>);
+thread_local! {
+    static SCRIPT_CODE: RefCell<(VecDeque<ScriptCacheEntry>, usize)> = RefCell::new((VecDeque::new(), 0));
+}
+
 pub const SYM_ITERATOR: SymbolId = SymbolId(0);
 pub const SYM_ASYNC_ITERATOR: SymbolId = SymbolId(1);
 pub const SYM_HAS_INSTANCE: SymbolId = SymbolId(2);
@@ -1357,10 +1362,6 @@ impl Realm {
     fn compile_script_cached(&mut self, source: &str, filename: &str, completion: bool) -> Result<Rc<FunctionCode>, Value> {
         const MIN_LEN: usize = 4 * 1024;
         const MAX_TOTAL: usize = 32 * 1024 * 1024;
-        type Entry = (Rc<str>, bool, Rc<str>, Rc<FunctionCode>);
-        thread_local! {
-            static SCRIPT_CODE: RefCell<(VecDeque<Entry>, usize)> = RefCell::new((VecDeque::new(), 0));
-        }
         if source.len() < MIN_LEN || source.len() > MAX_TOTAL / 4 {
             return self.compile_with(source, filename, false, completion);
         }
@@ -1377,7 +1378,11 @@ impl Realm {
         SCRIPT_CODE.with(|c| {
             let mut c = c.borrow_mut();
             c.1 += source.len();
-            c.0.push_back((Rc::from(filename), completion, Rc::from(source), t.clone()));
+            // The compiler retains escaped source for toString. Reuse it as
+            // the cache key when its bytes are identical to the caller's input.
+            let key = t.source.as_ref().filter(|text| text.as_ref() == source)
+                .cloned().unwrap_or_else(|| Rc::from(source));
+            c.0.push_back((Rc::from(filename), completion, key, t.clone()));
             while c.1 > MAX_TOTAL {
                 let Some(old) = c.0.pop_front() else { break };
                 c.1 -= old.2.len();
@@ -1661,6 +1666,27 @@ fn log_engine_error(stack: &str, snippet: Option<&str>) {
         if g.1 < 5000 {
             g.1 += 1;
             let _ = writeln!(g.0, "{}\n  code: {}\n", stack, snippet.unwrap_or("-"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod script_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_shares_unescaped_code_source() {
+        let mut realm = Realm::new();
+        for (suffix, shared) in [('x', true), (crate::value::SOURCE_ESC, false)] {
+            let source = format!("/* {}{} */ 1", "x".repeat(4096), suffix);
+            let code = realm.compile_script_cached(&source, "cache-key.js", false).unwrap();
+            SCRIPT_CODE.with(|cache| {
+                let cache = cache.borrow();
+                let (_, _, key, entry) = cache.0.back().unwrap();
+                assert_eq!(key.as_ref(), source);
+                assert!(Rc::ptr_eq(entry, &code));
+                assert_eq!(Rc::ptr_eq(key, code.source.as_ref().unwrap()), shared);
+            });
         }
     }
 }
