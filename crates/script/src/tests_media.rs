@@ -103,7 +103,10 @@ fn autoplay_policy_seek_and_errors() {
     let out = pump(&mut env, &mut host, 30.0, "a.readyState === 4 && log.some(e => e.startsWith('error'))", "log.join(',') + '|' + [a.networkState, a.readyState, a.currentSrc.slice(0, 5)].join(':') + '|' + ct");
     assert!(out.contains("rejected:NotAllowedError"), "{out}");
     assert!(out.contains("error:4:3"), "{out}");
-    assert!(out.ends_with("|probably,probably,,probably,,true,true,false'"), "{out}");
+    // H.264 plays where a decoder is available and advertised (Media
+    // Foundation on Windows).
+    let avc = if rabbithole_media::video::can_decode_video("h264") && rabbithole_media::video::advertise_codec("h264") { "probably" } else { "" };
+    assert!(out.ends_with(&format!("|probably,probably,{avc},probably,,true,true,false'")), "{out}");
     run(&mut env, &mut host, "a.currentTime = 1.5; log.push('set:' + a.seeking + ':' + a.readyState);");
     let out = pump(&mut env, &mut host, 30.0, "log.some(e => e.startsWith('seeked'))", "log.join(',') + '|' + a.currentTime.toFixed(1) + '|' + a.seeking + ':' + a.readyState");
     assert!(out.contains("set:true:4,seeking,seeked:1.5"), "{out}");
