@@ -129,6 +129,40 @@ pub struct Compound {
     /// Set while parsing when a pseudo-element follows this compound; moved
     /// to `Selector::pseudo_element` (only valid on the last compound).
     pub pseudo_element: Option<PseudoElement>,
+    /// Filter bits of `classes` (computed on first use; ignored by `==`).
+    pub class_mask: ClassMask,
+}
+
+/// Lazily computed class filter bits of a compound (see
+/// [`Compound::class_bits`]). Equal for any two compounds.
+#[derive(Debug, Default)]
+pub struct ClassMask(std::sync::atomic::AtomicU64);
+
+impl Clone for ClassMask {
+    fn clone(&self) -> Self {
+        ClassMask(std::sync::atomic::AtomicU64::new(self.0.load(std::sync::atomic::Ordering::Relaxed)))
+    }
+}
+
+impl PartialEq for ClassMask {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Compound {
+    /// The filter bits of the compound's classes (bit 63 marks them
+    /// computed).
+    fn class_bits(&self) -> u64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let m = self.class_mask.0.load(Relaxed);
+        if m != 0 {
+            return m;
+        }
+        let m = self.classes.iter().fold(CLASS_BITS_DONE, |bits, c| bits | class_bit(c));
+        self.class_mask.0.store(m, Relaxed);
+        m
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1364,7 +1398,8 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
         };
         // Most checks fail: the filter rejects them without scanning.
         let filter = matcher.class_filter(node, class_attr);
-        if c.classes.iter().any(|cls| filter & class_bit(cls) == 0) {
+        let want = c.class_bits();
+        if filter & want != want {
             return false;
         }
         for cls in &c.classes {
