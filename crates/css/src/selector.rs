@@ -1088,16 +1088,51 @@ pub struct SelectorMatcher<'d, 's> {
     nth: RefCell<HashMap<(usize, NodeId), Arc<NthRanks>>>,
     cached_nodes: Cell<usize>,
     selectors: PhantomData<Cell<&'s Selector>>,
+    /// Per element: a 63-bit filter of its class names (bit 63 = computed).
+    /// The document cannot change while the matcher borrows it.
+    class_bits: RefCell<Vec<u64>>,
+    /// Class checks so far: short-lived matchers (one query) skip the filter.
+    class_checks: Cell<u32>,
     #[cfg(test)]
     rank_builds: Cell<usize>,
 }
+
+/// The filter bit of a class name.
+fn class_bit(name: &str) -> u64 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    1u64 << (h % 63)
+}
+
+const CLASS_BITS_DONE: u64 = 1 << 63;
 
 struct NthRanks { indices: HashMap<NodeId, i32>, count: i32 }
 
 impl<'d, 's> SelectorMatcher<'d, 's> {
     pub fn new(doc: &'d Document, state: &'d MatchState) -> Self {
         Self { doc, state, nth: RefCell::new(HashMap::new()), cached_nodes: Cell::new(0), selectors: PhantomData,
+            class_bits: RefCell::new(Vec::new()), class_checks: Cell::new(0),
             #[cfg(test)] rank_builds: Cell::new(0) }
+    }
+
+    /// The class filter of `node` (whose `class` attribute is `classes`),
+    /// or all bits for the first checks of a matcher.
+    fn class_filter(&self, node: NodeId, classes: &str) -> u64 {
+        let n = self.class_checks.get();
+        if n < 64 {
+            self.class_checks.set(n + 1);
+            return u64::MAX;
+        }
+        let mut v = self.class_bits.borrow_mut();
+        if node >= v.len() {
+            v.resize(self.doc.nodes.len().max(node + 1), 0);
+        }
+        if v[node] & CLASS_BITS_DONE == 0 {
+            v[node] = classes.split_ascii_whitespace().fold(CLASS_BITS_DONE, |bits, c| bits | class_bit(c));
+        }
+        v[node]
     }
 
     pub fn matches(&self, selector: &'s Selector, node: NodeId) -> bool {
@@ -1327,6 +1362,11 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
             Some(v) => v,
             None => return false,
         };
+        // Most checks fail: the filter rejects them without scanning.
+        let filter = matcher.class_filter(node, class_attr);
+        if c.classes.iter().any(|cls| filter & class_bit(cls) == 0) {
+            return false;
+        }
         for cls in &c.classes {
             if !class_attr.split_ascii_whitespace().any(|x| x == cls) {
                 return false;
