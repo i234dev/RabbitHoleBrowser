@@ -119,6 +119,7 @@ pub(crate) struct VideoSource {
 struct VideoGeometry {
     generation: u64,
     viewport: rabbithole_gfx::Rect,
+    canvas_y: f32,
     scale: f32,
     size: (u32, u32),
     plane: Option<rabbithole_layout::paint::VideoPlane>,
@@ -155,6 +156,11 @@ impl Page {
     /// replacements. Layout, display list rebuilds, scrolling and zoom
     /// invalidate it. Inner scroll translations rebuild the display list.
     pub fn video_plane(&mut self, viewport: rabbithole_gfx::Rect, scale: f32) -> Option<(rabbithole_layout::paint::VideoPlane, rabbithole_script::VideoReader, (u32, u32))> {
+        self.video_plane_in_raster(viewport, scale, viewport.y)
+    }
+
+    /// Use the backing canvas origin when an overscanned page is blitted at a rounded offset.
+    pub fn video_plane_in_raster(&mut self, viewport: rabbithole_gfx::Rect, scale: f32, canvas_y: f32) -> Option<(rabbithole_layout::paint::VideoPlane, rabbithole_script::VideoReader, (u32, u32))> {
         let source = self.video_source.as_mut()?;
         static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *DISABLED.get_or_init(|| std::env::var("RH_MEDIA_DISABLE_VIDEO_LAYER").as_deref() == Ok("1")) { return None; }
@@ -163,14 +169,14 @@ impl Page {
         let size = (image.width, image.height);
         let generation = self.incr.generation();
         if let Some(g) = &source.geometry {
-            if g.generation == generation && g.viewport == viewport && g.scale == scale && g.size == size {
+            if g.generation == generation && g.viewport == viewport && g.canvas_y == canvas_y && g.scale == scale && g.size == size {
                 return Some((g.plane.clone()?, source.reader.clone(), size));
             }
         }
         let plane = if self.images.values().filter(|i| i.video_frame).take(2).count() == 1 {
-            rabbithole_layout::paint::video_plane_on_background(&self.display_list, image, viewport, scale, &self.fonts, self.background)
+            rabbithole_layout::paint::video_plane_in_raster(&self.display_list, image, viewport, scale, &self.fonts, self.background, canvas_y)
         } else { None };
-        source.geometry = Some(VideoGeometry { generation, viewport, scale, size, plane: plane.clone() });
+        source.geometry = Some(VideoGeometry { generation, viewport, canvas_y, scale, size, plane: plane.clone() });
         Some((plane?, source.reader.clone(), size))
     }
 }

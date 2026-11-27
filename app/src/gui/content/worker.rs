@@ -1240,7 +1240,7 @@ impl Worker {
         self.frame_seq += 1;
         let viewport = Rect::new(sx, sy, vp.width, vp.height);
         let video = if self.inspect.is_none() && self.edit.is_none() && self.find.query.is_empty() && self.focus.is_none() {
-            page.video_plane(viewport, s).map(|(plane, reader, size)| {
+            page.video_plane_in_raster(viewport, s, origin.1).map(|(plane, reader, size)| {
                 let sink = self.sink.clone();
                 let (tab, epoch) = (self.tab_id, self.epoch);
                 VideoLayer::new(plane, reader, size, move || sink(tab, epoch, FromContent::VideoReady))
