@@ -246,7 +246,7 @@ fn range_delete_contents(realm: &mut Realm, this: Value, _: &[Value]) -> JsResul
     let o = range_data(realm, &this)?;
     let (doc, nodes) = range_nodes(realm, o);
     for n in nodes {
-        node::remove_node(NodeRef { doc, node: n });
+        node::remove_node(realm, NodeRef { doc, node: n });
     }
     Ok(Value::Undefined)
 }

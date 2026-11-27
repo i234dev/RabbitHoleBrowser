@@ -365,6 +365,8 @@ impl ScriptHost {
             mutation_records: HashMap::default(),
             pending_observers: Vec::new(),
             observer_links: None,
+            mutation_job: None,
+            mutation_job_queued: false,
             custom_elements: HashMap::default(),
             ce_constructing: None,
             ce_upgraded: std::collections::HashSet::default(),
@@ -747,14 +749,11 @@ impl ScriptHost {
                 }
                 shadow::flush(realm);
                 realm.run_jobs();
-                if observers::has_pending_mutations() {
-                    observers::deliver_mutations(realm);
-                }
                 if shadow::has_pending_reactions() || shadow::has_pending_slot_checks() {
                     shadow::drain_ce_reactions(realm);
                     shadow::check_slots(realm);
                 }
-                if !realm.has_pending_jobs() && !observers::has_pending_mutations() && !shadow::has_pending_reactions() && !shadow::has_pending_slot_checks() {
+                if !realm.has_pending_jobs() && !shadow::has_pending_reactions() && !shadow::has_pending_slot_checks() {
                     if docparser::finish_snapshot(realm) {
                         // Completion can run pending written scripts and
                         // queue jobs/reactions; drain them in this same
@@ -844,10 +843,6 @@ impl ScriptHost {
                     }
                 }
                 realm.run_jobs();
-                if observers::has_pending_mutations() {
-                    realm.begin_task();
-                    observers::deliver_mutations(realm);
-                }
                 frames::checkpoint();
             }
             // Animation frames (~60 Hz).
@@ -882,10 +877,6 @@ impl ScriptHost {
                 }
                 realm.begin_task();
                 realm.run_jobs();
-                if observers::has_pending_mutations() {
-                    realm.begin_task();
-                    observers::deliver_mutations(realm);
-                }
                 frames::checkpoint();
             }
             // Network connections (WebSocket / EventSource).
@@ -904,10 +895,6 @@ impl ScriptHost {
                 realm.begin_task();
                 shadow::flush(realm);
                 realm.run_jobs();
-                if observers::has_pending_mutations() {
-                    realm.begin_task();
-                    observers::deliver_mutations(realm);
-                }
             }
             ran
         });

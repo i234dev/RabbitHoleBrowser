@@ -141,36 +141,36 @@ fn mo_take_records(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
     Ok(records_to_js(realm, recs))
 }
 
-/// Deliver queued mutation records (called from `ScriptHost::run_jobs`).
-pub(crate) fn deliver_mutations(realm: &mut Realm) {
-    loop {
-        let pending = std::mem::take(&mut state().borrow_mut().pending_observers);
-        if pending.is_empty() { break; }
-        // A callback may disconnect a later observer, then run the GC.
-        let notify: Vec<_> = pending.into_iter().map(|id| realm.root_object(id)).collect();
-        for root in notify {
-            let observer = root.object().expect("rooted observer");
-            let list = {
-                let st = state();
-                let mut st = st.borrow_mut();
-                for reg in st.observers.iter_mut().filter(|r| r.observer == observer) {
-                    reg.transient_targets.clear();
-                }
-                st.mutation_records.remove(&observer).unwrap_or_default()
-            };
-            if list.is_empty() { continue; }
-            let cb = get_hidden(realm, observer, "__callback");
-            if !realm.is_callable(&cb) {
-                continue;
+/// Deliver the snapshot for one DOM mutation notification microtask.
+/// Mutations made during delivery queue a new job in normal FIFO order.
+pub(crate) fn notify_mutations(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+    let pending = {
+        let st = state();
+        let mut st = st.borrow_mut();
+        st.mutation_job_queued = false;
+        std::mem::take(&mut st.pending_observers)
+    };
+    // A callback may disconnect a later observer, then run the GC.
+    let notify: Vec<_> = pending.into_iter().map(|id| realm.root_object(id)).collect();
+    for root in notify {
+        let observer = root.object().expect("rooted observer");
+        let list = {
+            let st = state();
+            let mut st = st.borrow_mut();
+            for reg in st.observers.iter_mut().filter(|r| r.observer == observer) {
+                reg.transient_targets.clear();
             }
-            let arr = records_to_js(realm, list);
-            call_logged(realm, &cb, Value::Object(observer), &[arr, Value::Object(observer)], "MutationObserver callback");
+            st.mutation_records.remove(&observer).unwrap_or_default()
+        };
+        if list.is_empty() { continue; }
+        let cb = get_hidden(realm, observer, "__callback");
+        if !realm.is_callable(&cb) {
+            continue;
         }
+        let arr = records_to_js(realm, list);
+        call_logged(realm, &cb, Value::Object(observer), &[arr, Value::Object(observer)], "MutationObserver callback");
     }
-}
-
-pub(crate) fn has_pending_mutations() -> bool {
-    !state().borrow().pending_observers.is_empty()
+    Ok(Value::Undefined)
 }
 
 // ------------------------------------------------------ PerformanceObserver

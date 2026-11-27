@@ -29,7 +29,7 @@ fn attr_name_for(n: NodeRef, name: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-pub(crate) fn set_attribute(n: NodeRef, name: &str, value: Option<&str>) {
+pub(crate) fn set_attribute(realm: &mut Realm, n: NodeRef, name: &str, value: Option<&str>) {
     let name = attr_name_for(n, name);
     let old = with_doc(n.doc, |doc| {
         let old = doc.attr(n.node, &name).map(|s| s.to_string());
@@ -38,7 +38,7 @@ pub(crate) fn set_attribute(n: NodeRef, name: &str, value: Option<&str>) {
     });
     crate::shadow::on_attribute(n, &name, old.clone(), value);
     crate::media::note_attribute(n, &name);
-    node::record_attribute(n, &name, old);
+    node::record_attribute(realm, n, &name, old);
     if n.doc == 0 {
         mark_dirty();
     }
@@ -125,7 +125,7 @@ fn e_set_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     if !crate::document::valid_attribute_local_name(&name) {
         return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("Failed to execute 'setAttribute' on 'Element': '{name}' is not a valid attribute name.")));
     }
-    set_attribute(n, &name, Some(&value));
+    set_attribute(realm, n, &name, Some(&value));
     Ok(Value::Undefined)
 }
 
@@ -155,7 +155,7 @@ fn e_set_attribute_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
         old
     });
     crate::shadow::on_attribute(n, &name, old.clone(), Some(&value));
-    node::record_attribute(n, &name, old);
+    node::record_attribute(realm, n, &name, old);
     if n.doc == 0 {
         mark_dirty();
     }
@@ -166,7 +166,7 @@ fn e_remove_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let n = this_node(realm, &this, "removeAttribute")?;
     let name = arg_str(realm, args, 0)?;
     if get_attribute(n, &name).is_some() {
-        set_attribute(n, &name, None);
+        set_attribute(realm, n, &name, None);
     }
     Ok(Value::Undefined)
 }
@@ -198,9 +198,9 @@ fn e_toggle_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let force = args.get(1).filter(|v| !v.is_undefined()).map(|v| realm.to_boolean(v));
     let want = force.unwrap_or(!has);
     if want && !has {
-        set_attribute(n, &name, Some(""));
+        set_attribute(realm, n, &name, Some(""));
     } else if !want && has {
-        set_attribute(n, &name, None);
+        set_attribute(realm, n, &name, None);
     }
     Ok(Value::Bool(want))
 }
@@ -255,7 +255,7 @@ fn e_class_name_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
 fn e_class_name_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "className")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "class", Some(&v));
+    set_attribute(realm, n, "class", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -288,11 +288,11 @@ fn token_list_ref(realm: &mut Realm, this: &Value) -> JsResult<TokenListRef> {
 }
 
 /// DOMTokenList "update steps": no attribute is created for an empty set.
-fn write_tokens(r: &TokenListRef, tokens: &[String]) {
+fn write_tokens(realm: &mut Realm, r: &TokenListRef, tokens: &[String]) {
     if tokens.is_empty() && get_attribute(r.node, r.attr).is_none() {
         return;
     }
-    set_attribute(r.node, r.attr, Some(&tokens.join(" ")));
+    set_attribute(realm, r.node, r.attr, Some(&tokens.join(" ")));
 }
 
 fn check_token(realm: &mut Realm, t: &str) -> JsResult<()> {
@@ -319,7 +319,7 @@ fn tl_add(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
             tokens.push(t);
         }
     }
-    write_tokens(&r, &tokens);
+    write_tokens(realm, &r, &tokens);
     Ok(Value::Undefined)
 }
 
@@ -333,7 +333,7 @@ fn tl_remove(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     }
     let mut tokens = tokens_of(r.node, r.attr);
     tokens.retain(|x| !gone.contains(x));
-    write_tokens(&r, &tokens);
+    write_tokens(realm, &r, &tokens);
     Ok(Value::Undefined)
 }
 
@@ -347,10 +347,10 @@ fn tl_toggle(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     let want = force.unwrap_or(!has);
     if want && !has {
         tokens.push(t);
-        write_tokens(&r, &tokens);
+        write_tokens(realm, &r, &tokens);
     } else if !want && has {
         tokens.retain(|x| *x != t);
-        write_tokens(&r, &tokens);
+        write_tokens(realm, &r, &tokens);
     }
     Ok(Value::Bool(want))
 }
@@ -379,7 +379,7 @@ fn tl_replace(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
             true
         }
     });
-    write_tokens(&r, &tokens);
+    write_tokens(realm, &r, &tokens);
     Ok(Value::Bool(true))
 }
 
@@ -405,7 +405,7 @@ fn tl_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
 fn tl_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let r = token_list_ref(realm, &this)?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(r.node, r.attr, Some(&v));
+    set_attribute(realm, r.node, r.attr, Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -499,7 +499,7 @@ fn e_part_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
 fn put_forward(realm: &mut Realm, this: Value, args: &[Value], what: &str, attr: &str) -> JsResult<Value> {
     let n = this_node(realm, &this, what)?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, attr, Some(&v));
+    set_attribute(realm, n, attr, Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -577,7 +577,7 @@ fn dataset_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     if !crate::document::valid_attribute_local_name(&attr) {
         return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("Failed to set a named property on 'DOMStringMap': '{attr}' is not a valid attribute name.")));
     }
-    set_attribute(n, &attr, Some(&v));
+    set_attribute(realm, n, &attr, Some(&v));
     Ok(Value::Bool(true))
 }
 
@@ -590,7 +590,7 @@ fn dataset_has(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 fn dataset_delete(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let k = realm.to_rust_string(arg(args, 1))?;
-    set_attribute(n, &camel_to_data(&k), None);
+    set_attribute(realm, n, &camel_to_data(&k), None);
     Ok(Value::Bool(true))
 }
 
@@ -758,7 +758,7 @@ fn e_outer_html_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
         node::parse_html_into(pref, &html)
     };
     let next = with_doc(n.doc, |doc| doc.next_sibling(n.node));
-    remove_node(n);
+    remove_node(realm, n);
     for nn in nodes {
         insert_node(realm, pref, nn, next)?;
     }
@@ -818,7 +818,7 @@ fn e_inner_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
             doc.append_child(n.node, a.node);
         }
     });
-    node::record_child_list(n, added, old);
+    node::record_child_list(realm, n, added, old);
     if n.doc == 0 {
         mark_dirty();
     }
@@ -826,7 +826,7 @@ fn e_inner_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 }
 
 /// Merge `text` with its next sibling when both are Text nodes.
-fn merge_with_next_text(n: NodeRef) {
+fn merge_with_next_text(realm: &mut Realm, n: NodeRef) {
     let next = with_doc(n.doc, |doc| {
         let next = doc.next_sibling(n.node)?;
         match (&doc.node(n.node).data, &doc.node(next).data) {
@@ -835,8 +835,8 @@ fn merge_with_next_text(n: NodeRef) {
         }
     });
     if let Some((next, data)) = next {
-        node::set_character_data(n, &data);
-        remove_node(NodeRef { doc: n.doc, node: next });
+        node::set_character_data(realm, n, &data);
+        remove_node(realm, NodeRef { doc: n.doc, node: next });
     }
 }
 
@@ -856,14 +856,14 @@ fn e_outer_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
     for nn in nodes {
         insert_node(realm, pref, nn, Some(n.node))?;
     }
-    remove_node(n);
+    remove_node(realm, n);
     if let Some(next) = next {
         if let Some(prev_of_next) = with_doc(n.doc, |doc| doc.prev_sibling(next)) {
-            merge_with_next_text(NodeRef { doc: n.doc, node: prev_of_next });
+            merge_with_next_text(realm, NodeRef { doc: n.doc, node: prev_of_next });
         }
     }
     if let Some(previous) = previous {
-        merge_with_next_text(NodeRef { doc: n.doc, node: previous });
+        merge_with_next_text(realm, NodeRef { doc: n.doc, node: previous });
     }
     Ok(Value::Undefined)
 }
@@ -1593,7 +1593,7 @@ fn e_hidden_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
 fn e_hidden_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "hidden")?;
     let b = realm.to_boolean(&arg(args, 0));
-    set_attribute(n, "hidden", if b { Some("") } else { None });
+    set_attribute(realm, n, "hidden", if b { Some("") } else { None });
     Ok(Value::Undefined)
 }
 
@@ -1605,7 +1605,7 @@ fn e_tab_index_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
 fn e_tab_index_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "tabIndex")?;
     let v = realm.to_int32(arg(args, 0))?;
-    set_attribute(n, "tabindex", Some(&v.to_string()));
+    set_attribute(realm, n, "tabindex", Some(&v.to_string()));
     Ok(Value::Undefined)
 }
 
@@ -1632,8 +1632,8 @@ fn e_content_editable_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsR
     let n = this_node(realm, &this, "contentEditable")?;
     let v = arg_str(realm, args, 0)?.to_ascii_lowercase();
     match v.as_str() {
-        "inherit" => set_attribute(n, "contenteditable", None),
-        "true" | "false" | "plaintext-only" => set_attribute(n, "contenteditable", Some(&v)),
+        "inherit" => set_attribute(realm, n, "contenteditable", None),
+        "true" | "false" | "plaintext-only" => set_attribute(realm, n, "contenteditable", Some(&v)),
         _ => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to set the 'contentEditable' property on 'HTMLElement': The value provided ('{v}') is not one of 'true', 'false', 'plaintext-only', or 'inherit'."))),
     }
     Ok(Value::Undefined)
@@ -1680,7 +1680,7 @@ fn e_style(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 fn e_style_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "style")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "style", Some(&v));
+    set_attribute(realm, n, "style", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -1702,7 +1702,7 @@ fn a_href_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 fn a_href_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "href")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "href", Some(&v));
+    set_attribute(realm, n, "href", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -1791,7 +1791,7 @@ fn input_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
             mark_dirty();
         }
     } else {
-        set_attribute(n, "value", Some(&v));
+        set_attribute(realm, n, "value", Some(&v));
     }
     Ok(Value::Undefined)
 }
@@ -1813,7 +1813,7 @@ fn input_default_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsRes
 fn input_default_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "defaultValue")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "value", Some(&v));
+    set_attribute(realm, n, "value", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -1875,7 +1875,7 @@ fn input_type_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
 fn input_type_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "type")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "type", Some(&v));
+    set_attribute(realm, n, "type", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -2094,10 +2094,10 @@ fn select_remove(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Val
         Some(v) if !v.is_undefined() => {
             let i = realm.to_number(v.clone())?;
             if let Some(o) = options_of(n).get(i as usize).copied() {
-                remove_node(NodeRef { doc: n.doc, node: o });
+                remove_node(realm, NodeRef { doc: n.doc, node: o });
             }
         }
-        _ => remove_node(n),
+        _ => remove_node(realm, n),
     }
     Ok(Value::Undefined)
 }
@@ -2117,7 +2117,7 @@ fn option_text_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
 fn option_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "text")?;
     let v = arg_str(realm, args, 0)?;
-    set_text_content(n, &v);
+    set_text_content(realm, n, &v);
     Ok(Value::Undefined)
 }
 
@@ -2135,7 +2135,7 @@ fn option_label_get(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 fn option_label_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "label")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "label", Some(&v));
+    set_attribute(realm, n, "label", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -2165,7 +2165,7 @@ fn option_default_selected_get(realm: &mut Realm, this: Value, _: &[Value]) -> J
 fn option_default_selected_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "defaultSelected")?;
     let selected = realm.to_boolean(&arg(args, 0));
-    set_attribute(n, "selected", if selected { Some("") } else { None });
+    set_attribute(realm, n, "selected", if selected { Some("") } else { None });
     Ok(Value::Undefined)
 }
 
@@ -2334,7 +2334,7 @@ fn img_current_src(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
 fn img_srcset_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "srcset")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "srcset", Some(&v));
+    set_attribute(realm, n, "srcset", Some(&v));
     if n.doc == 0 {
         with_env(|env| env.image_src_changed(n.node));
     }
@@ -2373,7 +2373,7 @@ fn image_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
 fn img_src_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "src")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "src", Some(&v));
+    set_attribute(realm, n, "src", Some(&v));
     // The engine fetches the image and fires `load`/`error` when done.
     if n.doc == 0 && with_env(|env| env.image_src_changed(n.node)) {
         return Ok(Value::Undefined);
@@ -2404,7 +2404,7 @@ fn script_text_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
 fn script_text_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "text")?;
     let v = arg_str(realm, args, 0)?;
-    set_text_content(n, &v);
+    set_text_content(realm, n, &v);
     Ok(Value::Undefined)
 }
 
@@ -2431,7 +2431,7 @@ fn sheet_insert_rule(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
     if let Some(n) = node_of(realm, &owner) {
         if tag_of(n).as_deref() == Some("style") {
             let cur = with_doc(n.doc, |doc| doc.text_content(n.node));
-            set_text_content(n, &format!("{cur}\n{rule}"));
+            set_text_content(realm, n, &format!("{cur}\n{rule}"));
         }
     }
     Ok(Value::Number(0.0))
@@ -3146,7 +3146,7 @@ fn dialog_show(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
         }
         return Ok(Value::Undefined);
     }
-    set_attribute(n, "open", Some(""));
+    set_attribute(realm, n, "open", Some(""));
     dismiss_popovers_for_dialog(realm, n);
     Ok(Value::Undefined)
 }
@@ -3169,7 +3169,7 @@ fn dialog_show_modal(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
         return Err(crate::misc::dom_exception(realm, "InvalidStateError", "The dialog is not connected."));
     }
     with_doc(n.doc, |doc| doc.top_layer.push(n.node));
-    set_attribute(n, "open", Some(""));
+    set_attribute(realm, n, "open", Some(""));
     dismiss_popovers_for_dialog(realm, n);
     Ok(Value::Undefined)
 }
@@ -3180,7 +3180,7 @@ fn dialog_close(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
         return Ok(Value::Undefined);
     }
     with_doc(n.doc, |doc| doc.top_layer.retain(|&t| t != n.node));
-    set_attribute(n, "open", None);
+    set_attribute(realm, n, "open", None);
     crate::events::dispatch(realm, TargetKey::Node(n), "close", crate::EventInit::simple(false, false), true);
     Ok(Value::Undefined)
 }
@@ -3260,7 +3260,7 @@ fn svg_identity(_realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
 fn id_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "id")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "id", Some(&v));
+    set_attribute(realm, n, "id", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -3284,7 +3284,7 @@ fn empty_string(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value
 fn n_text_set_alias(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "text")?;
     let v = arg_str(realm, args, 0)?;
-    set_text_content(n, &v);
+    set_text_content(realm, n, &v);
     Ok(Value::Undefined)
 }
 
@@ -3309,7 +3309,7 @@ fn e_remove_attribute_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
             old
         });
         crate::shadow::on_attribute(n, &k, old.clone(), None);
-        node::record_attribute(n, &k, old);
+        node::record_attribute(realm, n, &k, old);
         if n.doc == 0 {
             mark_dirty();
         }
@@ -3334,11 +3334,11 @@ fn popover_target_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let n = this_node(realm, &this, "popoverTargetElement")?;
     let value = arg(args, 0);
     if value.is_nullish() {
-        set_attribute(n, "popovertarget", None);
+        set_attribute(realm, n, "popovertarget", None);
     } else {
         let target = node_of(realm, &value).filter(|t| with_doc(t.doc, |doc| doc.element(t.node).is_some()))
             .ok_or_else(|| realm.throw_type_error("Expected an Element"))?;
-        set_attribute(n, "popovertarget", Some(""));
+        set_attribute(realm, n, "popovertarget", Some(""));
         if n.doc == target.doc { with_doc(n.doc, |doc| doc.explicit_popover_targets.insert(n.node, target.node)); }
     }
     Ok(Value::Undefined)
@@ -3398,7 +3398,7 @@ fn e_set_attribute_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     let value = realm.get_str(a, "value")?;
     let name = realm.to_rust_string(name)?;
     let value = realm.to_rust_string(value)?;
-    set_attribute(n, &name, Some(&value));
+    set_attribute(realm, n, &name, Some(&value));
     Ok(Value::Null)
 }
 
@@ -3417,7 +3417,7 @@ fn ta_text_length(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
 fn form_action_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "action")?;
     let v = arg_str(realm, args, 0)?;
-    set_attribute(n, "action", Some(&v));
+    set_attribute(realm, n, "action", Some(&v));
     Ok(Value::Undefined)
 }
 
@@ -3425,7 +3425,7 @@ fn img_width_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Val
     let n = this_node(realm, &this, "width")?;
     // unsigned long: out-of-range values set the default, 0.
     let v = realm.to_uint32(arg(args, 0))?;
-    set_attribute(n, "width", Some(&(if v > 2147483647 { 0 } else { v }).to_string()));
+    set_attribute(realm, n, "width", Some(&(if v > 2147483647 { 0 } else { v }).to_string()));
     Ok(Value::Undefined)
 }
 
@@ -3433,7 +3433,7 @@ fn img_height_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Va
     let n = this_node(realm, &this, "height")?;
     // unsigned long: out-of-range values set the default, 0.
     let v = realm.to_uint32(arg(args, 0))?;
-    set_attribute(n, "height", Some(&(if v > 2147483647 { 0 } else { v }).to_string()));
+    set_attribute(realm, n, "height", Some(&(if v > 2147483647 { 0 } else { v }).to_string()));
     Ok(Value::Undefined)
 }
 

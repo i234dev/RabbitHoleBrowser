@@ -492,15 +492,15 @@ fn parse_style(n: NodeRef) -> DeclList {
     list
 }
 
-fn write_style(n: NodeRef, list: &DeclList) {
+fn write_style(realm: &mut Realm, n: NodeRef, list: &DeclList) {
     if list.items.is_empty() {
         if get_attribute(n, "style").is_some() {
-            set_attribute(n, "style", Some(""));
+            set_attribute(realm, n, "style", Some(""));
         }
         return;
     }
     let text = list.css_text();
-    set_attribute(n, "style", Some(&text));
+    set_attribute(realm, n, "style", Some(&text));
 }
 
 fn style_target(realm: &mut Realm, args: &[Value]) -> JsResult<NodeRef> {
@@ -546,7 +546,7 @@ fn might_use_anchor(value: &str) -> bool {
     value.as_bytes().windows(6).any(|w| w.eq_ignore_ascii_case(b"anchor"))
 }
 
-fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
+fn set_style_prop(realm: &mut Realm, n: NodeRef, prop: &str, value: &str, important: bool) {
     let value = value.trim();
     let serialized;
     let value = if !value.is_empty() && (checked_property(prop) || might_use_anchor(value)) {
@@ -559,7 +559,7 @@ fn set_style_prop(n: NodeRef, prop: &str, value: &str, important: bool) {
     if !value.is_empty() {
         list.push(prop.to_string(), value.to_string(), important);
     }
-    write_style(n, &list);
+    write_style(realm, n, &list);
 }
 
 fn style_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -568,11 +568,11 @@ fn style_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     let v = arg(args, 2);
     let value = if v.is_null() { String::new() } else { realm.to_rust_string(v)? };
     if key == "cssText" {
-        set_attribute(n, "style", Some(&value));
+        set_attribute(realm, n, "style", Some(&value));
         return Ok(Value::Bool(true));
     }
     let prop = camel_to_kebab(&key);
-    set_style_prop(n, &prop, &value, false);
+    set_style_prop(realm, n, &prop, &value, false);
     Ok(Value::Bool(true))
 }
 
@@ -605,7 +605,7 @@ fn style_set_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let priority = arg(args, 2);
     let prio = if priority.is_nullish() { String::new() } else { realm.to_rust_string(priority)? };
     if value.is_empty() || prio.is_empty() || prio.eq_ignore_ascii_case("important") {
-        set_style_prop(n, &prop, &value, !prio.is_empty());
+        set_style_prop(realm, n, &prop, &value, !prio.is_empty());
     }
     Ok(Value::Undefined)
 }
@@ -629,7 +629,7 @@ fn style_remove_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
     let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
     let old = list.value(&prop).0;
-    set_style_prop(n, &prop, "", false);
+    set_style_prop(realm, n, &prop, "", false);
     Ok(Value::str(&old))
 }
 

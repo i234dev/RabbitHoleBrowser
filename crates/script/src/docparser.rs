@@ -128,7 +128,7 @@ pub(crate) fn open(realm: &mut Realm, d: u32) -> JsResult<()> {
     let root = NodeRef { doc: d, node: Document::ROOT };
     let removed = crate::node::children_of(root);
     with_doc(d, |doc| doc.clear_children(Document::ROOT));
-    crate::node::record_child_list(root, Vec::new(), removed);
+    crate::node::record_child_list(realm, root, Vec::new(), removed);
     let mut parser = Parser::new(scripting(d));
     parser.set_insertion_point_at_end();
     let ap = Rc::new(RefCell::new(ActiveParser { parser, kind: ParserKind::ScriptCreated, nesting: 0, pending_blocking: None, deferred: Vec::new() }));
@@ -255,7 +255,7 @@ fn pump(realm: &mut Realm, d: u32, ap: &Shared) {
         }
         let before = with_doc(d, |doc| doc.node_count());
         let status = with_doc(d, |doc| ap.borrow_mut().parser.run(doc));
-        after_parse_slice(d, before);
+        after_parse_slice(realm, d, before);
         match status {
             ParseStatus::NeedInput => break,
             ParseStatus::Script(node) => {
@@ -348,7 +348,7 @@ fn classify(d: u32, node: NodeId) -> ScriptKind {
 
 /// Nodes the parser created in the last slice: custom element reactions
 /// and mutation records for the ones it inserted under existing nodes.
-fn after_parse_slice(d: u32, before: usize) {
+fn after_parse_slice(realm: &mut Realm, d: u32, before: usize) {
     let groups: Vec<(NodeId, Vec<NodeId>)> = with_doc(d, |doc| {
         let after = doc.node_count();
         let mut groups: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
@@ -372,7 +372,7 @@ fn after_parse_slice(d: u32, before: usize) {
     }
     for (p, kids) in groups {
         let added = kids.into_iter().map(|node| NodeRef { doc: d, node }).collect();
-        crate::node::record_child_list(NodeRef { doc: d, node: p }, added, Vec::new());
+        crate::node::record_child_list(realm, NodeRef { doc: d, node: p }, added, Vec::new());
     }
     if d == 0 {
         mark_dirty();
@@ -504,10 +504,11 @@ pub(crate) fn set_fragment_html(realm: &mut Realm, _: Value, args: &[Value]) -> 
             shadow_children,
         )
     });
-    crate::node::record_child_list(parent, added, removed);
+    crate::node::record_child_list(realm, parent, added, removed);
     if !shadow_children.is_empty() {
         if let Some(root) = with_doc(d, |doc| doc.shadow_root(context)) {
             crate::node::record_child_list(
+                realm,
                 NodeRef { doc: d, node: root },
                 shadow_children.into_iter().map(|node| NodeRef { doc: d, node }).collect(),
                 Vec::new(),
@@ -624,13 +625,13 @@ pub(crate) fn stream_open(realm: &mut Realm, _this: Value, args: &[Value]) -> Js
         "after" => with_doc(d, |doc| doc.next_sibling(n.node)),
         "replaceWith" => {
             let next = with_doc(d, |doc| doc.next_sibling(n.node));
-            crate::node::remove_node(n);
+            crate::node::remove_node(realm, n);
             next
         }
         _ => return Err(realm.throw_type_error("streamOpen: bad position")),
     };
     if !removed.is_empty() {
-        crate::node::record_child_list(NodeRef { doc: d, node: container }, Vec::new(), removed);
+        crate::node::record_child_list(realm, NodeRef { doc: d, node: container }, Vec::new(), removed);
     }
     let scripting = d == 0 || d & FRAME_DOC != 0;
     let mut parser = Parser::new_fragment(context, &ctx_tag, ctx_ns, container, before, form, scripting, dsd);
@@ -700,7 +701,7 @@ fn stream_run(realm: &mut Realm, o: rabbithole_js::ObjectId, text: Option<&str>)
             let mut s = s.borrow_mut();
             with_doc(d, |doc| s.parser.run(doc))
         };
-        after_parse_slice(d, before_slice);
+        after_parse_slice(realm, d, before_slice);
         match status {
             ParseStatus::Script(node) => {
                 let connected = with_doc(d, |doc| doc.is_connected(node));

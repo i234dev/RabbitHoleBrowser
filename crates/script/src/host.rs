@@ -128,6 +128,9 @@ pub struct HostState {
     pub observers: Vec<ObserverReg>,
     pub mutation_records: HashMap<ObjectId, Vec<MutationRecord>>,
     pub pending_observers: Vec<ObjectId>,
+    /// Lazily created native callback shared by mutation notification jobs.
+    pub mutation_job: Option<rabbithole_js::Root>,
+    pub mutation_job_queued: bool,
     pub observer_links: Option<rabbithole_js::SymbolId>,
     pub custom_elements: HashMap<String, Value>,
     /// Element an `HTMLElement` super constructor must return (set while a

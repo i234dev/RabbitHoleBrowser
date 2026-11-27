@@ -230,48 +230,48 @@ fn reflect_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     let spec = native_data::<AttrSpec>(realm).expect("attr spec");
     let n = this_node(realm, &this, &spec.attr)?;
     let v = arg(args, 0);
-    let set = |s: &str| crate::element::set_attribute(n, &spec.attr, Some(s));
+    let set = |realm: &mut Realm, s: &str| crate::element::set_attribute(realm, n, &spec.attr, Some(s));
     match &spec.kind {
         Reflect::Bool => {
             let b = realm.to_boolean(&v);
-            crate::element::set_attribute(n, &spec.attr, if b { Some("") } else { None });
+            crate::element::set_attribute(realm, n, &spec.attr, if b { Some("") } else { None });
         }
         Reflect::NullableStr | Reflect::Popover if v.is_nullish() => {
             if crate::element::get_attribute(n, &spec.attr).is_some() {
-                crate::element::set_attribute(n, &spec.attr, None);
+                crate::element::set_attribute(realm, n, &spec.attr, None);
             }
         }
-        Reflect::StrNullEmpty if matches!(v.v(), rabbithole_js::V::Null) => set(""),
+        Reflect::StrNullEmpty if matches!(v.v(), rabbithole_js::V::Null) => set(realm, ""),
         Reflect::Enum(e) if e.nullable && v.is_nullish() => {
             if crate::element::get_attribute(n, &spec.attr).is_some() {
-                crate::element::set_attribute(n, &spec.attr, None);
+                crate::element::set_attribute(realm, n, &spec.attr, None);
             }
         }
         Reflect::Long(_) => {
             let x = realm.to_int32(v)?;
-            set(&x.to_string());
+            set(realm, &x.to_string());
         }
         Reflect::NonNegLong(_) => {
             let x = realm.to_int32(v)?;
             if x < 0 {
                 return Err(index_size_error(realm, &format!("The value provided ({x}) is negative.")));
             }
-            set(&x.to_string());
+            set(realm, &x.to_string());
         }
         Reflect::ULong(d) | Reflect::Clamped(d, _, _) => {
             let x = realm.to_uint32(v)? as i64;
-            set(&(if x <= MAX_INT { x } else { *d as i64 }).to_string());
+            set(realm, &(if x <= MAX_INT { x } else { *d as i64 }).to_string());
         }
         Reflect::PosULong(d) => {
             let x = realm.to_uint32(v)? as i64;
             if x == 0 {
                 return Err(index_size_error(realm, "The value provided is 0, which is an invalid size."));
             }
-            set(&(if x <= MAX_INT { x } else { *d as i64 }).to_string());
+            set(realm, &(if x <= MAX_INT { x } else { *d as i64 }).to_string());
         }
         Reflect::PosULongFallback(d) => {
             let x = realm.to_uint32(v)? as i64;
-            set(&(if (1..=MAX_INT).contains(&x) { x } else { *d as i64 }).to_string());
+            set(realm, &(if (1..=MAX_INT).contains(&x) { x } else { *d as i64 }).to_string());
         }
         Reflect::Double(_) | Reflect::PosDouble(_) => {
             let x = realm.to_number(v)?;
@@ -281,11 +281,11 @@ fn reflect_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
             if matches!(spec.kind, Reflect::PosDouble(_)) && x <= 0.0 {
                 return Ok(Value::Undefined);
             }
-            set(&rabbithole_js::value::number_to_string(x));
+            set(realm, &rabbithole_js::value::number_to_string(x));
         }
         _ => {
             let s = realm.to_rust_string(v)?;
-            set(&s);
+            set(realm, &s);
         }
     }
     Ok(Value::Undefined)
@@ -357,7 +357,7 @@ fn translate_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
 fn translate_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "translate")?;
     let v = realm.to_boolean(&arg(args, 0));
-    crate::element::set_attribute(n, "translate", Some(if v { "yes" } else { "no" }));
+    crate::element::set_attribute(realm, n, "translate", Some(if v { "yes" } else { "no" }));
     Ok(Value::Undefined)
 }
 

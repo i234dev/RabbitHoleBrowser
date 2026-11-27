@@ -2079,3 +2079,20 @@ fn observer_lifetime_disconnect_during_delivery() {
         document.body.setAttribute('title', 'changed');
     "#), ["first"]);
 }
+
+#[test]
+fn observer_lifetime_microtask_order() {
+    let (mut env, mut host) = setup("<div></div>");
+    assert_eq!(run(&mut env, &mut host, r#"
+        const div = document.querySelector('div');
+        const observer = new MutationObserver(records => {
+            console.log(records.map(r => r.attributeName).join(','));
+            if (records[0].attributeName === 'id') div.setAttribute('title', 'next');
+        });
+        observer.observe(div, {attributes:true});
+        Promise.resolve().then(() => console.log('first promise'));
+        div.setAttribute('id', 'a');
+        div.setAttribute('class', 'b');
+        Promise.resolve().then(() => console.log('second promise'));
+    "#), ["first promise", "id,class", "second promise", "title"]);
+}

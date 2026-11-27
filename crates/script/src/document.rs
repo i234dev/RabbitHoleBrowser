@@ -60,7 +60,7 @@ fn d_body_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
             let parent = with_doc(d, |doc| doc.parent(o));
             if let Some(p) = parent {
                 insert_node(realm, NodeRef { doc: d, node: p }, new, Some(o))?;
-                node::remove_node(NodeRef { doc: d, node: o });
+                node::remove_node(realm, NodeRef { doc: d, node: o });
             }
         }
         (None, Some(html)) => insert_node(realm, NodeRef { doc: d, node: html }, new, None)?,
@@ -545,7 +545,7 @@ fn d_adopt_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
             return Err(crate::misc::dom_exception(realm, "NotSupportedError", "The node provided is a document, which may not be adopted."));
         }
         if n.doc == d {
-            node::remove_node(n);
+            node::remove_node(realm, n);
         } else {
             node::adopt(realm, n, d);
         }
@@ -570,7 +570,7 @@ fn d_dir_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     let d = this_doc(realm, &this)?;
     let value = arg_str(realm, args, 0)?;
     if let Some(root) = with_doc(d, |doc| doc.html_element()) {
-        crate::element::set_attribute(NodeRef { doc: d, node: root }, "dir", Some(&value));
+        crate::element::set_attribute(realm, NodeRef { doc: d, node: root }, "dir", Some(&value));
     }
     Ok(Value::Undefined)
 }

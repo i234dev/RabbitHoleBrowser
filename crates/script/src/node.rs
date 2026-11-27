@@ -236,7 +236,7 @@ pub(crate) fn adopt(realm: &mut Realm, child: NodeRef, target_doc: u32) -> NodeR
     if child.doc == target_doc {
         return child;
     }
-    remove_node(child);
+    remove_node(realm, child);
     // (Main document, script-created documents and same-origin frame
     // documents all go through `with_doc`.)
     let src_clone: Document = with_doc(child.doc, |d| d.clone_subtree_readonly(child.node));
@@ -415,18 +415,26 @@ impl ObserverReg {
 }
 
 impl HostState {
-    fn notify_observer(&mut self, observer: ObjectId) {
+    fn notify_observer(&mut self, realm: &mut Realm, observer: ObjectId) {
         if !self.pending_observers.contains(&observer) { self.pending_observers.push(observer); }
+        if !self.mutation_job_queued {
+            let job = self.mutation_job.get_or_insert_with(|| {
+                let f = realm.new_native_function("", 0, crate::observers::notify_mutations);
+                realm.root_object(f)
+            });
+            realm.enqueue_callback(job.value(), Value::Undefined, Vec::new());
+            self.mutation_job_queued = true;
+        }
     }
 
-    fn queue_record(&mut self, observer: ObjectId, record: MutationRecord) {
-        self.notify_observer(observer);
+    fn queue_record(&mut self, realm: &mut Realm, observer: ObjectId, record: MutationRecord) {
+        self.notify_observer(realm, observer);
         self.mutation_records.entry(observer).or_default().push(record);
     }
 }
 
 /// Record a childList mutation for observers watching `parent`.
-pub(crate) fn record_child_list(parent: NodeRef, added: Vec<NodeRef>, removed: Vec<NodeRef>) {
+pub(crate) fn record_child_list(realm: &mut Realm, parent: NodeRef, added: Vec<NodeRef>, removed: Vec<NodeRef>) {
     crate::shadow::on_child_list(parent, &added, &removed);
     crate::media::note_child_list(parent, &added, &removed);
     let st = state();
@@ -447,11 +455,11 @@ pub(crate) fn record_child_list(parent: NodeRef, added: Vec<NodeRef>, removed: V
             for &child in &removed {
                 if !transient.contains(&child) { transient.push(child); }
             }
-            st.notify_observer(observer);
+            st.notify_observer(realm, observer);
         }
     }
     for observer in hits {
-        st.queue_record(observer, MutationRecord {
+        st.queue_record(realm, observer, MutationRecord {
             ty: "childList",
             target: parent,
             added: added.clone(),
@@ -462,7 +470,7 @@ pub(crate) fn record_child_list(parent: NodeRef, added: Vec<NodeRef>, removed: V
     }
 }
 
-pub(crate) fn record_attribute(target: NodeRef, name: &str, old: Option<String>) {
+pub(crate) fn record_attribute(realm: &mut Realm, target: NodeRef, name: &str, old: Option<String>) {
     let st = state();
     let mut st = st.borrow_mut();
     if st.observers.is_empty() {
@@ -488,7 +496,7 @@ pub(crate) fn record_attribute(target: NodeRef, name: &str, old: Option<String>)
         }
     }
     for (observer, want_old) in hits {
-        st.queue_record(observer, MutationRecord {
+        st.queue_record(realm, observer, MutationRecord {
             ty: "attributes",
             target,
             added: Vec::new(),
@@ -499,7 +507,7 @@ pub(crate) fn record_attribute(target: NodeRef, name: &str, old: Option<String>)
     }
 }
 
-pub(crate) fn record_character_data(target: NodeRef, old: Option<String>) {
+pub(crate) fn record_character_data(realm: &mut Realm, target: NodeRef, old: Option<String>) {
     let st = state();
     let mut st = st.borrow_mut();
     if st.observers.is_empty() {
@@ -516,7 +524,7 @@ pub(crate) fn record_character_data(target: NodeRef, old: Option<String>) {
         }
     }
     for observer in hits {
-        st.queue_record(observer, MutationRecord { ty: "characterData", target, added: Vec::new(), removed: Vec::new(), attribute_name: None, old_value: old.clone() });
+        st.queue_record(realm, observer, MutationRecord { ty: "characterData", target, added: Vec::new(), removed: Vec::new(), attribute_name: None, old_value: old.clone() });
     }
 }
 
@@ -540,18 +548,18 @@ pub(crate) fn insert_node_checked(realm: &mut Realm, parent: NodeRef, child: Nod
             }
         });
         if !kids.is_empty() && !state().borrow().observers.is_empty() {
-            record_child_list(child, Vec::new(), kids.clone());
+            record_child_list(realm, child, Vec::new(), kids.clone());
         }
         kids
     } else {
         let old_parent = with_doc(parent.doc, |doc| doc.parent(child.node));
         with_doc(parent.doc, |doc| doc.insert_before(parent.node, child.node, before));
         if let Some(op) = old_parent {
-            record_child_list(NodeRef { doc: parent.doc, node: op }, Vec::new(), vec![child]);
+            record_child_list(realm, NodeRef { doc: parent.doc, node: op }, Vec::new(), vec![child]);
         }
         vec![child]
     };
-    record_child_list(parent, inserted.clone(), Vec::new());
+    record_child_list(realm, parent, inserted.clone(), Vec::new());
     if parent.doc == 0 {
         mark_dirty();
         if is_connected(parent) {
@@ -769,18 +777,18 @@ pub(crate) fn deliver_script_events(realm: &mut Realm, _this: Value, _args: &[Va
 }
 
 /// Remove a node from its parent.
-pub(crate) fn remove_node(child: NodeRef) {
+pub(crate) fn remove_node(realm: &mut Realm, child: NodeRef) {
     let parent = with_doc(child.doc, |doc| doc.parent(child.node));
     let Some(p) = parent else { return };
     with_doc(child.doc, |doc| doc.detach(child.node));
-    record_child_list(NodeRef { doc: child.doc, node: p }, Vec::new(), vec![child]);
+    record_child_list(realm, NodeRef { doc: child.doc, node: p }, Vec::new(), vec![child]);
     if child.doc == 0 {
         mark_dirty();
     }
 }
 
 /// Replace all children with a single text node (or nothing when empty).
-pub(crate) fn set_text_content(n: NodeRef, text: &str) {
+pub(crate) fn set_text_content(realm: &mut Realm, n: NodeRef, text: &str) {
     let old: Vec<NodeRef> = children_of(n);
     let added = with_doc(n.doc, |doc| {
         doc.clear_children(n.node);
@@ -792,7 +800,7 @@ pub(crate) fn set_text_content(n: NodeRef, text: &str) {
             Some(NodeRef { doc: n.doc, node: t })
         }
     });
-    record_child_list(n, added.into_iter().collect(), old);
+    record_child_list(realm, n, added.into_iter().collect(), old);
     if n.doc == 0 {
         mark_dirty();
     }
@@ -836,7 +844,7 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
             }
         });
     }
-    record_child_list(n, added, old);
+    record_child_list(realm, n, added, old);
     if n.doc == 0 {
         mark_dirty();
     }
@@ -970,14 +978,14 @@ fn n_node_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
         None | Some(V::Null) | Some(V::Undefined) => String::new(),
         Some(v) => realm.to_rust_string(v.to_value())?,
     };
-    set_character_data(n, &v);
+    set_character_data(realm, n, &v);
     Ok(Value::Undefined)
 }
 
-pub(crate) fn set_character_data(n: NodeRef, v: &str) {
+pub(crate) fn set_character_data(realm: &mut Realm, n: NodeRef, v: &str) {
     let old = with_doc(n.doc, |doc| doc.set_char_data(n.node, v));
     if old.is_some() {
-        record_character_data(n, old);
+        record_character_data(realm, n, old);
         if n.doc == 0 {
             mark_dirty();
         }
@@ -1005,9 +1013,9 @@ fn n_text_content_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
         _ => (false, false),
     });
     if is_char {
-        set_character_data(n, &v);
+        set_character_data(realm, n, &v);
     } else if !is_leaf {
-        set_text_content(n, &v);
+        set_text_content(realm, n, &v);
     }
     Ok(Value::Undefined)
 }
@@ -1214,7 +1222,7 @@ fn n_remove_child(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Va
     if with_doc(n.doc, |doc| doc.parent(child.node)) != Some(n.node) || child.doc != n.doc {
         return Err(crate::misc::dom_exception(realm, "NotFoundError", "The node to be removed is not a child of this node."));
     }
-    remove_node(child);
+    remove_node(realm, child);
     Ok(arg(args, 0))
 }
 
@@ -1231,14 +1239,14 @@ fn n_replace_child(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     ensure_insert_validity(realm, n, new, Some(old.node), true)?;
     let next = with_doc(n.doc, |doc| doc.next_sibling(old.node));
     let next = next.filter(|nx| Some(*nx) != Some(new.node));
-    remove_node(old);
+    remove_node(realm, old);
     insert_node_checked(realm, n, new, next, false)?;
     Ok(arg(args, 1))
 }
 
 fn n_remove(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "remove")?;
-    remove_node(n);
+    remove_node(realm, n);
     Ok(Value::Undefined)
 }
 
@@ -1285,7 +1293,7 @@ fn n_replace_with(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Va
     let n = this_node(realm, &this, "replaceWith")?;
     let (parent, next) = with_doc(n.doc, |doc| (doc.parent(n.node), doc.next_sibling(n.node)));
     if let Some(p) = parent {
-        remove_node(n);
+        remove_node(realm, n);
         insert_many(realm, NodeRef { doc: n.doc, node: p }, args, next)?;
     }
     Ok(Value::Undefined)
@@ -1295,7 +1303,7 @@ fn n_replace_children(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let n = this_node(realm, &this, "replaceChildren")?;
     let old = children_of(n);
     with_doc(n.doc, |doc| doc.clear_children(n.node));
-    record_child_list(n, Vec::new(), old);
+    record_child_list(realm, n, Vec::new(), old);
     insert_many(realm, n, args, None)?;
     if n.doc == 0 {
         mark_dirty();
@@ -1417,18 +1425,18 @@ fn n_normalize(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
         let Some((mut length, data, following)) = group else { continue };
         let text = NodeRef { doc: n.doc, node: id };
         if length == 0 {
-            remove_node(text);
+            remove_node(realm, text);
             continue;
         }
         // Appending preserves boundaries already in the surviving node and
         // queues the single characterData record required for this group.
-        replace_character_data(text, length, 0, &data);
+        replace_character_data(realm, text, length, 0, &data);
         for &(sibling, added) in &following {
             with_doc(n.doc, |doc| doc.live_before_merge_text(id, sibling, length));
             length += added;
         }
         for (sibling, _) in following {
-            remove_node(NodeRef { doc: n.doc, node: sibling });
+            remove_node(realm, NodeRef { doc: n.doc, node: sibling });
         }
     }
     Ok(Value::Undefined)
@@ -1565,7 +1573,7 @@ fn cd_data_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     // CharacterData.data has [LegacyNullToEmptyString], unlike method
     // DOMString arguments, where null is converted to the string "null".
     let v = if matches!(arg(args, 0).v(), V::Null) { String::new() } else { arg_str(realm, args, 0)? };
-    set_character_data(n, &v);
+    set_character_data(realm, n, &v);
     Ok(Value::Undefined)
 }
 
@@ -1579,15 +1587,15 @@ fn cd_append_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Va
     character_data_arguments(realm, args, 1, "appendData")?;
     let v = arg_str(realm, args, 0)?;
     let len = with_doc(n.doc, |doc| doc.char_data(n.node).map(|t| t.encode_utf16().count()).unwrap_or(0));
-    replace_character_data(n, len, 0, &v);
+    replace_character_data(realm, n, len, 0, &v);
     Ok(Value::Undefined)
 }
 
 /// DOM "replace data" (live ranges follow); offsets in UTF-16 code units.
-pub(crate) fn replace_character_data(n: NodeRef, offset: usize, count: usize, data: &str) {
+pub(crate) fn replace_character_data(realm: &mut Realm, n: NodeRef, offset: usize, count: usize, data: &str) {
     let old = with_doc(n.doc, |doc| doc.replace_data(n.node, offset, count, data));
     if old.is_some() {
-        record_character_data(n, old);
+        record_character_data(realm, n, old);
         if n.doc == 0 {
             mark_dirty();
         }
@@ -1605,7 +1613,7 @@ fn cd_replace_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     if off > len {
         return Err(crate::misc::dom_exception(realm, "IndexSizeError", &format!("The offset {off} is greater than the node's length ({len}).")));
     }
-    replace_character_data(n, off, count, &data);
+    replace_character_data(realm, n, off, count, &data);
     Ok(Value::Undefined)
 }
 
@@ -1657,9 +1665,9 @@ fn text_split(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
     let new = with_doc(n.doc, |doc| doc.split_text(n.node, off));
     let new = NodeRef { doc: n.doc, node: new };
     if let Some(p) = parent {
-        record_child_list(NodeRef { doc: n.doc, node: p }, vec![new], Vec::new());
+        record_child_list(realm, NodeRef { doc: n.doc, node: p }, vec![new], Vec::new());
     }
-    record_character_data(n, Some(old));
+    record_character_data(realm, n, Some(old));
     if n.doc == 0 {
         mark_dirty();
     }
