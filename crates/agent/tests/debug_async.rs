@@ -165,7 +165,9 @@ fn debug_old_fetch_advances_on_later_tools_after_observation_timeout() {
     let server = Server::new();
     let mut agent = server.agent();
     assert!(eval(&mut agent, "globalThis.oldFetch=fetch('/slow').then(r=>{document.getElementById('result').textContent='Old fetch completed';return r.status}); oldFetch", 20).contains("Promise still pending after 20 ms"));
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // The response comes after 100 ms; the deadline only bounds a fetch that
+    // never completes (interpreted runs under GC stress on CI are slow).
+    let deadline = Instant::now() + Duration::from_secs(10);
     let text = loop {
         let text = call(&mut agent, "read", &json!({})).unwrap().text;
         if text.contains("Old fetch completed") { break text; }
