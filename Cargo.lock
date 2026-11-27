@@ -2131,7 +2131,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rabbithole"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "arboard",
  "dirs",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-agent"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "image",
  "rabbithole-engine",
@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-css"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-dom",
  "rabbithole-html",
@@ -2167,11 +2167,11 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-dom"
-version = "0.2.49"
+version = "0.2.50"
 
 [[package]]
 name = "rabbithole-engine"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "image",
  "rabbithole-css",
@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-gfx"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "avif-parse",
  "brotli-decompressor",
@@ -2201,18 +2201,18 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-html"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-dom",
 ]
 
 [[package]]
 name = "rabbithole-jit"
-version = "0.2.49"
+version = "0.2.50"
 
 [[package]]
 name = "rabbithole-js"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-jit",
  "windows-sys 0.61.2",
@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-layout"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "image",
  "rabbithole-css",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-media"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "libloading",
  "opus",
@@ -2246,7 +2246,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-net"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "brotli-decompressor",
  "flate2",
@@ -2258,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-rtc"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-net",
  "rcgen",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-script"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "aes 0.8.4",
  "aws-lc-rs",
@@ -2295,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-style"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-css",
  "rabbithole-dom",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-svg"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-css",
  "rabbithole-dom",
@@ -2316,14 +2316,14 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-wasm"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-jit",
 ]
 
 [[package]]
 name = "rabbithole-wasm-js"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-js",
  "rabbithole-wasm",
@@ -2331,11 +2331,11 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-webgl"
-version = "0.2.49"
+version = "0.2.50"
 
 [[package]]
 name = "rabbithole-wpt"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "rabbithole-engine",
  "serde_json",
