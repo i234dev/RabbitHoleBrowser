@@ -284,11 +284,15 @@ impl Worker {
             }
             let t0 = Instant::now();
             let cpu0 = if debug_content() { rabbithole_js::realm::thread_cpu_time() } else { None };
+            let mut messages_start = t0;
             if self.tick_deferred {
                 // Timers held back last turn (a frame went out first) run
                 // before anything that arrived since.
                 self.tick_deferred = false;
                 self.tick_if_due(true);
+                if debug_content() {
+                    messages_start = Instant::now();
+                }
             }
             for m in coalesce(batch) {
                 match m {
@@ -325,13 +329,14 @@ impl Worker {
                     _ => -1.0,
                 };
                 eprintln!(
-                    "[content] busy {:.0} ms (cpu {:.0} ms): messages {:.0}, scroll event {:.0}, tick {:.0}, flush/paint {:.0}",
+                    "[content] busy {:.0} ms (cpu {:.0} ms): messages {:.0}, scroll event {:.0}, tick {:.0}, flush/paint {:.0}, deferred tick {:.0}",
                     ms(t0, Instant::now()),
                     cpu,
-                    ms(t0, t1),
+                    ms(messages_start, t1),
                     ms(t1, t2),
                     ms(t2, t3),
-                    ms(t3, Instant::now())
+                    ms(t3, Instant::now()),
+                    ms(t0, messages_start)
                 );
             }
         }
