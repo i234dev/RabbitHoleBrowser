@@ -476,6 +476,8 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbith
         parents3d: Vec::new(),
         child3d: 0,
         next3d: 0,
+        inline_group: None,
+        any_inline_opacity: ctx.styles.styles.iter().flatten().any(|s| s.opacity < 1.0 && s.display == rabbithole_style::Display::Inline),
         sel,
     };
     p.paint_stacking_context(root, bounds);
@@ -489,6 +491,12 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbith
 
 struct Painter<'l, 't, 'a> {
     list: &'l mut DisplayList,
+    /// While painting an inline element with opacity as a group: only its
+    /// fragments (and floats) are painted.
+    inline_group: Option<NodeId>,
+    /// Some inline element has `opacity` below 1 (otherwise no group
+    /// search is needed).
+    any_inline_opacity: bool,
     /// The selected parts of text fragments (`None`: nothing selected).
     sel: Option<crate::selection::HighlightPaint<'l>>,
     ctx: &'l LayoutContext<'a>,
@@ -1412,7 +1420,16 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // `border-shape` also shapes the overflow clip.
         let shape_clip = clip && b.style.border_shape.is_some() && self.push_border_shape(b, box_radii(b), false);
         if phase == Phase::Floats {
+            let groups = self.inline_opacity_roots(b);
+            for &r in &groups {
+                if !b.lines.iter().flat_map(|l| l.fragments.iter()).any(|f| self.in_inline(f.node, r, b)) {
+                    self.paint_inline_group(b, r);
+                }
+            }
             for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c) && !c.clamped) {
+                if groups.iter().any(|&r| self.in_inline(c.node, r, b)) {
+                    continue;
+                }
                 self.paint_float_or_atomic(c);
             }
         }
@@ -2155,14 +2172,138 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
 
     // --------------------------------------------------------------- lines
 
+    /// Inline elements of `b`'s lines with `opacity` below 1: each paints
+    /// as one group (CSS Color 4 §3.2 applies opacity to the element and
+    /// its descendants as a whole, across line boxes, floats included).
+    fn inline_opacity_roots(&self, b: &'t LayoutBox) -> Vec<NodeId> {
+        if self.inline_group.is_some() || !self.any_inline_opacity {
+            return Vec::new();
+        }
+        // Inline ancestors (below `b`) of the fragments and floats.
+        let mut seen: Vec<NodeId> = Vec::new();
+        let mut roots: Vec<NodeId> = Vec::new();
+        let starts = b.lines.iter().flat_map(|l| l.fragments.iter()).map(|f| f.node)
+            .chain(b.children.iter().filter(|c| c.flow.is_float()).map(|c| c.node.and_then(|n| self.ctx.doc.parent(n))));
+        for start in starts {
+            let mut cur = start;
+            while let Some(n) = cur {
+                if Some(n) == b.node || seen.contains(&n) {
+                    break;
+                }
+                seen.push(n);
+                if self.ctx.styles.get(n).is_some_and(|st| st.opacity < 1.0 && st.display == rabbithole_style::Display::Inline && st.visibility != Visibility::Hidden) {
+                    roots.retain(|&r| !self.in_inline(Some(r), n, b));
+                    if !roots.iter().any(|&r| self.in_inline(Some(n), r, b)) {
+                        roots.push(n);
+                    }
+                }
+                cur = self.ctx.doc.parent(n);
+            }
+        }
+        roots
+    }
+
+    /// Is `node` `root` or inside it (stopping at the block `b`)?
+    fn in_inline(&self, node: Option<NodeId>, root: NodeId, b: &'t LayoutBox) -> bool {
+        let mut cur = node;
+        while let Some(n) = cur {
+            if n == root {
+                return true;
+            }
+            if Some(n) == b.node {
+                return false;
+            }
+            cur = self.ctx.doc.parent(n);
+        }
+        false
+    }
+
     fn paint_lines(&mut self, b: &'t LayoutBox) {
-        let rtl = b.style.direction == rabbithole_style::Direction::Rtl;
-        let _ = rtl;
+        let groups = self.inline_opacity_roots(b);
+        if groups.is_empty() {
+            return self.paint_lines_only(b);
+        }
+        // Each group is painted, in one layer, where its first fragment is
+        // (groups holding only floats paint in the float phase).
+        let mut painted: Vec<NodeId> = Vec::new();
+
+        for line in &b.lines {
+            for f in &line.fragments {
+                match groups.iter().copied().find(|&r| self.in_inline(f.node, r, b)) {
+                    Some(r) if !painted.contains(&r) => {
+                        painted.push(r);
+                        self.paint_inline_group(b, r);
+                    }
+                    Some(_) => {}
+                    None => self.paint_fragment(b, line, f),
+                }
+            }
+        }
+    }
+
+    /// One inline element with opacity, its fragments on every line and its
+    /// floats, composited as a single layer.
+    fn paint_inline_group(&mut self, b: &'t LayoutBox, root: NodeId) {
+        let mut bounds: Option<Rect> = None;
+        let mut grow = |r: Rect| bounds = Some(bounds.map_or(r, |b| b.union(&r)));
+        let mut opacity = 1.0;
+        for f in b.lines.iter().flat_map(|l| l.fragments.iter()) {
+            if self.in_inline(f.node, root, b) {
+                grow(f.rect);
+                if f.node == Some(root) {
+                    if let FragmentKind::InlineBox { style, .. } = &f.kind {
+                        opacity = style.opacity.clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+        if let Some(st) = self.ctx.styles.get(root) {
+            opacity = st.opacity.clamp(0.0, 1.0);
+        }
+        let floats: Vec<&'t LayoutBox> = b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c) && !c.clamped && self.in_inline(c.node, root, b)).collect();
+        for c in &floats {
+            grow(c.subtree_bounds());
+        }
+        let Some(r) = bounds else { return };
+        // (Room for glyph overhang, shadows and outlines.)
+        let pad = 64.0;
+        let r = Rect::new(r.x - pad, r.y - pad, r.w + 2.0 * pad, r.h + 2.0 * pad);
+        let start = self.list.items.len();
+        self.list.push(DisplayItem::PushLayer(r));
+        let saved = self.inline_group.replace(root);
+        for c in floats {
+            self.paint_float_or_atomic(c);
+        }
+        for line in &b.lines {
+            for f in &line.fragments {
+                if self.in_inline(f.node, root, b) {
+                    self.paint_fragment(b, line, f);
+                }
+            }
+        }
+        self.inline_group = saved;
+        if opacity <= 0.0 {
+            // Invisible: keep the hits, drop the paint.
+            self.list.items.truncate(start);
+            return;
+        }
+        self.list.push(DisplayItem::PopLayer(opacity));
+    }
+
+    fn paint_lines_only(&mut self, b: &'t LayoutBox) {
         for line in &b.lines {
             if !self.visible(&line.rect) && !line.rect.is_empty() && line.fragments.iter().all(|f| !self.visible(&f.rect)) {
                 continue;
             }
             for f in &line.fragments {
+                self.paint_fragment(b, line, f);
+            }
+        }
+    }
+
+    fn paint_fragment(&mut self, b: &'t LayoutBox, line: &'t crate::tree::LineBox, f: &'t Fragment) {
+        {
+            {
                 match &f.kind {
                     FragmentKind::InlineBox {
                         style,
@@ -2170,7 +2311,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         right_edge,
                     } => {
                         if style.visibility == Visibility::Hidden {
-                            continue;
+                            return;
                         }
                         if !f.inert {
                             self.record_hit(f.rect, f.node);
@@ -2231,13 +2372,13 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         src,
                     } => {
                         if *hidden {
-                            continue;
+                            return;
                         }
                         if !f.inert {
                             self.record_hit(f.rect, f.node);
                         }
                         if !self.visible(&f.rect) {
-                            continue;
+                            return;
                         }
                         if self.flipped {
                             let cy = f.rect.y + f.rect.h / 2.0;

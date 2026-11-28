@@ -1457,3 +1457,37 @@ fn fixed_descendants_escape_positioned_boxes_inside_their_transformed_ancestor()
     assert!((absolute.rect.y + absolute.rect.h - (inner.y + inner.h - 3.0)).abs() < 0.1);
     assert!(!fixed.fixed);
 }
+
+#[test]
+fn inline_opacity_groups_its_lines_and_floats() {
+    // A float inside a transparent inline is transparent too (CSS Color
+    // inline-opacity-float-child).
+    let fx = Fixture::new(
+        "<div id=g><span style='opacity:0'><div id=f></div></span></div>",
+        "html,body{margin:0} #g{width:100px;height:100px;background:rgb(0,128,0)} #f{float:left;width:100px;height:100px;background:red}",
+    );
+    let list = fx.display_list();
+    let mut canvas = Canvas::new(120, 120);
+    paint(&list, &mut canvas, &fx.fonts, 0.0, 0.0);
+    assert_eq!(canvas.data[50 * 120 + 50], 0x008000);
+    // Overlapping line boxes of one inline composite once: the overlap is
+    // as light as the rest (t32-opacity-offscreen-multiple-boxes).
+    let fx = Fixture::new(
+        "<div id=t><span>XXXXX<br>XXXXX</span></div>",
+        "html,body{margin:0} #t{line-height:6px;font-size:16px} span{opacity:0.4;background:blue;color:blue}",
+    );
+    let list = fx.display_list();
+    let pushes = list.items.iter().filter(|i| matches!(i, DisplayItem::PushLayer(_))).count();
+    let pops: Vec<f32> = list.items.iter().filter_map(|i| match i { DisplayItem::PopLayer(o) => Some(*o), _ => None }).collect();
+    assert_eq!((pushes, pops.len()), (1, 1), "one layer for both lines");
+    assert!((pops[0] - 0.4).abs() < 0.01);
+    // The same when only a descendant inline paints (the transparent one
+    // has no box decorations of its own).
+    let fx = Fixture::new(
+        "<div id=t><span><a>XXXXX<br>XXXXX</a></span></div>",
+        "html,body{margin:0} #t{line-height:0;font-size:16px} span{opacity:0.4} a{background:blue;color:blue}",
+    );
+    let list = fx.display_list();
+    let pops: Vec<f32> = list.items.iter().filter_map(|i| match i { DisplayItem::PopLayer(o) => Some(*o), _ => None }).collect();
+    assert_eq!(pops.len(), 1, "one layer for the transparent span");
+}
