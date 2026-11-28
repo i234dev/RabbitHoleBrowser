@@ -644,7 +644,26 @@ impl<'a> Layouter<'a> {
         if let Some(target) = cb.height {
             if target > rows_total + 0.01 && nrows > 0 {
                 let extra = target - rows_total;
-                let weights = row_h.clone();
+                // Rows without a specified height (theirs or a cell's) take
+                // it first, in proportion to their heights, or equally when
+                // all are empty; otherwise every row does (as Blink).
+                let mut constrained = vec![false; nrows];
+                for (r, p) in g.rows.iter().enumerate() {
+                    constrained[r] = !row_ref(b, *p).style.height.is_auto();
+                }
+                for info in &g.cells {
+                    if info.rowspan == 1 && !cell_ref(b, info).style.height.is_auto() {
+                        constrained[info.row] = true;
+                    }
+                }
+                let free = |r: usize, nonempty: bool| !constrained[r] && (row_h[r] > 0.0) == nonempty;
+                let weights: Vec<f32> = if (0..nrows).any(|r| free(r, true)) {
+                    (0..nrows).map(|r| if free(r, true) { row_h[r] } else { 0.0 }).collect()
+                } else if (0..nrows).any(|r| free(r, false)) {
+                    (0..nrows).map(|r| if free(r, false) { 1.0 } else { 0.0 }).collect()
+                } else {
+                    row_h.clone()
+                };
                 spread(&mut row_h, &weights, extra);
             }
         }
@@ -799,6 +818,7 @@ impl<'a> Layouter<'a> {
     /// each winning border (style and color of the winner), the table gets
     /// the outer halves and no padding.
     pub(crate) fn resolve_collapsed_borders(&mut self, table: &mut LayoutBox) {
+        table.collapsed_edges = None;
         let g = build_grid(table, self.ctx.doc);
         // A vertical table is laid out transposed: so are the cascaded
         // borders read here.
@@ -1056,10 +1076,42 @@ impl<'a> Layouter<'a> {
             }
             cell_mut(table, c).style = Rc::new(s);
         }
+        // Sides along which the edge cells' outer halves differ (a border on
+        // some cells only, mixed styles or colors) are painted per cell; the
+        // table paints the uniform ones.
+        let mut edges: Vec<crate::tree::CollapsedEdge> = Vec::new();
+        let mut segmented = [false; 4];
+        for side in 0..4 {
+            let outer = |c: &Cand| if side == 0 || side == 3 { half_lo(c.0) } else { half_hi(c.0) };
+            let on_side = |c: &CellInfo| match side {
+                0 => c.row == 0,
+                1 => c.col + c.colspan == ncols,
+                2 => c.row + c.rowspan == nrows,
+                _ => c.col == 0,
+            };
+            let uniform = g.cells.iter().enumerate().filter(|(_, c)| on_side(c)).all(|(i, _)| {
+                let cand = new_cells[i][side];
+                let w = outer(&cand);
+                (w == tw[side] && cand.1 == tb[side].1 && cand.2 == tb[side].2) || (w <= 0.0 && tw[side] <= 0.0)
+            });
+            if uniform {
+                continue;
+            }
+            segmented[side] = true;
+            for (i, c) in g.cells.iter().enumerate().filter(|(_, c)| on_side(c)) {
+                let cand = new_cells[i][side];
+                let w = outer(&cand);
+                if w > 0.0 && cand.1.is_visible() {
+                    edges.push(crate::tree::CollapsedEdge { path: (c.row_path.0, c.row_path.1, c.idx), side: side as u8, width: w, style: cand.1, color: cand.2 });
+                }
+            }
+        }
+        table.collapsed_edges = if edges.is_empty() && !segmented.iter().any(|s| *s) { None } else { Some(Box::new(edges)) };
         let mut ts = (*tstyle).clone();
         ts.padding = Edges::all(Length::ZERO);
         ts.border_width = Edges { top: tw[0], right: tw[1], bottom: tw[2], left: tw[3] };
-        ts.border_style = Edges { top: tb[0].1, right: tb[1].1, bottom: tb[2].1, left: tb[3].1 };
+        let style_of = |side: usize| if segmented[side] { BorderStyle::None } else { tb[side].1 };
+        ts.border_style = Edges { top: style_of(0), right: style_of(1), bottom: style_of(2), left: style_of(3) };
         ts.border_color = Edges { top: tb[0].2, right: tb[1].2, bottom: tb[2].2, left: tb[3].2 };
         table.style = Rc::new(ts);
     }

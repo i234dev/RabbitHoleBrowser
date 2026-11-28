@@ -174,6 +174,11 @@ pub struct Built {
     pub overflow_visible: bool,
     /// `<filter>` elements by id.
     pub filters: HashMap<String, std::sync::Arc<crate::filter::FilterDef>>,
+    /// The CSS background color of the root of a standalone SVG document
+    /// (it paints the whole canvas of the image).
+    pub background: Option<Color>,
+    /// The root's `viewBox` has a zero width or height: nothing renders.
+    pub zero_viewbox: bool,
 }
 
 const MAX_DEPTH: usize = 64;
@@ -238,7 +243,8 @@ pub fn build_in(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) ->
     b.resolve_gradients();
     b.resolve_patterns();
     let overflow_visible = b.nodes[root_idx].spec.overflow_visible.unwrap_or(false);
-    let mut built = Built { nodes: b.nodes, root: root_idx, ids: b.ids, width, height, viewbox, par, overflow_visible, filters: b.filters };
+    let zero_viewbox = attr_ci(doc, root, "viewbox").map(crate::units::parse_number_list).is_some_and(|n| n.len() == 4 && n[2] >= 0.0 && n[3] >= 0.0 && (n[2] == 0.0 || n[3] == 0.0));
+    let mut built = Built { nodes: b.nodes, root: root_idx, ids: b.ids, width, height, viewbox, par, overflow_visible, filters: b.filters, background: None, zero_viewbox };
     compute_bboxes(&mut built);
     if built.nodes.iter().any(|n| n.xform.is_some()) {
         for i in 0..built.nodes.len() {
@@ -1086,4 +1092,44 @@ fn compute_bboxes(b: &mut Built) {
 fn attr_ci<'d>(doc: &'d Document, n: NodeId, name: &str) -> Option<&'d str> {
     let el = doc.element(n)?;
     el.attr(name).or_else(|| el.attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str()))
+}
+
+/// The background color the root `<svg>` of a standalone document gets
+/// from its internal stylesheets and `style` attribute.
+pub fn root_background(doc: &Document, root: NodeId) -> Option<Color> {
+    let mut value: Option<String> = None;
+    let mut take = |name: &str, v: String| {
+        if name.eq_ignore_ascii_case("background") || name.eq_ignore_ascii_case("background-color") {
+            value = Some(v);
+        }
+    };
+    let mut sheets = Vec::new();
+    for n in doc.descendants(root) {
+        if doc.is_element(n, "style") {
+            sheets.push(rabbithole_css::parse_stylesheet(&doc.text_content(n)));
+        }
+    }
+    let env = MediaEnv { width: 1000.0, height: 1000.0, screen: true, scripting: true };
+    let mut rules = Vec::new();
+    for s in &sheets {
+        s.active_rules(&env, &mut rules);
+    }
+    for rule in &rules {
+        if rule.selectors.iter().any(|sel| sel.pseudo_element.is_none() && matches(sel, doc, root)) {
+            for d in &rule.declarations {
+                take(&d.name, tokens_to_string(&d.value));
+            }
+        }
+    }
+    if let Some(style) = attr_ci(doc, root, "style") {
+        for d in rabbithole_css::parse_declaration_list(style) {
+            take(&d.name, tokens_to_string(&d.value));
+        }
+    }
+    let v = value?;
+    let color = |s: &str| match crate::color::parse_color(s) {
+        Some(crate::color::ColorSpec::Color(c)) if c.a > 0 => Some(c),
+        _ => None,
+    };
+    color(&v).or_else(|| v.split_whitespace().find_map(color))
 }

@@ -551,3 +551,108 @@ fn absolute_max_width_between_insets_centers_with_auto_margins() {
     let a = fx.rect(&tree, "a");
     assert!(close(a.x, 150.0) && close(a.w, 100.0), "{a:?}");
 }
+
+#[test]
+fn inline_box_fragments_exclude_margins_and_preceding_space() {
+    let fx = Fx::new(r#"<body><p><span id=a style="margin-left:50px;margin-right:30px;background:red">x</span> <span id=b style="background:black">y</span></p></body>"#, "");
+    let t = fx.layout();
+    let boxes: Vec<Rect> = t.root.children[0].children[0].lines[0]
+        .fragments
+        .iter()
+        .filter(|f| matches!(f.kind, crate::tree::FragmentKind::InlineBox { .. }))
+        .map(|f| f.rect)
+        .collect();
+    let texts: Vec<Rect> = t.root.children[0].children[0].lines[0]
+        .fragments
+        .iter()
+        .filter(|f| matches!(f.kind, crate::tree::FragmentKind::Text { .. }))
+        .map(|f| f.rect)
+        .collect();
+    assert_eq!(boxes.len(), 2, "{}", t.dump());
+    // The first box starts after its left margin, at its text.
+    assert!(close(boxes[0].x, 58.0) && close(boxes[0].right(), texts[0].right()), "{}", t.dump());
+    // The second starts at its own text, after the right margin and the space.
+    let y = texts.last().unwrap();
+    assert!(close(boxes[1].x, y.x) && close(boxes[1].right(), y.right()), "{}", t.dump());
+    assert!(boxes[1].x > boxes[0].right() + 30.0, "{}", t.dump());
+}
+
+#[test]
+fn table_height_goes_to_rows_without_specified_height() {
+    let fx = Fx::new(
+        "<table id=t><tr><td id=a>x</td><td>x</td></tr><tr><td id=b>x</td><td>x</td></tr></table>",
+        "body { margin: 0 } table { height: 100px; border-collapse: collapse } td { padding: 0 } tr:first-child td { height: 30px }",
+    );
+    let t = fx.layout();
+    let (a, b) = (fx.rect(&t, "a"), fx.rect(&t, "b"));
+    assert!(close(a.h, 30.0), "{a:?}");
+    assert!(close(b.h, 70.0), "{b:?}");
+}
+
+#[test]
+fn empty_list_item_is_one_marker_line_tall() {
+    let fx = Fx::new("<ul><li id=a></li><li id=b style='list-style:none'></li></ul>", "body { margin: 0 } li { line-height: 20px }");
+    let t = fx.layout();
+    assert!(close(fx.rect(&t, "a").h, 20.0), "{}", t.dump());
+    assert!(close(fx.rect(&t, "b").h, 0.0), "{}", t.dump());
+}
+
+#[test]
+fn calc_margins_resolve_against_zero_in_content_sizes() {
+    let fx = Fx::new("<div id=a><div style='margin-left: calc(10% + 100px)'></div></div>", "body { margin: 0 } #a { width: min-content; height: 10px }");
+    let t = fx.layout();
+    assert!(close(fx.rect(&t, "a").w, 100.0), "{}", t.dump());
+}
+
+#[test]
+fn percentage_height_replaced_in_anonymous_block_sizes_max_content() {
+    let fx = Fx::new(
+        "<div id=f><div id=i><div></div><canvas width=400 height=400 style='height:100%'></canvas></div></div>",
+        "body { margin: 0 } #f { display: flex; flex-direction: column } #i { width: max-content; height: 200px }",
+    );
+    let t = fx.layout();
+    assert!(close(fx.rect(&t, "i").w, 200.0), "{}", t.dump());
+}
+
+#[test]
+fn border_box_replaced_heights_keep_the_ratio() {
+    let fx = Fx::new(
+        "<img id=a width=100 height=100><img id=b width=100 height=100><img id=c width=100 height=100>",
+        "body { margin: 0 } img { box-sizing: border-box; padding-bottom: 30px; width: auto; height: auto } #a { max-height: 100px } #b { height: 100px } #c { min-height: 160px }",
+    );
+    let t = fx.layout();
+    let (a, b, c) = (fx.rect(&t, "a"), fx.rect(&t, "b"), fx.rect(&t, "c"));
+    assert!(close(a.w, 70.0) && close(a.h, 100.0), "{a:?}");
+    assert!(close(b.w, 70.0) && close(b.h, 100.0), "{b:?}");
+    assert!(close(c.w, 130.0) && close(c.h, 160.0), "{c:?}");
+}
+
+#[test]
+fn layout_and_paint_containment_contain_absolute_boxes() {
+    for c in ["layout", "paint", "content"] {
+        let fx = Fx::new("<div id=c><div id=a></div></div>", &format!("body {{ margin: 0 }} #c {{ contain: {c}; width: 100px; height: 100px; margin: 50px }} #a {{ position: absolute; right: 0; bottom: 0; width: 10px; height: 10px }}"));
+        let t = fx.layout();
+        let a = fx.rect(&t, "a");
+        assert!(close(a.x, 140.0) && close(a.y, 140.0), "{c}: {a:?}");
+    }
+}
+
+#[test]
+fn empty_inline_with_padding_makes_a_line() {
+    let fx = Fx::new("<div id=a><span style='padding: 10px'></span></div><div id=b><span></span></div>", "body { margin: 0 } div { line-height: 20px }");
+    let t = fx.layout();
+    assert!(close(fx.rect(&t, "a").h, 20.0), "{}", t.dump());
+    assert!(close(fx.rect(&t, "b").h, 0.0), "{}", t.dump());
+}
+
+#[test]
+fn inline_box_start_edge_wraps_with_its_content() {
+    let fx = Fx::new("<div><span style='font-size: 16px'>aa <span id=s style='border-left: 20px solid'>b</span></span></div>", "body { margin: 0 } div { width: 40px; font: 16px monospace }");
+    let t = fx.layout();
+    let lines = &t.root.children[0].children[0].lines;
+    assert_eq!(lines.len(), 2, "{}", t.dump());
+    let boxes = |l: usize| lines[l].fragments.iter().filter(|f| matches!(&f.kind, crate::tree::FragmentKind::InlineBox { style, .. } if style.border_width.left > 0.0)).map(|f| f.rect).collect::<Vec<_>>();
+    // The bordered box starts on the second line, at its start.
+    assert!(boxes(0).is_empty(), "{}", t.dump());
+    assert!(boxes(1).iter().any(|r| close(r.x, 0.0)), "{}", t.dump());
+}

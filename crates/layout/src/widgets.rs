@@ -113,7 +113,9 @@ pub(crate) fn native_rounding(b: &LayoutBox, ctx: &LayoutContext) -> bool {
     }
     let bg = s.background_color;
     let ua_bg = [Color::WHITE, TRACK, Color::rgb(229, 229, 229), Color::rgb(245, 245, 245), Color::rgba(239, 239, 239, 77)];
-    if !ua_bg.contains(&bg) || s.background_image.is_some() || !s.background_layers.is_empty() {
+    // (Layers without an image, from `background-position` & co., change
+    // nothing.)
+    if !ua_bg.contains(&bg) || s.background_image.is_some() || s.background_layers.iter().any(|l| !matches!(l.image, rabbithole_style::BackgroundImage::None)) {
         return false;
     }
     match ctx.doc.tag(node) {

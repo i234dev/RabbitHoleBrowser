@@ -66,6 +66,12 @@ impl<'a> Tokenizer<'a> {
         self.input.get(self.pos + off).copied()
     }
 
+    fn skip_ws_only(&mut self) {
+        while self.peek(0).is_some_and(|c| c.is_ascii_whitespace()) {
+            self.pos += 1;
+        }
+    }
+
     fn skip_comments_and_ws(&mut self) -> bool {
         let mut saw_ws = false;
         loop {
@@ -232,11 +238,27 @@ impl<'a> Tokenizer<'a> {
                     return Token::Url(out);
                 }
                 Some(c) if c.is_ascii_whitespace() => {
-                    self.skip_comments_and_ws();
-                    if self.peek(0) == Some(b')') {
-                        self.pos += 1;
+                    // (No comments inside url(): only whitespace may follow
+                    // the URL; anything else makes it a bad URL.)
+                    self.skip_ws_only();
+                    match self.peek(0) {
+                        None => return Token::Url(out),
+                        Some(b')') => {
+                            self.pos += 1;
+                            return Token::Url(out);
+                        }
+                        Some(_) => {
+                            while let Some(c) = self.peek(0) {
+                                self.pos += 1;
+                                match c {
+                                    b')' => break,
+                                    b'\\' if self.peek(0).is_some() => self.pos += 1,
+                                    _ => {}
+                                }
+                            }
+                            return Token::BadUrl;
+                        }
                     }
-                    return Token::Url(out);
                 }
                 Some(b'"') | Some(b'\'') | Some(b'(') => {
                     // bad url: consume to ')'
@@ -350,7 +372,7 @@ impl<'a> Tokenizer<'a> {
                 if self.peek(0) == Some(b'(') {
                     self.pos += 1;
                     if name.eq_ignore_ascii_case("url") {
-                        self.skip_comments_and_ws();
+                        self.skip_ws_only();
                         if matches!(self.peek(0), Some(b'"') | Some(b'\'')) {
                             Token::Function(name)
                         } else {
@@ -385,5 +407,12 @@ mod tests {
         assert!(toks.contains(&Token::Dimension(1.5, "em".into())));
         assert!(toks.contains(&Token::Percentage(-2.0)));
         assert!(toks.contains(&Token::Delim('>')));
+    }
+
+    #[test]
+    fn url_tokens_have_no_comments_and_end_at_whitespace() {
+        assert_eq!(Tokenizer::tokenize("url( a/*b )"), vec![Token::Url("a/*b".into())]);
+        assert_eq!(Tokenizer::tokenize("url(/* x); y"), vec![Token::BadUrl, Token::Semicolon, Token::Whitespace, Token::Ident("y".into())]);
+        assert_eq!(Tokenizer::tokenize("url(a b) c"), vec![Token::BadUrl, Token::Whitespace, Token::Ident("c".into())]);
     }
 }

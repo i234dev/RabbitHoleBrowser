@@ -239,7 +239,7 @@ pub fn evaluate_property(name: &str, value: &[Token]) -> bool {
         return false;
     }
     // Value functions we do not implement anywhere.
-    if values.iter().any(|v| matches!(v.as_str(), "sibling-index(" | "sibling-count(" | "if(" | "random(" | "progress(")) {
+    if values.iter().any(|v| matches!(v.as_str(), "if(" | "random(" | "progress(")) {
         return false;
     }
     // Vendor-prefixed properties of other engines.

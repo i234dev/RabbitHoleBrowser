@@ -1011,9 +1011,10 @@ fn absolute_descendants_use_the_positioned_inline_padding_box() {
     let node = |id| fx.doc.element_by_id(id).unwrap();
     let inline = t.inline_rect(&fx.doc, node("inline")).unwrap();
     let absolute = t.box_of(&fx.doc, node("absolute")).unwrap().rect;
-    assert!((absolute.x - inline.x - 14.0).abs() < 0.01, "{absolute:?} vs {inline:?}");
+    // (The inline's rect is its border box.)
+    assert!((absolute.x - inline.x - 3.0).abs() < 0.01, "{absolute:?} vs {inline:?}");
     assert!((absolute.y - inline.y - 3.0).abs() < 0.01);
-    assert!((absolute.w - inline.w + 28.0).abs() < 0.01);
+    assert!((absolute.w - inline.w + 6.0).abs() < 0.01);
     assert!((absolute.h - inline.h + 6.0).abs() < 0.01);
     let positioned = t.box_of(&fx.doc, node("positioned")).unwrap().rect;
     let inner = t.box_of(&fx.doc, node("inner")).unwrap().rect;
@@ -1490,4 +1491,57 @@ fn inline_opacity_groups_its_lines_and_floats() {
     let list = fx.display_list();
     let pops: Vec<f32> = list.items.iter().filter_map(|i| match i { DisplayItem::PopLayer(o) => Some(*o), _ => None }).collect();
     assert_eq!(pops.len(), 1, "one layer for the transparent span");
+}
+
+#[test]
+fn root_background_images_cover_the_canvas() {
+    // The root's own image (with or without a color) and the body's
+    // propagated one are painted over the whole canvas, not its box.
+    for css in [
+        "html { background: linear-gradient(red, blue); height: 100px; margin: 50px }",
+        "html { background: white linear-gradient(red, blue); height: 100px; margin: 50px }",
+        "html { height: 100px; margin: 50px } body { background: linear-gradient(red, blue) }",
+    ] {
+        let fx = Fixture::new("<p>x</p>", css);
+        let list = fx.display_list();
+        let canvas = list.items.iter().any(|i| matches!(i, DisplayItem::PushClip(r) if r.x <= 0.0 && r.y <= 0.0 && r.w >= 800.0 && r.h >= 600.0));
+        assert!(canvas, "{css}: {:?}", list.items);
+    }
+}
+
+#[test]
+fn inline_outlines_and_negative_offsets() {
+    let fx = Fixture::new("<p><span>xx</span></p><div></div>", "span { outline: 3px solid red } div { width: 100px; height: 100px; outline: 50px solid green; outline-offset: -150px }");
+    let list = fx.display_list();
+    let outlines: Vec<Rect> = list.items.iter().filter_map(|i| match i { DisplayItem::Border { rect, widths, .. } if widths[0] >= 3.0 => Some(*rect), _ => None }).collect();
+    assert_eq!(outlines.len(), 2, "{:?}", list.items);
+    // The div's outline collapses to its center, 50px each way.
+    assert!(outlines.iter().any(|r| (r.w - 100.0).abs() < 0.01 && (r.h - 100.0).abs() < 0.01), "{outlines:?}");
+}
+
+#[test]
+fn imageless_background_layers_keep_native_select_corners() {
+    let rounded = |css: &str| {
+        let fx = Fixture::new("<select><option>a</option></select>", css);
+        let list = fx.display_list();
+        list.items.iter().any(|i| matches!(i, DisplayItem::Border { radii, .. } if radii[0].0 > 0.0))
+    };
+    assert!(rounded(""));
+    assert!(rounded("select { background-position: 0 0; background-image: none }"));
+}
+
+#[test]
+fn collapsed_outer_border_is_painted_per_edge_cell() {
+    let fx = Fixture::new(
+        "<table><tr><td id=a>x</td><td>y</td></tr></table>",
+        "table { border-collapse: collapse } td { padding: 0; width: 50px } #a { border: 4px solid rgb(0, 128, 0) }",
+    );
+    let list = fx.display_list();
+    // Top bands of the green border: none crosses into the second cell.
+    let tops: Vec<Rect> = list.items.iter().filter_map(|i| match i {
+        DisplayItem::Border { rect, widths, colors, styles, .. } if widths[0] > 0.0 && styles[0].is_visible() && colors[0] == rabbithole_gfx::Color::rgb(0, 128, 0) => Some(*rect),
+        _ => None,
+    }).collect();
+    assert!(!tops.is_empty(), "{:?}", list.items);
+    assert!(tops.iter().all(|r| r.w < 70.0), "{tops:?}");
 }

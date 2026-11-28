@@ -417,7 +417,8 @@ impl<'a> Builder<'a> {
         // Replaced elements. An `<object>` whose resource cannot be shown
         // (unknown type, failed load, plugin content) renders its fallback
         // content instead, as an ordinary element (HTML §4.8.7).
-        let object_fallback = tag == "object" && !self.ctx.images.get(&node).map(|i| !i.broken).unwrap_or(false);
+        // (One showing a document is replaced until its load fails.)
+        let object_fallback = tag == "object" && self.ctx.images.get(&node).map_or(!crate::object_shows_document(doc, node), |i| i.broken);
         let image_alt = if tag == "img"
             && self.ctx.images.get(&node).is_some_and(|image| image.broken)
             && doc.attr(node, "width").and_then(parse_dimension_attr).is_none()
@@ -1048,8 +1049,11 @@ impl<'a> Builder<'a> {
         let mut rs = (*rt.style).clone();
         rs.display = Display::Block;
         rs.line_height_tight = true;
-        // Size containment does not apply to internal ruby boxes.
+        // Size, layout and paint containment do not apply to internal ruby
+        // boxes.
         rs.contain_size = false;
+        rs.contain_layout = false;
+        rs.contain_paint = false;
         rs.text_align = rabbithole_style::TextAlign::Center;
         rs.white_space = rabbithole_style::WhiteSpace::Nowrap;
         let mut ablk = LayoutBox::new(BoxKind::Block, rt.node, Rc::new(rs));

@@ -776,13 +776,27 @@ impl<'a> Layouter<'a> {
         } else if b.kind == BoxKind::Image {
             let (w, h) = self.replaced_size(b, Some(cbw), cb.height, pb_h);
             let rem = cbw - w - pb_h;
+            // Auto margins of a block-level image in normal flow share the
+            // remaining space; a floated image's auto margins are zero.
+            let in_flow = style.display.is_block_level() && matches!(mode, WidthMode::Fill) && !matches!(b.flow, Flow::FloatLeft | Flow::FloatRight);
             let (l, r) = match (ml, mr) {
-                (None, None) if style.display.is_block_level() && rem > 0.0 => (rem / 2.0, rem / 2.0),
+                (None, None) if in_flow && rem > 0.0 => (rem / 2.0, rem / 2.0),
+                (None, Some(r)) if in_flow => ((rem - r).max(0.0), r),
                 (l, r) => (l.unwrap_or(0.0), r.unwrap_or(0.0)),
             };
             (w, l, r, Some(h))
         } else {
+            // A height imposed by the parent (an absolutely positioned box
+            // between `top` and `bottom`) is definite for the percentage
+            // heights of the contents its shrink-to-fit width measures.
+            let forced_intrinsic = forced_h.is_some() && matches!(mode, WidthMode::ShrinkToFit);
+            if forced_intrinsic {
+                self.intrinsic_forced_h = forced_h;
+            }
             let (w, l, r) = self.compute_width(b, cbw, cb.height, pb_h, ml, mr, mode);
+            if forced_intrinsic {
+                self.intrinsic_forced_h = None;
+            }
             (w, l, r, None)
         };
         b.margin = Edges {
@@ -984,6 +998,12 @@ impl<'a> Layouter<'a> {
             }
             // Empty text fields, buttons and menus are one line tall.
             if b.pseudo.is_none() && h < 0.5 && self.is_line_control(b) {
+                let font = self.font_for(&style);
+                h = style.line_height.unwrap_or_else(|| self.ctx.fonts.normal_line_height(font, style.font_size));
+            }
+            // So is an empty list item with an outside marker: the marker
+            // makes a line box.
+            if h < 0.5 && b.marker_text.is_some() && b.lines.is_empty() && style.list_style_position == rabbithole_style::ListStylePosition::Outside && !b.children.iter().any(|c| c.is_in_flow()) {
                 let font = self.font_for(&style);
                 h = style.line_height.unwrap_or_else(|| self.ctx.fonts.normal_line_height(font, style.font_size));
             }
@@ -1795,6 +1815,15 @@ impl<'a> Layouter<'a> {
         // `auto <ratio>` prefers the natural ratio.
         let ratio = if style.aspect_ratio_auto { natural_ratio.or(css_ratio) } else { css_ratio.or(natural_ratio) };
         let adj_w = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
+        // `box-sizing: border-box` heights include the vertical padding and
+        // borders too.
+        let pb_v = if style.box_sizing == BoxSizing::BorderBox {
+            let base = cbw.unwrap_or(0.0);
+            style.padding.top.resolve_or_zero(base) + style.padding.bottom.resolve_or_zero(base) + style.border_width.top + style.border_width.bottom
+        } else {
+            0.0
+        };
+        let adj_h = |v: f32| (v - pb_v).max(0.0);
         // `width`/`height` attributes arrive as presentational hints in the
         // computed style; an explicit `auto` (e.g. `height: auto`) must
         // keep the ratio instead of falling back to the attribute.
@@ -1805,9 +1834,9 @@ impl<'a> Layouter<'a> {
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         let sh = match style.height {
-            Length::Px(v) => Some(v),
-            Length::Percent(p) => cb_h.map(|c| c * p / 100.0),
-            l @ (Length::Calc(..) | Length::Math(_)) => cb_h.map(|c| l.resolve_or_zero(c)),
+            Length::Px(v) => Some(adj_h(v)),
+            Length::Percent(p) => cb_h.map(|c| adj_h(c * p / 100.0)),
+            l @ (Length::Calc(..) | Length::Math(_)) => cb_h.map(|c| adj_h(l.resolve_or_zero(c))),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         let (iw, ih) = match (iw > 0.0, ih > 0.0, ratio) {
@@ -1822,9 +1851,12 @@ impl<'a> Layouter<'a> {
         // Likewise an `<object>` / `<embed>` showing an SVG document whose
         // width is a percentage or omitted (100%): it fills the containing
         // block like a nested document's viewport.
+        // So does an SVG image with only a ratio (no natural width or
+        // height): CSS 2.1 §10.3.2's suggested used width.
         let fill_width = b.ratio_only
             || b.image.as_ref().and_then(|i| i.vector.as_ref()).is_some_and(|v| v.width.is_none())
-                && b.node.and_then(|n| self.ctx.doc.tag(n)).is_some_and(|t| matches!(t, "object" | "embed"));
+                && b.node.and_then(|n| self.ctx.doc.tag(n)).is_some_and(|t| matches!(t, "object" | "embed"))
+            || b.image.as_ref().filter(|i| !i.broken).and_then(|i| i.vector.as_ref()).is_some_and(|v| v.width.is_none() && v.height.is_none() && v.ratio.is_some());
         let sw = match (sw, sh) {
             (None, None) if fill_width => Some(cbw.map(|c| (c - pb_h).max(0.0)).unwrap_or(300.0)),
             _ => sw,
@@ -1859,7 +1891,8 @@ impl<'a> Layouter<'a> {
         }
         let min_w = if !width_limits { None } else { match style.min_width {
             Length::MinContent | Length::MaxContent | Length::FitContent => Some(content_w),
-            l => l.resolve(cbw_v).filter(|_| cbw.is_some()),
+            Length::Px(v) => Some(adj_w(v)),
+            l => l.resolve(cbw_v).filter(|_| cbw.is_some()).map(adj_w),
         } };
         if let Some(min) = min_w {
             if w < min {
@@ -1869,12 +1902,21 @@ impl<'a> Layouter<'a> {
                 w = min;
             }
         }
-        if let Some(max_h) = style.max_height.resolve_definite(cb_h) {
+        if let Some(max_h) = style.max_height.resolve_definite(cb_h).map(adj_h) {
             if h > max_h {
                 if h > 0.0 {
                     w *= max_h / h;
                 }
                 h = max_h;
+            }
+        }
+        // A minimum height scales an automatic width with the ratio.
+        if let Some(min_h) = style.min_height.resolve_definite(cb_h).map(adj_h).filter(|m| *m > 0.0) {
+            if h < min_h {
+                if h > 0.0 && sw.is_none() {
+                    w *= min_h / h;
+                }
+                h = min_h;
             }
         }
         (w.max(0.0), h.max(0.0))
@@ -2422,10 +2464,10 @@ fn inline_containing_blocks(b: &LayoutBox) -> HashMap<rabbithole_dom::NodeId, Re
                 if !contains_absolutes(style) {
                     continue;
                 }
-                // Inline background fragments include their horizontal
-                // margins; the containing block starts at the padding edge.
-                let left = if *left_edge { style.border_width.left + style.margin.left.resolve_or_zero(b.content_rect.w) } else { 0.0 };
-                let right = if *right_edge { style.border_width.right + style.margin.right.resolve_or_zero(b.content_rect.w) } else { 0.0 };
+                // Inline fragments are border boxes; the containing block
+                // starts at the padding edge.
+                let left = if *left_edge { style.border_width.left } else { 0.0 };
+                let right = if *right_edge { style.border_width.right } else { 0.0 };
                 let rect = Rect::new(
                     fragment.rect.x + left,
                     fragment.rect.y + style.border_width.top,

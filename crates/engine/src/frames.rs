@@ -558,7 +558,7 @@ impl Engine {
                 let roots = std::iter::once(Document::ROOT).chain(page.doc.connected_shadow_roots());
                 roots
                     .flat_map(|r| page.doc.descendants(r))
-                    .filter(|&n| matches!(page.doc.tag(n), Some("iframe" | "frame")) && !(self.scripting && crate::in_noscript(&page.doc, n)))
+                    .filter(|&n| (matches!(page.doc.tag(n), Some("iframe" | "frame")) || rabbithole_layout::object_shows_document(&page.doc, n)) && !(self.scripting && crate::in_noscript(&page.doc, n)))
                     .take(MAX_FRAMES_PER_PAGE)
                     .collect()
             };
@@ -1059,6 +1059,13 @@ impl Engine {
             (c.node, c.id, c.size)
         };
         let vp = Viewport { width: size.0.max(1.0), height: size.1.max(1.0) };
+        // An `<object>` whose document fails to load (or is an HTTP error)
+        // keeps showing its fallback content (HTML §4.8.7).
+        if page.doc.is_element(node, "object") && !matches!(&result, Ok(Loaded::Page(p)) if (200..300).contains(&p.status) || p.status == 0) {
+            page.images.insert(node, Arc::new(rabbithole_gfx::Image::broken()));
+            page.incr.style_patched(node);
+            return;
+        }
         let loaded = match result {
             Ok(Loaded::Page(p)) => p,
             // Downloads and failures show an empty frame.
@@ -1447,7 +1454,8 @@ fn frame_source(page: &Page, node: NodeId) -> FrameSource {
     if page.doc.is_element(node, "iframe") {
         if let Some(s) = page.doc.attr(node, "srcdoc") { return FrameSource::Srcdoc(s.to_string()); }
     }
-    let src = page.doc.attr(node, "src").map(str::trim).unwrap_or("");
+    // (An `<object>` showing a document names it with `data`.)
+    let src = page.doc.attr(node, if page.doc.is_element(node, "object") { "data" } else { "src" }).map(str::trim).unwrap_or("");
     if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
         return FrameSource::Blank;
     }

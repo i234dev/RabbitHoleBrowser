@@ -2424,15 +2424,22 @@ fn sheet_has_dynamic_rules(sheet: &Stylesheet) -> bool {
 fn canvas_background(doc: &Document, styles: &StyledTree) -> Color {
     let root = doc.html_element().and_then(|html| styles.get(html));
     if let Some(s) = root {
+        // A root with `display: none` renders nothing.
+        if s.display == rabbithole_style::Display::None {
+            return Color::TRANSPARENT;
+        }
         if !s.background_color.is_transparent() {
             return s.background_color;
         }
+        if s.background_image.is_some() || s.background_layers.iter().any(|l| !matches!(l.image, rabbithole_style::BackgroundImage::None)) {
+            return Color::TRANSPARENT;
+        }
     }
     // The body's background propagates unless the root or the body has
-    // containment (CSS Contain 2 §3).
+    // containment (CSS Contain 2 §3), or the body generates no box.
     if let Some(body) = doc.body() {
         if let Some(s) = styles.get(body) {
-            if !s.background_color.is_transparent() && !s.has_containment() && !root.is_some_and(|r| r.has_containment()) {
+            if !s.background_color.is_transparent() && !s.has_containment() && !root.is_some_and(|r| r.has_containment()) && !matches!(s.display, rabbithole_style::Display::None | rabbithole_style::Display::Contents) {
                 return s.background_color;
             }
         }

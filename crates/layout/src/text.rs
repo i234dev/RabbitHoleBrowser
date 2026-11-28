@@ -62,7 +62,25 @@ fn segment_break_removed(prev: Option<char>, next: Option<char>) -> bool {
 
 /// Apply `text-transform` (the case, then `full-width` and
 /// `full-size-kana`), with the case tailorings of the content language.
+#[cfg(test)]
 pub(crate) fn transform_style(text: &str, style: &ComputedStyle) -> String {
+    transform_style_in(text, style, false)
+}
+
+/// [`transform_style`] for text that continues a word (`mid_word`: the
+/// previous text of the paragraph ends with a letter or digit, so
+/// `capitalize` leaves its first letter alone).
+pub(crate) fn transform_style_in(text: &str, style: &ComputedStyle, mid_word: bool) -> String {
+    if mid_word && style.text_transform == TextTransform::Capitalize {
+        let mut out = transform_lang_from(text, TextTransform::Capitalize, style.lang, false);
+        if style.text_transform_extra & 1 != 0 {
+            out = out.chars().map(full_width).collect();
+        }
+        if style.text_transform_extra & 2 != 0 {
+            out = out.chars().map(full_size_kana).collect();
+        }
+        return out;
+    }
     let mut out = match (style.text_transform, style.lang) {
         (TextTransform::None, _) => text.to_string(),
         (TextTransform::Uppercase, LANG_TR) => text.chars().map(|c| if c == 'i' { "\u{130}".to_string() } else { c.to_uppercase().collect() }).collect(),
@@ -92,6 +110,10 @@ pub(crate) fn transform(text: &str, t: TextTransform) -> String {
 }
 
 fn transform_lang(text: &str, t: TextTransform, lang: u8) -> String {
+    transform_lang_from(text, t, lang, true)
+}
+
+fn transform_lang_from(text: &str, t: TextTransform, lang: u8, word_start: bool) -> String {
     match t {
         TextTransform::None => text.to_string(),
         TextTransform::Uppercase => text.to_uppercase(),
@@ -100,7 +122,7 @@ fn transform_lang(text: &str, t: TextTransform, lang: u8) -> String {
             // The first typographic letter unit of each word in titlecase
             // (punctuation before it is skipped).
             let mut out = String::with_capacity(text.len());
-            let mut at_word_start = true;
+            let mut at_word_start = word_start;
             let mut chars = text.chars().peekable();
             while let Some(ch) = chars.next() {
                 if ch.is_whitespace() {
@@ -467,6 +489,8 @@ mod tests {
         assert_eq!(transform_style("(hello ǆx", &st), "(Hello ǅx");
         st.text_transform_extra = 1;
         assert_eq!(transform_style("ab c", &st), "Ａｂ Ｃ");
+        st.text_transform_extra = 0;
+        assert_eq!(transform_style_in("xx yy", &st, true), "xx Yy");
     }
 
     #[test]

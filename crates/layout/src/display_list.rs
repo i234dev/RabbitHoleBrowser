@@ -415,16 +415,35 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbith
     // Canvas background: the root's background propagates to the viewport,
     // falling back to the body's.
     let root = &tree.root;
+    // A root with `display: none` renders nothing.
+    if root.style.display == rabbithole_style::Display::None {
+        return list;
+    }
     let mut bg = root.style.background_color;
     let mut root_bg_painted = false;
-    if bg.is_transparent() {
+    let has_layers = |s: &rabbithole_style::ComputedStyle| s.background_image.is_some() || s.background_layers.iter().any(|l| !matches!(l.image, rabbithole_style::BackgroundImage::None));
+    let masked = |s: &rabbithole_style::ComputedStyle| s.background_layers.iter().any(|l| l.clip_text || l.clip_border_area);
+    // The box whose background images cover the canvas (the root's, else
+    // the body's), and the body when its background propagated.
+    let mut canvas_source: Option<&LayoutBox> = None;
+    let mut propagated_body = 0usize;
+    if bg.is_transparent() && !has_layers(&root.style) {
         // (Not when the root or the body has containment.)
         let body = root.children.iter().find(|c| c.is_in_flow() && c.node.is_some_and(|n| ctx.doc.is_element(n, "body")));
-        if let Some(body) = body.filter(|b| !root.style.has_containment() && !b.style.has_containment()) {
+        if let Some(body) = body.filter(|b| !root.style.has_containment() && !b.style.has_containment() && !masked(&b.style)) {
             bg = body.style.background_color;
+            if !bg.is_transparent() || has_layers(&body.style) {
+                propagated_body = body as *const LayoutBox as usize;
+                if has_layers(&body.style) {
+                    canvas_source = Some(body);
+                }
+            }
         }
     } else {
-        root_bg_painted = true;
+        root_bg_painted = !masked(&root.style) || !bg.is_transparent();
+        if !masked(&root.style) && has_layers(&root.style) {
+            canvas_source = Some(root);
+        }
     }
     // The root's opacity also fades the canvas background over the white
     // page backdrop (CSS Compositing 1 §4.1: the root group blends with
@@ -443,6 +462,14 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbith
             radius: 0.0,
         });
     }
+    // Its images go with it, under (and not transformed with) the root,
+    // unless the root's opacity fades them (then the root paints them).
+    if let Some(src) = canvas_source.filter(|_| root_opacity >= 1.0) {
+        let g = crate::background::BoxGeometry { border: root.rect, padding: root.padding_rect(), content: root.content_rect, radii: [(0.0, 0.0); 4], border_width: root.style.border_width, scrolled: None };
+        let vp = Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height);
+        background::paint_canvas_layers(&mut list, &g, &src.style, ctx.background_images, vp, bounds);
+        canvas_source = None;
+    }
     // The top layer (modal dialogs): painted after everything else, in
     // viewport coordinates, each over its `::backdrop`.
     let top_layer: Vec<(NodeId, &LayoutBox)> = ctx
@@ -452,12 +479,19 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbith
         .filter(|&&n| ctx.doc.is_connected(n))
         .filter_map(|&n| tree.box_of(ctx.doc, n).filter(|b| b.node == Some(n)).map(|b| (n, b)))
         .collect();
+    // Inline elements with opacity paint as groups; with an outline, their
+    // fragments get one (both rare: one pass over the styles finds them).
+    let (any_inline_opacity, any_inline_outline) = ctx.styles.styles.iter().flatten().filter(|s| s.display == rabbithole_style::Display::Inline).fold((false, false), |(o, l), s| {
+        (o || s.opacity < 1.0, l || (s.outline_width > 0.0 && s.outline_style.is_visible()))
+    });
     let mut p = Painter {
         list: &mut list,
         ctx,
         bounds,
         root,
         skip_root_bg: root_bg_painted,
+        canvas_source,
+        propagated_body,
         canvas_bg: !bg.is_transparent(),
         blends: 0,
         snap_origin: (0.0, 0.0),
@@ -477,7 +511,8 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbith
         child3d: 0,
         next3d: 0,
         inline_group: None,
-        any_inline_opacity: ctx.styles.styles.iter().flatten().any(|s| s.opacity < 1.0 && s.display == rabbithole_style::Display::Inline),
+        any_inline_opacity,
+        any_inline_outline,
         sel,
     };
     p.paint_stacking_context(root, bounds);
@@ -489,6 +524,14 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext, highlights: Option<&rabbith
     list
 }
 
+/// The outer edge of an outline of width `w` drawn `off` outside `rect`
+/// (a negative offset shrinks the inner edge down to the center at most).
+fn outline_rect(rect: Rect, w: f32, off: f32) -> Rect {
+    let (ix, iw) = if rect.w + 2.0 * off >= 0.0 { (rect.x - off, rect.w + 2.0 * off) } else { (rect.x + rect.w / 2.0, 0.0) };
+    let (iy, ih) = if rect.h + 2.0 * off >= 0.0 { (rect.y - off, rect.h + 2.0 * off) } else { (rect.y + rect.h / 2.0, 0.0) };
+    Rect::new(ix - w, iy - w, iw + 2.0 * w, ih + 2.0 * w)
+}
+
 struct Painter<'l, 't, 'a> {
     list: &'l mut DisplayList,
     /// While painting an inline element with opacity as a group: only its
@@ -497,12 +540,20 @@ struct Painter<'l, 't, 'a> {
     /// Some inline element has `opacity` below 1 (otherwise no group
     /// search is needed).
     any_inline_opacity: bool,
+    /// Some inline element has a visible outline.
+    any_inline_outline: bool,
     /// The selected parts of text fragments (`None`: nothing selected).
     sel: Option<crate::selection::HighlightPaint<'l>>,
     ctx: &'l LayoutContext<'a>,
     bounds: Rect,
     root: &'t LayoutBox,
     skip_root_bg: bool,
+    /// The box (the root or the body) whose background images the root
+    /// paints over the whole canvas.
+    canvas_source: Option<&'t LayoutBox>,
+    /// The body whose background propagated to the canvas (by address; 0:
+    /// none): it does not paint it itself.
+    propagated_body: usize,
     /// A page background was painted under the root group.
     canvas_bg: bool,
     /// Blended layers pushed so far (a stacking context whose painting
@@ -641,8 +692,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 (c, background::inner_radii(padding_radii(), &pad))
             }
         };
-        let grow = |r: f32| if r > 0.0 { r + margin } else { 0.0 };
-        let rect = Rect::new(rect.x - margin, rect.y - margin, rect.w + 2.0 * margin, rect.h + 2.0 * margin);
+        let grow = |r: f32| if r > 0.0 { (r + margin).max(0.0) } else { 0.0 };
+        // (A negative margin shrinks the clip, down to nothing.)
+        let rect = Rect::new(rect.x - margin, rect.y - margin, (rect.w + 2.0 * margin).max(0.0), (rect.h + 2.0 * margin).max(0.0));
         (rect, radii.map(|(h, v)| (grow(h), grow(v))))
     }
 
@@ -1611,6 +1663,16 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         let style = &b.style;
         let rect = self.piece_geom.map_or(b.rect, |g| g.0);
+        // The canvas background's images, positioned against the root.
+        if !pieced && std::ptr::eq(b, self.root) {
+            if let Some(src) = self.canvas_source {
+                let g = BoxGeometry { border: rect, padding: b.padding_rect(), content: b.content_rect, radii: [(0.0, 0.0); 4], border_width: style.border_width, scrolled: None };
+                let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
+                background::paint_canvas_layers(self.list, &g, &src.style, self.ctx.background_images, vp, self.bounds);
+            }
+        }
+        // A body whose background went to the canvas paints none.
+        let skip_bg = skip_bg || (self.propagated_body != 0 && self.propagated_body == b as *const LayoutBox as usize);
         if style.visibility == Visibility::Hidden || rect.is_empty() || (!pieced && !self.visible(&rect)) {
             return;
         }
@@ -1731,6 +1793,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 radii: geom.radii,
             });
         }
+        if let Some(edges) = b.collapsed_edges.as_deref() {
+            self.paint_collapsed_edges(b, edges);
+        }
         if let Some(crate::widgets::Widget::Overlay(items)) = widget {
             for it in items {
                 self.list.push(it);
@@ -1741,6 +1806,29 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         if let Some(rules) = &b.col_rules {
             self.paint_column_rules(style, rules);
+        }
+    }
+
+    /// The outer halves of a collapsed-border table's edge cell borders
+    /// along its non-uniform sides, each along its cell (the top and bottom
+    /// ones cover the table's corners).
+    fn paint_collapsed_edges(&mut self, table: &LayoutBox, edges: &[crate::tree::CollapsedEdge]) {
+        for e in edges {
+            let Some(row) = table.children.get(e.path.0).and_then(|c| match e.path.1 { Some(j) => c.children.get(j), None => Some(c) }) else { continue };
+            let Some(cell) = row.children.get(e.path.2) else { continue };
+            let (c, t, w) = (cell.rect, table, e.width);
+            let x0 = if (c.x - t.content_rect.x).abs() < 0.5 { t.rect.x } else { c.x };
+            let x1 = if (c.right() - t.content_rect.right()).abs() < 0.5 { t.rect.right() } else { c.right() };
+            let (rect, widths) = match e.side {
+                0 => (Rect::new(x0, c.y - w, x1 - x0, w), [w, 0.0, 0.0, 0.0]),
+                1 => (Rect::new(c.right(), c.y, w, c.h), [0.0, w, 0.0, 0.0]),
+                2 => (Rect::new(x0, c.bottom(), x1 - x0, w), [0.0, 0.0, w, 0.0]),
+                _ => (Rect::new(c.x - w, c.y, w, c.h), [0.0, 0.0, 0.0, w]),
+            };
+            if !self.visible(&rect) {
+                continue;
+            }
+            self.list.push(DisplayItem::Border { rect, widths, colors: [e.color; 4], styles: [e.style; 4], radii: [(0.0, 0.0); 4] });
         }
     }
 
@@ -1843,20 +1931,20 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if s.outline_width <= 0.0 || !s.outline_style.is_visible() || s.visibility == Visibility::Hidden || b.kind == BoxKind::Text {
             return;
         }
+        // Table columns and column groups render no boxes of their own.
+        if matches!(s.display, rabbithole_style::Display::TableColumn | rabbithole_style::Display::TableColumnGroup) {
+            return;
+        }
         let w = s.outline_width;
         let off = s.outline_offset;
-        let r = Rect::new(b.rect.x - off - w, b.rect.y - off - w, b.rect.w + 2.0 * (off + w), b.rect.h + 2.0 * (off + w));
+        let r = outline_rect(b.rect, w, off);
         if !self.visible(&r) {
             return;
         }
         let color = s.outline_color.unwrap_or(s.color);
         let radii = box_radii(b);
-        let grown: Radii = [
-            (radii[0].0 + off + w, radii[0].1 + off + w),
-            (radii[1].0 + off + w, radii[1].1 + off + w),
-            (radii[2].0 + off + w, radii[2].1 + off + w),
-            (radii[3].0 + off + w, radii[3].1 + off + w),
-        ];
+        let g = |r: f32| (r + off + w).max(0.0);
+        let grown: Radii = [(g(radii[0].0), g(radii[0].1)), (g(radii[1].0), g(radii[1].1)), (g(radii[2].0), g(radii[2].1)), (g(radii[3].0), g(radii[3].1))];
         let has_radius = radii.iter().any(|(h, v)| *h > 0.0 && *v > 0.0);
         self.list.push(DisplayItem::Border {
             rect: r,
@@ -2219,6 +2307,34 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     }
 
     fn paint_lines(&mut self, b: &'t LayoutBox) {
+        self.paint_lines_grouped(b);
+        if self.any_inline_outline && self.inline_group.is_none() {
+            self.paint_inline_outlines(b);
+        }
+    }
+
+    /// The outlines of the inline elements' fragments, over the lines.
+    fn paint_inline_outlines(&mut self, b: &'t LayoutBox) {
+        for line in &b.lines {
+            for f in &line.fragments {
+                let FragmentKind::InlineBox { style, .. } = &f.kind else { continue };
+                // (Empty pieces at line ends get none; a clip-path, which
+                // would clip the outline, is left to the element's group.)
+                if style.outline_width <= 0.0 || !style.outline_style.is_visible() || style.visibility == Visibility::Hidden || f.rect.w <= 0.01 || f.rect.h <= 0.01 || style.clip_path.is_some() {
+                    continue;
+                }
+                let w = style.outline_width;
+                let r = outline_rect(f.rect, w, style.outline_offset);
+                if !self.visible(&r) {
+                    continue;
+                }
+                let color = style.outline_color.unwrap_or(style.color);
+                self.list.push(DisplayItem::Border { rect: r, widths: [w; 4], colors: [color; 4], styles: [style.outline_style; 4], radii: [(0.0, 0.0); 4] });
+            }
+        }
+    }
+
+    fn paint_lines_grouped(&mut self, b: &'t LayoutBox) {
         let groups = self.inline_opacity_roots(b);
         if groups.is_empty() {
             return self.paint_lines_only(b);

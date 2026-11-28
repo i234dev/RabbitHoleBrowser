@@ -926,7 +926,7 @@ fn paint_and_image_properties() {
     let s = one("overflow-clip-margin: content-box 5px; image-orientation: none");
     assert_eq!(s.overflow_clip_margin, (BoxArea::ContentBox, 5.0));
     assert!(s.image_orientation_none);
-    assert_eq!(one("overflow-clip-margin: -10px").overflow_clip_margin, (BoxArea::PaddingBox, 0.0));
+    assert_eq!(one("overflow-clip-margin: -10px").overflow_clip_margin, (BoxArea::PaddingBox, -10.0));
 }
 
 #[test]

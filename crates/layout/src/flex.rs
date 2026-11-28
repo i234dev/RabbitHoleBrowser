@@ -759,7 +759,9 @@ impl<'a> Layouter<'a> {
         };
         let max = max.max(min);
         let hyp = base.clamp(min, max);
-        let cross_auto = cross_prop.is_auto() || cross_prop.is_intrinsic();
+        // (Only an automatic cross size stretches: `max-content` & co.
+        // keep their size.)
+        let cross_auto = cross_prop.is_auto();
         FlexItem {
             idx,
             edges,
@@ -932,7 +934,7 @@ impl<'a> Layouter<'a> {
                     None => match resolve_size(child.style.width, Some(cbw), bb, it.edges.pb_h) {
                         Some(w) => WidthMode::Fixed(w),
                         None => {
-                            if matches!(it.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto) && !it.edges.auto.left && !it.edges.auto.right {
+                            if it.cross_auto && matches!(it.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto) && !it.edges.auto.left && !it.edges.auto.right {
                                 WidthMode::Fixed((cbw - it.edges.pb_h - it.edges.margin_sum(Axis::Row)).max(0.0))
                             } else {
                                 WidthMode::ShrinkToFit

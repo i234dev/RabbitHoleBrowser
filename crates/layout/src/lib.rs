@@ -84,6 +84,29 @@ pub(crate) fn pseudo_style(styles: &StyledTree, id: NodeId, which: rabbithole_cs
 }
 
 /// Lay out the document into absolute (document-space) coordinates.
+/// Does this `<object>` show an HTML document (in a nested browsing
+/// context, like an `<iframe>`) rather than an image or its fallback?
+pub fn object_shows_document(doc: &rabbithole_dom::Document, n: rabbithole_dom::NodeId) -> bool {
+    if !doc.is_element(n, "object") {
+        return false;
+    }
+    let Some(data) = doc.attr(n, "data").map(str::trim).filter(|d| !d.is_empty()) else { return false };
+    // (Only documents named by a relative URL, of the page's own site: an
+    // object pointing elsewhere keeps its fallback content, which it would
+    // show anyway should the load fail.)
+    let has_scheme = data.find(':').is_some_and(|i| i > 0 && data[..i].bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')));
+    if has_scheme || data.starts_with("//") {
+        return false;
+    }
+    match doc.attr(n, "type").map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()) {
+        Some(t) => t == "text/html" || t == "application/xhtml+xml",
+        None => {
+            let path = data.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+            [".html", ".htm", ".xht", ".xhtml"].iter().any(|e| path.ends_with(e))
+        }
+    }
+}
+
 pub fn layout(ctx: &LayoutContext) -> LayoutTree {
     build::reset_list_numbers();
     tree::layout_document(ctx)

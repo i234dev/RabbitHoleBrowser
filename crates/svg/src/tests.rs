@@ -287,3 +287,20 @@ fn css_transform_origin_on_svg_elements() {
     assert_eq!(px(75, 25).3, 0);
     assert_eq!(px(95, 95), (0, 0, 255, 255));
 }
+
+#[test]
+fn root_background_paints_the_image_canvas() {
+    let t = SvgTree::parse(r#"<svg style="background: green" xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>"#).unwrap();
+    let img = t.rasterize_viewport(&fonts(), 100.0, 100.0, 1.0);
+    assert_eq!(img.pixel(50, 50), [0, 128, 0, 255]);
+    let t = SvgTree::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><style>svg { background-color: #00f }</style></svg>"#).unwrap();
+    assert_eq!(t.rasterize(&fonts(), 20, 20).pixel(1, 1), [0, 0, 255, 255]);
+    let t = SvgTree::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>"#).unwrap();
+    assert_eq!(t.rasterize(&fonts(), 10, 10).pixel(1, 1)[3], 0);
+}
+
+#[test]
+fn zero_sized_viewbox_renders_nothing() {
+    let t = SvgTree::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 0"><rect width="100%" height="100%" fill="lime"/></svg>"#).unwrap();
+    assert_eq!(t.rasterize(&fonts(), 10, 10).pixel(5, 5)[3], 0);
+}
