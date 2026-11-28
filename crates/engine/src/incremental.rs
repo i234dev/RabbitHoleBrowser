@@ -1257,7 +1257,8 @@ fn numbers_close(a: &str, b: &str) -> bool {
         for ch in s.chars() {
             // (Exponents included: `6.1035156e-5`.)
             let exp = num && (ch == 'e' && cur.chars().last().is_some_and(|c| c.is_ascii_digit()) || ch == '-' && cur.ends_with('e'));
-            let is_num = ch.is_ascii_digit() || ch == '.' || (ch == '-' && !num && cur.is_empty()) || exp;
+            // (A minus sign starts a number after text: `[480.0,-0.0`.)
+            let is_num = ch.is_ascii_digit() || ch == '.' || (ch == '-' && !num) || exp;
             if is_num != num && !cur.is_empty() {
                 out.push(if num { cur.parse::<f32>().map_err(|_| cur.clone()) } else { Err(cur.clone()) });
                 cur.clear();
