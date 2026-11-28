@@ -1522,7 +1522,13 @@ impl StyleEngine {
                 (style, vars)
             } else {
                 let vars = self.vars[node].clone().unwrap_or_else(|| pvars.clone());
-                (old.clone().expect("visible element has a style"), vars)
+                let style = old.clone().expect("visible element has a style");
+                if node == html {
+                    // `rem` lengths of recomputed descendants resolve
+                    // against the root element's (unchanged) font size.
+                    root_fs = style.font_size;
+                }
+                (style, vars)
             };
             if style.display.is_none() {
                 if !all && (!old_hidden || flags & N_DESC != 0) {

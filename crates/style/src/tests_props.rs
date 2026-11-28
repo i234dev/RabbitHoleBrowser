@@ -1179,3 +1179,26 @@ fn html_headings_list_alignment_and_input_clipping_use_their_ua_defaults() {
     let input = style_of(&doc,&tree,"input");
     assert_eq!((input.overflow_x,input.overflow_y),(Overflow::Clip,Overflow::Clip));
 }
+
+#[test]
+fn incremental_restyle_resolves_rem_against_unchanged_root_font_size() {
+    // Only the span is recomputed: `rem` must still use the root's 10px,
+    // not the initial 16px (a 1.8rem title flipped between 18px and 28.8px).
+    let mut doc = rabbithole_html::parse("<div id=row><span id=title>x</span></div>");
+    let sheets = vec![parse_stylesheet("html {font-size:10px} span {font-size:1.8rem} .active span {color:green}")];
+    let row = doc.element_by_id("row").unwrap();
+    let title = doc.element_by_id("title").unwrap();
+    let state = MatchState::default();
+    let opts = StyleOptions { state: &state, resolve_url: &|_, s| Some(s.to_string()), document_base: "" };
+    let mut engine = crate::restyle::StyleEngine::new(&sheets, &env());
+    let mut tree = engine.full(&doc, &sheets, &opts);
+    assert_eq!(tree.get(title).unwrap().font_size, 18.0);
+    doc.track_mutations(true);
+    doc.set_attr(row, "class", Some("active"));
+    let log = doc.take_mutations();
+    engine.update(&doc, &mut tree, &log, &opts, &sheets);
+    assert_eq!(tree.get(title).unwrap().color, Color::rgb(0, 128, 0));
+    assert_eq!(tree.get(title).unwrap().font_size, 18.0);
+    let full = style_tree_with(&doc, &sheets, &env(), &opts);
+    assert_eq!(tree.get(title), full.get(title));
+}
