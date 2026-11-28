@@ -837,12 +837,32 @@ impl LayoutBox {
             m.baseline += dy;
         }
         for c in &mut self.children {
-            c.translate(dx, dy);
+            c.translate_with_parent(dx, dy);
+        }
+    }
+
+    /// Move a child along with its parent's contents. A box fixed to the
+    /// viewport stays where its insets put it (it moves only in axes
+    /// where both insets are `auto`, placed at its static position): an
+    /// ancestor's relative offset, scroll offset or reuse by translation
+    /// does not move it.
+    pub(crate) fn translate_with_parent(&mut self, dx: f32, dy: f32) {
+        if self.fixed && self.flow == Flow::Absolute {
+            let inset = &self.style.inset;
+            let dx = if inset.left.is_auto() && inset.right.is_auto() { dx } else { 0.0 };
+            let dy = if inset.top.is_auto() && inset.bottom.is_auto() { dy } else { 0.0 };
+            self.translate(dx, dy);
+        } else {
+            self.translate(dx, dy);
         }
     }
 
     /// Baseline of the box's first line (absolute y), searching descendants.
+    /// (Baselines are found as if every scroll container were at its
+    /// initial scroll position, CSS Align 3 §9.1: contents moved by a
+    /// scroll offset are measured back from it.)
     pub fn first_baseline(&self) -> Option<f32> {
+        let dy = self.scroll_offset.1;
         if self.wm_wrapper {
             // An orthogonal flow has no baseline in its parent's axis (its
             // lines are in its own, logical, space): one is synthesized.
@@ -851,16 +871,17 @@ impl LayoutBox {
         if matches!(self.formatting, Formatting::Flex | Formatting::Grid) && self.flex_baselines[0] != FLEX_BASELINE_UNSET {
             // An item without a baseline has one synthesized from its
             // border box's bottom edge.
-            return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(self.synthesized_baseline_of(c)));
+            return self.children.get(self.flex_baselines[0] as usize).map(|c| c.first_baseline().unwrap_or(self.synthesized_baseline_of(c)) + dy);
         }
         if let Some(l) = self.lines.first() {
-            return Some(l.baseline);
+            return Some(l.baseline + dy);
         }
         self.children
             .iter()
             .filter(|c| c.is_in_flow())
             .find_map(|c| c.first_baseline())
             .or_else(|| self.synthesized_item_baseline(false))
+            .map(|v| v + dy)
     }
 
     /// The baseline synthesized from an item's border box: its bottom
@@ -887,14 +908,15 @@ impl LayoutBox {
 
     /// Baseline of the last line (absolute y).
     pub fn last_baseline(&self) -> Option<f32> {
+        let dy = self.scroll_offset.1;
         if self.wm_wrapper {
             return None;
         }
         if matches!(self.formatting, Formatting::Flex | Formatting::Grid) && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
-            return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(self.synthesized_baseline_of(c)));
+            return self.children.get(self.flex_baselines[1] as usize).map(|c| c.last_baseline().unwrap_or(self.synthesized_baseline_of(c)) + dy);
         }
         if let Some(l) = self.lines.last() {
-            return Some(l.baseline);
+            return Some(l.baseline + dy);
         }
         self.children
             .iter()
@@ -902,6 +924,7 @@ impl LayoutBox {
             .filter(|c| c.is_in_flow())
             .find_map(|c| c.last_baseline())
             .or_else(|| self.synthesized_item_baseline(true))
+            .map(|v| v + dy)
     }
 
     /// Visit every absolutely positioned descendant whose containing block is
@@ -978,7 +1001,7 @@ impl LayoutBox {
             let _ = write!(out, " fixed");
         }
         if self.scroll_container {
-            let _ = write!(out, " scroll[{:.0}x{:.0} @{:.0},{:.0}]", self.scroll_width, self.scroll_height, self.scroll_offset.0, self.scroll_offset.1);
+            let _ = write!(out, " scroll[{:.1}x{:.1} @{:.1},{:.1}]", self.scroll_width, self.scroll_height, self.scroll_offset.0, self.scroll_offset.1);
         }
         if let Some(m) = self.transform_matrix() {
             let _ = write!(out, " transform[{:.2} {:.2} {:.2} {:.2} {:.1} {:.1}]", m[0], m[1], m[2], m[3], m[4], m[5]);
@@ -1333,11 +1356,12 @@ impl LayoutTree {
         if !b.scroll_container {
             return false;
         }
+        crate::block::extend_to_scrolling_area(b, offset);
         let pr = b.padding_rect();
         let ox = offset.0.clamp(0.0, (b.scroll_width - pr.w).max(0.0));
         let oy = offset.1.clamp(0.0, (b.scroll_height - pr.h).max(0.0));
         let (dx, dy) = (b.scroll_offset.0 - ox, b.scroll_offset.1 - oy);
-        crate::table::translate_contents(b, dx, dy);
+        crate::block::scroll_contents(b, dx, dy);
         b.scroll_offset = (ox, oy);
         true
     }

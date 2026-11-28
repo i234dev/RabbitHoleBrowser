@@ -916,6 +916,12 @@ impl<'a> Layouter<'a> {
             b.contents_fp.set(fp);
             b.collapsed_bottom_margin = c.collapsed_bottom_margin;
             b.bottom_margins = c.bottom_margins;
+            // The widening the contents caused (the box was sized from
+            // its style again above).
+            if c.grown_w != 0.0 {
+                b.rect.w += c.grown_w;
+                b.content_rect.w += c.grown_w;
+            }
             // Floats inside that belong to the parent BFC are placed again.
             bfc.extend_relative(origin, &c.escaped);
             let out = (c.content_h, c.float_extent);
@@ -957,6 +963,7 @@ impl<'a> Layouter<'a> {
                 float_env,
                 escaped,
                 alt_h,
+                grown_w: b.content_rect.w - inner_cb.width,
             });
             (content_h, float_extent)
         };
@@ -1155,37 +1162,24 @@ impl<'a> Layouter<'a> {
         use rabbithole_style::Overflow::{Auto, Hidden, Scroll};
         b.scroll_container = matches!(style.overflow_x, Auto | Scroll | Hidden) || matches!(style.overflow_y, Auto | Scroll | Hidden);
         let pr = b.padding_rect();
-        let mut max_r = pr.right();
-        let mut max_b = pr.bottom();
-        // Boxes hidden after a line-clamp point add no scrollable overflow.
-        for c in b.children.iter().filter(|c| !c.clamped) {
-            let r = content_bounds(c);
-            max_r = max_r.max(r.right());
-            max_b = max_b.max(r.bottom());
-        }
-        for line in &b.lines {
-            for f in &line.fragments {
-                max_r = max_r.max(f.rect.right());
-                max_b = max_b.max(f.rect.bottom());
-            }
-        }
-        // Padding at the end of the scrollable area (CSS Overflow 3).
-        let pad_r = b.content_rect.right() - pr.right();
-        let pad_b = b.content_rect.bottom() - pr.bottom();
-        b.scroll_width = (max_r - pr.x + pad_r.max(0.0)).max(pr.w);
-        b.scroll_height = (max_b - pr.y + pad_b.max(0.0)).max(pr.h);
+        (b.scroll_width, b.scroll_height) = scroll_extent(b);
         if !b.scroll_container {
             return;
         }
         let Some(node) = b.node else { return };
         let Some(&(ox, oy)) = self.ctx.scroll_offsets.get(&node) else { return };
+        // Scripts may scroll anywhere in the CSSOM scrolling area, which
+        // can reach past the overflow measured above: keep such an offset
+        // (as `LayoutTree::set_scroll_offset` does) instead of clamping it
+        // by a different measure on the next layout.
+        extend_to_scrolling_area(b, (ox, oy));
         let max_x = (b.scroll_width - pr.w).max(0.0);
         let max_y = (b.scroll_height - pr.h).max(0.0);
         let ox = ox.clamp(0.0, max_x);
         let oy = oy.clamp(0.0, max_y);
         b.scroll_offset = (ox, oy);
         if ox != 0.0 || oy != 0.0 {
-            crate::table::translate_contents(b, -ox, -oy);
+            scroll_contents(b, -ox, -oy);
         }
     }
 
@@ -2289,8 +2283,12 @@ impl<'a> Layouter<'a> {
     /// containing block's height when definite (percentage `top`/`bottom`
     /// against an indefinite height compute to `auto`, CSS 2.1 §9.3.2);
     /// `definite` says whether `b`'s own height is.
-    fn apply_relative(&mut self, b: &mut LayoutBox, cbw: f32, cbh: Option<f32>, definite: bool) {
+    /// Apply relative offsets (CSS 2.1 §9.4.3) below and at `b`. Returns
+    /// whether anything moved. Clipping boxes whose contents moved measure
+    /// their scrollable overflow again (relative offsets count in it).
+    fn apply_relative(&mut self, b: &mut LayoutBox, cbw: f32, cbh: Option<f32>, definite: bool) -> bool {
         let (iw, ih) = (b.content_rect.w, b.content_rect.h);
+        let mut moved = false;
         if !b.reused_layout {
             // Flex and grid items are sized by their container: their
             // heights (and the container's, for them) count as definite.
@@ -2311,7 +2309,10 @@ impl<'a> Layouter<'a> {
             };
             for i in 0..b.children.len() {
                 let d = items || height_definite(&b.children[i], definite);
-                self.apply_relative(&mut b.children[i], iw, inner_h, d);
+                moved |= self.apply_relative(&mut b.children[i], iw, inner_h, d);
+            }
+            if moved && b.clips {
+                self.refresh_scroll_extent(b);
             }
         }
         let mut want = (0.0, 0.0);
@@ -2336,6 +2337,32 @@ impl<'a> Layouter<'a> {
         let (ax, ay) = b.rel_applied;
         b.translate(want.0 - ax, want.1 - ay);
         b.rel_applied = want;
+        moved || want != (ax, ay)
+    }
+
+    /// Measure a clipping box's scrollable overflow again after its
+    /// contents moved, keeping its scroll offset within it.
+    fn refresh_scroll_extent(&mut self, b: &mut LayoutBox) {
+        let size = scroll_extent(b);
+        if size == (b.scroll_width, b.scroll_height) {
+            return;
+        }
+        (b.scroll_width, b.scroll_height) = size;
+        if !b.scroll_container {
+            return;
+        }
+        let Some(&want) = b.node.and_then(|n| self.ctx.scroll_offsets.get(&n)) else { return };
+        // (Offsets are measured in the unscrolled geometry.)
+        let now = b.scroll_offset;
+        b.scroll_offset = (0.0, 0.0);
+        scroll_contents(b, now.0, now.1);
+        extend_to_scrolling_area(b, want);
+        let pr = b.padding_rect();
+        let to = (want.0.clamp(0.0, (b.scroll_width - pr.w).max(0.0)), want.1.clamp(0.0, (b.scroll_height - pr.h).max(0.0)));
+        b.scroll_offset = to;
+        if to != (0.0, 0.0) {
+            scroll_contents(b, -to.0, -to.1);
+        }
     }
 
     /// Position an outside list marker next to the first line.
@@ -2379,7 +2406,7 @@ impl<'a> Layouter<'a> {
 /// its absolutely positioned descendants? Positioned inlines do, and so do
 /// filtered ones (Filter Effects §5: `filter` / `backdrop-filter` other than
 /// `none` establish a containing block for absolute descendants).
-fn contains_absolutes(style: &rabbithole_style::ComputedStyle) -> bool {
+pub(crate) fn contains_absolutes(style: &rabbithole_style::ComputedStyle) -> bool {
     style.position != Position::Static
         || style.establishes_fixed_containing_block()
         || (style.display == rabbithole_style::Display::Inline && (!style.filters.is_empty() || !style.backdrop_filters.is_empty()))
@@ -2459,6 +2486,29 @@ fn inline_containing_blocks(b: &LayoutBox) -> HashMap<rabbithole_dom::NodeId, Re
 /// Union of a box's border box, its fragments and its descendants
 /// (respecting clips) — the area it occupies for scroll-size purposes.
 pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
+    content_bounds_scoped(b, true, true)
+}
+
+/// Is `c` in flow, or an out-of-flow box whose containing block is inside
+/// the scroll container being measured (`abs_in`: some box between them
+/// contains absolutely positioned boxes; `fixed_in`: fixed ones)?
+#[inline]
+fn contained_out_of_flow(c: &LayoutBox, abs_in: bool, fixed_in: bool) -> bool {
+    if c.flow != Flow::Absolute {
+        return true;
+    }
+    if c.style.position == Position::Fixed {
+        // (A box between them with a fixed containing block makes the
+        // fixed box absolutely positioned against it, never `c.fixed`.)
+        fixed_in
+    } else {
+        abs_in
+    }
+}
+
+/// [`content_bounds`] of a descendant of a scroll container, leaving out
+/// out-of-flow boxes whose containing block is outside the container.
+fn content_bounds_scoped(b: &LayoutBox, abs_in: bool, fixed_in: bool) -> Rect {
     // A transformed box contributes its transformed border box (its auto
     // margins, turned, must not extend the overflow).
     let transformed = b.style.has_transform();
@@ -2476,8 +2526,10 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
             r = r.union(&f.rect);
         }
     }
-    for c in b.children.iter().filter(|c| !c.clamped) {
-        let cr = content_bounds(c);
+    let abs_in = abs_in || contains_absolutes(&b.style);
+    let fixed_in = fixed_in || b.style.establishes_fixed_containing_block();
+    for c in b.children.iter().filter(|c| !c.clamped && contained_out_of_flow(c, abs_in, fixed_in)) {
+        let cr = content_bounds_scoped(c, abs_in, fixed_in);
         // A transformed empty box (nothing to draw) adds no overflow.
         if cr.w <= 0.0 && cr.h <= 0.0 || c.style.has_transform() && (cr.w <= 0.0 || cr.h <= 0.0) {
             continue;
@@ -2499,6 +2551,159 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
         r.h = outer.h;
     }
     b.transformed_bounds(r)
+}
+
+/// The scrolling area of box `b` (CSSOM View "scrolling area"): its padding
+/// box united with the border boxes and line fragments of its content (the
+/// content of nested clipping boxes is clipped by them; fixed boxes do not
+/// count, nor do out-of-flow boxes whose containing block is outside
+/// `b`), cut at the edges the scroll origin is at (block start and
+/// inline start, mirrored for `*-reverse` flex containers). Returns the
+/// (width, height) — `scrollWidth` / `scrollHeight`.
+pub fn scrolling_area(b: &LayoutBox) -> (f32, f32) {
+    use rabbithole_style::{Direction, Display, FlexDirection, WritingMode};
+    let p = b.padding_rect();
+    // Contents of a scrolled box are translated by -scroll_offset.
+    let (ox, oy) = b.scroll_offset;
+    let mut u = (p.x, p.y, p.x + p.w, p.y + p.h);
+    fn add(u: &mut (f32, f32, f32, f32), r: &Rect, dx: f32, dy: f32) {
+        if r.w <= 0.0 && r.h <= 0.0 {
+            return;
+        }
+        u.0 = u.0.min(r.x + dx);
+        u.1 = u.1.min(r.y + dy);
+        u.2 = u.2.max(r.x + r.w + dx);
+        u.3 = u.3.max(r.y + r.h + dy);
+    }
+    fn walk(bx: &LayoutBox, u: &mut (f32, f32, f32, f32), dx: f32, dy: f32, columns: bool, abs_in: bool, fixed_in: bool) {
+        let abs_in = abs_in || contains_absolutes(&bx.style);
+        let fixed_in = fixed_in || bx.style.establishes_fixed_containing_block();
+        for line in &bx.lines {
+            for f in &line.fragments {
+                add(u, &f.rect, dx, dy);
+            }
+        }
+        for c in &bx.children {
+            // Fixed boxes, and boxes hidden after a line-clamp point, add no
+            // scrollable overflow; a clamped container cuts its content.
+            if c.fixed || c.clamped || !contained_out_of_flow(c, abs_in, fixed_in) {
+                continue;
+            }
+            // A transformed box counts with its transformed bounds.
+            if c.style.has_transform() {
+                let b = content_bounds(c);
+                add(u, &b, dx, dy);
+                continue;
+            }
+            // Inside a box (not the multi-column container itself), a
+            // descendant broken across columns counts unbroken.
+            if let Some(r) = c.unfragmented_rect().filter(|_| !columns) {
+                add(u, &r, dx, dy);
+                continue;
+            }
+            add(u, &c.rect, dx, dy);
+            let clamp_cut = c.style.line_clamp.is_some() && c.children.iter().any(|x| x.clamped);
+            if !c.clips && !clamp_cut {
+                walk(c, u, dx, dy, columns || c.style.multicol, abs_in, fixed_in);
+            }
+        }
+    }
+    walk(b, &mut u, ox, oy, b.style.multicol, false, false);
+    let s = &b.style;
+    let vertical = matches!(s.writing_mode, WritingMode::VerticalRl | WritingMode::VerticalLr | WritingMode::SidewaysLr);
+    let rtl = s.direction == Direction::Rtl;
+    // Where the scroll origin is: the right edge / the bottom edge.
+    let mut from_right = (!vertical && rtl) || s.writing_mode == WritingMode::VerticalRl;
+    let mut from_bottom = vertical && rtl;
+    if matches!(s.display, Display::Flex | Display::InlineFlex) {
+        let reverse = matches!(s.flex_direction, FlexDirection::RowReverse | FlexDirection::ColumnReverse);
+        let main_vertical = matches!(s.flex_direction, FlexDirection::Row | FlexDirection::RowReverse) == vertical;
+        if reverse {
+            if main_vertical {
+                from_bottom = !from_bottom;
+            } else {
+                from_right = !from_right;
+            }
+        }
+    }
+    let w = if from_right { p.x + p.w - u.0 } else { u.2 - p.x };
+    let h = if from_bottom { p.y + p.h - u.1 } else { u.3 - p.y };
+    (w.max(p.w), h.max(p.h))
+}
+
+
+/// Grow the recorded scroll size of a scroll container to its CSSOM
+/// scrolling area when `offset` reaches past it (computed only then).
+pub(crate) fn extend_to_scrolling_area(b: &mut LayoutBox, offset: (f32, f32)) {
+    let pr = b.padding_rect();
+    if offset.0 <= b.scroll_width - pr.w && offset.1 <= b.scroll_height - pr.h {
+        return;
+    }
+    let area = scrolling_area(b);
+    b.scroll_width = b.scroll_width.max(area.0);
+    b.scroll_height = b.scroll_height.max(area.1);
+}
+
+/// The scrollable overflow size of a clipping box (its padding box united
+/// with its contents' bounds and end padding), measured with its contents
+/// at their unscrolled position.
+fn scroll_extent(b: &LayoutBox) -> (f32, f32) {
+    let style = &b.style;
+    let (sx, sy) = b.scroll_offset;
+    let pr = b.padding_rect();
+    let mut max_r = pr.right();
+    let mut max_b = pr.bottom();
+    // Boxes hidden after a line-clamp point add no scrollable overflow,
+    // nor do out-of-flow boxes whose containing block is an ancestor
+    // (CSS Overflow 3 §2.2: they are not scrolled by this box; they
+    // are also positioned only after it is laid out, so their
+    // geometry here would be whatever an earlier layout left).
+    let abs_in = contains_absolutes(style);
+    let fixed_in = style.establishes_fixed_containing_block();
+    for c in b.children.iter().filter(|c| !c.clamped && contained_out_of_flow(c, abs_in, fixed_in)) {
+        let r = content_bounds_scoped(c, abs_in, fixed_in);
+        // An empty box adds no overflow (as in `content_bounds`).
+        if r.w <= 0.0 && r.h <= 0.0 || c.style.has_transform() && (r.w <= 0.0 || r.h <= 0.0) {
+            continue;
+        }
+        max_r = max_r.max(r.right() + sx);
+        max_b = max_b.max(r.bottom() + sy);
+    }
+    for line in &b.lines {
+        for f in &line.fragments {
+            max_r = max_r.max(f.rect.right() + sx);
+            max_b = max_b.max(f.rect.bottom() + sy);
+        }
+    }
+    // Padding at the end of the scrollable area (CSS Overflow 3).
+    let pad_r = b.content_rect.right() - pr.right();
+    let pad_b = b.content_rect.bottom() - pr.bottom();
+    ((max_r - pr.x + pad_r.max(0.0)).max(pr.w), (max_b - pr.y + pad_b.max(0.0)).max(pr.h))
+}
+
+/// Move a scroll container's contents by its scroll offset change. Out-of-
+/// flow boxes whose containing block is outside the container are not
+/// scrolled by it, not even at their static position (the hypothetical
+/// box ignores the scroll offset: WPT css-position
+/// hypothetical-box-scroll-parent), as when their containing block
+/// positions them after the container's layout.
+pub(crate) fn scroll_contents(b: &mut LayoutBox, dx: f32, dy: f32) {
+    crate::table::translate_contents(b, dx, dy);
+    fn unscroll(b: &mut LayoutBox, dx: f32, dy: f32) {
+        for c in &mut b.children {
+            if c.flow == Flow::Absolute {
+                // (Viewport-fixed boxes were not moved.)
+                if !c.fixed {
+                    c.translate(-dx, -dy);
+                }
+            } else if !contains_absolutes(&c.style) {
+                unscroll(c, dx, dy);
+            }
+        }
+    }
+    if !contains_absolutes(&b.style) {
+        unscroll(b, dx, dy);
+    }
 }
 
 /// Max right / bottom extents of the tree (border boxes and lines).

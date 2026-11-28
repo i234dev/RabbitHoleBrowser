@@ -1108,6 +1108,6 @@ pub(crate) fn translate_contents(b: &mut LayoutBox, dx: f32, dy: f32) {
         }
     }
     for c in &mut b.children {
-        c.translate(dx, dy);
+        c.translate_with_parent(dx, dy);
     }
 }

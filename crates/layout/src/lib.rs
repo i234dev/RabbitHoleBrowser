@@ -118,6 +118,8 @@ pub fn paint_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &
     paint::paint_with_fixed_origin(list, canvas, fonts, scroll_x, scroll_y, fixed_origin)
 }
 
+pub use block::scrolling_area;
+
 /// The bounds of a box's subtree for scrollable overflow (margin boxes,
 /// lines, transforms; clipped axes cut).
 pub fn block_content_bounds(b: &tree::LayoutBox) -> rabbithole_gfx::Rect {

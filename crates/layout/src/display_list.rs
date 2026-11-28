@@ -805,7 +805,10 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, 1.0, sdx, sdy]));
             self.push_scope(HitScope::Transform(Some([1.0, 0.0, 0.0, 1.0, -sdx, -sdy])));
             pushed_transform = true;
-            self.bounds = Rect::new(self.bounds.x - sdx, self.bounds.y - sdy, self.bounds.w, self.bounds.h);
+            // No culling inside a sticky box: its offset changes with
+            // scrolling, which patches the wrapper without rebuilding the
+            // list, so what is culled must not depend on the current one.
+            self.bounds = if sticky { Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7) } else { Rect::new(self.bounds.x - sdx, self.bounds.y - sdy, self.bounds.w, self.bounds.h) };
             if sticky {
                 self.list.sticky.push(StickyPatch {
                     item: start,
