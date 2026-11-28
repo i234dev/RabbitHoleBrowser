@@ -561,9 +561,51 @@ struct Marks<'d> {
     state: &'d MatchState,
     /// `:has()` re-evaluations left before falling back to a full restyle.
     has_budget: u32,
+    /// Subtrees whose `:has()` subjects are restyled without their cached
+    /// results being re-evaluated: (root, root itself included). Their
+    /// entries are dropped once marking is done ([`Marks::drop_stale_has`]).
+    has_stale: Vec<(NodeId, bool)>,
 }
 
 impl Marks<'_> {
+    /// Forget the cached `:has()` results of subjects inside the subtrees
+    /// recorded in `has_stale`. Results of other subjects stay known: a
+    /// change can only flip the subjects that `has_scope` re-evaluates
+    /// (inclusive ancestors and their preceding siblings) or those inside
+    /// the marked subtrees. (Clearing every entry made the next
+    /// re-evaluation of the root's or body's `:has()` look like a flip,
+    /// restyling the whole document.)
+    fn drop_stale_has(&mut self) {
+        if self.has_stale.is_empty() || self.has_cache.is_empty() {
+            return;
+        }
+        let roots: HashMap<NodeId, bool> = self.has_stale.drain(..).fold(HashMap::new(), |mut m, (n, incl)| {
+            *m.entry(n).or_insert(false) |= incl;
+            m
+        });
+        let doc = self.doc;
+        let shadow = self.shadow;
+        let up = |n: NodeId| if shadow { doc.flat_parent(n) } else { doc.parent(n) };
+        // Memo per subject: entries share subjects across rules.
+        let mut inside: HashMap<NodeId, bool> = HashMap::new();
+        self.has_cache.retain(|&(n, _), _| {
+            let v = *inside.entry(n).or_insert_with(|| {
+                if roots.get(&n) == Some(&true) {
+                    return true;
+                }
+                let mut cur = up(n);
+                while let Some(p) = cur {
+                    if roots.contains_key(&p) {
+                        return true;
+                    }
+                    cur = up(p);
+                }
+                false
+            });
+            !v
+        });
+    }
+
     /// The element `node` inherits its style from (flat tree parent).
     fn up(&self, node: NodeId) -> Option<NodeId> {
         if self.shadow {
@@ -595,7 +637,16 @@ impl Marks<'_> {
             // that are not candidates below may have flipped. Their own
             // and related elements are restyled by the marks below; their
             // cached results are no longer known.
-            self.has_cache.clear();
+            if rel & R_DESC != 0 {
+                self.has_stale.push((node, true));
+            }
+            if rel & R_SIB != 0 {
+                if let Some(p) = self.doc.parent(node) {
+                    // (The following siblings' subtrees: the parent's
+                    // subtree without the parent, a superset.)
+                    self.has_stale.push((p, false));
+                }
+            }
         }
         if rel & R_GLOBAL != 0 {
             self.global = true;
@@ -667,7 +718,11 @@ impl Marks<'_> {
             }
             self.has_budget -= 1;
             let now = rabbithole_css::selector::has_list_matches(&rule.list, self.doc, a, self.state);
-            if self.has_cache.insert((a, i as u32), now) != Some(now) {
+            let before = self.has_cache.insert((a, i as u32), now);
+            if before != Some(now) && rule.rel & (R_DESC | R_SIB) != 0 && debug_enabled() && (Some(a) == self.doc.html_element() || Some(a) == self.doc.body()) {
+                eprintln!("[incr] :has() rule {i} on <{}> {before:?} -> {now} (rel {:#x}, tag {:?} id {:?} classes {:?})", self.doc.tag(a).unwrap_or("?"), rule.rel, rule.tag, rule.id, rule.classes);
+            }
+            if before != Some(now) {
                 self.apply(a, rule.rel & !R_HAS);
             }
         }
@@ -1061,7 +1116,7 @@ impl StyleEngine {
                 self.has_cache.clear();
             }
         }
-        let mut m = Marks { doc, need: &mut self.need, shadow, global: false, has_global, why: "", has_rules: &inval.has_rules, has_sib: inval.has_sib, has_cache: &mut self.has_cache, state: new_state, has_budget: 4096 };
+        let mut m = Marks { doc, need: &mut self.need, shadow, global: false, has_global, why: "", has_rules: &inval.has_rules, has_sib: inval.has_sib, has_cache: &mut self.has_cache, state: new_state, has_budget: 4096, has_stale: Vec::new() };
         let mut removed: Vec<NodeId> = Vec::new();
         // Shadow DOM bookkeeping: hosts whose light children changed (slot
         // assignment / fallback content), hosts whose slots changed, and
@@ -1075,6 +1130,26 @@ impl StyleEngine {
         // Child list changes per parent: past a few, all the children are
         // marked once instead of sweeping the siblings of each change.
         let mut per_parent: HashMap<NodeId, u32> = HashMap::new();
+        // Content changes per parent (child insertions / removals and text
+        // changes of its children), to tell when `:empty` cannot flip.
+        let mut content_changes: HashMap<NodeId, u32> = HashMap::new();
+        if inval.empty != 0 {
+            for mu in &log.entries {
+                match mu {
+                    Mutation::Children { parent, .. } => *content_changes.entry(*parent).or_default() += 1,
+                    Mutation::Text { node } => {
+                        if let Some(p) = doc.parent(*node) {
+                            *content_changes.entry(p).or_default() += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Each change adds or removes at most one content child: with more
+        // content children than changes, the element was not empty before
+        // and is not now.
+        let empty_may_flip = |p: NodeId| !has_more_content_children(doc, p, content_changes.get(&p).copied().unwrap_or(0));
         let structural = inval.first | inval.last | inval.nth_fwd | inval.nth_back | inval.sibling_follow;
         if structural != 0 {
             for mu in &log.entries {
@@ -1207,7 +1282,7 @@ impl StyleEngine {
                         }
                     }
                     if parent_done.insert(parent) {
-                        if inval.empty != 0 {
+                        if inval.empty != 0 && empty_may_flip(parent) {
                             m.apply(parent, inval.empty);
                         }
                         if inval.dir_auto != 0 {
@@ -1224,7 +1299,7 @@ impl StyleEngine {
                 }
                 Mutation::Text { node } => {
                     if let Some(p) = doc.parent(*node) {
-                        if inval.empty != 0 && doc.is_connected(p) {
+                        if inval.empty != 0 && doc.is_connected(p) && empty_may_flip(p) {
                             m.apply(p, inval.empty);
                         }
                         if inval.dir_auto != 0 && doc.is_connected(p) {
@@ -1383,6 +1458,7 @@ impl StyleEngine {
             }
             self.defined_seen = doc.defined_custom.clone();
         }
+        m.drop_stale_has();
         let global = m.global;
         if global && debug_enabled() {
             eprintln!("[incr] full restyle: {}", if m.why.is_empty() { "other" } else { m.why });
@@ -1483,8 +1559,13 @@ impl StyleEngine {
                 let vars = match &self.vars[node] {
                     Some(v) if Rc::ptr_eq(v, &out.vars) || **v == *out.vars => v.clone(),
                     _ => {
-                        if self.vars[node].is_some() {
+                        if let Some(v) = &self.vars[node] {
                             child_change |= P_INH;
+                            if debug_enabled() && (node == html || Some(node) == doc.body()) {
+                                let (a, b) = (v.flatten(), out.vars.flatten());
+                                let differ: Vec<&std::rc::Rc<str>> = a.keys().chain(b.keys()).filter(|k| a.get(*k) != b.get(*k)).take(5).collect();
+                                eprintln!("[incr] custom properties of <{}> changed: {differ:?}", doc.tag(node).unwrap_or("?"));
+                            }
                         }
                         out.vars
                     }
@@ -1549,6 +1630,10 @@ impl StyleEngine {
                 continue;
             }
             let descend = force || child_change != 0 || flags & N_DESC != 0 || old_hidden;
+            if !all && (force || child_change != 0) && debug_enabled() && (node == html || Some(node) == doc.body()) {
+                // Why a partial restyle recomputes the whole document.
+                eprintln!("[incr] restyle reaches all of <{}>: flags {flags:#x} force {force} child_change {child_change:#x} recompute {recompute}", doc.tag(node).unwrap_or("?"));
+            }
             if !descend {
                 continue;
             }
@@ -1636,6 +1721,26 @@ impl StyleEngine {
         }
         Some(parent)
     }
+}
+
+/// Does `p` have more than `k` children that keep it from matching
+/// `:empty` (elements, non-empty text)? Stops counting past `k`.
+fn has_more_content_children(doc: &Document, p: NodeId, k: u32) -> bool {
+    let mut n = 0;
+    for ch in doc.children(p) {
+        let content = match &doc.node(ch).data {
+            rabbithole_dom::NodeData::Comment(_) => false,
+            rabbithole_dom::NodeData::Text(t) => !t.is_empty(),
+            _ => true,
+        };
+        if content {
+            n += 1;
+            if n > k {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Drop the styles of `node` and everything below it, shadow trees

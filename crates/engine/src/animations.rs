@@ -1699,7 +1699,7 @@ impl AnimationState {
         self.base.get(&node).cloned()
     }
 
-    fn has_effects(&self, node: NodeId) -> bool {
+    pub(crate) fn has_effects(&self, node: NodeId) -> bool {
         self.transitions.iter().any(|t| t.node == node) || self.animations.iter().any(|a| a.node == node) || self.script_nodes.contains(&node)
     }
 }

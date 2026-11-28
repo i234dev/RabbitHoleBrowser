@@ -1736,15 +1736,9 @@ impl Engine {
         let p = b.padding_rect();
         // The scrolling area may extend past what layout recorded (content
         // overflowing through negative margins, end padding).
+        // (Layout records that larger size once an offset needs it.)
         let area = scrolling_area(b);
-        if area.0 > b.scroll_width || area.1 > b.scroll_height {
-            if let Some(bm) = page.layout.box_of_mut(&page.doc, node) {
-                bm.scroll_width = bm.scroll_width.max(area.0);
-                bm.scroll_height = bm.scroll_height.max(area.1);
-            }
-        }
-        let Some(b) = page.layout.box_of(&page.doc, node) else { return false };
-        let max = ((b.scroll_width - p.w).max(0.0), (b.scroll_height - p.h).max(0.0));
+        let max = ((b.scroll_width.max(area.0) - p.w).max(0.0), (b.scroll_height.max(area.1) - p.h).max(0.0));
         let to = (x.clamp(0.0, max.0), y.clamp(0.0, max.1));
         if to == b.scroll_offset {
             return false;
@@ -2845,79 +2839,10 @@ fn parsed_sheet_cached(text: &str, media: Option<&str>, base: &str, parse: impl 
     sheet
 }
 
-/// The scrolling area of box `b` (CSSOM View "scrolling area"): its padding
-/// box united with the border boxes and line fragments of its content (the
-/// content of nested clipping boxes is clipped by them; fixed boxes do not
-/// count), cut at the edges the scroll origin is at (block start and
-/// inline start, mirrored for `*-reverse` flex containers). Returns the
-/// (width, height) — `scrollWidth` / `scrollHeight`.
+/// The scrolling area of box `b` (`scrollWidth` / `scrollHeight`); see
+/// [`rabbithole_layout::scrolling_area`].
 pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
-    use rabbithole_style::{Direction, Display, FlexDirection, WritingMode};
-    let p = b.padding_rect();
-    // Contents of a scrolled box are translated by -scroll_offset.
-    let (ox, oy) = b.scroll_offset;
-    let mut u = (p.x, p.y, p.x + p.w, p.y + p.h);
-    fn add(u: &mut (f32, f32, f32, f32), r: &Rect, dx: f32, dy: f32) {
-        if r.w <= 0.0 && r.h <= 0.0 {
-            return;
-        }
-        u.0 = u.0.min(r.x + dx);
-        u.1 = u.1.min(r.y + dy);
-        u.2 = u.2.max(r.x + r.w + dx);
-        u.3 = u.3.max(r.y + r.h + dy);
-    }
-    fn walk(bx: &rabbithole_layout::LayoutBox, u: &mut (f32, f32, f32, f32), dx: f32, dy: f32, columns: bool) {
-        for line in &bx.lines {
-            for f in &line.fragments {
-                add(u, &f.rect, dx, dy);
-            }
-        }
-        for c in &bx.children {
-            // Fixed boxes, and boxes hidden after a line-clamp point, add no
-            // scrollable overflow; a clamped container cuts its content.
-            if c.fixed || c.clamped {
-                continue;
-            }
-            // A transformed box counts with its transformed bounds.
-            if c.style.has_transform() {
-                let b = rabbithole_layout::block_content_bounds(c);
-                add(u, &b, dx, dy);
-                continue;
-            }
-            // Inside a box (not the multi-column container itself), a
-            // descendant broken across columns counts unbroken.
-            if let Some(r) = c.unfragmented_rect().filter(|_| !columns) {
-                add(u, &r, dx, dy);
-                continue;
-            }
-            add(u, &c.rect, dx, dy);
-            let clamp_cut = c.style.line_clamp.is_some() && c.children.iter().any(|x| x.clamped);
-            if !c.clips && !clamp_cut {
-                walk(c, u, dx, dy, columns || c.style.multicol);
-            }
-        }
-    }
-    walk(b, &mut u, ox, oy, b.style.multicol);
-    let s = &b.style;
-    let vertical = matches!(s.writing_mode, WritingMode::VerticalRl | WritingMode::VerticalLr | WritingMode::SidewaysLr);
-    let rtl = s.direction == Direction::Rtl;
-    // Where the scroll origin is: the right edge / the bottom edge.
-    let mut from_right = (!vertical && rtl) || s.writing_mode == WritingMode::VerticalRl;
-    let mut from_bottom = vertical && rtl;
-    if matches!(s.display, Display::Flex | Display::InlineFlex) {
-        let reverse = matches!(s.flex_direction, FlexDirection::RowReverse | FlexDirection::ColumnReverse);
-        let main_vertical = matches!(s.flex_direction, FlexDirection::Row | FlexDirection::RowReverse) == vertical;
-        if reverse {
-            if main_vertical {
-                from_bottom = !from_bottom;
-            } else {
-                from_right = !from_right;
-            }
-        }
-    }
-    let w = if from_right { p.x + p.w - u.0 } else { u.2 - p.x };
-    let h = if from_bottom { p.y + p.h - u.1 } else { u.3 - p.y };
-    (w.max(p.w), h.max(p.h))
+    rabbithole_layout::scrolling_area(b)
 }
 
 /// Could these mutations add, remove or retarget an `<a>` / `<area>` link?

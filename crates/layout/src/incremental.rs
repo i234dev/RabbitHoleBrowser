@@ -88,6 +88,9 @@ pub(crate) struct LayoutCache {
     /// to one; when its contents never depend on that height, both layouts
     /// are the same and both are served from this entry).
     pub alt_h: Option<Option<f32>>,
+    /// How much laying out the contents widened the box past `inner_w`
+    /// (a table wider than its specified width: its columns need it).
+    pub grown_w: f32,
 }
 
 /// A fast non-cryptographic hasher for fingerprints (multiply-rotate).

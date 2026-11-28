@@ -485,7 +485,7 @@ impl Engine {
             if verify_enabled() {
                 let mut check = StyleEngine::new(&page.sheets, &env);
                 let full = check.full(&page.doc, &page.sheets, &opts);
-                if let Err(e) = check_styles(&page.doc, &page.styles, &full) {
+                if let Err(e) = check_styles(&page.doc, &page.styles, &full, &|n| page.anim.has_effects(n)) {
                     panic!("RH_VERIFY_INCREMENTAL: {e}");
                 }
             }
@@ -1086,9 +1086,15 @@ fn damage_from_log(doc: &Document, styles: &rabbithole_style::StyledTree, log: &
     }
 }
 
-fn check_styles(doc: &Document, inc: &rabbithole_style::StyledTree, full: &rabbithole_style::StyledTree) -> Result<(), String> {
+/// Compare incremental and full styles. Elements with animation effects
+/// (and their subtrees, which inherit animated values) hold animated
+/// values a full restyle does not compute: `animated` skips them.
+fn check_styles(doc: &Document, inc: &rabbithole_style::StyledTree, full: &rabbithole_style::StyledTree, animated: &dyn Fn(NodeId) -> bool) -> Result<(), String> {
     for n in rabbithole_dom::Document::ROOT..doc.nodes.len() {
         if !doc.is_connected(n) || doc.element(n).is_none() {
+            continue;
+        }
+        if doc.ancestor_or_self(n, animated).is_some() {
             continue;
         }
         let pairs = [
@@ -1155,8 +1161,19 @@ fn check_dump(what: &str, full: &str, inc: &str) -> Result<(), String> {
         let (a, b) = (fl.get(i).copied().unwrap_or("<missing>"), il.get(i).copied().unwrap_or("<missing>"));
         if a != b && !numbers_close(a, b) {
             let from = i.saturating_sub(if std::env::var_os("RH_VERIFY_CONTEXT").is_some() { 60 } else { 6 });
-            let ctx: Vec<String> = (from..(i + 3).min(fl.len())).map(|j| format!("  full {j}: {}", fl[j])).collect();
-            return Err(format!("{what} mismatch at line {i}:\n  full:        {a}\n  incremental: {b}\ncontext:\n{}", ctx.join("\n")));
+            let after: usize = std::env::var("RH_VERIFY_AFTER").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+            let ctx: Vec<String> = (from..(i + after).min(fl.len())).map(|j| format!("  full {j}: {}", fl[j])).chain((i..(i + after).min(il.len())).map(|j| format!("  incr {j}: {}", il[j]))).collect();
+            // Further differing lines (deeper boxes come after their
+            // containers: the cause is often there).
+            let more: Vec<String> = (i + 1..fl.len().max(il.len()))
+                .filter(|&j| {
+                    let (x, y) = (fl.get(j).copied().unwrap_or("<missing>"), il.get(j).copied().unwrap_or("<missing>"));
+                    x != y && !numbers_close(x, y)
+                })
+                .take(10)
+                .map(|j| format!("  line {j}:\n    full:        {}\n    incremental: {}", fl.get(j).copied().unwrap_or("<missing>"), il.get(j).copied().unwrap_or("<missing>")))
+                .collect();
+            return Err(format!("{what} mismatch at line {i}:\n  full:        {a}\n  incremental: {b}\ncontext:\n{}\nmore differences:\n{}", ctx.join("\n"), more.join("\n")));
         }
     }
     Ok(())
@@ -1187,7 +1204,7 @@ impl Engine {
         };
         let _font_units = rabbithole_style::cascade::font_unit_scope(Some(page.fonts.clone()), &page.sheets, &env, &opts);
         let full_styles = StyleEngine::new(&page.sheets, &env).full(&page.doc, &page.sheets, &opts);
-        check_styles(&page.doc, &page.styles, &full_styles)?;
+        check_styles(&page.doc, &page.styles, &full_styles, &|n| page.anim.has_effects(n))?;
         let ctx = LayoutContext {
             doc: &page.doc,
             styles: &page.styles,
@@ -1206,6 +1223,30 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// Lay the page out from scratch twice (with its current styles) and
+    /// compare: layout must not depend on state left by an earlier layout
+    /// (shaping or intrinsic-size caches, thread-local counters).
+    pub fn check_layout_idempotent(&self, page: &mut Page) -> Result<(), String> {
+        self.flush_display_list(page);
+        let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
+        let ctx = LayoutContext {
+            doc: &page.doc,
+            styles: &page.styles,
+            fonts: &page.fonts,
+            images: &page.images,
+            background_images: &page.background_images,
+            viewport_width: page.viewport.width,
+            viewport_height: page.viewport.height,
+            scroll_offsets: &page.scroll_offsets,
+            page_scroll: page.page_scroll,
+        };
+        let first = rabbithole_layout::layout(&ctx).dump();
+        let second = rabbithole_layout::layout(&ctx).dump();
+        check_dump("repeated layout", &first, &second)
+    }
+}
+
 /// Same text except for numbers that differ by at most 0.15 (dumps print
 /// one decimal, so rounding flips show up as 0.1).
 fn numbers_close(a: &str, b: &str) -> bool {
@@ -1214,7 +1255,10 @@ fn numbers_close(a: &str, b: &str) -> bool {
         let mut cur = String::new();
         let mut num = false;
         for ch in s.chars() {
-            let is_num = ch.is_ascii_digit() || ch == '.' || (ch == '-' && !num && cur.is_empty());
+            // (Exponents included: `6.1035156e-5`.)
+            let exp = num && (ch == 'e' && cur.chars().last().is_some_and(|c| c.is_ascii_digit()) || ch == '-' && cur.ends_with('e'));
+            // (A minus sign starts a number after text: `[480.0,-0.0`.)
+            let is_num = ch.is_ascii_digit() || ch == '.' || (ch == '-' && !num) || exp;
             if is_num != num && !cur.is_empty() {
                 out.push(if num { cur.parse::<f32>().map_err(|_| cur.clone()) } else { Err(cur.clone()) });
                 cur.clear();

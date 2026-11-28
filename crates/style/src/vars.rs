@@ -68,7 +68,7 @@ impl Vars {
     }
 
     /// Every defined property, with this layer's entries overriding.
-    fn flatten(&self) -> HashMap<Rc<str>, Option<Rc<[Token]>>> {
+    pub(crate) fn flatten(&self) -> HashMap<Rc<str>, Option<Rc<[Token]>>> {
         let mut layers = Vec::new();
         let mut cur = Some(self);
         while let Some(l) = cur {
