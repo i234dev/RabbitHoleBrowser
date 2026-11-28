@@ -304,20 +304,49 @@ impl RasterForeground {
     }
 }
 
-/// A source-over overlay for scrolling a page underneath fixed content.
-pub struct FixedForeground {
-    bands: Vec<(Rect, RasterForeground)>,
+/// How a [`PageLayer`] moves while the UI scrolls ahead of a repaint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LayerMotion {
+    /// Painted in viewport coordinates: it never moves.
+    Fixed,
+    /// Painted in page-canvas coordinates: it moves with the canvas.
+    Scroll,
+    /// A sticky box painted in page-canvas coordinates for the page scroll
+    /// `at`. It moves by the change of its viewport position, which its
+    /// containing block clamps.
+    Sticky { patch: crate::display_list::StickyPatch, viewport: (f32, f32), at: (f32, f32) },
 }
 
-impl FixedForeground {
-    /// Only the occupied rows need to cross to the UI. The origin of this
-    /// layer is the viewport, independent of the overscanned page canvas.
-    pub fn raster(items: &[DisplayItem], w: u32, h: u32, scale: f32, fonts: &FontContext) -> Self {
+/// A source-over overlay of the page canvas: fixed or sticky content, or
+/// scrolling content painted above them.
+pub struct PageLayer {
+    bands: Vec<(Rect, RasterForeground)>,
+    pub motion: LayerMotion,
+}
+
+impl std::fmt::Debug for PageLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageLayer").field("motion", &self.motion).field("bands", &self.bands.iter().map(|b| b.0).collect::<Vec<_>>()).finish()
+    }
+}
+
+impl PageLayer {
+    /// Only the occupied rows of what `paint` draws on a `w`×`h` canvas
+    /// need to cross to the UI.
+    pub fn from_paint(w: u32, h: u32, motion: LayerMotion, paint: impl Fn(&mut Canvas)) -> Self {
+        Self::from_rows(w, 0, h, motion, paint)
+    }
+
+    /// Like [`PageLayer::from_paint`] for the `h` rows from `top` of a
+    /// taller canvas (`paint` draws them at the top of its canvas).
+    fn from_rows(w: u32, top: u32, h: u32, motion: LayerMotion, paint: impl Fn(&mut Canvas)) -> Self {
+        if w == 0 || h == 0 {
+            return Self { bands: Vec::new(), motion };
+        }
         let render = |bg| {
             let mut canvas = Canvas::new(w, h);
             canvas.clear(bg);
-            canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
-            paint_items(items, &mut canvas, fonts, 0.0, 0.0, Rect::new(0.0, 0.0, w as f32, h as f32), (0.0, 0.0));
+            paint(&mut canvas);
             canvas.data
         };
         let (layer, _, _) = RasterForeground::from_backdrops(w, render(Color::BLACK), render(Color::WHITE));
@@ -329,16 +358,87 @@ impl FixedForeground {
             if !occupied(row) { continue; }
             let mut end = first + 1;
             while rows.next_if(|(_, row)| occupied(row)).is_some() { end += 1; }
-            let bounds = Rect::new(0.0, first as f32, w as f32, (end - first) as f32);
+            let bounds = Rect::new(0.0, (top as usize + first) as f32, w as f32, (end - first) as f32);
             let pixels = layer.pixels[first * width..end * width].to_vec();
             bands.push((bounds, RasterForeground { width, pixels }));
         }
-        Self { bands }
+        Self { bands, motion }
     }
 
-    pub fn paint(&self, dst: &mut Canvas, area: Rect) {
+    /// Viewport-fixed items, with the viewport as origin.
+    pub fn fixed(items: &[DisplayItem], w: u32, h: u32, scale: f32, fonts: &FontContext) -> Self {
+        Self::from_paint(w, h, LayerMotion::Fixed, |canvas| {
+            canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+            paint_items(items, canvas, fonts, 0.0, 0.0, Rect::new(0.0, 0.0, w as f32, h as f32), (0.0, 0.0));
+            canvas.pop_transform();
+        })
+    }
+
+    /// Items painted like the page canvas at `origin` (see
+    /// [`paint_items`]). A sticky box stuck to the viewport is painted at
+    /// its exact viewport position instead, so that it keeps the same
+    /// pixels however the canvas origin and the scroll change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scrolling(items: &[DisplayItem], w: u32, h: u32, scale: f32, fonts: &FontContext, origin: (f32, f32), fixed_origin: (f32, f32), motion: LayerMotion) -> Self {
+        let shift = match motion {
+            LayerMotion::Sticky { patch, viewport, at } => {
+                let offset = |x: f32, y: f32| patch.offset(Rect::new(x, y, viewport.0, viewport.1));
+                let (d, right, left, down, up) = (offset(at.0, at.1), offset(at.0 + 1.0, at.1), offset(at.0 - 1.0, at.1), offset(at.0, at.1 + 1.0), offset(at.0, at.1 - 1.0));
+                let follows = |a: f32, b: f32| (a - b - 1.0).abs() < 1e-3;
+                let snap = |o: f32, t: f32| (o - t) * scale - ((o - t) * scale).round();
+                let x = if follows(right.0, d.0) || follows(d.0, left.0) { snap(origin.0, at.0) } else { 0.0 };
+                let y = if follows(down.1, d.1) || follows(d.1, up.1) { snap(origin.1, at.1) } else { 0.0 };
+                (x, y)
+            }
+            _ => (0.0, 0.0),
+        };
+        // Only raster the rows the run can paint, when they are known.
+        let rows = crate::damage::run_bounds(items, origin).map(|b| {
+            let y0 = ((b.y * scale + shift.1).floor() - 2.0).clamp(0.0, h as f32) as u32;
+            let y1 = ((b.bottom() * scale + shift.1).ceil() + 2.0).clamp(0.0, h as f32) as u32;
+            (y0, y1.max(y0))
+        });
+        let (top, bottom) = rows.unwrap_or((0, h));
+        // Culling uses the canvas coordinates before scaling.
+        let view = match rows {
+            Some(_) => Rect::new(0.0, (top as f32 - shift.1) / scale - 2.0, w as f32, (bottom - top) as f32 / scale + 4.0),
+            None => Rect::new(0.0, 0.0, w as f32, h as f32),
+        };
+        Self::from_rows(w, top, bottom - top, motion, |canvas| {
+            canvas.push_transform([scale, 0.0, 0.0, scale, shift.0, shift.1 - top as f32]);
+            paint_items(items, canvas, fonts, origin.0, origin.1, view, fixed_origin);
+            canvas.pop_transform();
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bands.is_empty()
+    }
+
+    /// Where the layer's top-left corner goes (device px) when the page is
+    /// presented at `scroll`. `canvas` is where the page canvas goes and
+    /// `painted` where it went at the frame's own scroll.
+    pub fn position(&self, area: Rect, canvas: (f32, f32), painted: (f32, f32), scroll: (f32, f32), scale: f32) -> (f32, f32) {
+        match self.motion {
+            LayerMotion::Fixed => (area.x, area.y),
+            LayerMotion::Scroll => canvas,
+            LayerMotion::Sticky { patch, viewport, at } => {
+                // Its viewport position, rounded like the canvas.
+                let place = |t: (f32, f32)| {
+                    let (dx, dy) = patch.offset(Rect::new(t.0, t.1, viewport.0, viewport.1));
+                    (((dx - t.0) * scale).round(), ((dy - t.1) * scale).round())
+                };
+                let (now, then) = (place(scroll), place(at));
+                (painted.0 + now.0 - then.0, painted.1 + now.1 - then.1)
+            }
+        }
+    }
+
+    /// Composite the layer with its top-left corner at `at` (whole device
+    /// px), clipped to `area`.
+    pub fn paint(&self, dst: &mut Canvas, area: Rect, at: (f32, f32)) {
         for (bounds, band) in &self.bands {
-            band.paint(dst, bounds.translate(area.x, area.y), area);
+            band.paint(dst, bounds.translate(at.0, at.1), area);
         }
     }
 }

@@ -215,52 +215,103 @@ impl DisplayList {
         })
     }
 
-    /// First item of a viewport-fixed suffix that can be painted source-over
-    /// on any scrolling backdrop. A clip, transform or group spanning the
-    /// split would change the meaning of painting either slice alone.
-    pub fn fixed_suffix(&self) -> Result<usize, &'static str> {
+    /// Split the list into an opaque page canvas (`..base`) followed by
+    /// runs that move differently while the UI scrolls ahead of a
+    /// repaint: viewport-fixed groups, page-scrolled sticky boxes and the
+    /// scrolling content painted between or above them. Each run is
+    /// painted source-over on what is below, so nothing after `base` may
+    /// read the pixels below it, and runs only split at the top level (a
+    /// clip, transform or group spanning a split would change the meaning
+    /// of painting either side alone). Fixed or sticky boxes nested in
+    /// such a scope stay in the run that contains them.
+    pub fn layer_plan(&self) -> Result<LayerPlan, &'static str> {
         use DisplayItem::*;
-        if self.fixed_bounds.is_empty() { return Err("no-fixed"); }
-        fn nested_fixed(items: &[DisplayItem]) -> bool {
-            items.iter().any(|item| match item {
-                PushFixed => true,
-                LayerMask(v) | Filtered { items: v, .. } | Blended { items: v, .. }
-                | Isolated { items: v, .. } => nested_fixed(v),
-                Transform3d(group) => nested_fixed(&group.items),
-                _ => false,
-            })
-        }
-        let start = self.items.iter().position(|i| matches!(i, PushFixed)).ok_or("nested-fixed")?;
-        let mut depth = 0;
-        for item in &self.items[..start] {
+        let mut starts: Vec<(usize, usize)> = self.sticky.iter().enumerate()
+            .filter(|(_, p)| p.port.is_none()).map(|(n, p)| (p.item, n)).collect();
+        starts.sort_unstable();
+        let sticky_at = |i: usize| starts.binary_search_by_key(&i, |s| s.0).ok().map(|k| starts[k].1);
+        // First top-level fixed group or sticky box.
+        let mut depth = 0usize;
+        let mut base = None;
+        for (i, item) in self.items.iter().enumerate() {
+            if depth == 0 && (matches!(item, PushFixed) || sticky_at(i).is_some()) {
+                base = Some(i);
+                break;
+            }
             match item {
                 PushClip(_) | PushClipRounded(..) | PushClipPath { .. } | PushTransform(_) | PushLayer(_) => depth += 1,
-                PopClip | PopTransform | PopLayer(_) => depth -= 1,
-                LayerMask(v) | Filtered { items: v, .. } | Blended { items: v, .. }
-                | Isolated { items: v, .. } if nested_fixed(v) => return Err("nested-fixed"),
-                Transform3d(g) if nested_fixed(&g.items) => return Err("nested-fixed"),
+                PopClip | PopTransform | PopLayer(_) => depth = depth.saturating_sub(1),
                 _ => {}
             }
         }
-        if depth != 0 { return Err("enclosing-scope"); }
-        let mut fixed = false;
-        for item in &self.items[start..] {
+        let base = base.ok_or(if self.fixed_bounds.is_empty() { "no-layers" } else { "nested-fixed" })?;
+        let mut layers: Vec<(LayerKind, std::ops::Range<usize>)> = Vec::new();
+        let mut open: Option<LayerKind> = None;
+        let (mut depth, mut fixed) = (0usize, 0usize);
+        for (i, item) in self.items.iter().enumerate().skip(base) {
+            if depth == 0 && fixed == 0 && open != Some(LayerKind::Fixed) {
+                let kind = match item {
+                    PushFixed => Some(LayerKind::Fixed),
+                    _ => sticky_at(i).map(LayerKind::Sticky),
+                };
+                let kind = kind.unwrap_or(LayerKind::Scroll);
+                // Adjacent fixed groups share a layer.
+                let continues = match (open, kind) {
+                    (Some(LayerKind::Scroll), LayerKind::Scroll) => true,
+                    (None, LayerKind::Fixed) => layers.last().is_some_and(|l| l.0 == LayerKind::Fixed && l.1.end == i),
+                    _ => false,
+                };
+                if !continues {
+                    layers.push((kind, i..i));
+                }
+                open = Some(kind);
+            }
             match item {
-                PushFixed if !fixed => fixed = true,
-                PopFixed if fixed => fixed = false,
-                // These draws may depend on the actual page pixels.
-                PushFixed | BackdropFilter { .. } | LayerBlend(_) | Blended { .. }
-                | Transform3d(_) | Filtered { .. } | Isolated { .. } => return Err("unsupported-effect"),
-                _ if !fixed => return Err("interleaved"),
+                // These draws read the pixels below them, which are in
+                // other layers now.
+                BackdropFilter { .. } | LayerBlend(_) | Blended { .. } => return Err("unsupported-effect"),
+                Transform3d(g) if g.blend != 0 => return Err("unsupported-effect"),
+                PushFixed => fixed += 1,
+                PopFixed => fixed = fixed.checked_sub(1).ok_or("unbalanced")?,
+                PushClip(_) | PushClipRounded(..) | PushClipPath { .. } | PushTransform(_) | PushLayer(_) => depth += 1,
+                PopClip | PopTransform | PopLayer(_) => depth = depth.checked_sub(1).ok_or("unbalanced")?,
                 _ => {}
             }
+            let last = layers.last_mut().expect("a layer is open");
+            last.1.end = i + 1;
+            // A group is complete when its scope closes.
+            if depth == 0 && fixed == 0 && matches!(open, Some(LayerKind::Fixed | LayerKind::Sticky(_))) {
+                open = None;
+            }
         }
-        if fixed { Err("unbalanced") } else { Ok(start) }
+        if depth != 0 || fixed != 0 { return Err("unbalanced"); }
+        Ok(LayerPlan { base, layers })
     }
 }
 
+/// How a run of display items moves while the page scrolls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerKind {
+    /// Document content painted above a fixed or sticky run.
+    Scroll,
+    /// `position: fixed` content, in viewport coordinates.
+    Fixed,
+    /// A page-scrolled `position: sticky` box (index into
+    /// [`DisplayList::sticky`]).
+    Sticky(usize),
+}
+
+/// See [`DisplayList::layer_plan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerPlan {
+    /// Items before this index paint the page canvas.
+    pub base: usize,
+    /// Every item from `base` on, in paint order.
+    pub layers: Vec<(LayerKind, std::ops::Range<usize>)>,
+}
+
 /// Where a sticky box's displacement lives in the list.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StickyPatch {
     /// Index of its `PushTransform` item.
     pub item: usize,

@@ -1457,3 +1457,56 @@ fn fixed_descendants_escape_positioned_boxes_inside_their_transformed_ancestor()
     assert!((absolute.rect.y + absolute.rect.h - (inner.y + inner.h - 3.0)).abs() < 0.1);
     assert!(!fixed.fixed);
 }
+
+fn layer_kinds(plan: &crate::LayerPlan) -> Vec<crate::LayerKind> {
+    plan.layers.iter().map(|l| l.0).collect()
+}
+
+#[test]
+fn layer_plan_splits_fixed_groups_from_scrolling_content_between_them() {
+    use crate::LayerKind::{Fixed, Scroll};
+    let fx = Fixture::new(
+        "<header></header><main><div id=mid></div><div id=top></div></main><footer></footer><aside></aside>",
+        "body{margin:0} main{height:3000px} header{position:fixed;top:0;width:100%;height:20px;background:red;z-index:1}\
+         #mid{position:relative;z-index:2;height:30px;background:blue} footer{position:fixed;bottom:0;width:100%;height:20px;background:green;z-index:3}\
+         aside{position:fixed;right:0;bottom:0;width:20px;height:20px;background:black;z-index:3} #top{position:relative;z-index:4;height:900px;background:orange}",
+    );
+    let list = fx.display_list();
+    let plan = list.layer_plan().unwrap();
+    // The footer and the aside are adjacent: one layer.
+    assert_eq!(layer_kinds(&plan), [Fixed, Scroll, Fixed, Scroll]);
+    assert!(matches!(list.items[plan.base], DisplayItem::PushFixed));
+    let mut next = plan.base;
+    for (_, range) in &plan.layers {
+        assert_eq!(range.start, next, "{plan:?}");
+        next = range.end;
+    }
+    assert_eq!(next, list.items.len());
+}
+
+#[test]
+fn layer_plan_promotes_page_scrolled_sticky_boxes_only() {
+    use crate::LayerKind::{Fixed, Sticky};
+    let fx = Fixture::new("<section><h2>Sticky</h2></section><nav></nav>",
+        "body{margin:0} section{height:2000px} h2{position:sticky;top:0;height:20px;margin:0;background:red} nav{position:fixed;top:0;width:10px;height:10px;z-index:1}");
+    let list = fx.display_list();
+    let plan = list.layer_plan().unwrap();
+    assert_eq!(layer_kinds(&plan), [Sticky(0), Fixed]);
+    assert_eq!(list.sticky[0].item, plan.base);
+
+    // Sticky inside a scroll container follows that container instead.
+    let fx = Fixture::new("<div id=box><h2>Sticky</h2><p>text</p></div>",
+        "body{margin:0} #box{height:100px;overflow:auto} h2{position:sticky;top:0;height:20px;margin:0} p{height:500px}");
+    assert_eq!(fx.display_list().layer_plan(), Err("no-layers"));
+}
+
+#[test]
+fn layer_plan_keeps_effects_that_read_the_page_in_one_canvas() {
+    for css in ["#over{position:relative;z-index:2;height:40px;mix-blend-mode:multiply;background:blue}",
+                "header{backdrop-filter:blur(4px)}"] {
+        let fx = Fixture::new("<header></header><div id=over></div>",
+            &format!("body{{margin:0;height:3000px}} header{{position:fixed;top:0;width:100%;height:20px;z-index:1}} {css}"));
+        // (A blended box also isolates the root group, nesting the header.)
+        assert!(fx.display_list().layer_plan().is_err(), "{css}");
+    }
+}

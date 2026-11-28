@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rabbithole_engine::dom::{BoundaryPoint, ControlDirection, Document, NodeId};
 use rabbithole_engine::gfx::{Canvas, Color, Rect};
-use rabbithole_engine::layout::{DisplayItem, DisplayList, LayoutBox};
+use rabbithole_engine::layout::{DisplayItem, DisplayList, LayerKind, LayoutBox};
 use rabbithole_engine::net::{Request, Url};
 use rabbithole_engine::script::EventInit;
 use rabbithole_engine::scripting::{input_event_init, input_init, key_init, mouse_init, plain_init};
@@ -16,7 +16,7 @@ use rabbithole_engine::consent::{ConsentDriver, ConsentReport, ConsentStep};
 use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page, ScriptOutcome, SelectStart};
 
 use super::frame::{Frame, Pixels, VideoLayer};
-use rabbithole_engine::layout::paint::{paint_items, paint_items_region, FixedForeground};
+use rabbithole_engine::layout::paint::{paint_items, paint_items_region, LayerMotion, PageLayer};
 use super::{now_ms, ContentConfig, ContentSettings, DomRow, FromContent, Inbox, KeyInput, NodeDetails, PageState, Sink, ToContent, ViewSize};
 use crate::gui::chrome::{ACCENT, FIND_CURRENT, FIND_MATCH, SELECTION, TEXT};
 use crate::gui::input::TextBuffer;
@@ -87,11 +87,13 @@ struct PaintCache {
     scale: f32,
 }
 
-struct CachedFixedForeground {
-    view: ViewSize,
-    fonts: (u64, u64),
+/// A layer of the last frame, reused while its inputs paint the same pixels.
+struct CachedLayer {
+    motion: LayerMotion,
+    /// Raster size, scale, font generation, canvas origin and fixed origin.
+    key: (u32, u32, f32, (u64, u64), (f32, f32), (f32, f32)),
     items: Vec<DisplayItem>,
-    foreground: Arc<FixedForeground>,
+    layer: Arc<PageLayer>,
 }
 
 /// Paint statistics (tests, `RH_DEBUG_CONTENT`).
@@ -177,7 +179,7 @@ struct Worker {
     frame_seq: u64,
     painted: Option<Painted>,
     cache: Option<PaintCache>,
-    fixed_foreground: Option<CachedFixedForeground>,
+    layer_cache: Vec<CachedLayer>,
     fixed_trace: Option<&'static str>,
     paint_stats: PaintStats,
     /// Node outlined for the devtools Elements view.
@@ -236,7 +238,7 @@ impl Worker {
             frame_seq: 0,
             painted: None,
             cache: None,
-            fixed_foreground: None,
+            layer_cache: Vec::new(),
             fixed_trace: None,
             paint_stats: PaintStats::default(),
             inspect: None,
@@ -895,7 +897,7 @@ impl Worker {
         self.scroll = (0.0, 0.0);
         self.painted = None;
         self.cache = None;
-        self.fixed_foreground = None;
+        self.layer_cache.clear();
         self.fixed_trace = None;
         self.inspect = None;
         self.sent_hover = ("default", None);
@@ -1155,14 +1157,12 @@ impl Worker {
         let w = self.view.width.max(1);
         let origin = (sx, oy);
         let fixed = page.layout.has_sticky_or_fixed();
-        // UI highlights and carets are painted above the page stacking order.
-        let split = if page.display_list.fixed_bounds.is_empty() {
-            Err("no-fixed")
-        } else if self.inspect.is_some() || self.edit.is_some() || !self.find.query.is_empty() || self.focus.is_some() {
-            Err("ui-overlays")
-        } else { page.display_list.fixed_suffix() };
-        if !page.display_list.fixed_bounds.is_empty() {
-            let reason = split.err().unwrap_or("promoted");
+        // Fixed and sticky boxes (and what is painted above them) become
+        // layers the UI can keep in place while it scrolls the canvas.
+        let layered = !page.display_list.fixed_bounds.is_empty() || page.display_list.sticky.iter().any(|p| p.port.is_none());
+        let plan = if layered { page.display_list.layer_plan() } else { Err("no-fixed") };
+        if layered {
+            let reason = plan.as_ref().err().copied().unwrap_or("promoted");
             if self.fixed_trace != Some(reason) {
                 if std::env::var_os("RH_FIXED_LAYER_TRACE").is_some() {
                     eprintln!("rh_fixed_layer tab={} reason={reason}", self.tab_id);
@@ -1170,7 +1170,8 @@ impl Worker {
                 self.fixed_trace = Some(reason);
             }
         } else { self.fixed_trace = None; }
-        let fixed_split = split.ok();
+        let plan = plan.ok();
+        let fixed_split = plan.as_ref().map(|p| p.base);
         let base_end = fixed_split.unwrap_or(page.display_list.items.len());
         let fixed_origin = (sx - origin.0, sy - origin.1);
         let raster_view = Rect::new(0.0, 0.0, w as f32, h as f32);
@@ -1260,30 +1261,39 @@ impl Worker {
         };
         let mut frame_canvas = Canvas::new(w, h);
         frame_canvas.data.copy_from_slice(&cv.data);
-        let fixed_layer = if fixed_split.is_some() {
-            let suffix = &page.display_list.items[base_end..];
+        let mut layers = Vec::new();
+        let mut cache = Vec::new();
+        if let Some(plan) = &plan {
             let fonts = page.fonts.selection_generation();
-            let cached = self.fixed_foreground.as_ref().filter(|c|
-                c.view.width == w && c.view.height == self.view.height && c.view.scale == s && c.fonts == fonts
-                    && DisplayList::same_fixed_items(&c.items, suffix));
-            let foreground = if let Some(cached) = cached {
-                cached.foreground.clone()
-            } else {
-                let foreground = Arc::new(FixedForeground::raster(suffix, w, self.view.height, s, &page.fonts));
-                self.fixed_foreground = Some(CachedFixedForeground {
-                    view: self.view, fonts, items: suffix.to_vec(), foreground: foreground.clone(),
-                });
-                foreground
-            };
-            Some(foreground)
-        } else {
-            self.fixed_foreground = None;
-            None
-        };
+            let viewport = (page.viewport.width, page.viewport.height);
+            for (kind, range) in &plan.layers {
+                let items = &page.display_list.items[range.clone()];
+                let (motion, key) = match *kind {
+                    LayerKind::Fixed => (LayerMotion::Fixed, (w, self.view.height, s, fonts, (0.0, 0.0), (0.0, 0.0))),
+                    LayerKind::Scroll => (LayerMotion::Scroll, (w, h, s, fonts, origin, fixed_origin)),
+                    LayerKind::Sticky(n) => (LayerMotion::Sticky { patch: page.display_list.sticky[n], viewport, at: page.page_scroll }, (w, h, s, fonts, origin, fixed_origin)),
+                };
+                let reuse = self.layer_cache.iter().position(|c| c.motion == motion && c.key == key && DisplayList::same_fixed_items(&c.items, items));
+                let layer = match reuse {
+                    Some(i) => self.layer_cache.swap_remove(i).layer,
+                    None if motion == LayerMotion::Fixed => Arc::new(PageLayer::fixed(items, w, self.view.height, s, &page.fonts)),
+                    None => Arc::new(PageLayer::scrolling(items, w, h, s, &page.fonts, origin, fixed_origin, motion)),
+                };
+                if !layer.is_empty() { layers.push(layer.clone()); }
+                cache.push(CachedLayer { motion, key, items: items.to_vec(), layer });
+            }
+        }
+        self.layer_cache = cache;
         let raster_end = video_paint.map(|_| Instant::now());
         self.engine.mark_painted(page, damage_origin);
         page.incr.video_frame_pending = false;
-        self.paint_overlays(&mut frame_canvas, origin);
+        // UI highlights and carets go above the page's own layers.
+        if plan.is_none() {
+            self.paint_overlays(&mut frame_canvas, origin);
+        } else if self.inspect.is_some() || self.edit.is_some() || !self.find.query.is_empty() || self.focus.is_some() {
+            let overlays = PageLayer::from_paint(w, h, LayerMotion::Scroll, |c| self.paint_overlays(c, origin));
+            if !overlays.is_empty() { layers.push(Arc::new(overlays)); }
+        }
         self.cache = Some(PaintCache { fixed_split, fixed_scroll, canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
 
         let page = self.page.as_mut().expect("page");
@@ -1300,7 +1310,7 @@ impl Worker {
             })
         } else { None };
         let frame = Frame {
-            fixed: fixed_layer,
+            layers,
             raster_timing: page.raster_video_timing(viewport),
             video,
             seq: self.frame_seq,
@@ -1861,7 +1871,12 @@ impl Worker {
             return;
         }
         let Some(page) = self.page.as_ref() else { return };
-        let focused = page.state.focused;
+        // A removed element no longer has focus (the focus fixup rule).
+        let focused = page.state.focused.filter(|&n| page.doc.is_connected(n));
+        // Its ring is painted with the frame.
+        if self.focus != focused {
+            self.dirty = true;
+        }
         self.focus = focused;
         let editing = self.edit.as_ref().map(|e| e.node);
         if focused == editing {

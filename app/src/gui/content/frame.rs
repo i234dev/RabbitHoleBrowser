@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use rabbithole_engine::layout::paint::{FixedForeground, VideoPlane};
+use rabbithole_engine::layout::paint::{PageLayer, VideoPlane};
 use rabbithole_engine::script::{FrameTiming, VideoReader};
 
 /// The player holds a weak callback. Dropping the displayed frame releases
@@ -63,7 +63,9 @@ pub struct Frame {
     /// Increases with every frame of a tab.
     pub seq: u64,
     pub video: Option<VideoLayer>,
-    pub fixed: Option<Arc<FixedForeground>>,
+    /// Fixed and sticky content, and what is painted above it, composited
+    /// over the canvas in order (each moves its own way while scrolling).
+    pub layers: Vec<Arc<PageLayer>>,
     pub raster_timing: Option<FrameTiming>,
     /// Pixels (device px).
     pub canvas: Arc<Pixels>,
@@ -112,7 +114,14 @@ impl Frame {
         let x = area.x + ((self.origin.0 - scroll.0) * s).round();
         let y = area.y + ((self.origin.1 - scroll.1) * s).round();
         blit_clipped(dst, &self.canvas, x as i32, y as i32, area);
-        if let Some(fixed) = &self.fixed { fixed.paint(dst, area); }
+        if !self.layers.is_empty() {
+            let canvas = ((x as i32) as f32, (y as i32) as f32);
+            let painted = (area.x + ((self.origin.0 - self.scroll.0) * s).round(), area.y + ((self.origin.1 - self.scroll.1) * s).round());
+            let painted = ((painted.0 as i32) as f32, (painted.1 as i32) as f32);
+            for layer in &self.layers {
+                layer.paint(dst, area, layer.position(area, canvas, painted, scroll, s));
+            }
+        }
         if scroll == self.scroll && scale == self.scale {
             if let Some(timing) = self.video.as_ref().and_then(|v| v.present(dst, area, scroll, scale)) {
                 return Some((timing, "layer"));
@@ -186,7 +195,7 @@ mod tests {
             scroll: (0.0, 60.0),
             content: (2.0, 1000.0),
             background: Color::WHITE,
-            fixed: None, video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
+            layers: Vec::new(), video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
         };
         let mut dst = Canvas::new(2, 20);
         // Scrolled to 70: the frame row 20 (doc y=70) is at the top.
