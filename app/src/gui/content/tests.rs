@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use rabbithole_engine::gfx::Color;
 use rabbithole_engine::net::{Request, Url};
 
 mod consent;
@@ -533,7 +534,7 @@ fn fixed_header_stays_in_place_before_the_scroll_repaint() {
     let html = "<style>*{margin:0}header{position:fixed;top:0;left:0;width:100%;height:32px;background:rgba(255,0,0,.5)}footer{position:fixed;bottom:0;width:100%;height:15px;background:green}</style><div style='height:75px;background:white'></div><div style='height:2000px;background:black'></div><header></header><footer></footer>";
     load(&h, html);
     let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
-    assert!(first.fixed.is_some(), "fixed header and footer paint last");
+    assert_eq!(motions(&first), ["fixed"], "fixed header and footer paint last");
 
     let area = Rect::new(2.0, 3.0, 800.0, 600.0);
     let present = |f: &Frame, y| {
@@ -556,6 +557,30 @@ fn fixed_header_stays_in_place_before_the_scroll_repaint() {
     assert_eq!(mismatches(&present(&next, 0.0), &present(&first, 0.0)), 0);
 }
 
+/// The layers of a frame, bottom to top.
+fn motions(f: &Frame) -> Vec<&'static str> {
+    use rabbithole_engine::layout::paint::LayerMotion;
+    f.layers.iter().map(|l| match l.motion {
+        LayerMotion::Fixed => "fixed",
+        LayerMotion::Scroll => "scroll",
+        LayerMotion::Sticky { .. } => "sticky",
+    }).collect()
+}
+
+/// What the UI shows for `f` at page scroll `y` in a `w`×`h` page area.
+fn shown(f: &Frame, y: f32, w: u32, h: u32, scale: f32) -> Vec<u32> {
+    let mut dst = rabbithole_engine::gfx::Canvas::new(w, h);
+    f.present(&mut dst, Rect::new(0.0, 0.0, w as f32, h as f32), (0.0, y), scale);
+    dst.data
+}
+
+fn frame_at(rx: &Received, y: f32) -> Frame {
+    match wait_for(rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if f.scroll.1 == y)) {
+        Some((_, FromContent::Frame(f))) => f,
+        _ => panic!("no frame at scroll {y}"),
+    }
+}
+
 #[test]
 fn fixed_header_below_a_scrolling_box_stays_in_paint_order() {
     let (sink, rx) = sink();
@@ -563,8 +588,121 @@ fn fixed_header_below_a_scrolling_box_stays_in_paint_order() {
     let html = "<body style='margin:0;height:2000px'><header style='position:fixed;top:0;width:100%;height:60px;background:red'></header><div style='position:relative;z-index:2;width:40px;height:60px;background:blue'></div>";
     load(&h, html);
     let (_, FromContent::Frame(f)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
-    assert!(f.fixed.is_none());
-    assert_eq!(f.canvas.data, reference_paint(html, &f));
+    // The box painted above the header is a scrolling layer above it.
+    assert_eq!(motions(&f), ["fixed", "scroll"]);
+    assert_eq!(shown(&f, 0.0, 800, 600, 1.0), reference_paint(html, &f)[..800 * 600]);
+    let speculative = shown(&f, 30.0, 800, 600, 1.0);
+    h.send(ToContent::Scroll { x: 0.0, y: 30.0 });
+    let next = frame_at(&rx, 30.0);
+    assert_eq!(mismatches(&speculative, &shown(&next, 30.0, 800, 600, 1.0)), 0);
+    let (blue, red) = (Color::rgb(0, 0, 255).to_u32(), Color::rgb(255, 0, 0).to_u32());
+    assert_eq!((speculative[10 * 800 + 10], speculative[10 * 800 + 100], speculative[40 * 800 + 10]), (blue, red, red));
+}
+
+#[test]
+fn fixed_groups_around_scrolling_content_stay_in_place() {
+    let (sink, rx) = sink();
+    let h = ContentHandle::spawn(1, 1, config(ViewSize::new(400, 300, 1.25)), sink.clone());
+    h.send(ToContent::SetActive(true));
+    // Header, a box above it, footer, and a tall box above the footer.
+    let html = "<style>*{margin:0}main{height:2500px;background:linear-gradient(black,white)}\
+        header{position:fixed;top:0;left:0;width:100%;height:20px;background:#781753;color:white;z-index:1}\
+        #mid{position:relative;z-index:2;top:40px;width:50px;height:30px;background:#36c}\
+        footer{position:fixed;bottom:0;left:0;width:100%;height:20px;background:#285539;z-index:3}\
+        #top{position:relative;z-index:4;top:40px;width:30px;height:900px;background:#c63}</style>\
+        <header>Top</header><main><div id=mid></div><div id=top></div></main><footer>Bottom</footer>";
+    load(&h, html);
+    let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    assert_eq!(motions(&first), ["fixed", "scroll", "fixed", "scroll"]);
+    // Header and footer rows to the right of the scrolling boxes.
+    let bars = |px: &[u32]| -> Vec<u32> {
+        (0..25).chain(275..300).flat_map(|y| px[y * 400 + 70..y * 400 + 400].to_vec()).collect()
+    };
+    let expected = bars(&shown(&first, 0.0, 400, 300, 1.25));
+    let mut prev = first;
+    for y in [0.25, 3.75, 37.25, 50.5, 81.75, 160.5, 120.25, 30.75, 0.0] {
+        let speculative = shown(&prev, y, 400, 300, 1.25);
+        assert!(bars(&speculative) == expected, "anticipating scroll {y}");
+        h.send(ToContent::Scroll { x: 0.0, y });
+        let next = frame_at(&rx, y);
+        let repainted = shown(&next, y, 400, 300, 1.25);
+        assert_eq!(mismatches(&speculative, &repainted), 0, "scroll {y}");
+        // The tall box stays above the footer.
+        assert_eq!(repainted[290 * 400 + 10], Color::rgb(0xcc, 0x66, 0x33).to_u32(), "scroll {y}");
+        prev = next;
+    }
+}
+
+#[test]
+fn sticky_header_stays_in_place_until_its_container_ends() {
+    let (sink, rx) = sink();
+    let h = ContentHandle::spawn(1, 1, config(ViewSize::new(400, 300, 1.25)), sink.clone());
+    h.send(ToContent::SetActive(true));
+    // The heading sticks from scroll 50 to 630, then leaves with its section.
+    let html = "<style>*{margin:0}#before{height:50px;background:#ddd}section{height:600px;background:linear-gradient(#123,#9ab)}\
+        h2{position:sticky;top:0;height:20px;background:rgb(200,30,30);color:white;font-size:14px}#after{height:2000px;background:#eee}</style>\
+        <div id=before></div><section><h2>Sticky</h2></section><div id=after></div>";
+    load(&h, html);
+    let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    assert_eq!(motions(&first), ["sticky"]);
+    let stuck = |y: f32| (50.0..=630.0).contains(&y);
+    let heading = Color::rgb(200, 30, 30).to_u32();
+    // First fully covered row of the heading (right of its text).
+    let top = |px: &[u32]| (0..300).find(|&r| px[r * 400 + 390] == heading);
+    let mut stuck_band: Option<Vec<u32>> = None;
+    let mut prev = first;
+    for y in [10.4, 49.6, 50.0, 70.25, 160.5, 250.75, 340.25, 430.5, 520.75, 610.25, 629.6, 640.25, 700.5, 640.25, 610.25, 520.75, 430.5, 340.25, 250.75, 160.5, 70.25, 30.25, 0.0] {
+        let speculative = shown(&prev, y, 400, 300, 1.25);
+        h.send(ToContent::Scroll { x: 0.0, y });
+        let next = frame_at(&rx, y);
+        assert_eq!(motions(&next), ["sticky"]);
+        let repainted = shown(&next, y, 400, 300, 1.25);
+        if stuck(y) {
+            assert_eq!(top(&repainted), Some(0), "scroll {y}");
+            let band = repainted[..25 * 400].to_vec();
+            let expected = stuck_band.get_or_insert_with(|| band.clone());
+            assert!(band == *expected, "stuck heading moved at scroll {y}");
+            if stuck(prev.scroll.1) {
+                assert!(speculative[..25 * 400] == expected[..], "stuck heading moved before the repaint at {y}");
+            }
+        }
+        if stuck(y) == stuck(prev.scroll.1) {
+            assert_eq!(mismatches(&speculative, &repainted), 0, "scroll {prev:?} to {y}");
+        } else {
+            // Sticking or unsticking between two frames: within a device pixel.
+            let (a, b) = (top(&speculative).unwrap() as i32, top(&repainted).unwrap() as i32);
+            assert!((a - b).abs() <= 1, "scroll {prev:?} to {y}: {a} {b}");
+        }
+        prev = next;
+    }
+    // Past the end of its section the heading scrolled away with it.
+    let end = shown(&prev, 700.5, 400, 300, 1.25);
+    assert_eq!(top(&end), None);
+}
+
+#[test]
+fn focus_ring_is_painted_above_the_fixed_layer() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    let html = "<style>*{margin:0}header{position:fixed;top:0;width:100%;height:20px;background:#781753}main{height:3000px}</style><header></header><main><button id=b style='margin-top:100px'>Go</button></main>";
+    load(&h, html);
+    let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    assert_eq!(motions(&first), ["fixed"]);
+    let band = |px: &[u32]| px[..20 * 800].to_vec();
+    let expected = band(&shown(&first, 0.0, 800, 600, 1.0));
+    h.send(ToContent::Eval("document.getElementById('b').focus()".into()));
+    let focused = match wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if f.layers.len() == 2)) {
+        Some((_, FromContent::Frame(f))) => f,
+        _ => panic!("no frame with the focus ring"),
+    };
+    // The ring is a scrolling overlay: the header keeps its own layer.
+    assert_eq!(motions(&focused), ["fixed", "scroll"]);
+    let ring = shown(&focused, 0.0, 800, 600, 1.0);
+    assert_ne!(ring, shown(&first, 0.0, 800, 600, 1.0));
+    assert!(band(&shown(&focused, 37.5, 800, 600, 1.0)) == expected);
+    // A removed element loses focus, and its ring.
+    h.send(ToContent::Eval("document.getElementById('b').remove()".into()));
+    assert!(wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if motions(f) == ["fixed"])).is_some());
 }
 
 #[test]
@@ -579,7 +717,7 @@ fn fixed_bars_keep_their_pixels_through_every_scroll_frame() {
     let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
     let area = Rect::new(0.0, 0.0, 400.0, 300.0);
     let bars = |f: &Frame, y| {
-        assert!(f.fixed.is_some());
+        assert_eq!(motions(f), ["fixed"]);
         let mut dst = Canvas::new(400, 300);
         f.present(&mut dst, area, (0.0, y), 1.25);
         [dst.data[..25 * 400].to_vec(), dst.data[275 * 400..].to_vec()]
@@ -591,5 +729,51 @@ fn fixed_bars_keep_their_pixels_through_every_scroll_frame() {
         h.send(ToContent::Scroll { x: 0.0, y });
         let (_, FromContent::Frame(f)) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if f.scroll.1 == y)).unwrap() else { unreachable!() };
         assert!(bars(&f, y) == expected, "repainted scroll {y}");
+    }
+}
+
+/// Development probe: `RH_PROBE_URL=<url> cargo test -p rabbithole
+/// probe_fixed_layer_on_url -- --ignored --nocapture` (with
+/// `RH_FIXED_LAYER_TRACE=1`) reports which frames carry a fixed layer while
+/// the page loads and scrolls.
+#[test]
+#[ignore]
+fn probe_fixed_layer_on_url() {
+    let Ok(target) = std::env::var("RH_PROBE_URL") else { return };
+    let scale = std::env::var("RH_PROBE_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let (sink, rx) = sink();
+    let h = ContentHandle::spawn(1, 1, config(ViewSize::new(1280, 800, scale)), sink.clone());
+    h.send(ToContent::SetActive(true));
+    h.send(ToContent::Navigate { request: Request::get(url(&target)), push_history: true });
+    let report = |label: &str, f: &Frame| eprintln!("[probe] {label} seq={} scroll={:?} origin={:?} layers={:?}", f.seq, f.scroll, f.origin, motions(f));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last = None;
+    while let Some((_, m)) = wait_for(&rx, 1, deadline.saturating_duration_since(Instant::now()), is_frame) {
+        if let FromContent::Frame(f) = m { report("load", &f); last = Some(f) }
+    }
+    let Some(mut last) = last else { return };
+    // Rows of the window above `band` CSS px, as the UI shows a frame.
+    let band: f32 = std::env::var("RH_PROBE_BAND").ok().and_then(|s| s.parse().ok()).unwrap_or(60.0);
+    let rows = |f: &Frame, y: f32| {
+        let mut dst = rabbithole_engine::gfx::Canvas::new(1280, 800);
+        f.present(&mut dst, Rect::new(0.0, 0.0, 1280.0, 800.0), (0.0, y), scale);
+        dst.data[..(band * scale) as usize * 1280].to_vec()
+    };
+    let reference = rows(&last, 0.0);
+    if let Ok(js) = std::env::var("RH_PROBE_EVAL") {
+        h.send(ToContent::Eval(js));
+        if let Some((_, FromContent::EvalResult(r))) = wait_for(&rx, 1, Duration::from_secs(5), |m| matches!(m, FromContent::EvalResult(_))) {
+            eprintln!("[probe] eval {r}");
+        }
+    }
+    for i in 1..=20 {
+        let y = i as f32 * 37.5;
+        h.send(ToContent::Scroll { x: 0.0, y });
+        if let Some((_, FromContent::Frame(f))) = wait_for(&rx, 1, Duration::from_secs(5), |m| matches!(m, FromContent::Frame(f) if f.scroll.1 == y)) {
+            report("scroll", &f);
+            eprintln!("[probe]   speculative={} repainted={} (pixels differing from the unscrolled band)",
+                mismatches(&rows(&last, y), &reference), mismatches(&rows(&f, y), &reference));
+            last = f;
+        }
     }
 }

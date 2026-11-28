@@ -135,6 +135,19 @@ impl State {
     }
 }
 
+/// Painted bounds of a balanced top-level run of items relative to
+/// `scroll` (CSS px), if only translations apply and nothing in it is fixed.
+pub(crate) fn run_bounds(items: &[DisplayItem], scroll: (f32, f32)) -> Option<Rect> {
+    if items.iter().any(|i| matches!(i, DisplayItem::PushFixed)) {
+        return None;
+    }
+    let mut out = Vec::new();
+    if !range_damage(items, 0, items.len(), scroll, &mut out) {
+        return None;
+    }
+    Some(out.into_iter().reduce(|a, b| a.union(&b)).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)))
+}
+
 /// Bounds of `items[from..to]` given the state before `from`.
 fn range_damage(items: &[DisplayItem], from: usize, to: usize, scroll: (f32, f32), out: &mut Vec<Rect>) -> bool {
     let mut st = State::default();

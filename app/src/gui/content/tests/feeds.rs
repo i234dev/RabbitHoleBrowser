@@ -60,7 +60,7 @@ fn protocol_frame(seq: u64) -> Frame {
     Frame {
         seq, canvas: Arc::new(Pixels::default()), origin: (0., 0.), scale: 1.,
         scroll: (0., 0.), content: (0., 0.), background: rabbithole_engine::gfx::Color::WHITE,
-        fixed: None, video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
+        layers: Vec::new(), video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
     }
 }
 
