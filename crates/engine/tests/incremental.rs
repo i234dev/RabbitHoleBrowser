@@ -1065,3 +1065,21 @@ fn reused_table_layout_keeps_widening_for_its_columns() {
         assert_eq!(page.rect_of(t).unwrap().w, w0);
     }
 }
+
+/// An empty box moved by relative offsets adds no scrollable overflow
+/// (WPT css-overflow overflow-empty-child-box).
+#[test]
+fn empty_relative_box_adds_no_scrollable_overflow() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>
+        .container { border: 1px solid black; width: 200px; height: 100px }
+        .empty { position: relative; width: 0px; height: 0px; left: 500px; top: 300px; box-shadow: 0 0 0 10px blue }
+        </style></head><body>
+        <div class="container" id="c" style="overflow: auto"><div class="empty"></div></div>
+        </body></html>"#,
+    );
+    let c = id(&page, "c");
+    let (_, size) = engine.element_scroll(&page, c).unwrap();
+    assert_eq!(size, (200.0, 100.0), "{}", page.layout.dump());
+    check(&engine, &mut page, "empty relative box");
+}

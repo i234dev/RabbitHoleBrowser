@@ -2662,8 +2662,10 @@ fn scroll_extent(b: &LayoutBox) -> (f32, f32) {
     let fixed_in = style.establishes_fixed_containing_block();
     for c in b.children.iter().filter(|c| !c.clamped && contained_out_of_flow(c, abs_in, fixed_in)) {
         let r = content_bounds_scoped(c, abs_in, fixed_in);
-        // An empty box adds no overflow (as in `content_bounds`).
-        if r.w <= 0.0 && r.h <= 0.0 || c.style.has_transform() && (r.w <= 0.0 || r.h <= 0.0) {
+        // An empty box adds no overflow (as in `content_bounds`), nor do
+        // the auto margins of one (moved by a relative offset).
+        let empty = c.rect.w <= 0.0 && c.rect.h <= 0.0 && c.children.is_empty() && c.lines.is_empty();
+        if empty || r.w <= 0.0 && r.h <= 0.0 || c.style.has_transform() && (r.w <= 0.0 || r.h <= 0.0) {
             continue;
         }
         max_r = max_r.max(r.right() + sx);
