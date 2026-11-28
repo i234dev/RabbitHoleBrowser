@@ -32,6 +32,12 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.2.52 keeps `position: fixed` headers and bars in place while the
+interface scrolls ahead of the page's repaint: they are composited as a
+separate layer (on Windows, both bars of a test page identical in 45 of 45
+captures during wheel scrolling, from 2 of 45). Speedometer 3.1 1.002×
+([record](docs/benchmarks/fixed-layer-2026-11-28-v0.2.52.md)).
+
 Version 0.2.51 rejects most selectors during style recalculation with a
 per-element filter of class names (about 8 % less CPU on a news front page),
 skips the search for inline containing blocks when no positioned element
