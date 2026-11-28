@@ -1082,6 +1082,8 @@ fn empty_relative_box_adds_no_scrollable_overflow() {
     let (_, size) = engine.element_scroll(&page, c).unwrap();
     assert_eq!(size, (200.0, 100.0), "{}", page.layout.dump());
     check(&engine, &mut page, "empty relative box");
+}
+
 #[test]
 fn scroll_anchoring_keeps_visible_content_in_place() {
     let (engine, mut page) = load(

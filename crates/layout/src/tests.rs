@@ -1609,6 +1609,9 @@ fn collapsed_outer_border_is_painted_per_edge_cell() {
     }).collect();
     assert!(!tops.is_empty(), "{:?}", list.items);
     assert!(tops.iter().all(|r| r.w < 70.0), "{tops:?}");
+}
+
+#[test]
 fn scroll_anchor_selection_and_shift() {
     let html = "<div id=a></div><div id=b><div id=b1></div></div><div id=c><p id=p></p></div>";
     let base = "body{margin:0} div,p{margin:0} #b{height:300px} #b1{height:150px} #c{height:2000px} #p{height:100px}";
