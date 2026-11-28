@@ -19,7 +19,7 @@ pub struct VideoPlane {
     pub src: Rect,
     pub clip: Rect,
     pub pixelated: bool,
-    pub foreground: Option<std::sync::Arc<VideoForeground>>,
+    pub foreground: Option<std::sync::Arc<RasterForeground>>,
     // Underlying page colours of partially covered device pixels only.
     edges: std::sync::Arc<[(u32, u32, u32)]>,
     device_clip: Rect,
@@ -157,7 +157,7 @@ pub fn video_plane_in_raster(list: &DisplayList, target: &std::sync::Arc<rabbith
     }
     let Some(mut plane) = plane else { fallback!("no-top-level-image", list.items.len()) };
     if !foreground_items.is_empty() {
-        plane.foreground = VideoForeground::raster(list, target_index, &foreground_items, plane.clip, viewport, scale, fonts)?;
+        plane.foreground = RasterForeground::raster(list, target_index, &foreground_items, plane.clip, viewport, scale, fonts)?;
     }
     let device_dest = Rect::new((plane.dest.x - viewport.x) * scale, (plane.dest.y - raster_y) * scale,
         plane.dest.w * scale, plane.dest.h * scale);
@@ -224,12 +224,15 @@ impl VideoPlane {
 
 /// Premultiplied ARGB8 in device pixels, cropped to the visible video.
 #[derive(Debug)]
-pub struct VideoForeground {
+pub struct RasterForeground {
     width: usize,
     pixels: Vec<u32>,
 }
 
-impl VideoForeground {
+/// Foreground composited over a video plane.
+pub type VideoForeground = RasterForeground;
+
+impl RasterForeground {
     fn raster(list: &DisplayList, target: usize, foreground: &[usize], clip: Rect, viewport: Rect, scale: f32, fonts: &FontContext) -> Option<Option<std::sync::Arc<Self>>> {
         use DisplayItem as D;
         let (w, h) = ((clip.w * scale).round() as u32, (clip.h * scale).round() as u32);
@@ -257,8 +260,15 @@ impl VideoForeground {
         };
         // Source-over onto black gives the premultiplied colour. Onto white
         // it adds (1 - alpha). This also preserves antialiased glyphs.
-        let mut pixels = render(Color::BLACK);
-        let white = render(Color::WHITE);
+        let (layer, any, transparent) = Self::from_backdrops(w, render(Color::BLACK), render(Color::WHITE));
+        if std::env::var("RH_MEDIA_STATS").as_deref() == Ok("1") {
+            eprintln!("rh_video foreground {w} {h} visible={transparent} ink={any}");
+        }
+        if !transparent { return None; }
+        Some(any.then(|| std::sync::Arc::new(layer)))
+    }
+
+    fn from_backdrops(w: u32, mut pixels: Vec<u32>, white: Vec<u32>) -> (Self, bool, bool) {
         let mut any = false;
         let mut transparent = false;
         for (p, w) in pixels.iter_mut().zip(white) {
@@ -268,11 +278,7 @@ impl VideoForeground {
             transparent |= trans != 0;
             *p = (*p & 0xffffff) | alpha << 24;
         }
-        if std::env::var("RH_MEDIA_STATS").as_deref() == Ok("1") {
-            eprintln!("rh_video foreground {w} {h} visible={transparent} ink={any}");
-        }
-        if !transparent { return None; }
-        Some(any.then(|| std::sync::Arc::new(Self { width: w as usize, pixels })))
+        (Self { width: w as usize, pixels }, any, transparent)
     }
 
     /// Restore the page foreground over a freshly drawn video, clipped to
@@ -294,6 +300,45 @@ impl VideoForeground {
                 };
                 *out = (channel(16) << 16) | (channel(8) << 8) | channel(0);
             }
+        }
+    }
+}
+
+/// A source-over overlay for scrolling a page underneath fixed content.
+pub struct FixedForeground {
+    bands: Vec<(Rect, RasterForeground)>,
+}
+
+impl FixedForeground {
+    /// Only the occupied rows need to cross to the UI. The origin of this
+    /// layer is the viewport, independent of the overscanned page canvas.
+    pub fn raster(items: &[DisplayItem], w: u32, h: u32, scale: f32, fonts: &FontContext) -> Self {
+        let render = |bg| {
+            let mut canvas = Canvas::new(w, h);
+            canvas.clear(bg);
+            canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+            paint_items(items, &mut canvas, fonts, 0.0, 0.0, Rect::new(0.0, 0.0, w as f32, h as f32), (0.0, 0.0));
+            canvas.data
+        };
+        let (layer, _, _) = RasterForeground::from_backdrops(w, render(Color::BLACK), render(Color::WHITE));
+        let width = w as usize;
+        let mut bands = Vec::new();
+        let mut rows = layer.pixels.chunks_exact(width).enumerate().peekable();
+        while let Some((first, row)) = rows.next() {
+            let occupied = |row: &[u32]| row.iter().any(|p| p >> 24 != 0);
+            if !occupied(row) { continue; }
+            let mut end = first + 1;
+            while rows.next_if(|(_, row)| occupied(row)).is_some() { end += 1; }
+            let bounds = Rect::new(0.0, first as f32, w as f32, (end - first) as f32);
+            let pixels = layer.pixels[first * width..end * width].to_vec();
+            bands.push((bounds, RasterForeground { width, pixels }));
+        }
+        Self { bands }
+    }
+
+    pub fn paint(&self, dst: &mut Canvas, area: Rect) {
+        for (bounds, band) in &self.bands {
+            band.paint(dst, bounds.translate(area.x, area.y), area);
         }
     }
 }
@@ -500,7 +545,7 @@ pub fn paint(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scrol
 /// overscanned canvas.
 pub fn paint_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, fixed_origin: (f32, f32)) {
     let view = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
-    paint_view(list, canvas, fonts, scroll_x, scroll_y, view, fixed_origin);
+    paint_items(&list.items, canvas, fonts, scroll_x, scroll_y, view, fixed_origin);
 }
 
 /// Paint only the device-space `region` (clipped; items outside it are
@@ -512,16 +557,22 @@ pub fn paint_region(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext
 /// Paint a damaged region of an overscanned canvas at the same viewport
 /// offset as a full paint, including fixed elements overlapping the damage.
 pub fn paint_region_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, region: Rect, fixed_origin: (f32, f32)) {
+    paint_items_region(&list.items, canvas, fonts, scroll_x, scroll_y, region, fixed_origin);
+}
+
+/// Clip as well as cull: glyphs and other ink can extend beyond the damage.
+pub fn paint_items_region(items: &[DisplayItem], canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, region: Rect, fixed_origin: (f32, f32)) {
     let view = region.intersect(&Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32));
     if view.is_empty() {
         return;
     }
     canvas.push_clip(view);
-    paint_view(list, canvas, fonts, scroll_x, scroll_y, view, fixed_origin);
+    paint_items(items, canvas, fonts, scroll_x, scroll_y, view, fixed_origin);
     canvas.pop_clip();
 }
 
-fn paint_view(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, view: Rect, fixed_origin: (f32, f32)) {
+/// Paint a balanced range of display items using the same origin and culling as a full paint.
+pub fn paint_items(items: &[DisplayItem], canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, view: Rect, fixed_origin: (f32, f32)) {
     let mut st = State {
         dx: -scroll_x,
         dy: -scroll_y,
@@ -535,7 +586,7 @@ fn paint_view(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scro
         ext: gfx_ext_available(),
         views: Vec::new(),
     };
-    for item in &list.items {
+    for item in items {
         paint_item(item, canvas, fonts, &mut st, view);
     }
     // Balance anything left open.

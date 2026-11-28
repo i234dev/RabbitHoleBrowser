@@ -66,7 +66,7 @@ fn frame_from(canvas: &mut Canvas, content_h: f32) -> Frame {
         scroll: (0.0, 0.0),
         content: (canvas.width as f32, content_h),
         background: Color::WHITE,
-        video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
+        fixed: None, video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
     }
 }
 

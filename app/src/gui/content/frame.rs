@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use rabbithole_engine::layout::paint::VideoPlane;
+use rabbithole_engine::layout::paint::{FixedForeground, VideoPlane};
 use rabbithole_engine::script::{FrameTiming, VideoReader};
 
 /// The player holds a weak callback. Dropping the displayed frame releases
@@ -63,6 +63,7 @@ pub struct Frame {
     /// Increases with every frame of a tab.
     pub seq: u64,
     pub video: Option<VideoLayer>,
+    pub fixed: Option<Arc<FixedForeground>>,
     pub raster_timing: Option<FrameTiming>,
     /// Pixels (device px).
     pub canvas: Arc<Pixels>,
@@ -111,6 +112,7 @@ impl Frame {
         let x = area.x + ((self.origin.0 - scroll.0) * s).round();
         let y = area.y + ((self.origin.1 - scroll.1) * s).round();
         blit_clipped(dst, &self.canvas, x as i32, y as i32, area);
+        if let Some(fixed) = &self.fixed { fixed.paint(dst, area); }
         if scroll == self.scroll && scale == self.scale {
             if let Some(timing) = self.video.as_ref().and_then(|v| v.present(dst, area, scroll, scale)) {
                 return Some((timing, "layer"));
@@ -184,7 +186,7 @@ mod tests {
             scroll: (0.0, 60.0),
             content: (2.0, 1000.0),
             background: Color::WHITE,
-            video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
+            fixed: None, video: None, raster_timing: None, scroll_containers: Arc::new(Vec::new()),
         };
         let mut dst = Canvas::new(2, 20);
         // Scrolled to 70: the frame row 20 (doc y=70) is at the top.

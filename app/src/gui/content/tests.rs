@@ -524,3 +524,72 @@ fn print_to_pdf_writes_pages() {
     assert!(String::from_utf8_lossy(&data).contains("/Count 5"));
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn fixed_header_stays_in_place_before_the_scroll_repaint() {
+    use rabbithole_engine::gfx::Canvas;
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    let html = "<style>*{margin:0}header{position:fixed;top:0;left:0;width:100%;height:32px;background:rgba(255,0,0,.5)}footer{position:fixed;bottom:0;width:100%;height:15px;background:green}</style><div style='height:75px;background:white'></div><div style='height:2000px;background:black'></div><header></header><footer></footer>";
+    load(&h, html);
+    let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    assert!(first.fixed.is_some(), "fixed header and footer paint last");
+
+    let area = Rect::new(2.0, 3.0, 800.0, 600.0);
+    let present = |f: &Frame, y| {
+        let mut dst = Canvas::new(804, 606);
+        f.present(&mut dst, area, (0.0, y), 1.0);
+        dst.data
+    };
+    let reference = reference_paint(html, &first);
+    let normal = present(&first, 0.0);
+    for y in 0..600 {
+        assert_eq!(&normal[(3 + y) * 804 + 2..(3 + y) * 804 + 802], &reference[y * 800..(y + 1) * 800]);
+    }
+    let speculative = present(&first, 90.0);
+    h.send(ToContent::Scroll { x: 0.0, y: 90.0 });
+    let (_, FromContent::Frame(next)) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if f.scroll.1 == 90.0)).unwrap() else { unreachable!() };
+
+    assert_eq!(mismatches(&speculative, &present(&next, 90.0)), 0);
+    // Scroll up on the same frame to expose pixels previously covered by
+    // the header and move a white background under its translucent fill.
+    assert_eq!(mismatches(&present(&next, 0.0), &present(&first, 0.0)), 0);
+}
+
+#[test]
+fn fixed_header_below_a_scrolling_box_stays_in_paint_order() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    let html = "<body style='margin:0;height:2000px'><header style='position:fixed;top:0;width:100%;height:60px;background:red'></header><div style='position:relative;z-index:2;width:40px;height:60px;background:blue'></div>";
+    load(&h, html);
+    let (_, FromContent::Frame(f)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    assert!(f.fixed.is_none());
+    assert_eq!(f.canvas.data, reference_paint(html, &f));
+}
+
+#[test]
+fn fixed_bars_keep_their_pixels_through_every_scroll_frame() {
+    use rabbithole_engine::gfx::Canvas;
+    let (sink, rx) = sink();
+    let view = ViewSize::new(400, 300, 1.25);
+    let h = ContentHandle::spawn(1, 1, config(view), sink.clone());
+    h.send(ToContent::SetActive(true));
+    let html = "<style>*{margin:0}header,footer{position:fixed;left:0;width:100%;height:20px;color:white;background:#781753}header{top:0}footer{bottom:0;background:#285539}main{height:2500px;background:linear-gradient(black,white)}</style><main></main><header>Top</header><footer>Bottom</footer>";
+    load(&h, html);
+    let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+    let bars = |f: &Frame, y| {
+        assert!(f.fixed.is_some());
+        let mut dst = Canvas::new(400, 300);
+        f.present(&mut dst, area, (0.0, y), 1.25);
+        [dst.data[..25 * 400].to_vec(), dst.data[275 * 400..].to_vec()]
+    };
+    let expected = bars(&first, 0.0);
+    assert_ne!(expected[0][399], expected[1][399]);
+    for y in [0.25, 0.5, 3.75, 20.0, 37.25, 50.5, 81.75] {
+        assert!(bars(&first, y) == expected, "anticipating scroll {y}");
+        h.send(ToContent::Scroll { x: 0.0, y });
+        let (_, FromContent::Frame(f)) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if f.scroll.1 == y)).unwrap() else { unreachable!() };
+        assert!(bars(&f, y) == expected, "repainted scroll {y}");
+    }
+}

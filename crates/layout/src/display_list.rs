@@ -203,6 +203,62 @@ pub struct DisplayList {
     pub highlights_key: u64,
 }
 
+impl DisplayList {
+    /// A cached fixed overlay can be reused across scrolls or list rebuilds
+    /// only if its inputs still paint the same pixels. Animated image
+    /// frames can change behind an unchanged Arc.
+    pub fn same_fixed_items(old: &[DisplayItem], new: &[DisplayItem]) -> bool {
+        use DisplayItem::*;
+        old.len() == new.len() && old.iter().zip(new).all(|(a, b)| match b {
+            Image { image, .. } | ImageTiled { image, .. } if image.is_animated() => false,
+            _ => crate::damage::item_eq(a, b),
+        })
+    }
+
+    /// First item of a viewport-fixed suffix that can be painted source-over
+    /// on any scrolling backdrop. A clip, transform or group spanning the
+    /// split would change the meaning of painting either slice alone.
+    pub fn fixed_suffix(&self) -> Result<usize, &'static str> {
+        use DisplayItem::*;
+        if self.fixed_bounds.is_empty() { return Err("no-fixed"); }
+        fn nested_fixed(items: &[DisplayItem]) -> bool {
+            items.iter().any(|item| match item {
+                PushFixed => true,
+                LayerMask(v) | Filtered { items: v, .. } | Blended { items: v, .. }
+                | Isolated { items: v, .. } => nested_fixed(v),
+                Transform3d(group) => nested_fixed(&group.items),
+                _ => false,
+            })
+        }
+        let start = self.items.iter().position(|i| matches!(i, PushFixed)).ok_or("nested-fixed")?;
+        let mut depth = 0;
+        for item in &self.items[..start] {
+            match item {
+                PushClip(_) | PushClipRounded(..) | PushClipPath { .. } | PushTransform(_) | PushLayer(_) => depth += 1,
+                PopClip | PopTransform | PopLayer(_) => depth -= 1,
+                LayerMask(v) | Filtered { items: v, .. } | Blended { items: v, .. }
+                | Isolated { items: v, .. } if nested_fixed(v) => return Err("nested-fixed"),
+                Transform3d(g) if nested_fixed(&g.items) => return Err("nested-fixed"),
+                _ => {}
+            }
+        }
+        if depth != 0 { return Err("enclosing-scope"); }
+        let mut fixed = false;
+        for item in &self.items[start..] {
+            match item {
+                PushFixed if !fixed => fixed = true,
+                PopFixed if fixed => fixed = false,
+                // These draws may depend on the actual page pixels.
+                PushFixed | BackdropFilter { .. } | LayerBlend(_) | Blended { .. }
+                | Transform3d(_) | Filtered { .. } | Isolated { .. } => return Err("unsupported-effect"),
+                _ if !fixed => return Err("interleaved"),
+                _ => {}
+            }
+        }
+        if fixed { Err("unbalanced") } else { Ok(start) }
+    }
+}
+
 /// Where a sticky box's displacement lives in the list.
 #[derive(Debug, Clone, Copy)]
 pub struct StickyPatch {

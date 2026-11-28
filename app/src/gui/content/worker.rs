@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rabbithole_engine::dom::{BoundaryPoint, ControlDirection, Document, NodeId};
 use rabbithole_engine::gfx::{Canvas, Color, Rect};
-use rabbithole_engine::layout::LayoutBox;
+use rabbithole_engine::layout::{DisplayItem, DisplayList, LayoutBox};
 use rabbithole_engine::net::{Request, Url};
 use rabbithole_engine::script::EventInit;
 use rabbithole_engine::scripting::{input_event_init, input_init, key_init, mouse_init, plain_init};
@@ -16,6 +16,7 @@ use rabbithole_engine::consent::{ConsentDriver, ConsentReport, ConsentStep};
 use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page, ScriptOutcome, SelectStart};
 
 use super::frame::{Frame, Pixels, VideoLayer};
+use rabbithole_engine::layout::paint::{paint_items, paint_items_region, FixedForeground};
 use super::{now_ms, ContentConfig, ContentSettings, DomRow, FromContent, Inbox, KeyInput, NodeDetails, PageState, Sink, ToContent, ViewSize};
 use crate::gui::chrome::{ACCENT, FIND_CURRENT, FIND_MATCH, SELECTION, TEXT};
 use crate::gui::input::TextBuffer;
@@ -79,10 +80,18 @@ struct Find {
 /// paint: scrolling shifts them and only the exposed strip is rastered;
 /// page changes repaint only the damaged regions.
 struct PaintCache {
+    fixed_split: Option<usize>,
     fixed_scroll: Option<(f32, f32)>,
     canvas: Canvas,
     origin: (f32, f32),
     scale: f32,
+}
+
+struct CachedFixedForeground {
+    view: ViewSize,
+    fonts: (u64, u64),
+    items: Vec<DisplayItem>,
+    foreground: Arc<FixedForeground>,
 }
 
 /// Paint statistics (tests, `RH_DEBUG_CONTENT`).
@@ -168,6 +177,8 @@ struct Worker {
     frame_seq: u64,
     painted: Option<Painted>,
     cache: Option<PaintCache>,
+    fixed_foreground: Option<CachedFixedForeground>,
+    fixed_trace: Option<&'static str>,
     paint_stats: PaintStats,
     /// Node outlined for the devtools Elements view.
     inspect: Option<NodeId>,
@@ -225,6 +236,8 @@ impl Worker {
             frame_seq: 0,
             painted: None,
             cache: None,
+            fixed_foreground: None,
+            fixed_trace: None,
             paint_stats: PaintStats::default(),
             inspect: None,
             sent_hover: ("default", None),
@@ -881,6 +894,9 @@ impl Worker {
         self.find.current = 0;
         self.scroll = (0.0, 0.0);
         self.painted = None;
+        self.cache = None;
+        self.fixed_foreground = None;
+        self.fixed_trace = None;
         self.inspect = None;
         self.sent_hover = ("default", None);
         let title = if page.title.trim().is_empty() { page.url.to_string() } else { page.title.trim().to_string() };
@@ -1139,6 +1155,25 @@ impl Worker {
         let w = self.view.width.max(1);
         let origin = (sx, oy);
         let fixed = page.layout.has_sticky_or_fixed();
+        // UI highlights and carets are painted above the page stacking order.
+        let split = if page.display_list.fixed_bounds.is_empty() {
+            Err("no-fixed")
+        } else if self.inspect.is_some() || self.edit.is_some() || !self.find.query.is_empty() || self.focus.is_some() {
+            Err("ui-overlays")
+        } else { page.display_list.fixed_suffix() };
+        if !page.display_list.fixed_bounds.is_empty() {
+            let reason = split.err().unwrap_or("promoted");
+            if self.fixed_trace != Some(reason) {
+                if std::env::var_os("RH_FIXED_LAYER_TRACE").is_some() {
+                    eprintln!("rh_fixed_layer tab={} reason={reason}", self.tab_id);
+                }
+                self.fixed_trace = Some(reason);
+            }
+        } else { self.fixed_trace = None; }
+        let fixed_split = split.ok();
+        let base_end = fixed_split.unwrap_or(page.display_list.items.len());
+        let fixed_origin = (sx - origin.0, sy - origin.1);
+        let raster_view = Rect::new(0.0, 0.0, w as f32, h as f32);
         let background = page.background;
         let fixed_scroll = fixed.then_some(self.scroll);
         // Damage is relative to the viewport when fixed items are present.
@@ -1151,7 +1186,7 @@ impl Worker {
         let mut partial: Option<Canvas> = None;
         let mut spare: Option<Canvas> = None;
         if let Some(c) = self.cache.take() {
-            let can_reuse = c.fixed_scroll == fixed_scroll && (!fixed || (video_update && c.origin == origin));
+            let can_reuse = c.fixed_split == fixed_split && c.fixed_scroll == fixed_scroll && (!fixed || (video_update && c.origin == origin));
             let compatible = can_reuse && s >= 1.0 && (c.scale - s).abs() < 1e-4 && c.canvas.width == w && c.canvas.height == h && c.origin.0 == origin.0;
             let shift = (origin.1 - c.origin.1) * s;
             let dy = shift.round() as i64;
@@ -1187,7 +1222,7 @@ impl Worker {
                             cv.pop_clip();
                             cv.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
                             let css = Rect::new(r.x / s, r.y / s, r.w / s, r.h / s);
-                            rabbithole_engine::layout::paint::paint_region_with_fixed_origin(&page.display_list, &mut cv, &page.fonts, origin.0, origin.1, css, (sx - origin.0, sy - origin.1));
+                            paint_items_region(&page.display_list.items[..base_end], &mut cv, &page.fonts, origin.0, origin.1, css, fixed_origin);
                             cv.pop_transform();
                         }
                         self.paint_stats.partial += 1;
@@ -1217,21 +1252,39 @@ impl Worker {
                 // Fixed content (interleaved in stacking order) is painted
                 // where the viewport is inside the overscanned canvas.
                 cv.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
-                rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut cv, &page.fonts, origin.0, origin.1, (sx - origin.0, sy - origin.1));
+                paint_items(&page.display_list.items[..base_end], &mut cv, &page.fonts, origin.0, origin.1, raster_view, fixed_origin);
                 cv.pop_transform();
                 self.paint_stats.full += 1;
                 cv
             }
         };
+        let mut frame_canvas = Canvas::new(w, h);
+        frame_canvas.data.copy_from_slice(&cv.data);
+        let fixed_layer = if fixed_split.is_some() {
+            let suffix = &page.display_list.items[base_end..];
+            let fonts = page.fonts.selection_generation();
+            let cached = self.fixed_foreground.as_ref().filter(|c|
+                c.view.width == w && c.view.height == self.view.height && c.view.scale == s && c.fonts == fonts
+                    && DisplayList::same_fixed_items(&c.items, suffix));
+            let foreground = if let Some(cached) = cached {
+                cached.foreground.clone()
+            } else {
+                let foreground = Arc::new(FixedForeground::raster(suffix, w, self.view.height, s, &page.fonts));
+                self.fixed_foreground = Some(CachedFixedForeground {
+                    view: self.view, fonts, items: suffix.to_vec(), foreground: foreground.clone(),
+                });
+                foreground
+            };
+            Some(foreground)
+        } else {
+            self.fixed_foreground = None;
+            None
+        };
         let raster_end = video_paint.map(|_| Instant::now());
         self.engine.mark_painted(page, damage_origin);
         page.incr.video_frame_pending = false;
-
-        // The frame: the page pixels plus overlays (selection, find, caret).
-        let mut frame_canvas = Canvas::new(w, h);
-        frame_canvas.data.copy_from_slice(&cv.data);
         self.paint_overlays(&mut frame_canvas, origin);
-        self.cache = Some(PaintCache { fixed_scroll, canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
+        self.cache = Some(PaintCache { fixed_split, fixed_scroll, canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
 
         let page = self.page.as_mut().expect("page");
         let mut containers = Vec::new();
@@ -1247,6 +1300,7 @@ impl Worker {
             })
         } else { None };
         let frame = Frame {
+            fixed: fixed_layer,
             raster_timing: page.raster_video_timing(viewport),
             video,
             seq: self.frame_seq,

@@ -12,7 +12,7 @@ use rabbithole_gfx::Rect;
 use std::sync::Arc;
 
 /// Are two items identical for painting purposes?
-fn item_eq(a: &DisplayItem, b: &DisplayItem) -> bool {
+pub(crate) fn item_eq(a: &DisplayItem, b: &DisplayItem) -> bool {
     use DisplayItem as D;
     match (a, b) {
         (D::Rect { rect: r1, color: c1, radius: q1 }, D::Rect { rect: r2, color: c2, radius: q2 }) => r1 == r2 && c1 == c2 && q1 == q2,
