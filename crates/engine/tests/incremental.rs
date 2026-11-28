@@ -443,6 +443,10 @@ fn randomized_mutations_match_full_recompute() {
             let els: Vec<NodeId> = page.doc.descendants(body).filter(|&n| page.doc.element(n).is_some()).collect();
             let el = *rng.pick(&els);
             let what = rng.next() % 7;
+            let trace = std::env::var("RH_FUZZ_TRACE").ok().is_some_and(|v| v == format!("{seed}:{step}"));
+            if trace {
+                eprintln!("TRACE el {el} <{:?}> class {:?} op {what}\nBEFORE\n{}", page.doc.tag(el), page.doc.attr(el, "class"), page.layout.dump());
+            }
             match what {
                 0 => {
                     let c = format!("{} {}", rng.pick(&classes), rng.pick(&classes));
@@ -482,6 +486,9 @@ fn randomized_mutations_match_full_recompute() {
                 }
             }
             engine.restyle(&mut page);
+            if trace {
+                eprintln!("AFTER\n{}", page.layout.dump());
+            }
             if let Err(e) = engine.check_incremental(&mut page) {
                 panic!("seed {seed} step {step} (op {what}): {e}");
             }
@@ -901,6 +908,17 @@ fn randomized_layout_mutations_match_full_recompute() {
             }
             engine.restyle(&mut page);
             if let Err(e) = engine.check_incremental(&mut page) {
+                if std::env::var_os("RH_FUZZ_HTML").is_some() {
+                    eprintln!("HTML {}", page.doc.serialize(page.doc.body().unwrap(), true));
+                }
+                if let Ok(n) = std::env::var("RH_FUZZ_DUMP_NODE") {
+                    let mut cur = n.parse::<usize>().ok();
+                    while let Some(c) = cur {
+                        let st = page.styles.get(c);
+                        eprintln!("node {c} <{}> class={:?} style={:?} pos={:?} transform={} display={:?}", page.doc.tag(c).unwrap_or("#"), page.doc.attr(c, "class"), page.doc.attr(c, "style"), st.map(|s| s.position), st.is_some_and(|s| s.has_transform()), st.map(|s| s.display));
+                        cur = page.doc.parent(c);
+                    }
+                }
                 panic!("seed {seed} step {step} (op {what}): {e}");
             }
             if let Err(e) = engine.check_layout_idempotent(&mut page) {
@@ -1124,4 +1142,49 @@ fn scroll_anchoring_keeps_visible_content_in_place() {
     engine.restyle(&mut page);
     assert_eq!(page.page_scroll, (0.0, 850.0));
     assert!(!page.scroll_anchored);
+}
+
+/// A fixed box whose containing block is an ancestor with layout
+/// containment does not move with a relatively positioned box between
+/// them, in a full layout as in an incremental one.
+#[test]
+fn fixed_box_ignores_relative_offset_below_its_containing_block() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>
+        body { margin: 0 } .cb { contain: layout; position: relative } .rel { position: relative; left: 7px; display: grid }
+        .f { position: fixed; top: 5px; left: 5px; width: 30px; height: 10px }
+        </style></head><body><p id="p">text</p>
+        <section class="cb" id="cb"><div class="rel"><div style="display: grid; margin: 0 auto; width: 60%">x<section class="f" id="f">fixed</section></div></div></section>
+        </body></html>"#,
+    );
+    let (p, f, cb) = (id(&page, "p"), id(&page, "f"), id(&page, "cb"));
+    let at = |page: &Page| page.rect_of(f).unwrap().x - page.rect_of(cb).unwrap().x;
+    assert!((at(&page) - 5.0).abs() < 0.01, "inset from its containing block: {}", at(&page));
+    for (i, t) in ["a\nb", "longer text", "x"].iter().enumerate() {
+        page.doc.set_attr(p, "style", Some(&format!("height: {}px", 20 + 10 * i)));
+        if let Some(n) = page.doc.children(p).next() {
+            page.doc.set_text(n, t);
+        }
+        check(&engine, &mut page, "content above moved");
+        assert!((at(&page) - 5.0).abs() < 0.01, "{}", at(&page));
+    }
+}
+
+/// An empty list item's outside marker follows the item when it moves
+/// and is laid out again (beside a float): the previous marker must not
+/// place the new one.
+#[test]
+fn empty_list_item_marker_follows_the_item() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>ol { list-style: decimal }</style></head><body>
+        <div style="float: left; width: 60px; height: 300px">float</div><div id="above" style="height: 50px">above</div><ol><li id="li"></li><li>two</li></ol></body></html>"#,
+    );
+    let (above, li) = (id(&page, "above"), id(&page, "li"));
+    for h in [10, 80, 30] {
+        page.doc.set_attr(above, "style", Some(&format!("height: {h}px")));
+        check(&engine, &mut page, "item moved");
+        let b = page.layout.box_of(&page.doc, li).unwrap();
+        let m = b.marker.as_ref().unwrap();
+        assert!(m.baseline > b.rect.y && m.baseline < b.rect.bottom() + 0.5, "marker {} in {:?}", m.baseline, b.rect);
+    }
 }

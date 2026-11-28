@@ -815,6 +815,12 @@ impl LayoutBox {
 
     /// Move this box and everything inside it.
     pub fn translate(&mut self, dx: f32, dy: f32) {
+        self.translate_inside(dx, dy, false);
+    }
+
+    /// [`LayoutBox::translate`]; `inside`: a box of the moved subtree above
+    /// this one contains fixed-position boxes (they move with it).
+    fn translate_inside(&mut self, dx: f32, dy: f32, inside: bool) {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
@@ -852,24 +858,26 @@ impl LayoutBox {
             m.x += dx;
             m.baseline += dy;
         }
+        let inside = inside || self.style.establishes_fixed_containing_block();
         for c in &mut self.children {
-            c.translate_with_parent(dx, dy);
+            c.translate_with_parent(dx, dy, inside);
         }
     }
 
-    /// Move a child along with its parent's contents. A box fixed to the
-    /// viewport stays where its insets put it (it moves only in axes
-    /// where both insets are `auto`, placed at its static position): an
-    /// ancestor's relative offset, scroll offset or reuse by translation
-    /// does not move it.
-    pub(crate) fn translate_with_parent(&mut self, dx: f32, dy: f32) {
-        if self.fixed && self.flow == Flow::Absolute {
+    /// Move a child along with its parent's contents. A fixed-position box
+    /// whose containing block is not in the moved subtree (`inside`: a
+    /// box of it contains fixed boxes) stays where its insets put it: it
+    /// moves only in axes where both insets are `auto` (placed at its
+    /// static position). An ancestor's relative offset, scroll offset or
+    /// reuse by translation does not move it.
+    pub(crate) fn translate_with_parent(&mut self, dx: f32, dy: f32, inside: bool) {
+        if !inside && self.flow == Flow::Absolute && self.style.position == Position::Fixed {
             let inset = &self.style.inset;
             let dx = if inset.left.is_auto() && inset.right.is_auto() { dx } else { 0.0 };
             let dy = if inset.top.is_auto() && inset.bottom.is_auto() { dy } else { 0.0 };
-            self.translate(dx, dy);
+            self.translate_inside(dx, dy, false);
         } else {
-            self.translate(dx, dy);
+            self.translate_inside(dx, dy, inside);
         }
     }
 
@@ -1035,7 +1043,7 @@ impl LayoutBox {
         }
         let _ = writeln!(out);
         if let Some(m) = &self.marker {
-            let _ = writeln!(out, "{pad}  marker {:?} @ {:.1}", m.text, m.x);
+            let _ = writeln!(out, "{pad}  marker {:?} @ {:.1},{:.1}", m.text, m.x, m.baseline);
         }
         for (i, line) in self.lines.iter().enumerate() {
             let _ = writeln!(

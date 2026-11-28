@@ -2426,6 +2426,9 @@ impl<'a> Layouter<'a> {
 
     /// Position an outside list marker next to the first line.
     fn place_marker(&mut self, b: &mut LayoutBox) {
+        // The marker of a previous layout must not place this one (the
+        // first baseline of a box without lines is its marker's).
+        b.marker = None;
         let text = match &b.marker_text {
             Some(t) => t.clone(),
             None => return,
@@ -2753,8 +2756,8 @@ pub(crate) fn scroll_contents(b: &mut LayoutBox, dx: f32, dy: f32) {
     fn unscroll(b: &mut LayoutBox, dx: f32, dy: f32) {
         for c in &mut b.children {
             if c.flow == Flow::Absolute {
-                // (Viewport-fixed boxes were not moved.)
-                if !c.fixed {
+                // (Fixed-position boxes kept their inset-given position.)
+                if c.style.position != Position::Fixed {
                     c.translate(-dx, -dy);
                 }
             } else if !contains_absolutes(&c.style) {
