@@ -224,7 +224,24 @@
     return { bw: r.width, bh: r.height, cw, ch, pl, pt };
   }
 
-  function checkResizes() {
+  // Depth of a node in the flat tree (shadow roots count through their
+  // host), for the ResizeObserver delivery loop.
+  function depthOf(el) {
+    let d = 0;
+    for (let n = el; n; ) {
+      const p = n.parentNode;
+      n = p && p.nodeType === 11 && p.host ? p.host : p;
+      d++;
+    }
+    return d;
+  }
+
+  // Gather and broadcast the observations deeper than `shallowest` (-1:
+  // all of them; Resize Observer §3.4.3-3.4.5). Returns the shallowest depth
+  // delivered (Infinity when nothing was) and whether a change at or above
+  // `shallowest` was left for the next rendering update.
+  function checkResizes(shallowest) {
+    let delivered = Infinity, skipped = false;
     for (const ro of Array.from(ros)) {
       const st = ro[S];
       const entries = [];
@@ -238,6 +255,8 @@
         // The first observation of a 0x0 target is reported too (its
         // initial "last size" is -1 x -1 per spec... except 0x0 matches 0x0).
         if (!rec.last && size[0] === 0 && size[1] === 0 && b.bw === 0) { rec.last = size; continue; }
+        const depth = depthOf(target);
+        if (depth <= shallowest) { skipped = true; continue; }
         rec.last = size;
         const e = Object.create(ResizeObserverEntry.prototype);
         const dpr = g.devicePixelRatio || 1;
@@ -249,10 +268,34 @@
           device: Object.freeze([roSize(Math.round(b.cw * dpr), Math.round(b.ch * dpr))]),
         });
         entries.push(e);
+        delivered = Math.min(delivered, depth);
       }
       if (entries.length) {
         try { st.callback.call(ro, entries, ro); } catch (e) { reportError(e); }
       }
+    }
+    return { delivered, skipped };
+  }
+
+  // Deliver resize observations until sizes settle, in the same rendering
+  // update as in browsers: a callback that changes layout (a component
+  // adapting to its width) is seen again before the frame is painted,
+  // instead of one frame later. Each round only reports targets deeper
+  // than the shallowest one of the previous round, so it terminates.
+  function deliverResizes() {
+    let r = checkResizes(-1);
+    let rounds = 1;
+    while (r.delivered !== Infinity && rounds < 16) {
+      r = checkResizes(r.delivered);
+      rounds++;
+    }
+    if (r.skipped) {
+      try {
+        const ev = new g.ErrorEvent('error', { message: 'ResizeObserver loop completed with undelivered notifications.', cancelable: true });
+        g.dispatchEvent(ev);
+      } catch (e) {}
+      // The skipped changes are reported by the next rendering update.
+      N.requestRenderUpdate();
     }
   }
 
@@ -263,7 +306,7 @@
   // The host calls this during "update the rendering".
   N.setRenderHook(function () {
     const t = now();
-    if (ros.size) checkResizes();
+    if (ros.size) deliverResizes();
     if (ios.size) checkIntersections(t);
   });
 

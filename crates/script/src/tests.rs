@@ -79,6 +79,13 @@ impl HostEnv for MockEnv {
     }
     fn ensure_layout(&mut self) {}
     fn node_rect(&mut self, node: NodeId) -> Option<Rect> {
+        // Scripts can move a box through `data-test-rect="x y w h"`.
+        if let Some(v) = self.doc.element(node).and_then(|e| e.attr("data-test-rect")) {
+            let n: Vec<f32> = v.split_ascii_whitespace().filter_map(|p| p.parse().ok()).collect();
+            if let [x, y, w, h] = n[..] {
+                return Some(Rect::new(x, y, w, h));
+            }
+        }
         self.rects.get(&node).copied()
     }
     fn computed_style(&mut self, _node: NodeId) -> Option<Rc<ComputedStyle>> {
