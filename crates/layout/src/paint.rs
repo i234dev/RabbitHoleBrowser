@@ -350,19 +350,23 @@ impl PageLayer {
             canvas.data
         };
         let (layer, _, _) = RasterForeground::from_backdrops(w, render(Color::BLACK), render(Color::WHITE));
-        let width = w as usize;
+        Self { bands: Self::bands(w as usize, top, &layer.pixels), motion }
+    }
+
+    /// The runs of rows of `pixels` with any ink, `top` rows down.
+    fn bands(width: usize, top: u32, pixels: &[u32]) -> Vec<(Rect, RasterForeground)> {
         let mut bands = Vec::new();
-        let mut rows = layer.pixels.chunks_exact(width).enumerate().peekable();
+        let mut rows = pixels.chunks_exact(width).enumerate().peekable();
         while let Some((first, row)) = rows.next() {
             let occupied = |row: &[u32]| row.iter().any(|p| p >> 24 != 0);
             if !occupied(row) { continue; }
             let mut end = first + 1;
             while rows.next_if(|(_, row)| occupied(row)).is_some() { end += 1; }
-            let bounds = Rect::new(0.0, (top as usize + first) as f32, w as f32, (end - first) as f32);
-            let pixels = layer.pixels[first * width..end * width].to_vec();
+            let bounds = Rect::new(0.0, (top as usize + first) as f32, width as f32, (end - first) as f32);
+            let pixels = pixels[first * width..end * width].to_vec();
             bands.push((bounds, RasterForeground { width, pixels }));
         }
-        Self { bands, motion }
+        bands
     }
 
     /// Viewport-fixed items, with the viewport as origin.
@@ -372,6 +376,59 @@ impl PageLayer {
             paint_items(items, canvas, fonts, 0.0, 0.0, Rect::new(0.0, 0.0, w as f32, h as f32), (0.0, 0.0));
             canvas.pop_transform();
         })
+    }
+
+    /// Viewport-fixed items that read the pixels below them, painted over
+    /// `below` (the page as shown at the frame's scroll, `w`×`h`). Where
+    /// such an effect draws, the layer is opaque: a snapshot of its result
+    /// that stays in place until the next repaint.
+    pub fn fixed_backdrop(items: &[DisplayItem], w: u32, h: u32, scale: f32, fonts: &FontContext, below: &Canvas) -> Self {
+        let paint = |canvas: &mut Canvas| {
+            canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+            paint_items(items, canvas, fonts, 0.0, 0.0, Rect::new(0.0, 0.0, w as f32, h as f32), (0.0, 0.0));
+            canvas.pop_transform();
+        };
+        let full = Rect::new(0.0, 0.0, w as f32, h as f32);
+        let regions: Vec<Rect> = match backdrop_regions(items) {
+            Some(regions) => regions.into_iter().map(|r| Rect::new(r.x * scale, r.y * scale, r.w * scale, r.h * scale).intersect(&full)).filter(|r| !r.is_empty()).collect(),
+            None => vec![full],
+        };
+        let mut page = Canvas::new(w, h);
+        page.data.copy_from_slice(&below.data[..(w * h) as usize]);
+        paint(&mut page);
+        let width = w as usize;
+        let covers = |r: &Rect| r.x <= 0.0 && r.y <= 0.0 && r.right() >= full.w && r.bottom() >= full.h;
+        if regions.iter().any(covers) {
+            // (A full-viewport overlay: the snapshot is all there is.)
+            for p in &mut page.data { *p |= 0xff00_0000; }
+            return Self { bands: vec![(full, RasterForeground { width, pixels: page.data })], motion: LayerMotion::Fixed };
+        }
+        // Effects only change their regions, which the snapshot replaces:
+        // the transparent layer is painted without them.
+        let plain: Vec<DisplayItem> = items.iter()
+            .filter(|i| !matches!(i, DisplayItem::BackdropFilter { .. } | DisplayItem::LayerBlend(_) | DisplayItem::Blended { .. }))
+            .cloned().collect();
+        let mut layer = Self::from_paint(w, h, LayerMotion::Fixed, |canvas| {
+            canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+            paint_items(&plain, canvas, fonts, 0.0, 0.0, full, (0.0, 0.0));
+            canvas.pop_transform();
+        });
+        // Rows as full-width bands, like the rest of the layer.
+        let mut pixels = vec![0u32; width * h as usize];
+        for (bounds, band) in &layer.bands {
+            let y0 = bounds.y as usize;
+            pixels[y0 * width..y0 * width + band.pixels.len()].copy_from_slice(&band.pixels);
+        }
+        for r in regions {
+            let (x0, x1) = (r.x.floor() as usize, (r.right().ceil() as usize).min(width));
+            for y in r.y.floor() as usize..(r.bottom().ceil() as usize).min(h as usize) {
+                for x in x0..x1 {
+                    pixels[y * width + x] = page.data[y * width + x] & 0xffffff | 0xff00_0000;
+                }
+            }
+        }
+        layer.bands = Self::bands(width, 0, &pixels);
+        layer
     }
 
     /// Items painted like the page canvas at `origin` (see
@@ -441,6 +498,38 @@ impl PageLayer {
             band.paint(dst, bounds.translate(at.0, at.1), area);
         }
     }
+}
+
+/// Viewport areas (CSS px) where fixed `items` filter or blend with the
+/// pixels below them, or `None` if a transform makes them unknown.
+fn backdrop_regions(items: &[DisplayItem]) -> Option<Vec<Rect>> {
+    use DisplayItem as D;
+    let mut offsets: Vec<(f32, f32)> = Vec::new();
+    let mut layers: Vec<Rect> = Vec::new();
+    let mut out = Vec::new();
+    let at = |offsets: &[(f32, f32)], r: Rect| {
+        let (dx, dy) = offsets.iter().fold((0.0, 0.0), |a, o| (a.0 + o.0, a.1 + o.1));
+        r.translate(dx, dy)
+    };
+    for item in items {
+        match item {
+            D::PushTransform(m) => {
+                if (m[0] - 1.0).abs() > 1e-6 || m[1].abs() > 1e-6 || m[2].abs() > 1e-6 || (m[3] - 1.0).abs() > 1e-6 {
+                    return None;
+                }
+                offsets.push((m[4], m[5]));
+            }
+            D::PopTransform => { offsets.pop(); }
+            D::PushLayer(r) => layers.push(at(&offsets, *r)),
+            D::PopLayer(_) => { layers.pop(); }
+            D::LayerBlend(_) => out.push(*layers.last()?),
+            // (The filter reads around its rectangle but only paints inside.)
+            D::BackdropFilter { rect, .. } | D::Blended { bounds: rect, .. } => out.push(at(&offsets, *rect)),
+            D::Transform3d(g) if g.blend != 0 => return None,
+            _ => {}
+        }
+    }
+    Some(out)
 }
 
 fn style_code(s: BorderStyle) -> u8 {

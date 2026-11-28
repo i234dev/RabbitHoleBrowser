@@ -1183,7 +1183,9 @@ impl Worker {
         let fixed = page.layout.has_sticky_or_fixed();
         // Fixed and sticky boxes (and what is painted above them) become
         // layers the UI can keep in place while it scrolls the canvas.
-        let layered = !page.display_list.fixed_bounds.is_empty() || page.display_list.sticky.iter().any(|p| p.port.is_none());
+        // (`RH_NO_PAGE_LAYERS` paints a single canvas, for comparisons.)
+        let layered = (!page.display_list.fixed_bounds.is_empty() || page.display_list.sticky.iter().any(|p| p.port.is_none()))
+            && !no_page_layers();
         let plan = if layered { page.display_list.layer_plan() } else { Err("no-fixed") };
         if layered {
             let reason = plan.as_ref().err().copied().unwrap_or("promoted");
@@ -1292,8 +1294,17 @@ impl Worker {
             let viewport = (page.viewport.width, page.viewport.height);
             for (kind, range) in &plan.layers {
                 let items = &page.display_list.items[range.clone()];
+                if *kind == LayerKind::FixedBackdrop {
+                    // Depends on the pixels below: painted every frame.
+                    let t = Instant::now();
+                    let below = viewport_below(&cv, background, origin, (sx, sy), s, self.view.height, &layers);
+                    let layer = PageLayer::fixed_backdrop(items, w, self.view.height, s, &page.fonts, &below);
+                    debug_time("fixed backdrop layer", t);
+                    if !layer.is_empty() { layers.push(Arc::new(layer)); }
+                    continue;
+                }
                 let (motion, key) = match *kind {
-                    LayerKind::Fixed => (LayerMotion::Fixed, (w, self.view.height, s, fonts, (0.0, 0.0), (0.0, 0.0))),
+                    LayerKind::Fixed | LayerKind::FixedBackdrop => (LayerMotion::Fixed, (w, self.view.height, s, fonts, (0.0, 0.0), (0.0, 0.0))),
                     LayerKind::Scroll => (LayerMotion::Scroll, (w, h, s, fonts, origin, fixed_origin)),
                     LayerKind::Sticky(n) => (LayerMotion::Sticky { patch: page.display_list.sticky[n], viewport, at: page.page_scroll }, (w, h, s, fonts, origin, fixed_origin)),
                 };
@@ -1313,11 +1324,15 @@ impl Worker {
         page.incr.video_frame_pending = false;
         // UI highlights and carets go above the page's own layers.
         if plan.is_none() {
-            self.paint_overlays(&mut frame_canvas, origin);
-        } else if let Some((top, bottom)) = self.overlay_rows(origin, h) {
-            let shifted = (origin.0, origin.1 + top as f32 / s);
-            let overlays = PageLayer::from_rows(w, top, bottom - top, LayerMotion::Scroll, |c| self.paint_overlays(c, shifted));
-            if !overlays.is_empty() { layers.push(Arc::new(overlays)); }
+            self.paint_overlays(&mut frame_canvas, Overlays::All, origin, (origin.0 - sx, origin.1 - sy));
+        } else {
+            // Rings of fixed elements stay with them; the rest scrolls.
+            for (part, height, motion) in [(Overlays::Scrolling, h, LayerMotion::Scroll), (Overlays::Fixed, self.view.height, LayerMotion::Fixed)] {
+                let Some((top, bottom)) = self.overlay_rows(part, origin, (0.0, 0.0), height) else { continue };
+                let dy = top as f32 / s;
+                let overlays = PageLayer::from_rows(w, top, bottom - top, motion, |c| self.paint_overlays(c, part, (origin.0, origin.1 + dy), (0.0, dy)));
+                if !overlays.is_empty() { layers.push(Arc::new(overlays)); }
+            }
         }
         self.cache = Some(PaintCache { fixed_split, fixed_scroll, canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
 
@@ -1358,37 +1373,56 @@ impl Worker {
         }
     }
 
+    /// Where the rectangle of an overlay for `node` goes: relative to
+    /// `origin` (document) or to `fixed_at` (viewport, for fixed
+    /// elements), or nowhere for the other `part`.
+    fn overlay_origin(&self, page: &Page, node: Option<NodeId>, part: Overlays, origin: (f32, f32), fixed_at: (f32, f32)) -> Option<(f32, f32)> {
+        let fixed = node.is_some_and(|n| in_fixed(page, n));
+        match part {
+            Overlays::All => Some(if fixed { fixed_at } else { origin }),
+            Overlays::Scrolling => (!fixed).then_some(origin),
+            Overlays::Fixed => fixed.then_some(fixed_at),
+        }
+    }
+
     /// The canvas rows (device px) [`Worker::paint_overlays`] can draw on.
-    fn overlay_rows(&self, origin: (f32, f32), h: u32) -> Option<(u32, u32)> {
+    fn overlay_rows(&self, part: Overlays, origin: (f32, f32), fixed_at: (f32, f32), h: u32) -> Option<(u32, u32)> {
         let page = self.page.as_ref()?;
         let s = self.view.scale;
         let mut rects: Vec<Rect> = Vec::new();
-        rects.extend(self.inspect.and_then(|n| page.rect_of(n)));
-        rects.extend(self.edit.as_ref().and_then(|e| page.rect_of(e.node)));
-        rects.extend(self.focus.and_then(|n| page.rect_of(n)));
+        let mut add = |node: Option<NodeId>, r: Option<Rect>| {
+            if let (Some(r), Some(o)) = (r, self.overlay_origin(page, node, part, origin, fixed_at)) {
+                rects.push(r.translate(-o.0, -o.1));
+            }
+        };
+        add(self.inspect, self.inspect.and_then(|n| page.rect_of(n)));
+        add(self.edit.as_ref().map(|e| e.node), self.edit.as_ref().and_then(|e| page.rect_of(e.node)));
+        add(self.focus, self.focus.and_then(|n| page.rect_of(n)));
         if !self.find.query.is_empty() {
-            rects.extend(self.find.matches.iter().copied());
+            for r in &self.find.matches { add(None, Some(*r)); }
         }
         let b = rects.into_iter().reduce(|a, b| a.union(&b))?;
         // The focus ring is stroked outside the element.
-        let y0 = ((b.y - origin.1) * s - 8.0).floor().clamp(0.0, h as f32) as u32;
-        let y1 = ((b.bottom() - origin.1) * s + 8.0).ceil().clamp(0.0, h as f32) as u32;
+        let y0 = (b.y * s - 8.0).floor().clamp(0.0, h as f32) as u32;
+        let y1 = (b.bottom() * s + 8.0).ceil().clamp(0.0, h as f32) as u32;
         (y1 > y0).then_some((y0, y1))
     }
 
     /// Selection, find highlights, focus ring and caret.
-    fn paint_overlays(&self, canvas: &mut Canvas, origin: (f32, f32)) {
+    fn paint_overlays(&self, canvas: &mut Canvas, part: Overlays, origin: (f32, f32), fixed_at: (f32, f32)) {
         let Some(page) = self.page.as_ref() else { return };
         let s = self.view.scale;
-        let map = |r: Rect| Rect::new((r.x - origin.0) * s, (r.y - origin.1) * s, r.w * s, r.h * s);
-        if let Some(r) = self.inspect.and_then(|n| page.rect_of(n)).map(map) {
+        let place = |node: Option<NodeId>, r: Rect| {
+            self.overlay_origin(page, node, part, origin, fixed_at).map(|o| Rect::new((r.x - o.0) * s, (r.y - o.1) * s, r.w * s, r.h * s))
+        };
+        if let Some(r) = self.inspect.and_then(|n| page.rect_of(n).and_then(|r| place(Some(n), r))) {
             canvas.fill_rect(r, rabbithole_engine::gfx::Color::rgba(0x6f, 0xa8, 0xdc, 110));
             canvas.stroke_rect(r, [1.0; 4], [rabbithole_engine::gfx::Color::rgb(0x1a, 0x73, 0xe8); 4], [0; 4], 0.0);
         }
         // The selection inside the text control being edited (document
         // selections are painted with the page).
         if let Some((edit, (a, b))) = self.edit.as_ref().and_then(|e| e.buf.selection().map(|r| (e, r))) {
-            if let Some(screen) = page.rect_of(edit.node).map(map) {
+            if let Some(screen) = page.rect_of(edit.node).and_then(|r| place(Some(edit.node), r)) {
                 let x0 = page.caret_x(&page.fonts, edit.node, a).unwrap_or(0.0);
                 let x1 = page.caret_x(&page.fonts, edit.node, b).unwrap_or(x0);
                 let pad = (3.0 * s).min(screen.h / 4.0);
@@ -1397,18 +1431,20 @@ impl Worker {
         }
         if !self.find.query.is_empty() {
             for (i, r) in self.find.matches.iter().enumerate() {
-                canvas.fill_rect(map(*r), if i == self.find.current { FIND_CURRENT } else { FIND_MATCH });
+                if let Some(r) = place(None, *r) {
+                    canvas.fill_rect(r, if i == self.find.current { FIND_CURRENT } else { FIND_MATCH });
+                }
             }
         }
         if let Some(n) = self.focus {
             if self.edit.as_ref().map(|e| e.node != n).unwrap_or(true) {
-                if let Some(r) = page.rect_of(n).map(map) {
+                if let Some(r) = page.rect_of(n).and_then(|r| place(Some(n), r)) {
                     canvas.stroke_rect(Rect::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0), [2.0; 4], [ACCENT; 4], [0; 4], 3.0);
                 }
             }
         }
         if let Some(edit) = &self.edit {
-            if let Some(screen) = page.rect_of(edit.node).map(map) {
+            if let Some(screen) = page.rect_of(edit.node).and_then(|r| place(Some(edit.node), r)) {
                 let rel = page.caret_x(&page.fonts, edit.node, edit.buf.caret).unwrap_or(4.0);
                 let cx = screen.x + rel * s;
                 let pad = (3.0 * s).min(screen.h / 4.0);
@@ -2335,6 +2371,60 @@ fn debug_content() -> bool {
 }
 
 /// `RH_DEBUG_CONTENT=1`: log how long content-thread steps take.
+/// Which UI overlays to paint.
+#[derive(Clone, Copy, PartialEq)]
+enum Overlays {
+    All,
+    /// Those of document content.
+    Scrolling,
+    /// Those of viewport-fixed elements.
+    Fixed,
+}
+
+/// Is `node` inside a viewport-fixed box (laid out in viewport
+/// coordinates)?
+fn in_fixed(page: &Page, node: NodeId) -> bool {
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if page.layout.box_of(&page.doc, n).is_some_and(|b| b.node == Some(n) && b.fixed && b.flow == rabbithole_engine::layout::tree::Flow::Absolute) {
+            return true;
+        }
+        cur = page.doc.flat_parent(n);
+    }
+    false
+}
+
+/// The page as the UI shows it at the frame's scroll (`w`×`height` device
+/// px): the canvas `cv` painted at `origin` and the layers above it.
+fn viewport_below(cv: &Canvas, background: Color, origin: (f32, f32), scroll: (f32, f32), s: f32, height: u32, layers: &[Arc<PageLayer>]) -> Canvas {
+    let w = cv.width;
+    let mut below = Canvas::new(w, height);
+    below.clear(Color::WHITE);
+    if background.a > 0 {
+        below.fill_rect(Rect::new(0.0, 0.0, w as f32, height as f32), background);
+    }
+    let at = (((origin.0 - scroll.0) * s).round(), ((origin.1 - scroll.1) * s).round());
+    // (The canvas is as wide as the viewport and starts at its left.)
+    let dy = at.1 as i64;
+    let width = w as usize;
+    for y in 0..height as i64 {
+        let sy = y - dy;
+        if sy < 0 || sy >= cv.height as i64 { continue; }
+        let (d, src) = (y as usize * width, sy as usize * width);
+        below.data[d..d + width].copy_from_slice(&cv.data[src..src + width]);
+    }
+    let area = Rect::new(0.0, 0.0, w as f32, height as f32);
+    for layer in layers {
+        layer.paint(&mut below, area, layer.position(area, at, at, scroll, s));
+    }
+    below
+}
+
+fn no_page_layers() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("RH_NO_PAGE_LAYERS").is_some())
+}
+
 fn debug_time(what: &str, since: Instant) {
     if debug_content() {
         eprintln!("[content {:?}] {what}: {:.1} ms", std::thread::current().name().unwrap_or("?"), since.elapsed().as_secs_f64() * 1000.0);

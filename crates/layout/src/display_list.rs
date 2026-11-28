@@ -258,7 +258,7 @@ impl DisplayList {
                 // Adjacent fixed groups share a layer.
                 let continues = match (open, kind) {
                     (Some(LayerKind::Scroll), LayerKind::Scroll) => true,
-                    (None, LayerKind::Fixed) => layers.last().is_some_and(|l| l.0 == LayerKind::Fixed && l.1.end == i),
+                    (None, LayerKind::Fixed) => layers.last().is_some_and(|l| matches!(l.0, LayerKind::Fixed | LayerKind::FixedBackdrop) && l.1.end == i),
                     _ => false,
                 };
                 if !continues {
@@ -266,11 +266,17 @@ impl DisplayList {
                 }
                 open = Some(kind);
             }
+            let backdrop = matches!(item, BackdropFilter { .. } | LayerBlend(_) | Blended { .. })
+                || matches!(item, Transform3d(g) if g.blend != 0);
+            if backdrop {
+                // These draws read the pixels below them, which are in other
+                // layers now. A fixed layer can keep a snapshot of them.
+                match layers.last_mut() {
+                    Some(last) if fixed > 0 && matches!(open, Some(LayerKind::Fixed)) => last.0 = LayerKind::FixedBackdrop,
+                    _ => return Err("unsupported-effect"),
+                }
+            }
             match item {
-                // These draws read the pixels below them, which are in
-                // other layers now.
-                BackdropFilter { .. } | LayerBlend(_) | Blended { .. } => return Err("unsupported-effect"),
-                Transform3d(g) if g.blend != 0 => return Err("unsupported-effect"),
                 PushFixed => fixed += 1,
                 PopFixed => fixed = fixed.checked_sub(1).ok_or("unbalanced")?,
                 PushClip(_) | PushClipRounded(..) | PushClipPath { .. } | PushTransform(_) | PushLayer(_) => depth += 1,
@@ -298,6 +304,10 @@ pub enum LayerKind {
     Scroll,
     /// `position: fixed` content, in viewport coordinates.
     Fixed,
+    /// Fixed content that filters or blends with what is below it
+    /// (`backdrop-filter`, `mix-blend-mode`): painted over a snapshot of
+    /// the page below, which it keeps until the next repaint.
+    FixedBackdrop,
     /// A page-scrolled `position: sticky` box (index into
     /// [`DisplayList::sticky`]).
     Sticky(usize),
