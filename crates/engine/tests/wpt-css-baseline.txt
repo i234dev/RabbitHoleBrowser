@@ -1,5 +1,5 @@
 # WPT reftest baseline: per-directory pass/total, then failing tests.
-dir css/CSS2 5862 6232
+dir css/CSS2 5863 6232
 dir css/compositing 36 60
 dir css/css-align 37 64
 dir css/css-backgrounds 636 718
@@ -18,11 +18,11 @@ dir css/css-masking 271 384
 dir css/css-nesting 13 17
 dir css/css-overflow 456 719
 dir css/css-position 168 251
-dir css/css-sizing 421 568
-dir css/css-text 1209 1550
+dir css/css-sizing 424 568
+dir css/css-text 1210 1550
 dir css/css-text-decor 285 339
 dir css/css-transforms 754 794
-dir css/css-ui 917 962
+dir css/css-ui 918 962
 dir css/css-values 120 192
 dir css/css-writing-modes 968 1162
 dir css/filter-effects 282 370
@@ -392,7 +392,6 @@ fail css/CSS2/visudet/inline-block-baseline-005.xht
 fail css/CSS2/visudet/inline-block-baseline-006.xht
 fail css/CSS2/visudet/replaced-elements-max-height-20.html
 fail css/CSS2/visudet/replaced-elements-max-width-40.html
-fail css/CSS2/visudet/replaced-elements-min-height-40.html
 fail css/CSS2/visudet/replaced-elements-min-width-80.html
 fail css/CSS2/zindex/stack-floats-003.xht
 fail css/CSS2/zindex/z-index-016.xht
@@ -1850,9 +1849,6 @@ fail css/css-sizing/aspect-ratio/intrinsic-size-014.html
 fail css/css-sizing/aspect-ratio/intrinsic-size-015.html
 fail css/css-sizing/aspect-ratio/replaced-element-002.html
 fail css/css-sizing/aspect-ratio/replaced-element-016.html
-fail css/css-sizing/aspect-ratio/replaced-element-031.html
-fail css/css-sizing/aspect-ratio/replaced-element-032.html
-fail css/css-sizing/aspect-ratio/replaced-element-033.html
 fail css/css-sizing/aspect-ratio/replaced-element-034.html
 fail css/css-sizing/aspect-ratio/replaced-element-041.html
 fail css/css-sizing/aspect-ratio/replaced-element-045.html
@@ -2218,7 +2214,6 @@ fail css/css-text/text-transform/text-transform-upperlower-043.html
 fail css/css-text/text-transform/text-transform-upperlower-044.html
 fail css/css-text/white-space/control-chars-00C.html
 fail css/css-text/white-space/control-chars-00D.html
-fail css/css-text/white-space/eol-spaces-bidi-001.html
 fail css/css-text/white-space/eol-spaces-bidi-003.html
 fail css/css-text/white-space/hanging-whitespace-002.tentative.html
 fail css/css-text/white-space/hanging-whitespace-003.tentative.html
@@ -2408,7 +2403,6 @@ fail css/css-ui/appearance-revert-001.tentative.html
 fail css/css-ui/box-sizing-012.html
 fail css/css-ui/box-sizing-013.html
 fail css/css-ui/box-sizing-022.html
-fail css/css-ui/box-sizing-023.html
 fail css/css-ui/caret-color-block-shape-text-color-001.html
 fail css/css-ui/caret-color-block-shape-text-color-002.html
 fail css/css-ui/caret-color-block-shape-text-color-003.html

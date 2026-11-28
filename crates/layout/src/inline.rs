@@ -1013,6 +1013,9 @@ struct BgFrag {
     item: usize,
     left_edge: bool,
     right_edge: bool,
+    /// A collapsible space of the box's own text is pending at its end: the
+    /// box takes it in if it is placed (not at a line end).
+    tail_space: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1388,16 +1391,20 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let cw = self.content_w;
         let mr = style.margin.right.resolve_or_zero(cw);
         let end = self.cur.x + style.border_width.right + style.padding.right.resolve_or_zero(cw);
-        if end != self.cur.x || mr != 0.0 {
+        // (Only a box that started on the line: the end of one continued
+        // from the previous line, after a forced break, makes no line.)
+        if (end != self.cur.x || mr != 0.0) && o.started_here {
             self.cur.boxed = true;
         }
         if needs_bg(&style) {
+            let tail_space = end == self.cur.x && mr == 0.0 && self.cur.has_content && self.cur.pending_space.is_some_and(|(_, item)| item > i && item != MARKER_ITEM);
             self.cur.bg.push(BgFrag {
                 x: o.start_x,
                 w: (end - o.start_x).max(0.0),
                 item: i,
                 left_edge: o.started_here,
                 right_edge: true,
+                tail_space,
             });
         }
         self.cur.x = end + mr;
@@ -1654,6 +1661,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             self.cur.x += sw;
             for o in &mut self.cur.open {
                 o.start_x += std::mem::take(&mut o.pending);
+            }
+            for bg in &mut self.cur.bg {
+                if std::mem::take(&mut bg.tail_space) {
+                    bg.w += sw;
+                }
             }
         }
     }
@@ -2752,7 +2764,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         if clamp_hit {
             self.done = true;
         }
-        let align = self.line_align(forced || self.final_flush);
+        let mut align = self.line_align(forced || self.final_flush);
+        // A justified line without content to justify (only empty inline
+        // boxes) is centered (as Blink).
+        if align == TextAlign::Justify && self.cur.frags.is_empty() {
+            align = TextAlign::Center;
+        }
         if align == TextAlign::Justify && !overflows {
             self.justify();
         }
@@ -2775,6 +2792,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     item,
                     left_edge: started_here,
                     right_edge: false,
+                    tail_space: false,
                 });
             }
             self.cur.open[idx].started_here = false;

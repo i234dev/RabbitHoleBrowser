@@ -1967,6 +1967,10 @@ pub struct ComputedStyle {
     pub line_clamp: Option<u32>,
     /// `content-visibility: hidden`: the contents are not rendered.
     pub content_visibility_hidden: bool,
+    /// The containment bits (1 paint, 2 layout, 4 size) that
+    /// `content-visibility: hidden` turned on, which a later winning value
+    /// turns off again.
+    pub cv_contain: u8,
     /// `contain`: paint / layout / size containment.
     pub contain_paint: bool,
     pub contain_layout: bool,
@@ -2274,6 +2278,7 @@ impl ComputedStyle {
             tab_size_length: false,
             line_clamp: None,
             content_visibility_hidden: false,
+            cv_contain: 0,
             contain_paint: false,
             contain_layout: false,
             contain_size: false,

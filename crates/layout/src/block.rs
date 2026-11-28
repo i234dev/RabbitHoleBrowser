@@ -1910,13 +1910,30 @@ impl<'a> Layouter<'a> {
                 h = max_h;
             }
         }
-        // A minimum height scales an automatic width with the ratio.
-        if let Some(min_h) = style.min_height.resolve_definite(cb_h).map(adj_h).filter(|m| *m > 0.0) {
+        // A minimum height scales an automatic width with a natural ratio,
+        // within max-width.
+        let real_ratio = ratio.is_some() && b.image.as_ref().is_some_and(|i| !i.broken);
+        if let (Some(min_h), true) = (style.min_height.resolve_definite(cb_h).filter(|_| !matches!(style.min_height, Length::Math(_))).map(adj_h).filter(|m| *m > 0.0), real_ratio) {
             if h < min_h {
                 if h > 0.0 && sw.is_none() {
                     w *= min_h / h;
+                    let max_w = if width_limits { style.max_width.resolve_definite(cbw).map(adj_w) } else { None };
+                    if let Some(mw) = max_w {
+                        w = w.min(mw);
+                    }
                 }
                 h = min_h;
+            }
+        }
+        // A CSS `aspect-ratio` of a border box (`box-sizing: border-box`,
+        // not `auto <ratio>`) relates the border-box sizes.
+        if let (Some(r), true, false) = (css_ratio, style.box_sizing == BoxSizing::BorderBox, style.aspect_ratio_auto) {
+            if pb_v > 0.0 || pb_h > 0.0 {
+                if sw.is_some() && sh.is_none() {
+                    h = ((w + pb_h) / r - pb_v).max(0.0);
+                } else if sw.is_none() {
+                    w = ((h + pb_v) * r - pb_h).max(0.0);
+                }
             }
         }
         (w.max(0.0), h.max(0.0))

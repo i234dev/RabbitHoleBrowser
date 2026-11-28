@@ -292,9 +292,17 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             if let Some(kw) = values::ident(c0) {
                 style.content_visibility_hidden = kw == "hidden";
                 if kw == "hidden" {
+                    style.cv_contain |= (!style.contain_paint as u8) | ((!style.contain_layout as u8) << 1) | ((!style.contain_size as u8) << 2);
                     style.contain_paint = true;
                     style.contain_layout = true;
                     style.contain_size = true;
+                } else {
+                    // (An earlier `hidden` declaration lost the cascade:
+                    // its layout and paint containment go. Its size
+                    // containment is kept, as before.)
+                    let cv = std::mem::take(&mut style.cv_contain);
+                    style.contain_paint &= cv & 1 == 0;
+                    style.contain_layout &= cv & 2 == 0;
                 }
                 if kw != "visible" {
                     style.creates_stacking_context = true;

@@ -617,6 +617,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.creates_stacking_context = true;
             }
             if name == "contain" {
+                style.cv_contain = 0;
                 let has = |k: &str| kws.iter().any(|x| x == k);
                 style.contain_paint = has("paint") || has("strict") || has("content");
                 style.contain_layout = has("layout") || has("strict") || has("content");

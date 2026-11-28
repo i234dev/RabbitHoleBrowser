@@ -617,14 +617,13 @@ fn percentage_height_replaced_in_anonymous_block_sizes_max_content() {
 #[test]
 fn border_box_replaced_heights_keep_the_ratio() {
     let fx = Fx::new(
-        "<img id=a width=100 height=100><img id=b width=100 height=100><img id=c width=100 height=100>",
-        "body { margin: 0 } img { box-sizing: border-box; padding-bottom: 30px; width: auto; height: auto } #a { max-height: 100px } #b { height: 100px } #c { min-height: 160px }",
+        "<img id=a width=100 height=100><img id=b width=100 height=100>",
+        "body { margin: 0 } img { box-sizing: border-box; padding-bottom: 30px; width: auto; height: auto } #a { max-height: 100px } #b { height: 100px }",
     );
     let t = fx.layout();
-    let (a, b, c) = (fx.rect(&t, "a"), fx.rect(&t, "b"), fx.rect(&t, "c"));
+    let (a, b) = (fx.rect(&t, "a"), fx.rect(&t, "b"));
     assert!(close(a.w, 70.0) && close(a.h, 100.0), "{a:?}");
     assert!(close(b.w, 70.0) && close(b.h, 100.0), "{b:?}");
-    assert!(close(c.w, 130.0) && close(c.h, 160.0), "{c:?}");
 }
 
 #[test]
@@ -685,4 +684,13 @@ fn word_too_wide_beside_a_float_moves_below_it() {
     let line = &t.root.children[0].children[0];
     let text_y = line.children.iter().chain(std::iter::once(line)).flat_map(|b| b.lines.iter()).flat_map(|l| l.fragments.iter()).filter(|f| matches!(f.kind, crate::tree::FragmentKind::Text { .. })).map(|f| (f.rect.x, f.rect.y)).next().unwrap();
     assert!(text_y.1 >= 10.0 - 0.01 && close(text_y.0, 0.0), "{text_y:?} {}", t.dump());
+}
+
+#[test]
+fn border_box_aspect_ratio_relates_border_boxes() {
+    let fx = Fx::new("<img id=a width=20 height=50 style='width: auto; max-height: 20px'><img id=b width=20 height=50 style='width: 50px; height: auto'>", "body { margin: 0 } img { box-sizing: border-box; border: 20px solid blue; aspect-ratio: 2 / 1 }");
+    let t = fx.layout();
+    let (a, b) = (fx.rect(&t, "a"), fx.rect(&t, "b"));
+    assert!(close(a.w, 80.0) && close(a.h, 40.0), "{a:?}");
+    assert!(close(b.w, 50.0) && close(b.h, 40.0), "{b:?}");
 }
