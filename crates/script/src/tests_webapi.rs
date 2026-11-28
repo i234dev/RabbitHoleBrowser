@@ -386,6 +386,49 @@ fn intersection_and_resize_observers_follow_layout_and_scroll() {
 }
 
 #[test]
+fn resize_observer_delivers_deeper_changes_in_the_same_rendering_update() {
+    // A callback that resizes a deeper target is followed by that target's
+    // notification before the update ends (browsers paint only then); a
+    // change at the same or a shallower depth waits for the next update
+    // and reports the loop error.
+    let (mut env, mut host) = setup("<html><body><div id=outer data-test-rect='0 0 500 100'><div id=inner data-test-rect='0 0 100 10'></div></div></body></html>");
+    run(
+        &mut env,
+        &mut host,
+        r#"
+        window.log = [];
+        const outer = document.getElementById('outer'), inner = document.getElementById('inner');
+        addEventListener('error', e => log.push('error:' + e.message));
+        new ResizeObserver(entries => {
+          for (const e of entries) {
+            log.push(e.target.id + ':' + e.contentRect.width);
+            if (e.target === outer) inner.setAttribute('data-test-rect', '0 0 ' + e.contentRect.width / 2 + ' 10');
+          }
+        }).observe(outer);
+        new ResizeObserver(entries => {
+          for (const e of entries) {
+            log.push(e.target.id + ':' + e.contentRect.width);
+            if (e.contentRect.width === 150) outer.setAttribute('data-test-rect', '0 0 200 100');
+          }
+        }).observe(inner);
+        "#,
+    );
+    host.run_timers(&mut env, 1100.0);
+    host.run_jobs(&mut env);
+    let out = run(&mut env, &mut host, "console.log(log.join(' ')); log.length = 0; document.getElementById('outer').setAttribute('data-test-rect', '0 0 300 100')");
+    assert_eq!(out[0], "outer:500 inner:250");
+    host.run_timers(&mut env, 1200.0);
+    host.run_jobs(&mut env);
+    let out = run(&mut env, &mut host, "console.log(log.join(' ')); log.length = 0");
+    assert_eq!(out[0], "outer:300 inner:150 error:ResizeObserver loop completed with undelivered notifications.");
+    host.run_timers(&mut env, 1300.0);
+    host.run_jobs(&mut env);
+    let out = run(&mut env, &mut host, "console.log(log.join(' '))");
+    assert_eq!(out[0], "outer:200 inner:100");
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
 fn geometry_interfaces() {
     let out = result_of(
         "<html><body></body></html>",

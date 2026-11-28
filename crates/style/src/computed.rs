@@ -1971,6 +1971,9 @@ pub struct ComputedStyle {
     /// `content-visibility: hidden` turned on, which a later winning value
     /// turns off again.
     pub cv_contain: u8,
+    /// `overflow-anchor: none`: the box and its contents are never chosen
+    /// as a scroll anchor.
+    pub overflow_anchor_none: bool,
     /// `contain`: paint / layout / size containment.
     pub contain_paint: bool,
     pub contain_layout: bool,
@@ -2279,6 +2282,7 @@ impl ComputedStyle {
             line_clamp: None,
             content_visibility_hidden: false,
             cv_contain: 0,
+            overflow_anchor_none: false,
             contain_paint: false,
             contain_layout: false,
             contain_size: false,

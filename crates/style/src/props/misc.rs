@@ -288,6 +288,11 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 _ => {}
             }
         }
+        "overflow-anchor" => {
+            if let Some(kw) = values::ident(c0).filter(|k| matches!(k.as_str(), "auto" | "none")) {
+                style.overflow_anchor_none = kw == "none";
+            }
+        }
         "content-visibility" => {
             if let Some(kw) = values::ident(c0) {
                 style.content_visibility_hidden = kw == "hidden";

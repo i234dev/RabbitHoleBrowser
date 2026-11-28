@@ -1209,3 +1209,12 @@ fn incremental_restyle_resolves_rem_against_unchanged_root_font_size() {
     let full = style_tree_with(&doc, &sheets, &env(), &opts);
     assert_eq!(tree.get(title), full.get(title));
 }
+
+#[test]
+fn overflow_anchor_is_a_reset_property() {
+    let (doc, tree) = styled("<div><p>x</p></div><section>y</section>", "div {overflow-anchor: none} section {overflow-anchor: none; overflow-anchor: bogus}");
+    assert!(style_of(&doc, &tree, "div").overflow_anchor_none);
+    assert!(!style_of(&doc, &tree, "p").overflow_anchor_none);
+    assert!(style_of(&doc, &tree, "section").overflow_anchor_none);
+    assert!(!one("overflow-anchor: auto").overflow_anchor_none);
+}

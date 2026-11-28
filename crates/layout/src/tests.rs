@@ -1609,4 +1609,30 @@ fn collapsed_outer_border_is_painted_per_edge_cell() {
     }).collect();
     assert!(!tops.is_empty(), "{:?}", list.items);
     assert!(tops.iter().all(|r| r.w < 70.0), "{tops:?}");
+fn scroll_anchor_selection_and_shift() {
+    let html = "<div id=a></div><div id=b><div id=b1></div></div><div id=c><p id=p></p></div>";
+    let base = "body{margin:0} div,p{margin:0} #b{height:300px} #b1{height:150px} #c{height:2000px} #p{height:100px}";
+    let id = |fx: &Fixture, s: &str| fx.doc.element_by_id(s).unwrap();
+    // Viewport 400..1000: #b is cut at the top, so is #b1 inside it,
+    // which has nothing inside: #b1 is the anchor.
+    let before = Fixture::new(html, &format!("{base} #a{{height:300px}}"));
+    let tree = before.layout();
+    let anchor = tree.scroll_anchor((0.0, 400.0)).expect("anchor");
+    assert_eq!(anchor.node, id(&before, "b1"));
+    assert_eq!(anchor.rect.y, 300.0);
+    // 200px more above it: scroll 200px further.
+    let after = Fixture::new(html, &format!("{base} #a{{height:500px}}"));
+    assert_eq!(after.layout().scroll_anchor_shift(&after.doc, &anchor), Some(200.0));
+    // Nothing moved: no adjustment.
+    assert_eq!(tree.scroll_anchor_shift(&before.doc, &anchor), None);
+    // A script repositioning the anchor suppresses the adjustment.
+    let moved = Fixture::new(html, &format!("{base} #a{{height:500px}} #b1{{position:relative;top:10px}}"));
+    assert_eq!(moved.layout().scroll_anchor_shift(&moved.doc, &anchor), None);
+    // `overflow-anchor: none` excludes #b and its contents: the first
+    // fully visible box after it is #p.
+    let none = Fixture::new(html, &format!("{base} #a{{height:300px}} #b{{overflow-anchor:none}}"));
+    assert_eq!(none.layout().scroll_anchor((0.0, 400.0)).map(|a| a.node), Some(id(&none, "p")));
+    // On the root, it turns anchoring off.
+    let off = Fixture::new(html, &format!("{base} #a{{height:300px}} html{{overflow-anchor:none}}"));
+    assert!(off.layout().scroll_anchor((0.0, 400.0)).is_none());
 }
