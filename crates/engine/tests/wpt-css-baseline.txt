@@ -1,32 +1,32 @@
 # WPT reftest baseline: per-directory pass/total, then failing tests.
-dir css/CSS2 5789 6232
+dir css/CSS2 5863 6232
 dir css/compositing 36 60
-dir css/css-align 36 64
-dir css/css-backgrounds 609 718
+dir css/css-align 37 64
+dir css/css-backgrounds 636 718
 dir css/css-borders 42 123
 dir css/css-box 40 42
 dir css/css-cascade 41 51
-dir css/css-color 300 311
-dir css/css-conditional 151 172
-dir css/css-contain 320 435
+dir css/css-color 307 311
+dir css/css-conditional 157 172
+dir css/css-contain 341 435
 dir css/css-display 179 223
-dir css/css-flexbox 881 1027
+dir css/css-flexbox 889 1027
 dir css/css-fonts 267 387
-dir css/css-grid 1484 1763
-dir css/css-images 437 482
+dir css/css-grid 1488 1763
+dir css/css-images 440 482
 dir css/css-masking 271 384
 dir css/css-nesting 13 17
-dir css/css-overflow 451 719
-dir css/css-position 165 251
-dir css/css-sizing 403 568
-dir css/css-text 1203 1550
-dir css/css-text-decor 284 339
-dir css/css-transforms 749 794
-dir css/css-ui 877 962
-dir css/css-values 116 192
-dir css/css-writing-modes 944 1162
+dir css/css-overflow 456 719
+dir css/css-position 168 251
+dir css/css-sizing 424 568
+dir css/css-text 1210 1550
+dir css/css-text-decor 285 339
+dir css/css-transforms 754 794
+dir css/css-ui 918 962
+dir css/css-values 120 192
+dir css/css-writing-modes 968 1162
 dir css/filter-effects 282 370
-dir css/selectors 208 229
+dir css/selectors 212 229
 fail css/CSS2/abspos/abspos-containing-block-initial-004a.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004b.xht
 fail css/CSS2/abspos/abspos-containing-block-initial-004c.xht
@@ -35,25 +35,10 @@ fail css/CSS2/abspos/abspos-containing-block-initial-009b.xht
 fail css/CSS2/abspos/static-inside-float-inside-inline.html
 fail css/CSS2/abspos/static-inside-inline-002.html
 fail css/CSS2/backgrounds/background-003.xht
-fail css/CSS2/backgrounds/background-bg-pos-204.xht
-fail css/CSS2/backgrounds/background-bg-pos-206.xht
-fail css/CSS2/backgrounds/background-bg-pos-208.xht
 fail css/CSS2/backgrounds/background-intrinsic-006.xht
-fail css/CSS2/backgrounds/background-position-001.xht
-fail css/CSS2/backgrounds/background-position-002.xht
 fail css/CSS2/backgrounds/background-position-150.xht
 fail css/CSS2/backgrounds/background-position-151.xht
 fail css/CSS2/backgrounds/background-repeat-005.xht
-fail css/CSS2/backgrounds/background-root-002.xht
-fail css/CSS2/backgrounds/background-root-007.xht
-fail css/CSS2/backgrounds/background-root-008.xht
-fail css/CSS2/backgrounds/background-root-009.xht
-fail css/CSS2/backgrounds/background-root-010.xht
-fail css/CSS2/backgrounds/background-root-015.xht
-fail css/CSS2/backgrounds/background-root-016.xht
-fail css/CSS2/backgrounds/background-root-018.xht
-fail css/CSS2/backgrounds/background-root-019.xht
-fail css/CSS2/backgrounds/background-root-024.xht
 fail css/CSS2/bidi-005.xht
 fail css/CSS2/bidi-006.xht
 fail css/CSS2/bidi-007.xht
@@ -98,15 +83,9 @@ fail css/CSS2/bidi-text/unicode-bidi-004.xht
 fail css/CSS2/bidi-text/unicode-bidi-applies-to-009.xht
 fail css/CSS2/bidi-text/unicode-bidi-applies-to-015.xht
 fail css/CSS2/borders/border-applies-to-006.xht
-fail css/CSS2/borders/border-bottom-applies-to-006.xht
-fail css/CSS2/borders/border-bottom-color-applies-to-006.xht
-fail css/CSS2/borders/border-bottom-width-applies-to-006.xht
 fail css/CSS2/borders/border-color-011.xht
 fail css/CSS2/borders/border-color-012.xht
 fail css/CSS2/borders/border-color-applies-to-006.xht
-fail css/CSS2/borders/border-top-applies-to-006.xht
-fail css/CSS2/borders/border-top-color-applies-to-006.xht
-fail css/CSS2/borders/border-top-width-applies-to-006.xht
 fail css/CSS2/borders/border-width-011.xht
 fail css/CSS2/borders/border-width-012.xht
 fail css/CSS2/borders/groove-default.html
@@ -115,6 +94,7 @@ fail css/CSS2/box-display/block-in-inline-relpos-002.xht
 fail css/CSS2/box-display/box-generation-001.xht
 fail css/CSS2/box-display/box-generation-002.xht
 fail css/CSS2/box-display/root-box-002.xht
+fail css/CSS2/box-display/root-box-003.xht
 fail css/CSS2/box-display/root-canvas-001.xht
 fail css/CSS2/box/rtl-basic.xht
 fail css/CSS2/box/rtl-linebreak.xht
@@ -123,9 +103,7 @@ fail css/CSS2/cascade-import/cascade-import-dynamic-001.xht
 fail css/CSS2/cascade-import/cascade-import-dynamic-002.xht
 fail css/CSS2/cascade/html-precedence-004.xht
 fail css/CSS2/cascade/specificity-005.xht
-fail css/CSS2/css1/c11-import-000.xht
 fail css/CSS2/css1/c25-pseudo-elmnt-000.xht
-fail css/CSS2/css1/c414-flt-wrap-001.xht
 fail css/CSS2/css1/c42-ibx-ht-000.xht
 fail css/CSS2/css1/c42-ibx-pad-000.xht
 fail css/CSS2/css1/c43-rpl-ibx-000.xht
@@ -135,7 +113,6 @@ fail css/CSS2/css1/c533-bgimage-000.xht
 fail css/CSS2/css1/c541-word-sp-001.xht
 fail css/CSS2/css1/c542-letter-sp-001.xht
 fail css/CSS2/css1/c544-valgn-001.xht
-fail css/CSS2/css1/c545-txttrans-000.xht
 fail css/CSS2/css1/c548-ln-ht-002.xht
 fail css/CSS2/css1/c5502-imrgn-r-002.xht
 fail css/CSS2/css1/c5502-imrgn-r-005.xht
@@ -145,7 +122,6 @@ fail css/CSS2/css1/c5505-imrgn-000.xht
 fail css/CSS2/css1/c5507-ipadn-r-002.xht
 fail css/CSS2/css1/c5507-padn-r-000.xht
 fail css/CSS2/css1/c5509-ipadn-l-002.xht
-fail css/CSS2/css1/c5510-ipadn-000.xht
 fail css/CSS2/css1/c5510-padn-000.xht
 fail css/CSS2/css1/c5525-fltmrgn-000.xht
 fail css/CSS2/css21-errata/s-11-1-1b-002.html
@@ -161,14 +137,9 @@ fail css/CSS2/floats-clear/clear-on-child-with-margins-2.html
 fail css/CSS2/floats-clear/clear-on-child-with-margins.html
 fail css/CSS2/floats-clear/clear-on-parent-with-margins.html
 fail css/CSS2/floats-clear/float-replaced-height-006.xht
-fail css/CSS2/floats-clear/float-replaced-width-005.xht
-fail css/CSS2/floats-clear/float-replaced-width-006.xht
-fail css/CSS2/floats-clear/float-replaced-width-011.xht
 fail css/CSS2/floats-clear/floats-124.xht
-fail css/CSS2/floats-clear/floats-132.xht
 fail css/CSS2/floats-clear/floats-143.xht
 fail css/CSS2/floats-clear/floats-147.xht
-fail css/CSS2/floats-clear/floats-149.xht
 fail css/CSS2/floats-clear/floats-clear-multicol-balancing-000.html
 fail css/CSS2/floats-clear/margin-collapse-018.xht
 fail css/CSS2/floats-clear/margin-collapse-033.xht
@@ -250,7 +221,6 @@ fail css/CSS2/generated-content/quotes-035a.xht
 fail css/CSS2/generated-content/quotes-036.xht
 fail css/CSS2/inline-svg-intrinsic-size-100-percent-1.html
 fail css/CSS2/linebox/baseline-block-with-overflow-001.html
-fail css/CSS2/linebox/empty-inline-002.xht
 fail css/CSS2/linebox/empty-inline-003.xht
 fail css/CSS2/linebox/inline-formatting-context-002.xht
 fail css/CSS2/linebox/inline-formatting-context-003.xht
@@ -266,17 +236,11 @@ fail css/CSS2/linebox/vertical-align-super-001.xht
 fail css/CSS2/lists/counter-reset-increment-002.xht
 fail css/CSS2/lists/list-style-020.xht
 fail css/CSS2/lists/list-style-021.xht
-fail css/CSS2/lists/list-style-applies-to-012.xht
-fail css/CSS2/lists/list-style-applies-to-014.xht
 fail css/CSS2/lists/list-style-applies-to-017.html
 fail css/CSS2/lists/list-style-image-005.xht
-fail css/CSS2/lists/list-style-image-applies-to-012.xht
-fail css/CSS2/lists/list-style-image-applies-to-014.xht
 fail css/CSS2/lists/list-style-image-applies-to-017.html
 fail css/CSS2/lists/list-style-position-023.xht
 fail css/CSS2/lists/list-style-position-024.xht
-fail css/CSS2/lists/list-style-type-applies-to-012.xht
-fail css/CSS2/lists/list-style-type-applies-to-014.xht
 fail css/CSS2/lists/list-style-type-applies-to-017.html
 fail css/CSS2/margin-padding-clear/margin-bottom-applies-to-012.xht
 fail css/CSS2/margin-padding-clear/margin-bottom-applies-to-013.xht
@@ -287,11 +251,9 @@ fail css/CSS2/margin-padding-clear/margin-collapse-021.xht
 fail css/CSS2/margin-padding-clear/margin-collapse-038.xht
 fail css/CSS2/margin-padding-clear/margin-collapse-105.xht
 fail css/CSS2/margin-padding-clear/margin-em-inherit-001.xht
-fail css/CSS2/margin-padding-clear/margin-right-114.html
 fail css/CSS2/margin-padding-clear/margin-right-applies-to-003.xht
 fail css/CSS2/margin-padding-clear/padding-applies-to-017.xht
 fail css/CSS2/margin-padding-clear/padding-em-inherit-001.xht
-fail css/CSS2/margin-padding-clear/padding-left-applies-to-008.xht
 fail css/CSS2/margin-padding-clear/padding-left-applies-to-010.xht
 fail css/CSS2/margin-padding-clear/padding-right-applies-to-015.xht
 fail css/CSS2/margin-padding-clear/padding-top-applies-to-015.xht
@@ -300,21 +262,16 @@ fail css/CSS2/normal-flow/block-in-inline-float-in-layer-001.html
 fail css/CSS2/normal-flow/block-replaced-height-006.xht
 fail css/CSS2/normal-flow/float-percentage-resolution-quirks-mode.html
 fail css/CSS2/normal-flow/inline-block-replaced-height-006.xht
-fail css/CSS2/normal-flow/inline-box-border-line-break.html
-fail css/CSS2/normal-flow/inline-box-padding-line-break.html
 fail css/CSS2/normal-flow/inline-replaced-height-006.xht
 fail css/CSS2/normal-flow/inline-replaced-height-011.xht
 fail css/CSS2/normal-flow/inline-replaced-width-017.xht
 fail css/CSS2/normal-flow/inlines-002.xht
-fail css/CSS2/normal-flow/inlines-020.xht
-fail css/CSS2/normal-flow/intrinsic-size-with-anonymous-block.html
 fail css/CSS2/normal-flow/margin-collapse-through-percentage-padding.html
 fail css/CSS2/normal-flow/margin-collapsing-dynamic.html
 fail css/CSS2/normal-flow/margin-collapsing-in-table-caption-001.html
 fail css/CSS2/normal-flow/margin-collapsing-in-table-caption-002.html
 fail css/CSS2/normal-flow/min-height-applies-to-013.xht
 fail css/CSS2/normal-flow/min-height-applies-to-014.xht
-fail css/CSS2/normal-flow/resizable-iframe-paint-order.html
 fail css/CSS2/normal-flow/width-applies-to-006.xht
 fail css/CSS2/pagination/float-page-break-inside-avoid-2-print.html
 fail css/CSS2/pagination/float-page-break-inside-avoid-8-print.html
@@ -335,7 +292,6 @@ fail css/CSS2/positioning/absolute-replaced-width-062.xht
 fail css/CSS2/positioning/absolute-replaced-width-069.xht
 fail css/CSS2/positioning/absolute-replaced-width-071.xht
 fail css/CSS2/positioning/absolute-replaced-width-076.xht
-fail css/CSS2/positioning/abspos-float-with-inline-container.html
 fail css/CSS2/positioning/abspos-inline-007.xht
 fail css/CSS2/positioning/abspos-overflow-010.xht
 fail css/CSS2/positioning/position-relative-010.xht
@@ -345,7 +301,6 @@ fail css/CSS2/positioning/relpos-calcs-006.xht
 fail css/CSS2/positioning/toogle-abspos-on-relpos-inline-child.html
 fail css/CSS2/selectors/attribute-value-selector-007.html
 fail css/CSS2/selectors/attribute-value-selector-010.html
-fail css/CSS2/selectors/first-child-selector-003.xht
 fail css/CSS2/selectors/first-line-floats-002.xht
 fail css/CSS2/selectors/first-line-pseudo-012.xht
 fail css/CSS2/selectors/first-line-pseudo-013.xht
@@ -355,18 +310,12 @@ fail css/CSS2/selectors/first-line-pseudo-016.xht
 fail css/CSS2/selectors/id-selector-005.xht
 fail css/CSS2/selectors/lang-selector-005.xht
 fail css/CSS2/selectors/pseudo-007.xht
-fail css/CSS2/selectors/pseudo-014.xht
 fail css/CSS2/selectors/selectors-parsing-001.xht
-fail css/CSS2/selectors/universal-selector-002.xht
 fail css/CSS2/stacking-context/opacity-affects-block-in-inline.html
 fail css/CSS2/stacking-context/zindex-affects-block-in-inline.html
 fail css/CSS2/syntax/at-charset-010.xht
 fail css/CSS2/syntax/at-charset-011.xht
 fail css/CSS2/syntax/at-charset-012.xht
-fail css/CSS2/syntax/at-rule-006.xht
-fail css/CSS2/syntax/at-rule-007.xht
-fail css/CSS2/syntax/at-rule-013.xht
-fail css/CSS2/syntax/blocks-001.xht
 fail css/CSS2/syntax/case-sensitive-005.xht
 fail css/CSS2/syntax/case-sensitive-007.xht
 fail css/CSS2/syntax/charset-attr-001.xht
@@ -375,12 +324,8 @@ fail css/CSS2/syntax/declarations-009.xht
 fail css/CSS2/syntax/escapes-001.xht
 fail css/CSS2/syntax/ident-003.xht
 fail css/CSS2/syntax/ident-008.xht
-fail css/CSS2/syntax/import-000.xht
 fail css/CSS2/syntax/matching-brackets-001.xht
-fail css/CSS2/syntax/matching-brackets-002.xht
-fail css/CSS2/syntax/matching-brackets-003.xht
 fail css/CSS2/syntax/uri-013.xht
-fail css/CSS2/syntax/uri-016.xht
 fail css/CSS2/tables/anonymous-table-box-width-001.xht
 fail css/CSS2/tables/border-collapse-empty-row.html
 fail css/CSS2/tables/border-collapse-offset-001.xht
@@ -414,15 +359,10 @@ fail css/CSS2/text/bidi-span-003.html
 fail css/CSS2/text/letter-spacing-080.xht
 fail css/CSS2/text/text-indent-014.xht
 fail css/CSS2/text/text-indent-applies-to-003.xht
-fail css/CSS2/text/text-indent-wrap-001.xht
-fail css/CSS2/text/text-indent-wrap-002.html
 fail css/CSS2/text/text-transform-bicameral-007.xht
-fail css/CSS2/text/text-transform-cap-002.xht
 fail css/CSS2/text/text-transform-cap-003.xht
 fail css/CSS2/text/white-space-007.xht
 fail css/CSS2/text/white-space-bidirectionality-001.xht
-fail css/CSS2/text/white-space-collapsing-001.xht
-fail css/CSS2/text/white-space-collapsing-002.xht
 fail css/CSS2/text/white-space-collapsing-bidi-001.xht
 fail css/CSS2/text/white-space-collapsing-breaks-001.xht
 fail css/CSS2/text/white-space-mixed-001.xht
@@ -440,32 +380,18 @@ fail css/CSS2/text/word-spacing-remove-space-002.xht
 fail css/CSS2/text/word-spacing-remove-space-004.xht
 fail css/CSS2/text/word-spacing-remove-space-005.xht
 fail css/CSS2/text/word-spacing-remove-space-006.xht
-fail css/CSS2/ui/outline-applies-to-005.xht
-fail css/CSS2/ui/outline-applies-to-006.xht
 fail css/CSS2/ui/outline-applies-to-016.xht
 fail css/CSS2/ui/outline-applies-to-017.xht
-fail css/CSS2/ui/outline-color-applies-to-005.xht
-fail css/CSS2/ui/outline-color-applies-to-006.xht
-fail css/CSS2/ui/outline-style-applies-to-005.xht
-fail css/CSS2/ui/outline-style-applies-to-006.xht
-fail css/CSS2/ui/outline-width-096.xht
-fail css/CSS2/ui/outline-width-applies-to-005.xht
-fail css/CSS2/ui/outline-width-applies-to-006.xht
 fail css/CSS2/ui/overflow-applies-to-001.xht
 fail css/CSS2/ui/overflow-applies-to-002.xht
 fail css/CSS2/ui/overflow-applies-to-003.xht
 fail css/CSS2/ui/overflow-applies-to-004.xht
-fail css/CSS2/visudet/content-height-005.html
 fail css/CSS2/visudet/inline-block-baseline-003.xht
 fail css/CSS2/visudet/inline-block-baseline-004.xht
 fail css/CSS2/visudet/inline-block-baseline-005.xht
 fail css/CSS2/visudet/inline-block-baseline-006.xht
-fail css/CSS2/visudet/replaced-elements-all-auto.html
 fail css/CSS2/visudet/replaced-elements-max-height-20.html
 fail css/CSS2/visudet/replaced-elements-max-width-40.html
-fail css/CSS2/visudet/replaced-elements-min-height-20.html
-fail css/CSS2/visudet/replaced-elements-min-height-40.html
-fail css/CSS2/visudet/replaced-elements-min-width-40.html
 fail css/CSS2/visudet/replaced-elements-min-width-80.html
 fail css/CSS2/zindex/stack-floats-003.xht
 fail css/CSS2/zindex/z-index-016.xht
@@ -500,7 +426,6 @@ fail css/css-align/abspos/align-self-static-position-003.html
 fail css/css-align/abspos/align-self-static-position-004.html
 fail css/css-align/abspos/align-self-static-position-005.html
 fail css/css-align/abspos/align-self-static-position-007.html
-fail css/css-align/abspos/align-self-stretch-auto-margins-aspect-ratio.html
 fail css/css-align/baseline-of-scrollable-1b.html
 fail css/css-align/baseline-rules/inline-table-inline-block-baseline-vert-rl-export.tentative.html
 fail css/css-align/baseline-rules/inline-table-inline-block-baseline-vert-rl-synthesis.tentative.html
@@ -532,8 +457,6 @@ fail css/css-backgrounds/background-attachment-local/attachment-local-clipping-c
 fail css/css-backgrounds/background-attachment-local/attachment-local-clipping-image-6.html
 fail css/css-backgrounds/background-attachment-local/attachment-local-positioning-3.html
 fail css/css-backgrounds/background-attachment-local/attachment-local-positioning-4.html
-fail css/css-backgrounds/background-attachment-margin-root-001.html
-fail css/css-backgrounds/background-attachment-margin-root-002.html
 fail css/css-backgrounds/background-clip-border-area-and-blend-mode.html
 fail css/css-backgrounds/background-clip-text-and-blend-mode.html
 fail css/css-backgrounds/background-clip/clip-border-area-background-geometry.html
@@ -560,44 +483,20 @@ fail css/css-backgrounds/background-clip/clip-text-stacking-context-child-002.ht
 fail css/css-backgrounds/background-clip/clip-text-stacking-context-child.html
 fail css/css-backgrounds/background-clip/clip-text-text-decorations.html
 fail css/css-backgrounds/background-clip/clip-text-text-emphasis.html
-fail css/css-backgrounds/background-color-body-propagation-004.html
-fail css/css-backgrounds/background-color-body-propagation-007.html
 fail css/css-backgrounds/background-color-clip.html
-fail css/css-backgrounds/background-color-root-propagation-001.html
-fail css/css-backgrounds/background-color-root-propagation-002.html
 fail css/css-backgrounds/background-color-root-propagation-003.html
 fail css/css-backgrounds/background-image-007.html
 fail css/css-backgrounds/background-image-centered-with-border-radius.html
 fail css/css-backgrounds/background-image-first-letter.html
 fail css/css-backgrounds/background-image-first-line.html
 fail css/css-backgrounds/background-image-shared-stylesheet.html
-fail css/css-backgrounds/background-margin-iframe-root.html
-fail css/css-backgrounds/background-margin-root.html
-fail css/css-backgrounds/background-margin-transformed-root.html
-fail css/css-backgrounds/background-margin-will-change-root.html
 fail css/css-backgrounds/background-origin-008.html
 fail css/css-backgrounds/background-origin/origin-border-box_with_radius.html
 fail css/css-backgrounds/background-origin/origin-padding-box_with_radius.html
-fail css/css-backgrounds/background-position/background-position-right-in-body.html
 fail css/css-backgrounds/background-size-034.html
 fail css/css-backgrounds/background-size-with-negative-value.html
 fail css/css-backgrounds/background-size/background-size-near-zero-png.html
 fail css/css-backgrounds/background-size/background-size-near-zero-svg.html
-fail css/css-backgrounds/background-size/vector/zero-height-ratio-5px-auto.html
-fail css/css-backgrounds/background-size/vector/zero-height-ratio-auto-5px.html
-fail css/css-backgrounds/background-size/vector/zero-height-ratio-auto-auto.html
-fail css/css-backgrounds/background-size/vector/zero-height-ratio-contain.html
-fail css/css-backgrounds/background-size/vector/zero-height-ratio-cover.html
-fail css/css-backgrounds/background-size/vector/zero-ratio-no-dimensions-5px-auto.html
-fail css/css-backgrounds/background-size/vector/zero-ratio-no-dimensions-auto-5px.html
-fail css/css-backgrounds/background-size/vector/zero-ratio-no-dimensions-auto-auto.html
-fail css/css-backgrounds/background-size/vector/zero-ratio-no-dimensions-contain.html
-fail css/css-backgrounds/background-size/vector/zero-ratio-no-dimensions-cover.html
-fail css/css-backgrounds/background-size/vector/zero-width-ratio-5px-auto.html
-fail css/css-backgrounds/background-size/vector/zero-width-ratio-auto-5px.html
-fail css/css-backgrounds/background-size/vector/zero-width-ratio-auto-auto.html
-fail css/css-backgrounds/background-size/vector/zero-width-ratio-contain.html
-fail css/css-backgrounds/background-size/vector/zero-width-ratio-cover.html
 fail css/css-backgrounds/border-image-006.html
 fail css/css-backgrounds/border-image-repeat-round-003.html
 fail css/css-backgrounds/border-image-repeat-round-stretch-001.html
@@ -613,7 +512,6 @@ fail css/css-backgrounds/box-shadow-039.html
 fail css/css-backgrounds/box-shadow-040.html
 fail css/css-backgrounds/box-shadow-041.html
 fail css/css-backgrounds/box-shadow-042.html
-fail css/css-backgrounds/box-shadow-currentcolor.html
 fail css/css-backgrounds/box-shadow-multiple-001.html
 fail css/css-backgrounds/box-shadow-overlapping-001.html
 fail css/css-backgrounds/box-shadow-radius-001.html
@@ -728,17 +626,8 @@ fail css/css-color/animation/contrast-color-interpolation.html
 fail css/css-color/at-color-profile-001.html
 fail css/css-color/clip-opacity-out-of-flow.html
 fail css/css-color/currentcolor-003.html
-fail css/css-color/deprecated-sameas-018.html
-fail css/css-color/hsl-009.html
-fail css/css-color/hsl-010.html
-fail css/css-color/inline-opacity-float-child.html
-fail css/css-color/t32-opacity-offscreen-multiple-boxes-1-c.xht
-fail css/css-color/t32-opacity-offscreen-multiple-boxes-2-c.xht
-fail css/css-color/t44-currentcolor-inherited-c.xht
 fail css/css-conditional/at-media-002.html
-fail css/css-conditional/at-media-003.html
 fail css/css-conditional/at-media-content-003.html
-fail css/css-conditional/at-supports-045.html
 fail css/css-conditional/at-supports-content-003.html
 fail css/css-conditional/at-supports-namespace-001.html
 fail css/css-conditional/at-supports-namespace-002.html
@@ -746,45 +635,27 @@ fail css/css-conditional/at-supports-selector-details-content-before.html
 fail css/css-conditional/at-supports-selector-details-content.html
 fail css/css-conditional/at-supports-selector-picker-icon.html
 fail css/css-conditional/at-supports-selector-picker.html
-fail css/css-conditional/container-queries/canvas-as-container-001.html
-fail css/css-conditional/container-queries/canvas-as-container-002.html
 fail css/css-conditional/container-queries/container-for-cue.html
 fail css/css-conditional/container-queries/container-units-sharing-via-rule-node.html
 fail css/css-conditional/container-queries/first-letter-outside-size-container.html
 fail css/css-conditional/container-queries/inline-size-bfc-floats.html
 fail css/css-conditional/container-queries/multiple-conditions-001.html
-fail css/css-conditional/container-queries/no-layout-containment-fixedpos-dynamic.html
-fail css/css-conditional/container-queries/no-layout-containment-fixedpos.html
 fail css/css-conditional/container-queries/query-style-color.html
 fail css/css-contain/contain-body-overflow-002.html
 fail css/css-contain/contain-body-w-m-004.html
-fail css/css-contain/contain-content-003.html
 fail css/css-contain/contain-content-004.html
-fail css/css-contain/contain-content-011.html
 fail css/css-contain/contain-html-w-m-004.html
 fail css/css-contain/contain-inline-size-intrinsic.html
 fail css/css-contain/contain-inline-size-vertical-rl-.html
-fail css/css-contain/contain-layout-006.html
-fail css/css-contain/contain-layout-007.html
-fail css/css-contain/contain-layout-013.html
-fail css/css-contain/contain-layout-014.html
 fail css/css-contain/contain-layout-017.html
 fail css/css-contain/contain-layout-018.html
 fail css/css-contain/contain-layout-021.html
-fail css/css-contain/contain-layout-baseline-001.html
-fail css/css-contain/contain-layout-baseline-002.html
-fail css/css-contain/contain-layout-baseline-003.html
-fail css/css-contain/contain-layout-baseline-004.html
 fail css/css-contain/contain-layout-baseline-005.html
-fail css/css-contain/contain-layout-baseline-006.html
 fail css/css-contain/contain-layout-breaks-002.html
 fail css/css-contain/contain-layout-button-001.tentative.html
 fail css/css-contain/contain-layout-cell-001.html
 fail css/css-contain/contain-layout-cell-002.html
-fail css/css-contain/contain-layout-containing-block-absolute-001.html
 fail css/css-contain/contain-layout-containing-block-absolute-002.html
-fail css/css-contain/contain-layout-containing-block-fixed-001.html
-fail css/css-contain/contain-layout-flexbox-001.html
 fail css/css-contain/contain-layout-formatting-context-float-001.html
 fail css/css-contain/contain-layout-grid-001.html
 fail css/css-contain/contain-layout-ink-overflow-013.html
@@ -797,22 +668,15 @@ fail css/css-contain/contain-layout-ink-overflow-019.html
 fail css/css-contain/contain-layout-ink-overflow-020.html
 fail css/css-contain/contain-layout-select-001.tentative.html
 fail css/css-contain/contain-layout-suppress-baseline-001.html
-fail css/css-contain/contain-layout-suppress-baseline-002.html
 fail css/css-contain/contain-paint-004.html
-fail css/css-contain/contain-paint-009.html
-fail css/css-contain/contain-paint-010.html
 fail css/css-contain/contain-paint-014.html
 fail css/css-contain/contain-paint-019.html
 fail css/css-contain/contain-paint-021.html
-fail css/css-contain/contain-paint-022.html
-fail css/css-contain/contain-paint-023.html
 fail css/css-contain/contain-paint-025.html
 fail css/css-contain/contain-paint-048.html
 fail css/css-contain/contain-paint-baseline-001.html
 fail css/css-contain/contain-paint-clip-001.html
 fail css/css-contain/contain-paint-clip-005.html
-fail css/css-contain/contain-paint-containing-block-absolute-001.html
-fail css/css-contain/contain-paint-containing-block-fixed-001.html
 fail css/css-contain/contain-paint-formatting-context-float-001.html
 fail css/css-contain/contain-paint-independent-formatting-context-002.html
 fail css/css-contain/contain-paint-stacking-context-001b.html
@@ -923,7 +787,6 @@ fail css/css-flexbox/abspos/flex-abspos-staticpos-margin-003.html
 fail css/css-flexbox/abspos/position-absolute-containing-block-001.html
 fail css/css-flexbox/abspos/position-absolute-containing-block-002.html
 fail css/css-flexbox/align-baseline.html
-fail css/css-flexbox/align-items-007.html
 fail css/css-flexbox/align-self-016.html
 fail css/css-flexbox/aspect-ratio-intrinsic-size-009.html
 fail css/css-flexbox/aspect-ratio-nonreplaced-max-content-contribution-001.html
@@ -953,7 +816,6 @@ fail css/css-flexbox/fieldset-baseline-alignment.html
 fail css/css-flexbox/fixed-table-layout-with-percentage-width-in-flex-item.html
 fail css/css-flexbox/flex-aspect-ratio-img-column-008.html
 fail css/css-flexbox/flex-aspect-ratio-img-column-012.html
-fail css/css-flexbox/flex-aspect-ratio-img-row-004.html
 fail css/css-flexbox/flex-container-line-if-empty-vertical-writing-mode.html
 fail css/css-flexbox/flex-container-max-content-001.html
 fail css/css-flexbox/flex-container-min-content-001.html
@@ -1022,7 +884,6 @@ fail css/css-flexbox/gap-007-rl.html
 fail css/css-flexbox/gap-007-rtl.html
 fail css/css-flexbox/gap-collapse.html
 fail css/css-flexbox/gap-percentage-wrap.html
-fail css/css-flexbox/image-nested-within-definite-column-flexbox.html
 fail css/css-flexbox/inline-flexbox-vertical-rl-image-flexitem-crash-print.html
 fail css/css-flexbox/intrinsic-size/auto-min-size-001.html
 fail css/css-flexbox/intrinsic-size/col-wrap-dynamic.html
@@ -1033,8 +894,6 @@ fail css/css-flexbox/multiline-shrink-to-fit.html
 fail css/css-flexbox/overflow-auto-001.html
 fail css/css-flexbox/overflow-auto-005.html
 fail css/css-flexbox/percentage-heights-008.html
-fail css/css-flexbox/percentage-heights-022.html
-fail css/css-flexbox/percentage-heights-023.html
 fail css/css-flexbox/percentage-padding-003.html
 fail css/css-flexbox/percentage-padding-004.html
 fail css/css-flexbox/percentage-size-subitems-001.html
@@ -1052,15 +911,12 @@ fail css/css-flexbox/svg-root-as-flex-item-003.html
 fail css/css-flexbox/svg-root-as-flex-item-005.html
 fail css/css-flexbox/table-as-item-change-cell.html
 fail css/css-flexbox/table-as-item-fixed-min-width-3.html
-fail css/css-flexbox/table-as-item-flex-cross-size.html
 fail css/css-flexbox/table-as-item-inflexible-in-column-2.html
 fail css/css-flexbox/table-as-item-inflexible-in-row-2.html
 fail css/css-flexbox/table-as-item-min-content-height-1.tentative.html
 fail css/css-flexbox/table-as-item-min-content-height-2.tentative.html
-fail css/css-flexbox/table-as-item-stretch-cross-size-2.html
 fail css/css-flexbox/table-as-item-stretch-cross-size-4.html
 fail css/css-flexbox/table-as-item-stretch-cross-size-5.html
-fail css/css-flexbox/table-as-item-stretch-cross-size.html
 fail css/css-fonts/cluster-matching-canonical-equivalence-002.html
 fail css/css-fonts/cluster-matching-canonical-equivalence-003.html
 fail css/css-fonts/font-default-04.html
@@ -1226,8 +1082,6 @@ fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-lr-007.htm
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-005.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-006.html
 fail css/css-grid/alignment/self-baseline/grid-self-baseline-vertical-rl-007.html
-fail css/css-grid/grid-definition/fr-unit-with-percentage.html
-fail css/css-grid/grid-definition/fr-unit.html
 fail css/css-grid/grid-definition/grid-auto-repeat-aspect-ratio-002.html
 fail css/css-grid/grid-definition/grid-auto-repeat-dynamic-001.html
 fail css/css-grid/grid-definition/grid-auto-repeat-dynamic-002.html
@@ -1427,8 +1281,6 @@ fail css/css-grid/grid-lanes/track-sizing/auto-repeat/row-auto-repeat-019.html
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/row-auto-repeat-020.html
 fail css/css-grid/grid-lanes/track-sizing/auto-repeat/row-auto-repeat-024.html
 fail css/css-grid/grid-lanes/track-sizing/grid-lanes-fr-rows-indefinite-001.html
-fail css/css-grid/grid-model/display-grid.html
-fail css/css-grid/grid-model/display-inline-grid.html
 fail css/css-grid/grid-model/grid-floats-no-intrude-002.html
 fail css/css-grid/grid-model/grid-item-first-line-001.html
 fail css/css-grid/grid-model/grid-item-first-line-002.html
@@ -1460,9 +1312,7 @@ fail css/css-grid/subgrid/subgrid-baseline-002.html
 fail css/css-grid/subgrid/subgrid-baseline-004.html
 fail css/css-grid/subgrid/subgrid-item-with-margin-left-auto.html
 fail css/css-grid/subgrid/writing-directions-001.html
-fail css/css-images/color-stop-currentcolor.html
 fail css/css-images/color-stop-light-dark-currentcolor-invalidation.html
-fail css/css-images/conic-gradient-color-with-sibling-index.html
 fail css/css-images/cross-fade-basic.html
 fail css/css-images/cross-fade-natural-size-gradients.html
 fail css/css-images/cross-fade-natural-size.html
@@ -1491,7 +1341,6 @@ fail css/css-images/image-set/image-set-resolution-002.html
 fail css/css-images/image-set/image-set-resolution-003.html
 fail css/css-images/image-set/image-set-zero-resolution-rendering-2.html
 fail css/css-images/image-set/image-set-zero-resolution-rendering.html
-fail css/css-images/linear-gradient-sibling-index.html
 fail css/css-images/object-fit-containcontainintrinsicsize-png-001c.tentative.html
 fail css/css-images/object-fit-containcontainintrinsicsize-png-001e.tentative.html
 fail css/css-images/object-fit-containcontainintrinsicsize-png-001i.tentative.html
@@ -1730,12 +1579,7 @@ fail css/css-overflow/line-clamp/webkit-line-clamp-027.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-035.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-036.html
 fail css/css-overflow/overflow-auto-scrollbar-gutter-intrinsic-003.html
-fail css/css-overflow/overflow-body-propagation-012.html
-fail css/css-overflow/overflow-body-propagation-014.html
 fail css/css-overflow/overflow-body-propagation-015.html
-fail css/css-overflow/overflow-body-propagation-016.html
-fail css/css-overflow/overflow-clip-margin-016.html
-fail css/css-overflow/overflow-clip-margin-017.html
 fail css/css-overflow/overflow-clip-margin-018.html
 fail css/css-overflow/overflow-clip-margin-019.html
 fail css/css-overflow/overflow-clip-margin-020.html
@@ -1890,7 +1734,6 @@ fail css/css-overflow/text-overflow-string-in-textarea-multiline.html
 fail css/css-overflow/text-overflow-string-in-textarea-scrolled.html
 fail css/css-overflow/text-overflow-with-selection-first-line.html
 fail css/css-overflow/text-overflow-with-selection.html
-fail css/css-position/change-insets-inside-strict-containment-nested.html
 fail css/css-position/multicol/static-position/vlr-ltr-ltr-in-multicol.html
 fail css/css-position/multicol/static-position/vlr-ltr-rtl-in-multicol.tentative.html
 fail css/css-position/multicol/static-position/vlr-rtl-ltr-in-multicol.tentative.html
@@ -1968,15 +1811,12 @@ fail css/css-position/sticky/position-sticky-table-pixel-rounding.html
 fail css/css-position/sticky/position-sticky-table-td-left.html
 fail css/css-position/sticky/position-sticky-table-td-right.html
 fail css/css-position/sticky/position-sticky-table-tfoot-bottom.html
-fail css/css-position/sticky/position-sticky-table-th-bottom.html
 fail css/css-position/sticky/position-sticky-table-th-left.html
 fail css/css-position/sticky/position-sticky-table-th-right.html
-fail css/css-position/sticky/position-sticky-table-th-top.html
 fail css/css-position/sticky/position-sticky-table-thead-top.html
 fail css/css-position/sticky/position-sticky-table-tr-bottom.html
 fail css/css-position/sticky/position-sticky-table-tr-top.html
 fail css/css-position/sticky/position-sticky-writing-modes.html
-fail css/css-sizing/aspect-ratio/abspos-004.html
 fail css/css-sizing/aspect-ratio/block-aspect-ratio-017.html
 fail css/css-sizing/aspect-ratio/block-aspect-ratio-021.html
 fail css/css-sizing/aspect-ratio/block-aspect-ratio-032.html
@@ -2008,15 +1848,7 @@ fail css/css-sizing/aspect-ratio/intrinsic-size-011.html
 fail css/css-sizing/aspect-ratio/intrinsic-size-014.html
 fail css/css-sizing/aspect-ratio/intrinsic-size-015.html
 fail css/css-sizing/aspect-ratio/replaced-element-002.html
-fail css/css-sizing/aspect-ratio/replaced-element-004.html
-fail css/css-sizing/aspect-ratio/replaced-element-006.html
-fail css/css-sizing/aspect-ratio/replaced-element-010.html
 fail css/css-sizing/aspect-ratio/replaced-element-016.html
-fail css/css-sizing/aspect-ratio/replaced-element-020.html
-fail css/css-sizing/aspect-ratio/replaced-element-021.html
-fail css/css-sizing/aspect-ratio/replaced-element-031.html
-fail css/css-sizing/aspect-ratio/replaced-element-032.html
-fail css/css-sizing/aspect-ratio/replaced-element-033.html
 fail css/css-sizing/aspect-ratio/replaced-element-034.html
 fail css/css-sizing/aspect-ratio/replaced-element-041.html
 fail css/css-sizing/aspect-ratio/replaced-element-045.html
@@ -2034,11 +1866,6 @@ fail css/css-sizing/block-size-with-min-or-max-content-7.html
 fail css/css-sizing/box-sizing-replaced-001.xht
 fail css/css-sizing/box-sizing-replaced-002.xht
 fail css/css-sizing/box-sizing-replaced-003.xht
-fail css/css-sizing/calc-margins-block.html
-fail css/css-sizing/calc-margins-fieldset-content.html
-fail css/css-sizing/calc-margins-fieldset-legend.html
-fail css/css-sizing/calc-margins-flex.html
-fail css/css-sizing/calc-margins-table-caption.html
 fail css/css-sizing/clone-intrinsic-size.html
 fail css/css-sizing/clone-nowrap-intrinsic-size-bidi.html
 fail css/css-sizing/clone-nowrap-intrinsic-size.html
@@ -2077,22 +1904,17 @@ fail css/css-sizing/intrinsic-percent-non-replaced-005.html
 fail css/css-sizing/intrinsic-percent-replaced-002.html
 fail css/css-sizing/intrinsic-percent-replaced-003.html
 fail css/css-sizing/intrinsic-percent-replaced-004.html
-fail css/css-sizing/intrinsic-percent-replaced-005.html
 fail css/css-sizing/intrinsic-percent-replaced-006.html
-fail css/css-sizing/intrinsic-percent-replaced-007.html
 fail css/css-sizing/intrinsic-percent-replaced-008.html
 fail css/css-sizing/intrinsic-percent-replaced-012.html
 fail css/css-sizing/intrinsic-percent-replaced-013.html
 fail css/css-sizing/intrinsic-percent-replaced-014.html
-fail css/css-sizing/intrinsic-percent-replaced-017.html
 fail css/css-sizing/intrinsic-percent-replaced-018.html
 fail css/css-sizing/intrinsic-percent-replaced-020.html
 fail css/css-sizing/intrinsic-percent-replaced-034.html
 fail css/css-sizing/intrinsic-percent-replaced-035.html
 fail css/css-sizing/intrinsic-percent-replaced-036.html
 fail css/css-sizing/intrinsic-percent-replaced-dynamic-001.html
-fail css/css-sizing/intrinsic-percent-replaced-dynamic-005.html
-fail css/css-sizing/intrinsic-percent-replaced-dynamic-007.html
 fail css/css-sizing/intrinsic-percent-replaced-dynamic-008.html
 fail css/css-sizing/intrinsic-percent-replaced-dynamic-011.html
 fail css/css-sizing/intrinsic-percent-replaced-dynamic-012.html
@@ -2103,8 +1925,6 @@ fail css/css-sizing/nested-flexbox-image-percentage-max-height-computes-as-none.
 fail css/css-sizing/range-percent-intrinsic-size-1.html
 fail css/css-sizing/range-percent-intrinsic-size-2.html
 fail css/css-sizing/range-percent-intrinsic-size-2a.html
-fail css/css-sizing/replaced-aspect-ratio-intrinsic-size-001.html
-fail css/css-sizing/replaced-aspect-ratio-intrinsic-size-002.html
 fail css/css-sizing/replaced-aspect-ratio-stretch-fit-001.html
 fail css/css-sizing/replaced-aspect-ratio-stretch-fit-002.html
 fail css/css-sizing/replaced-max-height-min-content.html
@@ -2186,7 +2006,6 @@ fail css/css-text-decor/text-emphasis-ruby-003a.html
 fail css/css-text-decor/text-emphasis-ruby-004.html
 fail css/css-text-decor/text-emphasis-ruby-004a.html
 fail css/css-text-decor/text-emphasis-style-008.html
-fail css/css-text-decor/text-shadow/currentcolor.html
 fail css/css-text-decor/text-shadow/decorations-multiple-zorder.html
 fail css/css-text-decor/text-shadow/svg-fill-none.html
 fail css/css-text-decor/text-shadow/svg-stroke-dasharray.html
@@ -2283,7 +2102,6 @@ fail css/css-text/line-break/line-break-normal-hyphens-002.html
 fail css/css-text/line-break/line-break-shaping-001.html
 fail css/css-text/line-break/line-break-strict-018.xht
 fail css/css-text/line-break/line-break-strict-hyphens-001.html
-fail css/css-text/line-breaking/line-breaking-018.html
 fail css/css-text/line-breaking/line-breaking-019.html
 fail css/css-text/line-breaking/line-breaking-022.html
 fail css/css-text/line-breaking/line-breaking-023.html
@@ -2365,10 +2183,7 @@ fail css/css-text/text-group-align/text-group-align-right-vlr.html
 fail css/css-text/text-group-align/text-group-align-right.html
 fail css/css-text/text-group-align/text-group-align-start-vlr.html
 fail css/css-text/text-group-align/text-group-align-start.html
-fail css/css-text/text-indent/below-float.html
-fail css/css-text/text-indent/below-float2.html
 fail css/css-text/text-indent/below-float3.html
-fail css/css-text/text-indent/text-indent-each-line-hanging.html
 fail css/css-text/text-indent/text-indent-length-002.html
 fail css/css-text/text-indent/text-indent-with-absolute-pos-child.html
 fail css/css-text/text-justify/text-justify-and-trailing-spaces-003.html
@@ -2390,7 +2205,6 @@ fail css/css-text/text-stroke-width-subpixel.html
 fail css/css-text/text-transform/math/text-transform-math-auto-001.html
 fail css/css-text/text-transform/math/text-transform-math-auto-002.html
 fail css/css-text/text-transform/text-transform-capitalize-016.html
-fail css/css-text/text-transform/text-transform-capitalize-033.html
 fail css/css-text/text-transform/text-transform-fullwidth-001.xht
 fail css/css-text/text-transform/text-transform-upperlower-006.html
 fail css/css-text/text-transform/text-transform-upperlower-016.html
@@ -2400,7 +2214,6 @@ fail css/css-text/text-transform/text-transform-upperlower-043.html
 fail css/css-text/text-transform/text-transform-upperlower-044.html
 fail css/css-text/white-space/control-chars-00C.html
 fail css/css-text/white-space/control-chars-00D.html
-fail css/css-text/white-space/eol-spaces-bidi-001.html
 fail css/css-text/white-space/eol-spaces-bidi-003.html
 fail css/css-text/white-space/hanging-whitespace-002.tentative.html
 fail css/css-text/white-space/hanging-whitespace-003.tentative.html
@@ -2411,7 +2224,6 @@ fail css/css-text/white-space/pre-wrap-align-end-002.html
 fail css/css-text/white-space/pre-wrap-align-left-002.html
 fail css/css-text/white-space/pre-wrap-align-right-002.html
 fail css/css-text/white-space/pre-wrap-align-start-002.html
-fail css/css-text/white-space/pre-wrap-float-001.html
 fail css/css-text/white-space/tab-bidi-001.html
 fail css/css-text/white-space/text-wrap-balance-float-001.html
 fail css/css-text/white-space/text-wrap-balance-float-002.html
@@ -2559,9 +2371,6 @@ fail css/css-transforms/perspective-svg-child-001.html
 fail css/css-transforms/perspective-svg-child-002.html
 fail css/css-transforms/scale-animation-with-var-001.html
 fail css/css-transforms/transform-3d-rotateY-stair-below-001.xht
-fail css/css-transforms/transform-background-005.html
-fail css/css-transforms/transform-background-006.html
-fail css/css-transforms/transform-background-008.html
 fail css/css-transforms/transform-box/fill-box-mutation-001.html
 fail css/css-transforms/transform-box/fill-box-mutation-002.html
 fail css/css-transforms/transform-box/stroke-box-mutation-001.html
@@ -2583,8 +2392,6 @@ fail css/css-transforms/transform-iframe-scroll-position.html
 fail css/css-transforms/transform-percent-010.html
 fail css/css-transforms/transform-table-007.html
 fail css/css-transforms/transform-table-008.html
-fail css/css-transforms/transform-translate-background-001.html
-fail css/css-transforms/transform-translate-background-002.html
 fail css/css-transforms/transforms-skewX.html
 fail css/css-transforms/transforms-skewY.html
 fail css/css-transforms/translate/translate-and-transform-css-property-in-svg.html
@@ -2593,25 +2400,9 @@ fail css/css-ui/accent-color-visited.html
 fail css/css-ui/appearance-auto-non-html-namespace-001.html
 fail css/css-ui/appearance-menulist-button-002.tentative.html
 fail css/css-ui/appearance-revert-001.tentative.html
-fail css/css-ui/box-sizing-007.html
-fail css/css-ui/box-sizing-008.html
-fail css/css-ui/box-sizing-009.html
-fail css/css-ui/box-sizing-010.html
-fail css/css-ui/box-sizing-011.html
 fail css/css-ui/box-sizing-012.html
 fail css/css-ui/box-sizing-013.html
-fail css/css-ui/box-sizing-014.html
-fail css/css-ui/box-sizing-015.html
-fail css/css-ui/box-sizing-016.html
-fail css/css-ui/box-sizing-017.html
-fail css/css-ui/box-sizing-018.html
-fail css/css-ui/box-sizing-019.html
-fail css/css-ui/box-sizing-020.html
-fail css/css-ui/box-sizing-021.html
 fail css/css-ui/box-sizing-022.html
-fail css/css-ui/box-sizing-023.html
-fail css/css-ui/box-sizing-024.html
-fail css/css-ui/box-sizing-025.html
 fail css/css-ui/caret-color-block-shape-text-color-001.html
 fail css/css-ui/caret-color-block-shape-text-color-002.html
 fail css/css-ui/caret-color-block-shape-text-color-003.html
@@ -2632,30 +2423,6 @@ fail css/css-ui/caret-shape-block-fallback-001.html
 fail css/css-ui/caret-shape-block-zoom.html
 fail css/css-ui/caret-shape-underscore-001.html
 fail css/css-ui/caret-shape-underscore-empty-001.html
-fail css/css-ui/compute-kind-widget-generated/grouped-kind-of-widget-fallback-background-attachment-001.html
-fail css/css-ui/compute-kind-widget-generated/grouped-kind-of-widget-fallback-background-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-attachment-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-clip-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-image-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-origin-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-position-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-size-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-attachment-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-clip-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-image-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-origin-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-position-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-size-001.html
-fail css/css-ui/negative-outline-offset.html
-fail css/css-ui/outline-004.html
-fail css/css-ui/outline-010.html
-fail css/css-ui/outline-013.html
-fail css/css-ui/outline-014.html
-fail css/css-ui/outline-015.html
-fail css/css-ui/outline-016.html
-fail css/css-ui/outline-020.html
-fail css/css-ui/outline-022.html
-fail css/css-ui/outline-028.html
 fail css/css-ui/outline-color-002.html
 fail css/css-ui/outline-color-003.html
 fail css/css-ui/outline-color-004.html
@@ -2665,7 +2432,6 @@ fail css/css-ui/outline-offset-inset-003.html
 fail css/css-ui/outline-offset-inset-004.html
 fail css/css-ui/outline-offset-inset-005.html
 fail css/css-ui/outline-offset-inset-006.html
-fail css/css-ui/outline-style-012.html
 fail css/css-ui/outline-with-padding-001.html
 fail css/css-ui/subpixel-outline-width.tentative.html
 fail css/css-ui/transparent-accent-color-001.html
@@ -2680,8 +2446,6 @@ fail css/css-values/attr-number-invalidation.html
 fail css/css-values/attr-pseudo-element-placeholder.html
 fail css/css-values/calc-background-size-round-percentage.html
 fail css/css-values/calc-height-block-1.html
-fail css/css-values/calc-in-media-queries-001.html
-fail css/css-values/calc-in-media-queries-002.html
 fail css/css-values/calc-max-height-block-1.html
 fail css/css-values/calc-max-width-block-intrinsic-1.html
 fail css/css-values/calc-min-height-block-1.html
@@ -2721,8 +2485,6 @@ fail css/css-values/ch-unit-019.html
 fail css/css-values/ic-unit-013.html
 fail css/css-values/ic-unit-014.html
 fail css/css-values/ic-unit-015.html
-fail css/css-values/inline-cache-base-uri-cssom.html
-fail css/css-values/inline-cache-base-uri.html
 fail css/css-values/lh-unit-001.html
 fail css/css-values/max-unitless-zero-invalid.html
 fail css/css-values/min-max-percentage-length-interpolation.html
@@ -2750,29 +2512,7 @@ fail css/css-values/viewport-page-print.html
 fail css/css-values/viewport-units-scrollbars-auto-vhw-001.html
 fail css/css-values/viewport-units-writing-mode-font-size.html
 fail css/css-writing-modes/abs-pos-border-offset-003.html
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-007.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-009.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-015.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-017.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-019.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-021.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-023.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-025.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-027.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-029.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-031.xht
 fail css/css-writing-modes/abs-pos-non-replaced-icb-vlr-033.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-006.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-008.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-014.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-016.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-018.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-020.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-022.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-024.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-026.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-028.xht
-fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-030.xht
 fail css/css-writing-modes/abs-pos-non-replaced-icb-vrl-032.xht
 fail css/css-writing-modes/abs-pos-non-replaced-vlr-093.xht
 fail css/css-writing-modes/abs-pos-non-replaced-vlr-095.xht
@@ -2812,8 +2552,6 @@ fail css/css-writing-modes/border-spacing-vlr-003.xht
 fail css/css-writing-modes/border-spacing-vlr-005.xht
 fail css/css-writing-modes/border-spacing-vrl-002.xht
 fail css/css-writing-modes/border-spacing-vrl-004.xht
-fail css/css-writing-modes/box-offsets-rel-pos-vlr-005.xht
-fail css/css-writing-modes/box-offsets-rel-pos-vrl-004.xht
 fail css/css-writing-modes/ch-units-vrl-001.html
 fail css/css-writing-modes/ch-units-vrl-002.html
 fail css/css-writing-modes/ch-units-vrl-003.html
@@ -3055,7 +2793,6 @@ fail css/filter-effects/svg-image-root-filter.html
 fail css/filter-effects/svg-visibility-hidden-element-with-filter-002.html
 fail css/filter-effects/tainting-css-dropshadow-001.html
 fail css/filter-effects/will-change-blur-filter-under-clip.html
-fail css/selectors/child-indexed-no-parent.html
 fail css/selectors/dir-style-01a.html
 fail css/selectors/dir-style-01b.html
 fail css/selectors/featureless-002.html
@@ -3068,11 +2805,8 @@ fail css/selectors/first-line-bidi-002.html
 fail css/selectors/focus-within-shadow-006.html
 fail css/selectors/focus-within-shadow-007.html
 fail css/selectors/focus-within-shadow-008.html
-fail css/selectors/has-visited.html
 fail css/selectors/invalidation/part-pseudo.html
 fail css/selectors/not-links.html
-fail css/selectors/of-type-selectors.xhtml
 fail css/selectors/remove-hovered-element.html
 fail css/selectors/selection-image-001.html
-fail css/selectors/selector-structural-pseudo-root.html
 fail css/selectors/user-invalid-form-submission-invalidation.html

@@ -1019,14 +1019,14 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         return true;
     }
     if name == "overflow-clip-margin" {
-        // <visual-box> || <length [0,∞]>
+        // <visual-box> || <length> (negative lengths shrink the clip)
         let mut area = None;
         let mut len = None;
         for c in comps {
             if let (None, Some(b)) = (area, parse_box(c)) {
                 area = Some(b);
             } else if let (None, Some(px)) = (len, super::len_no_auto(c, ctx).and_then(|l| match l {
-                Length::Px(v) if v >= 0.0 => Some(v),
+                Length::Px(v) => Some(v),
                 _ => None,
             })) {
                 len = Some(px);

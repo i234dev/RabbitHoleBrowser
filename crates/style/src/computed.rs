@@ -1967,6 +1967,10 @@ pub struct ComputedStyle {
     pub line_clamp: Option<u32>,
     /// `content-visibility: hidden`: the contents are not rendered.
     pub content_visibility_hidden: bool,
+    /// The containment bits (1 paint, 2 layout, 4 size) that
+    /// `content-visibility: hidden` turned on, which a later winning value
+    /// turns off again.
+    pub cv_contain: u8,
     /// `contain`: paint / layout / size containment.
     pub contain_paint: bool,
     pub contain_layout: bool,
@@ -2203,7 +2207,7 @@ impl ComputedStyle {
             transform: Vec::new(),
             transform_origin: (Length::Percent(50.0), Length::Percent(50.0)),
             transform3d: None,
-            outline_width: 0.0,
+            outline_width: 3.0,
             outline_style: BorderStyle::None,
             outline_color: None,
             outline_offset: 0.0,
@@ -2274,6 +2278,7 @@ impl ComputedStyle {
             tab_size_length: false,
             line_clamp: None,
             content_visibility_hidden: false,
+            cv_contain: 0,
             contain_paint: false,
             contain_layout: false,
             contain_size: false,
@@ -2572,6 +2577,13 @@ impl ComputedStyle {
     /// A transformed or filtered ancestor contains even fixed descendants.
     pub fn establishes_fixed_containing_block(&self) -> bool {
         self.has_transform() || !self.filters.is_empty() || !self.backdrop_filters.is_empty() || self.perspective().is_some() || self.preserve_3d()
+            // Layout and paint containment (CSS Contain 2 §3.2, §3.3), which
+            // do not apply to inline boxes and internal table boxes but cells.
+            || ((self.contain_layout || self.contain_paint)
+                && !matches!(
+                    self.display,
+                    Display::Inline | Display::Contents | Display::None | Display::TableRow | Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup | Display::TableColumn | Display::TableColumnGroup
+                ))
     }
 
     /// The 3D properties, for writing.

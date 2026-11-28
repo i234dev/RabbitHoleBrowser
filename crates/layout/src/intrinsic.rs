@@ -5,9 +5,12 @@ use crate::inline::{item_style, Piece};
 use crate::tree::{BoxKind, Formatting, LayoutBox};
 use rabbithole_style::{BoxSizing, Length};
 
+/// A length for intrinsic contributions: percentages resolve against zero
+/// (`calc(10% + 100px)` counts 100px).
 fn px(l: Length) -> f32 {
     match l {
         Length::Px(v) => v,
+        Length::Calc(..) | Length::Math(_) => l.resolve(0.0).unwrap_or(0.0),
         _ => 0.0,
     }
 }
@@ -52,6 +55,9 @@ impl<'a> Layouter<'a> {
         let pb_v = crate::block::vertical_extras(&style);
         let adj_v = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_v).max(0.0) } else { v.max(0.0) };
         let own_h = forced_h.or_else(|| match style.height {
+            // (Anonymous blocks are skipped: their contents resolve
+            // against the containing block.)
+            _ if b.kind == BoxKind::AnonymousBlock => outer_h,
             Length::Px(v) => Some(adj_v(v)),
             l if l.has_percent() => l.resolve_definite(outer_h).map(adj_v),
             _ => None,
@@ -122,7 +128,7 @@ impl<'a> Layouter<'a> {
         self.intrinsic_cb_h = saved_cb;
         // Contents that read this box's height depend on the outer height
         // only through a percentage height.
-        reads_outer |= children_read && style.height.has_percent();
+        reads_outer |= children_read && (style.height.has_percent() || b.kind == BoxKind::AnonymousBlock);
         self.intrinsic_cb_used = saved_used || reads_outer;
         let cacheable = !reads_outer;
         result = self.finish_intrinsic(&style, result, adj);

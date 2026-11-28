@@ -650,7 +650,7 @@ pub(crate) fn compute_element<'a>(
     need_attrs |= style_attr.iter().any(uses_attr);
     rollback |= style_attr.iter().any(|d| rollback_keyword(d).is_some());
     // `attr()` reads this element's attributes: no style sharing.
-    let _attrs = need_attrs.then(|| AttrScope::enter(doc.element(node).map(|e| e.attrs.clone()).unwrap_or_default()));
+    let _attrs = need_attrs.then(|| AttrScope::enter(doc.element(node).map(|e| e.attrs.clone()).unwrap_or_default(), tree_position(doc, node)));
     let share = if need_attrs { None } else { share };
     let key = share.as_ref().map(|_| ShareKey {
         parent: Rc::as_ptr(parent) as usize,
@@ -948,7 +948,7 @@ fn layer_index(m: &Matched) -> u32 {
     }
 }
 
-/// The single-color longhands whose `currentcolor`-relative values
+/// The color longhands and shadows whose `currentcolor`-relative values
 /// inherit as such.
 fn current_color_longhand(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -959,8 +959,42 @@ fn current_color_longhand(name: &str) -> Option<&'static str> {
         "border-left-color" => "border-left-color",
         "outline-color" => "outline-color",
         "text-decoration-color" => "text-decoration-color",
+        "text-shadow" => "text-shadow",
+        "box-shadow" => "box-shadow",
         _ => return None,
     })
+}
+
+/// The `background-color` part of a `background` shorthand value, for
+/// `currentcolor` tracking: the value itself for a CSS-wide keyword, the
+/// color component of the final layer, or nothing.
+fn background_shorthand_color(value: &[Token]) -> Vec<Token> {
+    if wide_keyword(value).is_some() {
+        return value.to_vec();
+    }
+    let comps = values::components(value);
+    let layers = values::split_commas(&comps);
+    layers.last().and_then(|layer| layer.iter().find(|c| values::parse_color(c).is_some()).map(|c| c.to_vec())).unwrap_or_default()
+}
+
+/// A `background` / `background-image` value whose images (gradients) use
+/// `currentcolor`, or a CSS-wide keyword, for `currentcolor` tracking;
+/// nothing otherwise.
+fn image_current_color(value: &[Token]) -> Vec<Token> {
+    if wide_keyword(value).is_some() {
+        return value.to_vec();
+    }
+    let mut depth = 0;
+    let mut uses = false;
+    for t in value {
+        match t {
+            Token::Function(_) | Token::OpenParen => depth += 1,
+            Token::CloseParen => depth -= 1,
+            Token::Ident(s) if depth > 0 && s.eq_ignore_ascii_case("currentcolor") => uses = true,
+            _ => {}
+        }
+    }
+    if uses { value.to_vec() } else { Vec::new() }
 }
 
 /// Record (or forget) that `prop`'s value depends on `currentcolor`;
@@ -1205,6 +1239,11 @@ fn apply_declarations(
         apply_property(name, value, &mut style, parent, &ctx);
         if let Some(prop) = current_color_longhand(name) {
             track_current_color(&mut style, parent, prop, value);
+        } else if *name == "background" {
+            track_current_color(&mut style, parent, "background-color", &background_shorthand_color(value));
+            track_current_color(&mut style, parent, "background", &image_current_color(value));
+        } else if *name == "background-image" {
+            track_current_color(&mut style, parent, "background-image", &image_current_color(value));
         }
         if *name == "all" {
             for (n2, v2, b2) in &resolved[i + 1..] {
@@ -1589,16 +1628,34 @@ thread_local! {
     /// Attributes of the element being styled while some matched
     /// declaration uses `attr()`.
     static ELEMENT_ATTRS: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
+    /// The element's `sibling-index()` and `sibling-count()` in the same
+    /// scope.
+    static TREE_POS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((1, 1)) };
 }
 
 /// Makes an element's attributes available to `attr()` for a scope.
 struct AttrScope;
 
 impl AttrScope {
-    fn enter(attrs: Vec<(String, String)>) -> AttrScope {
+    fn enter(attrs: Vec<(String, String)>, tree_pos: (u32, u32)) -> AttrScope {
         ELEMENT_ATTRS.with(|a| *a.borrow_mut() = Some(attrs));
+        TREE_POS.with(|p| p.set(tree_pos));
         AttrScope
     }
+}
+
+/// An element's 1-based index among its element siblings and their count.
+fn tree_position(doc: &Document, node: NodeId) -> (u32, u32) {
+    let Some(parent) = doc.parent(node) else { return (1, 1) };
+    let mut index = 0;
+    let mut count = 0;
+    for c in doc.child_elements(parent) {
+        count += 1;
+        if c == node {
+            index = count;
+        }
+    }
+    (index.max(1), count.max(1))
 }
 
 impl Drop for AttrScope {
@@ -1615,7 +1672,7 @@ fn attrs_active() -> bool {
 /// Does `value` hold a function substituted at computed-value time
 /// (`attrs`: `attr()` too)?
 fn needs_substitution(value: &[Token], attrs: bool) -> bool {
-    value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || (attrs && f.eq_ignore_ascii_case("attr"))))
+    value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var") || f.eq_ignore_ascii_case("env") || (attrs && (f.eq_ignore_ascii_case("attr") || f.eq_ignore_ascii_case("sibling-index") || f.eq_ignore_ascii_case("sibling-count")))))
 }
 
 /// The value of an environment variable (`env()`, CSS Environment
@@ -1743,6 +1800,14 @@ pub(crate) fn substitute_vars(value: &[Token], vars: &Vars, depth: u32) -> Optio
     let mut i = 0;
     while i < value.len() {
         match &value[i] {
+            Token::Function(f) if (f.eq_ignore_ascii_case("sibling-index") || f.eq_ignore_ascii_case("sibling-count")) && attrs_active() => {
+                // No arguments: `sibling-index()` / `sibling-count()`.
+                let rest = value[i + 1..].iter().position(|t| *t != Token::Whitespace).map(|p| i + 1 + p);
+                let close = rest.filter(|&p| value[p] == Token::CloseParen)?;
+                let (index, count) = TREE_POS.with(|p| p.get());
+                out.push(Token::Number(if f.eq_ignore_ascii_case("sibling-index") { index } else { count } as f32));
+                i = close + 1;
+            }
             Token::Function(f) if f.eq_ignore_ascii_case("attr") && attrs_active() => {
                 let start = i;
                 let mut depth_p = 0i32;
@@ -2663,12 +2728,15 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
                 _ => t.backface_hidden = f.backface_hidden,
             }
         }
-        "outline" | "outline-width" | "outline-style" | "outline-color" | "outline-offset" => {
+        "outline" => {
             to.outline_width = from.outline_width;
             to.outline_style = from.outline_style;
             to.outline_color = from.outline_color;
-            to.outline_offset = from.outline_offset;
         }
+        "outline-width" => to.outline_width = from.outline_width,
+        "outline-style" => to.outline_style = from.outline_style,
+        "outline-color" => to.outline_color = from.outline_color,
+        "outline-offset" => to.outline_offset = from.outline_offset,
         "text-overflow" => to.text_overflow = from.text_overflow.clone(),
         "word-break" => to.word_break = from.word_break,
         "overflow-wrap" | "word-wrap" => to.overflow_wrap = from.overflow_wrap,
@@ -4413,6 +4481,29 @@ mod tests {
     fn style_of<'a>(doc: &Document, tree: &'a StyledTree, tag: &str) -> &'a ComputedStyle {
         let n = doc.find_element(tag).expect("element");
         tree.get(n).expect("styled")
+    }
+
+    #[test]
+    fn inherited_gradients_resolve_currentcolor_per_element() {
+        let (doc, t) = styled("<div><p></p></div>", "div { color: red; background: linear-gradient(currentcolor, blue) } p { color: lime; background: inherit }");
+        let (div, p) = (style_of(&doc, &t, "div"), style_of(&doc, &t, "p"));
+        assert!(!div.background_layers.is_empty());
+        assert_ne!(format!("{:?}", div.background_layers), format!("{:?}", p.background_layers));
+    }
+
+    #[test]
+    fn inherited_shadows_resolve_currentcolor_per_element() {
+        let (doc, t) = styled("<div><p></p></div>", "div { color: red; text-shadow: 0 0 1px currentcolor } p { color: lime; text-shadow: inherit }");
+        let p = style_of(&doc, &t, "p");
+        assert_eq!(p.text_shadow[0].color, Color::rgb(0, 255, 0));
+    }
+
+    #[test]
+    fn tree_counting_functions() {
+        let (doc, t) = styled("<div><p></p><span></span><p></p></div>", "span { width: calc(10px * sibling-index()); height: calc(1px * sibling-count()) }");
+        let span = style_of(&doc, &t, "span");
+        assert_eq!(span.width.resolve(0.0), Some(20.0));
+        assert_eq!(span.height.resolve(0.0), Some(3.0));
     }
 
     #[test]

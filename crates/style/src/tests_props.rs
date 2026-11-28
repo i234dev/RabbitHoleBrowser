@@ -926,7 +926,7 @@ fn paint_and_image_properties() {
     let s = one("overflow-clip-margin: content-box 5px; image-orientation: none");
     assert_eq!(s.overflow_clip_margin, (BoxArea::ContentBox, 5.0));
     assert!(s.image_orientation_none);
-    assert_eq!(one("overflow-clip-margin: -10px").overflow_clip_margin, (BoxArea::PaddingBox, 0.0));
+    assert_eq!(one("overflow-clip-margin: -10px").overflow_clip_margin, (BoxArea::PaddingBox, -10.0));
 }
 
 #[test]
@@ -1164,6 +1164,13 @@ fn inherited_currentcolor_values_use_the_childs_color() {
     assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(0, 128, 0));
     let (doc, t) = styled("<p>x</p>", "p { color: rgb(255, 0, 0); background-color: color-mix(in srgb, currentColor, rgb(0, 0, 255)) }");
     assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::rgb(128, 0, 128));
+    // The same through the `background` shorthand (CSS Color t44).
+    let (doc, t) = styled(
+        "<div><section><p>x</p></section></div>",
+        "div { color: red; background: currentColor } section { color: rgb(0, 128, 0); background: inherit } p { color: white }",
+    );
+    assert_eq!(style_of(&doc, &t, "section").background_color, rabbithole_gfx::Color::rgb(0, 128, 0));
+    assert_eq!(style_of(&doc, &t, "p").background_color, rabbithole_gfx::Color::TRANSPARENT);
 }
 
 #[test]

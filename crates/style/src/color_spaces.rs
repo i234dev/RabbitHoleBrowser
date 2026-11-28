@@ -237,9 +237,9 @@ pub(crate) fn predefined_linear(space: &str, v: Rgb) -> Option<Rgb> {
 /// the deprecated ones (§6.3) are the same as their replacements.
 pub fn system_color(name: &str) -> Option<Color> {
     let name = match name {
-        "activeborder" | "inactiveborder" | "threeddarkshadow" | "threedshadow" | "threedlightshadow" | "windowframe" => "buttonborder",
+        "activeborder" | "inactiveborder" | "threeddarkshadow" | "threedshadow" | "threedlightshadow" | "threedhighlight" | "windowframe" => "buttonborder",
         "activecaption" | "appworkspace" | "background" | "inactivecaption" | "infobackground" | "menu" | "scrollbar" | "window" => "canvas",
-        "buttonhighlight" | "buttonshadow" | "threedface" | "threedhighlight" => "buttonface",
+        "buttonhighlight" | "buttonshadow" | "threedface" => "buttonface",
         "captiontext" | "infotext" | "menutext" | "windowtext" => "canvastext",
         "inactivecaptiontext" => "graytext",
         n => n,

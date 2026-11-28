@@ -1202,8 +1202,10 @@ fn parse_hsl(c: &[Token]) -> Option<Color> {
             _ => None,
         }
     };
-    let s = pct(vals[1])?.clamp(0.0, 1.0);
-    let l = pct(vals[2])?.clamp(0.0, 1.0);
+    // Only a negative saturation is clamped (CSS Color 4); out-of-range
+    // values give colours outside sRGB, clipped when converted to bytes.
+    let s = pct(vals[1])?.max(0.0);
+    let l = pct(vals[2])?;
     let a = alpha_value(alpha)?;
     let [r, g, b] = crate::color_model::hsl_rgb(f64::from(h), f64::from(s) * 100.0, f64::from(l) * 100.0);
     let byte = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;

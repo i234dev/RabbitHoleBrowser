@@ -246,6 +246,18 @@ pub(crate) const FLEX_BASELINE_UNSET: u32 = u32::MAX;
 /// child is ever at this index).
 pub(crate) const FLEX_BASELINE_NONE: u32 = u32::MAX - 1;
 
+/// The outer half of an edge cell's collapsed border (CSS 2.1 §17.6.2):
+/// the cell at `path` (table child, row group child, cell index) on `side`
+/// (0 top, 1 right, 2 bottom, 3 left).
+#[derive(Debug, Clone)]
+pub(crate) struct CollapsedEdge {
+    pub path: (usize, Option<usize>, usize),
+    pub side: u8,
+    pub width: f32,
+    pub style: rabbithole_style::BorderStyle,
+    pub color: Color,
+}
+
 #[derive(Debug)]
 pub struct LayoutBox {
     pub kind: BoxKind,
@@ -350,6 +362,9 @@ pub struct LayoutBox {
     /// items' and its nested row subgrids', for its parent to share its
     /// groups with them (Grid2 §9). Set by the subgrid's layout.
     pub(crate) subgrid_baselines: Option<Box<Vec<crate::grid::subgrid::SharedBaseline>>>,
+    /// A collapsed-border table whose outer border differs along a side:
+    /// the outer halves of its edge cells' borders, painted per cell.
+    pub(crate) collapsed_edges: Option<Box<Vec<CollapsedEdge>>>,
     /// CSSOM data from final layout, in this Grid box's own logical axes.
     pub(crate) used_grid_tracks: [Option<Rc<rabbithole_style::UsedGridTrackList>>; 2],
     /// `position: relative` offset currently applied to the box.
@@ -467,6 +482,7 @@ impl LayoutBox {
             grid_columns: None,
             grid_rows: None,
             subgrid_baselines: None,
+            collapsed_edges: None,
             used_grid_tracks: [None, None],
             rel_applied: (0.0, 0.0),
             reused_layout: false,
@@ -843,7 +859,9 @@ impl LayoutBox {
 
     /// Baseline of the box's first line (absolute y), searching descendants.
     pub fn first_baseline(&self) -> Option<f32> {
-        if self.wm_wrapper {
+        // Layout containment suppresses the baselines (CSS Contain 2 §3.2):
+        // one is synthesized.
+        if self.wm_wrapper || self.style.contain_layout {
             // An orthogonal flow has no baseline in its parent's axis (its
             // lines are in its own, logical, space): one is synthesized.
             return None;
@@ -860,6 +878,8 @@ impl LayoutBox {
             .iter()
             .filter(|c| c.is_in_flow())
             .find_map(|c| c.first_baseline())
+            // An outside marker's line.
+            .or_else(|| self.marker.as_ref().map(|m| m.baseline))
             .or_else(|| self.synthesized_item_baseline(false))
     }
 
@@ -887,7 +907,7 @@ impl LayoutBox {
 
     /// Baseline of the last line (absolute y).
     pub fn last_baseline(&self) -> Option<f32> {
-        if self.wm_wrapper {
+        if self.wm_wrapper || self.style.contain_layout {
             return None;
         }
         if matches!(self.formatting, Formatting::Flex | Formatting::Grid) && self.flex_baselines[1] != FLEX_BASELINE_UNSET {
@@ -901,6 +921,7 @@ impl LayoutBox {
             .rev()
             .filter(|c| c.is_in_flow())
             .find_map(|c| c.last_baseline())
+            .or_else(|| self.marker.as_ref().map(|m| m.baseline))
             .or_else(|| self.synthesized_item_baseline(true))
     }
 

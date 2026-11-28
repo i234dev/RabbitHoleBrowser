@@ -205,7 +205,33 @@ pub(crate) fn paint_backgrounds(
         if matches!(layer.image, BackgroundImage::None) {
             continue;
         }
-        paint_layer(list, geom, layer, images, viewport, style);
+        paint_layer(list, geom, layer, images, viewport, style, None);
+    }
+}
+
+/// The image layers of the background the canvas takes from the root (or
+/// the body): positioned against the root element's boxes (`geom`), painted
+/// over the whole `canvas` (CSS Backgrounds 3 §2.11.1).
+pub(crate) fn paint_canvas_layers(list: &mut DisplayList, geom: &BoxGeometry, style: &ComputedStyle, images: &HashMap<String, Arc<Image>>, viewport: Rect, canvas: Rect) {
+    let single;
+    let layers: &[BackgroundLayer] = if style.background_layers.is_empty() {
+        match &style.background_image {
+            Some(url) => {
+                single = [BackgroundLayer { image: BackgroundImage::Url(url.clone()), ..BackgroundLayer::default() }];
+                &single
+            }
+            None => return,
+        }
+    } else {
+        &style.background_layers
+    };
+    for layer in layers.iter().rev() {
+        if matches!(layer.image, BackgroundImage::None) {
+            continue;
+        }
+        let mut layer = layer.clone();
+        layer.local = false;
+        paint_layer(list, geom, &layer, images, viewport, style, Some(canvas));
     }
 }
 
@@ -255,7 +281,8 @@ enum LayerImage<'a> {
     Gradient(&'a BackgroundImage),
 }
 
-fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLayer, images: &HashMap<String, Arc<Image>>, viewport: Rect, style: &ComputedStyle) {
+/// `canvas`: paint over this area instead of the layer's clip box.
+fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLayer, images: &HashMap<String, Arc<Image>>, viewport: Rect, style: &ComputedStyle, canvas: Option<Rect>) {
     // `local`: positioned and painted in the scrolled contents, seen
     // through the scrollport (CSS Backgrounds 3 §3.6).
     if layer.local && !layer.fixed {
@@ -269,14 +296,14 @@ fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLay
             if inner.clip == BoxArea::BorderBox {
                 inner.clip = BoxArea::PaddingBox;
             }
-            paint_layer(list, &scrolled, &inner, images, viewport, style);
+            paint_layer(list, &scrolled, &inner, images, viewport, style, None);
             list.items.push(DisplayItem::PopClip);
             return;
         }
     }
     let pixelated = style.image_rendering_pixelated;
-    let clip_rect = area_rect(geom, layer.clip);
-    let clip_radii = area_radii(geom, layer.clip);
+    let clip_rect = canvas.unwrap_or_else(|| area_rect(geom, layer.clip));
+    let clip_radii = if canvas.is_some() { [(0.0, 0.0); 4] } else { area_radii(geom, layer.clip) };
     if clip_rect.is_empty() {
         return;
     }

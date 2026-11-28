@@ -41,6 +41,10 @@ pub const RULE_USES_ROLLBACK: u8 = 2;
 /// Does a declaration need `attr()` substituted at computed-value time?
 /// (`content: attr(name)` without type or fallback is left to layout.)
 pub fn declaration_uses_attr(d: &Declaration) -> bool {
+    // Tree-counting functions also read the element (CSS Values 5 §8).
+    if d.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("sibling-index") || f.eq_ignore_ascii_case("sibling-count"))) {
+        return true;
+    }
     let mut calls = d.value.iter().enumerate().filter(|(_, t)| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("attr"))).peekable();
     if calls.peek().is_none() {
         return false;
@@ -504,17 +508,13 @@ impl<'a> Parser<'a> {
     /// requested. Returns the slice consumed.
     fn consume_until(&mut self, stop_semicolon: bool, stop_brace: bool) -> &'a [Token] {
         let start = self.pos;
-        let mut depth = 0i32;
+        let mut nest = Nesting::default();
         while let Some(t) = self.peek() {
             match t {
-                Token::OpenParen | Token::Function(_) | Token::OpenBracket => depth += 1,
-                Token::CloseParen | Token::CloseBracket => depth -= 1,
-                Token::OpenBrace if depth <= 0 && stop_brace => break,
-                Token::OpenBrace => depth += 1,
-                Token::CloseBrace if depth <= 0 => break,
-                Token::CloseBrace => depth -= 1,
-                Token::Semicolon if depth <= 0 && stop_semicolon => break,
-                _ => {}
+                Token::OpenBrace if nest.is_empty() && stop_brace => break,
+                Token::CloseBrace if nest.is_empty() => break,
+                Token::Semicolon if nest.is_empty() && stop_semicolon => break,
+                t => nest.feed(t),
             }
             self.pos += 1;
         }
@@ -526,18 +526,12 @@ impl<'a> Parser<'a> {
         debug_assert_eq!(self.peek(), Some(&Token::OpenBrace));
         self.pos += 1;
         let start = self.pos;
-        let mut depth = 0i32;
+        let mut nest = Nesting::default();
         while let Some(t) = self.peek() {
-            match t {
-                Token::OpenBrace => depth += 1,
-                Token::CloseBrace => {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
-                }
-                _ => {}
+            if *t == Token::CloseBrace && nest.is_empty() {
+                break;
             }
+            nest.feed(t);
             self.pos += 1;
         }
         let inner = &self.toks[start..self.pos];
@@ -555,6 +549,9 @@ impl<'a> Parser<'a> {
         if depth > 64 { return Vec::new(); }
         let mut rules = Vec::new();
         let mut allow_namespace = top_level;
+        // `@import` must precede every other rule but `@charset` and
+        // `@layer` statements.
+        let mut allow_import = top_level;
         loop {
             self.skip_ws();
             match self.peek() {
@@ -573,6 +570,7 @@ impl<'a> Parser<'a> {
                     let prelude = self.consume_until(true, true);
                     match self.peek() {
                         Some(Token::OpenBrace) => {
+                            allow_import = false;
                             let inner = self.consume_block();
                             match name.as_str() {
                                 "media" => {
@@ -656,6 +654,7 @@ impl<'a> Parser<'a> {
                         _ => {
                             if allow_namespace && name == "namespace" {
                                 if let Some((prefix, uri)) = parse_namespace(prelude) {
+                                    allow_import = false;
                                     let names = self.namespaces.get_or_insert_with(Default::default);
                                     std::sync::Arc::make_mut(names).insert(prefix.to_owned(), std::sync::Arc::from(uri));
                                 }
@@ -664,7 +663,7 @@ impl<'a> Parser<'a> {
                             if self.peek() == Some(&Token::Semicolon) {
                                 self.pos += 1;
                             }
-                            if name == "import" && parent.is_none() {
+                            if name == "import" && parent.is_none() && allow_import {
                                 if let Some(imp) = parse_import(prelude) {
                                     rules.push(imp);
                                 }
@@ -689,6 +688,7 @@ impl<'a> Parser<'a> {
                     let mut sp = if let Some(p) = &parent { selector::SelectorParser::nested(prelude, p.clone()) } else { selector::SelectorParser::new(prelude) };
                     sp.namespaces = self.namespaces.clone();
                     if let Some(selectors) = sp.parse_list() {
+                        allow_import &= sp.unknown_pseudo;
                         let mut dp = self.subparser(inner);
                         rules.extend(dp.parse_style_body(std::sync::Arc::new(selectors), depth + 1));
                     }
@@ -859,6 +859,49 @@ pub fn parse_namespace(prelude: &[Token]) -> Option<(&str, &str)> {
     tokens.next().is_none().then_some((prefix, uri))
 }
 
+/// The open blocks (`(`, `[`, `{`) around the current token: a closing
+/// token only ends the block it matches; stray ones are ordinary tokens
+/// (CSS Syntax 3 §5.4.8).
+#[derive(Default)]
+struct Nesting {
+    stack: [u8; 32],
+    len: usize,
+    /// Blocks opened beyond the stack's capacity.
+    deep: usize,
+}
+
+impl Nesting {
+    fn is_empty(&self) -> bool {
+        self.len == 0 && self.deep == 0
+    }
+
+    fn feed(&mut self, t: &Token) {
+        let (open, close) = match t {
+            Token::OpenParen | Token::Function(_) => (Some(b'('), None),
+            Token::OpenBracket => (Some(b'['), None),
+            Token::OpenBrace => (Some(b'{'), None),
+            Token::CloseParen => (None, Some(b'(')),
+            Token::CloseBracket => (None, Some(b'[')),
+            Token::CloseBrace => (None, Some(b'{')),
+            _ => return,
+        };
+        if let Some(o) = open {
+            if self.len < self.stack.len() {
+                self.stack[self.len] = o;
+                self.len += 1;
+            } else {
+                self.deep += 1;
+            }
+        } else if let Some(c) = close {
+            if self.deep > 0 {
+                self.deep -= 1;
+            } else if self.len > 0 && self.stack[self.len - 1] == c {
+                self.len -= 1;
+            }
+        }
+    }
+}
+
 fn parse_import(prelude: &[Token]) -> Option<Rule> {
     let mut it = prelude.iter().filter(|t| **t != Token::Whitespace);
     let href = match it.next()? {
@@ -906,7 +949,18 @@ fn parse_media_tokens(toks: &[Token]) -> MediaQuery {
         return MediaQuery::always();
     }
     let mut alternatives = Vec::new();
-    for part in toks.split(|t| **t == Token::Comma) {
+    // (Commas inside parentheses, as in `max(a, b)`, do not separate
+    // queries.)
+    let mut depth = 0i32;
+    let parts = toks.split(|t| {
+        match t {
+            Token::OpenParen | Token::Function(_) => depth += 1,
+            Token::CloseParen => depth -= 1,
+            _ => {}
+        }
+        **t == Token::Comma && depth <= 0
+    });
+    for part in parts {
         let mut alt = MediaAlternative::default();
         let mut i = 0;
         let mut valid = true;
@@ -954,7 +1008,129 @@ fn parse_media_tokens(toks: &[Token]) -> MediaQuery {
     MediaQuery { alternatives }
 }
 
+/// Math functions (`calc()`, `min()`, `max()`, `clamp()`) in a media
+/// feature folded into the length or number they compute; `None` when
+/// there is none.
+fn fold_media_math(inner: &[&Token]) -> Option<Vec<Token>> {
+    let is_math = |t: &Token| matches!(t, Token::Function(f) if ["calc", "min", "max", "clamp"].iter().any(|m| f.eq_ignore_ascii_case(m)));
+    if !inner.iter().any(|t| is_math(t)) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        if is_math(inner[i]) {
+            let mut depth = 0;
+            let mut j = i;
+            while j < inner.len() {
+                match inner[j] {
+                    Token::Function(_) | Token::OpenParen => depth += 1,
+                    Token::CloseParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            let toks: Vec<Token> = inner[i..=j.min(inner.len() - 1)].iter().map(|t| (*t).clone()).collect();
+            let mut pos = 0;
+            out.push(match media_math_unit(&toks, &mut pos) {
+                Some((v, true)) if pos == toks.len() => Token::Dimension(v, "px".into()),
+                Some((v, false)) if pos == toks.len() => Token::Number(v),
+                _ => Token::Ident("invalid".into()),
+            });
+            i = j + 1;
+        } else {
+            out.push(inner[i].clone());
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
+/// One operand of a media math expression: (value in px or number, is a
+/// length).
+fn media_math_unit(t: &[Token], pos: &mut usize) -> Option<(f32, bool)> {
+    match t.get(*pos)? {
+        Token::Number(v) => {
+            *pos += 1;
+            Some((*v, false))
+        }
+        Token::Dimension(v, u) => {
+            *pos += 1;
+            Some((to_px(*v, &u.to_ascii_lowercase()), true))
+        }
+        Token::OpenParen => {
+            *pos += 1;
+            let r = media_math_sum(t, pos)?;
+            (t.get(*pos) == Some(&Token::CloseParen)).then(|| *pos += 1)?;
+            Some(r)
+        }
+        Token::Function(f) => {
+            let f = f.to_ascii_lowercase();
+            *pos += 1;
+            let mut args = vec![media_math_sum(t, pos)?];
+            while t.get(*pos) == Some(&Token::Comma) {
+                *pos += 1;
+                args.push(media_math_sum(t, pos)?);
+            }
+            (t.get(*pos) == Some(&Token::CloseParen)).then(|| *pos += 1)?;
+            if args.iter().any(|a| a.1 != args[0].1) {
+                return None;
+            }
+            let len = args[0].1;
+            let v = match (f.as_str(), args.as_slice()) {
+                ("calc", [a]) => a.0,
+                ("min", _) => args.iter().map(|a| a.0).fold(f32::INFINITY, f32::min),
+                ("max", _) => args.iter().map(|a| a.0).fold(f32::NEG_INFINITY, f32::max),
+                ("clamp", [lo, v, hi]) => v.0.min(hi.0).max(lo.0),
+                _ => return None,
+            };
+            Some((v, len))
+        }
+        _ => None,
+    }
+}
+
+fn media_math_sum(t: &[Token], pos: &mut usize) -> Option<(f32, bool)> {
+    let mut acc = media_math_product(t, pos)?;
+    while let Some(Token::Delim(op @ ('+' | '-'))) = t.get(*pos) {
+        *pos += 1;
+        let r = media_math_product(t, pos)?;
+        if r.1 != acc.1 {
+            return None;
+        }
+        acc.0 = if *op == '+' { acc.0 + r.0 } else { acc.0 - r.0 };
+    }
+    Some(acc)
+}
+
+fn media_math_product(t: &[Token], pos: &mut usize) -> Option<(f32, bool)> {
+    let mut acc = media_math_unit(t, pos)?;
+    while let Some(Token::Delim(op @ ('*' | '/'))) = t.get(*pos) {
+        *pos += 1;
+        let r = media_math_unit(t, pos)?;
+        acc = match op {
+            '*' if !(acc.1 && r.1) => (acc.0 * r.0, acc.1 || r.1),
+            '/' if !r.1 && r.0 != 0.0 => (acc.0 / r.0, acc.1),
+            _ => return None,
+        };
+    }
+    Some(acc)
+}
+
 fn parse_media_feature(inner: &[&Token]) -> MediaFeature {
+    if let Some(folded) = fold_media_math(inner) {
+        let refs: Vec<&Token> = folded.iter().collect();
+        return parse_media_feature_folded(&refs);
+    }
+    parse_media_feature_folded(inner)
+}
+
+fn parse_media_feature_folded(inner: &[&Token]) -> MediaFeature {
     // Forms: (name), (name: value), (value <= name <= value), (name >= value)
     let name = match inner.first() {
         Some(Token::Ident(n)) => n.to_ascii_lowercase(),
@@ -1052,6 +1228,37 @@ fn to_px(v: f32, unit: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocks_end_only_at_matching_tokens() {
+        let sheet = parse_stylesheet("p { color: red ] ) [ ; } p { x: y } ] ; background: green } q { color: blue }");
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let mut rules = Vec::new();
+        sheet.active_rules(&env, &mut rules);
+        assert_eq!(rules.len(), 2);
+        let names: Vec<&str> = rules[0].declarations.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["color", "background"]);
+    }
+
+    #[test]
+    fn media_features_fold_math_functions() {
+        let env = MediaEnv { width: 800., height: 600., screen: true, scripting: true };
+        let q = |s: &str| parse_media_tokens(&Tokenizer::tokenize(s)).evaluate(&env);
+        assert!(q("(min-width: calc(100px))"));
+        assert!(q("(min-width: calc(50px * 2 + 1em))"));
+        assert!(!q("(min-width: max(100px, 900px))"));
+        assert!(q("(max-width: clamp(100px, 1000px, 850px))"));
+        assert!(!q("(min-width: calc(100px + 2))"));
+    }
+
+    #[test]
+    fn import_after_other_rules_is_ignored() {
+        assert_eq!(parse_stylesheet("@charset \"utf-8\"; @layer a; @import 'a.css'; @import 'b.css';").imports().len(), 2);
+        assert!(parse_stylesheet("div { color: green } @import 'red.css';").imports().is_empty());
+        assert!(parse_stylesheet("@media all {} @import 'red.css';").imports().is_empty());
+        // An invalid rule is dropped and does not count.
+        assert_eq!(parse_stylesheet("p::before.x { color: red } :unknownpseudo {} @import 'a.css';").imports().len(), 1);
+    }
 
     #[test]
     fn nesting_parent_lists_order_and_conditions() {

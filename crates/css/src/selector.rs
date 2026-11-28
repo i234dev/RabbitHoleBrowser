@@ -369,19 +369,22 @@ pub struct SelectorParser<'a> {
     in_has: bool,
     toks: &'a [Token],
     pos: usize,
+    /// An unknown pseudo-class was read (it never matches; the rule does
+    /// not count as valid for `@import` placement).
+    pub(crate) unknown_pseudo: bool,
 }
 
 impl<'a> SelectorParser<'a> {
     pub fn new(toks: &'a [Token]) -> Self {
-        SelectorParser { namespaces: None, toks, pos: 0, parent: None, implicit_parent: false, in_has: false }
+        SelectorParser { namespaces: None, toks, pos: 0, parent: None, implicit_parent: false, in_has: false, unknown_pseudo: false }
     }
 
     pub(crate) fn nested(toks: &'a [Token], parent: Arc<Vec<Selector>>) -> Self {
-        Self { namespaces: None, toks, pos: 0, parent: Some(parent), implicit_parent: true, in_has: false }
+        Self { namespaces: None, toks, pos: 0, parent: Some(parent), implicit_parent: true, in_has: false, unknown_pseudo: false }
     }
 
     fn subparser(&self, toks: &'a [Token]) -> Self {
-        Self { namespaces: self.namespaces.clone(), toks, pos: 0, parent: self.parent.clone(), implicit_parent: false, in_has: self.in_has }
+        Self { namespaces: self.namespaces.clone(), toks, pos: 0, parent: self.parent.clone(), implicit_parent: false, in_has: self.in_has, unknown_pseudo: false }
     }
 
     fn nesting(&self) -> Pseudo {
@@ -519,6 +522,10 @@ impl<'a> SelectorParser<'a> {
             c.namespace = self.namespaces.as_ref().and_then(|names| names.get("")).cloned();
         }
         loop {
+            // Only pseudo-classes may follow a pseudo-element.
+            if c.pseudo_element.is_some() && matches!(self.peek(), Some(Token::Delim('&' | '.') | Token::Hash(_) | Token::OpenBracket)) {
+                return None;
+            }
             match self.peek() {
                 Some(Token::Delim('&')) => {
                     c.pseudos.push(self.nesting());
@@ -711,7 +718,10 @@ impl<'a> SelectorParser<'a> {
                     "target" => Pseudo::Target,
                     "host" => Pseudo::Host(Vec::new()),
                     "defined" => Pseudo::Defined,
-                    _ => Pseudo::Never,
+                    _ => {
+                        self.unknown_pseudo = true;
+                        Pseudo::Never
+                    }
                 }))
             }
             Some(Token::Function(name)) => {
@@ -1127,6 +1137,9 @@ pub struct SelectorMatcher<'d, 's> {
     /// matchers that style many elements use it (see
     /// [`SelectorMatcher::with_class_filter`]).
     class_bits: Option<RefCell<HashMap<NodeId, u64, BuildNodeHasher>>>,
+    /// Inside `:not()` / `:has()`: every link counts as unvisited, so
+    /// these cannot reveal the history (Selectors 4 §10.2).
+    unvisited: Cell<bool>,
     #[cfg(test)]
     rank_builds: Cell<usize>,
 }
@@ -1174,7 +1187,7 @@ struct NthRanks { indices: HashMap<NodeId, i32>, count: i32 }
 impl<'d, 's> SelectorMatcher<'d, 's> {
     pub fn new(doc: &'d Document, state: &'d MatchState) -> Self {
         Self { doc, state, nth: RefCell::new(HashMap::new()), cached_nodes: Cell::new(0), selectors: PhantomData,
-            class_bits: None,
+            class_bits: None, unvisited: Cell::new(false),
             #[cfg(test)] rank_builds: Cell::new(0) }
     }
 
@@ -1351,10 +1364,12 @@ fn next_element_sibling(doc: &Document, node: NodeId) -> Option<NodeId> {
 
 fn child_index(doc: &Document, node: NodeId, of_type: bool, from_end: bool) -> i32 {
     let tag = doc.tag(node);
+    // (An element type is a local name in a namespace.)
+    let ns = doc.element(node).map(|e| &e.ns);
     let mut i = 1;
     let mut cur = if from_end { next_element_sibling(doc, node) } else { prev_element_sibling(doc, node) };
     while let Some(s) = cur {
-        if !of_type || doc.tag(s) == tag {
+        if !of_type || (doc.tag(s) == tag && doc.element(s).map(|e| &e.ns) == ns) {
             i += 1;
         }
         cur = if from_end { next_element_sibling(doc, s) } else { prev_element_sibling(doc, s) };
@@ -1451,16 +1466,10 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
             return false;
         }
     }
-    // Structural pseudo-classes need a parent element (or fragment): the
-    // root element is not a :first-child (as in Blink/WebKit/Gecko).
-    let has_parent = || doc.parent(node).map(|p| doc.element(p).is_some()).unwrap_or(false);
+    // Structural pseudo-classes count siblings whether or not there is a
+    // parent element: the root element is its only child (Selectors 4).
     for p in &c.pseudos {
         let ok = match p {
-            Pseudo::FirstChild | Pseudo::LastChild | Pseudo::OnlyChild | Pseudo::FirstOfType | Pseudo::LastOfType | Pseudo::OnlyOfType | Pseudo::NthChild(..) | Pseudo::NthLastChild(..) | Pseudo::NthChildOf(..) | Pseudo::NthLastChildOf(..) | Pseudo::NthOfType(..) | Pseudo::NthLastOfType(..)
-                if !has_parent() =>
-            {
-                false
-            }
             Pseudo::Root => doc.parent(node).map(|p| matches!(doc.node(p).data, NodeData::Document)).unwrap_or(false),
             Pseudo::FirstChild => prev_element_sibling(doc, node).is_none(),
             Pseudo::LastChild => next_element_sibling(doc, node).is_none(),
@@ -1475,7 +1484,7 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
                 _ => false,
             }),
             Pseudo::AnyLink => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some(),
-            Pseudo::Link => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some() && !state.visited.contains(&node),
+            Pseudo::Link => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some() && (matcher.unvisited.get() || !state.visited.contains(&node)),
             Pseudo::NthChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, false)),
             Pseudo::NthLastChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, true)),
             Pseudo::NthChildOf(a, b, list) | Pseudo::NthLastChildOf(a, b, list) => {
@@ -1489,11 +1498,21 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
                 }
             }
             Pseudo::NthOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, false)),
-            Pseudo::Not(list) => !list.iter().any(|s| matcher.matches(s, node)),
+            Pseudo::Not(list) => {
+                let saved = matcher.unvisited.replace(true);
+                let r = !list.iter().any(|s| matcher.matches(s, node));
+                matcher.unvisited.set(saved);
+                r
+            }
             Pseudo::Is(list) | Pseudo::Where(list) => list.iter().any(|s| matcher.matches(s, node)),
             Pseudo::Nesting(list) => list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, node)),
             Pseudo::NthLastOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, true)),
-            Pseudo::Has(list) => list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node, state, matcher)),
+            Pseudo::Has(list) => {
+                let saved = matcher.unvisited.replace(true);
+                let r = list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node, state, matcher));
+                matcher.unvisited.set(saved);
+                r
+            }
             Pseudo::Lang(ranges) => match element_language(doc, node) {
                 Some(tag) => ranges.iter().any(|r| lang_range_matches(r, &tag)),
                 None => false,
@@ -1570,7 +1589,7 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
                 (Some(t), Some(id)) => t == id,
                 _ => false,
             },
-            Pseudo::Visited => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some() && state.visited.contains(&node),
+            Pseudo::Visited => !matcher.unvisited.get() && matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some() && state.visited.contains(&node),
             Pseudo::Host(list) => doc.shadow_root(node).is_some() && (list.is_empty() || list.iter().any(|s| matcher.matches(s, node))),
             Pseudo::HostContext(list) => {
                 doc.shadow_root(node).is_some() && {
@@ -1844,6 +1863,34 @@ mod tests {
     fn parse(s: &str) -> Vec<Selector> {
         let toks = Tokenizer::tokenize(s);
         SelectorParser::new(&toks).parse_list().expect("valid selector")
+    }
+
+    #[test]
+    fn links_count_as_unvisited_inside_not_and_has() {
+        let doc = rabbithole_html::parse("<div><a href=x>l</a></div>");
+        let a = doc.find_element("a").unwrap();
+        let div = doc.find_element("div").unwrap();
+        let mut state = MatchState::default();
+        state.visited = std::sync::Arc::new([a].into_iter().collect());
+        assert!(matches_with(&parse(":visited")[0], &doc, a, &state));
+        assert!(!matches_with(&parse(":not(:link)")[0], &doc, a, &state));
+        assert!(matches_with(&parse(":has(:link)")[0], &doc, div, &state));
+        assert!(!matches_with(&parse(":has(:visited)")[0], &doc, div, &state));
+    }
+
+    #[test]
+    fn structural_pseudo_classes_match_the_root() {
+        let doc = rabbithole_html::parse("<!doctype html><p></p>");
+        let html = doc.html_element().unwrap();
+        assert!(matches(&parse(":first-child:last-child:only-child:nth-of-type(1):only-of-type")[0], &doc, html));
+    }
+
+    #[test]
+    fn simple_selectors_after_pseudo_element_are_invalid() {
+        for s in ["p:first-line[id=a]", "p::before.x", "p::after#a"] {
+            assert!(SelectorParser::new(&Tokenizer::tokenize(s)).parse_list().is_none(), "{s}");
+        }
+        parse("p::before:hover");
     }
 
     #[test]

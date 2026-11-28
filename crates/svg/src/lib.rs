@@ -72,6 +72,7 @@ impl SvgTree {
         if let Some(par) = view_par {
             built.par = par;
         }
+        built.background = parse::root_background(&doc, root);
         Some(SvgTree { built })
     }
 
@@ -193,7 +194,8 @@ impl SvgTree {
     }
 
     fn render_mode(&self, canvas: &mut Canvas, fonts: &FontContext, dest: Rect, viewport: bool) {
-        if dest.w <= 0.0 || dest.h <= 0.0 {
+        // A zero-sized `viewBox` disables rendering (SVG 2 §8.7).
+        if dest.w <= 0.0 || dest.h <= 0.0 || self.built.zero_viewbox {
             return;
         }
         let b = &self.built;
@@ -221,6 +223,9 @@ impl SvgTree {
         };
         if !b.overflow_visible {
             canvas.push_clip(dest);
+        }
+        if let Some(bg) = b.background {
+            canvas.fill_rect(dest, bg);
         }
         canvas.push_transform(m);
         {

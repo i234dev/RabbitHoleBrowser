@@ -464,7 +464,9 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 }
             }
             style.outline_style = ostyle.unwrap_or(BorderStyle::None);
-            style.outline_width = if style.outline_style.is_visible() { width.unwrap_or(3.0) } else { 0.0 };
+            // The width is kept with `none` (it inherits as specified;
+            // painting checks the style).
+            style.outline_width = width.unwrap_or(3.0);
             style.outline_color = col.unwrap_or(None);
         }
         "outline-width" => {
@@ -489,9 +491,6 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                     "double" => BorderStyle::Double,
                     _ => return true,
                 };
-                if style.outline_style.is_visible() && style.outline_width == 0.0 {
-                    style.outline_width = 3.0;
-                }
             }
         }
         "outline-color" => {
@@ -618,6 +617,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.creates_stacking_context = true;
             }
             if name == "contain" {
+                style.cv_contain = 0;
                 let has = |k: &str| kws.iter().any(|x| x == k);
                 style.contain_paint = has("paint") || has("strict") || has("content");
                 style.contain_layout = has("layout") || has("strict") || has("content");

@@ -3,7 +3,7 @@
 use crate::block::{Cb, Layouter};
 use crate::float::Bfc;
 use crate::linebreak as lb;
-use crate::text::{segment_tabs, transform_style, Collapser, Seg};
+use crate::text::{segment_tabs, transform_style_in, Collapser, Seg};
 use crate::tree::{is_word_separator, DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{FontId, Rect};
@@ -311,16 +311,34 @@ fn auto_hyphens(style: &ComputedStyle) -> bool {
         && style.word_break != WordBreak::AutoPhrase
 }
 
+/// Does a word continue after `text` (it ends with a letter or digit;
+/// empty text keeps the previous state)?
+fn continues_word(text: &str, before: bool) -> bool {
+    match text.chars().next_back() {
+        Some(c) => c.is_alphanumeric(),
+        None => before,
+    }
+}
+
 /// The transformed texts of the items, with soft hyphens inserted at the
 /// hyphenation points of the English words (runs of ASCII letters, across
 /// inline element boundaries) whose letters all hyphenate; `None` for the
 /// items left unchanged.
 fn hyphenate_items(items: &[InlineItem]) -> Vec<Option<String>> {
+    let mut mid_word = false;
     let texts: Vec<Option<String>> = items
         .iter()
         .map(|it| match it {
-            InlineItem::Text { text, style, .. } => Some(transform_style(text, style)),
-            _ => None,
+            InlineItem::Text { text, style, .. } => {
+                let t = transform_style_in(text, style, mid_word);
+                mid_word = continues_word(text, mid_word);
+                Some(t)
+            }
+            InlineItem::Open { .. } | InlineItem::Close | InlineItem::Float(_) | InlineItem::Absolute(_) => None,
+            _ => {
+                mid_word = false;
+                None
+            }
         })
         .collect();
     // Insertion points: (item, byte offset).
@@ -536,7 +554,12 @@ impl<'a> Layouter<'a> {
         } else {
             None
         };
+        // Does the text so far end inside a word (for `capitalize`)?
+        let mut mid_word = false;
         for (i, item) in items.iter().enumerate() {
+            if !matches!(item, InlineItem::Text { .. } | InlineItem::Open { .. } | InlineItem::Close | InlineItem::Float(_) | InlineItem::Absolute(_)) {
+                mid_word = false;
+            }
             match item {
                 InlineItem::Text { text, style, .. } => {
                     let font = self.font_for(style);
@@ -545,8 +568,9 @@ impl<'a> Layouter<'a> {
                     let wraps = ws.wraps();
                     let t = match hyphenated.as_mut().and_then(|h| h[i].take()) {
                         Some(t) => t,
-                        None => transform_style(text, style),
+                        None => transform_style_in(text, style, mid_word),
                     };
+                    mid_word = continues_word(text, mid_word);
                     segs.clear();
                     let keep_shy = style.hyphens != 0;
                     segment_tabs(&t, ws, &mut col, &mut segs, keep_shy);
@@ -973,6 +997,13 @@ struct OpenInline {
     item: usize,
     start_x: f32,
     started_here: bool,
+    /// Where the box's start margin begins (the line position when it
+    /// opened).
+    origin_x: f32,
+    /// The width of the collapsible space pending when the box opened: it
+    /// moves the box's start once placed (dropped at a line end, it does
+    /// not).
+    pending: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -982,6 +1013,9 @@ struct BgFrag {
     item: usize,
     left_edge: bool,
     right_edge: bool,
+    /// A collapsible space of the box's own text is pending at its end: the
+    /// box takes it in if it is placed (not at a line end).
+    tail_space: bool,
 }
 
 #[derive(Debug, Default)]
@@ -993,7 +1027,14 @@ struct Line {
     frags: Vec<PF>,
     bg: Vec<BgFrag>,
     pending_space: Option<(f32, usize)>,
+    /// `text-autospace` space before the next word: added when that word
+    /// is placed on this line (none at a line end).
+    pending_gap: f32,
     has_content: bool,
+    /// An inline box with inline-axis margins, borders or padding started or
+    /// ended on the line: it is not empty (CSS Inline 3 §2.3) even without
+    /// content.
+    boxed: bool,
     open: Vec<OpenInline>,
     /// Index of the first fragment of the current unbreakable run.
     break_at: Option<usize>,
@@ -1215,7 +1256,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.frags.clear();
         self.cur.bg.clear();
         self.cur.pending_space = None;
+        self.cur.pending_gap = 0.0;
         self.cur.has_content = false;
+        self.cur.boxed = false;
         self.cur.break_at = None;
         self.cur.justified = 0.0;
         self.cur.frag_ws.clear();
@@ -1223,6 +1266,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         for o in &mut self.cur.open {
             o.start_x = x;
             o.started_here = false;
+            o.pending = 0.0;
         }
     }
 
@@ -1297,7 +1341,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
                 Piece::Gap(w) => {
                     if self.cur.has_content {
-                        self.cur.x += w;
+                        self.cur.pending_gap += w;
                     }
                 }
             }
@@ -1318,11 +1362,21 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     fn open(&mut self, i: usize) {
         let style = self.style(i).clone();
         let cw = self.content_w;
-        let left = style.margin.left.resolve_or_zero(cw) + style.border_width.left + style.padding.left.resolve_or_zero(cw);
+        let ml = style.margin.left.resolve_or_zero(cw);
+        let left = ml + style.border_width.left + style.padding.left.resolve_or_zero(cw);
+        if left != 0.0 {
+            self.cur.boxed = true;
+        }
+        // The box (its border edge) starts after its margin, and after the
+        // collapsible space pending before it once that space is placed
+        // (with the next content, inside the box, where it is invisible).
+        let pending = if self.cur.has_content { self.pending_w() } else { 0.0 };
         self.cur.open.push(OpenInline {
             item: i,
-            start_x: self.cur.x,
+            start_x: self.cur.x + ml,
             started_here: true,
+            origin_x: self.cur.x,
+            pending,
         });
         self.cur.x += left;
     }
@@ -1335,18 +1389,25 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let o = self.cur.open.remove(pos);
         let style = self.style(i).clone();
         let cw = self.content_w;
-        let right = style.margin.right.resolve_or_zero(cw) + style.border_width.right + style.padding.right.resolve_or_zero(cw);
-        let end = self.cur.x + right;
+        let mr = style.margin.right.resolve_or_zero(cw);
+        let end = self.cur.x + style.border_width.right + style.padding.right.resolve_or_zero(cw);
+        // (Only a box that started on the line: the end of one continued
+        // from the previous line, after a forced break, makes no line.)
+        if (end != self.cur.x || mr != 0.0) && o.started_here {
+            self.cur.boxed = true;
+        }
         if needs_bg(&style) {
+            let tail_space = end == self.cur.x && mr == 0.0 && self.cur.has_content && self.cur.pending_space.is_some_and(|(_, item)| item > i && item != MARKER_ITEM);
             self.cur.bg.push(BgFrag {
                 x: o.start_x,
                 w: (end - o.start_x).max(0.0),
                 item: i,
                 left_edge: o.started_here,
                 right_edge: true,
+                tail_space,
             });
         }
-        self.cur.x = end;
+        self.cur.x = end + mr;
     }
 
     /// Distance from the content box's start edge to the line's start
@@ -1368,7 +1429,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     }
 
     fn pending_w(&self) -> f32 {
-        self.cur.pending_space.map(|p| p.0).unwrap_or(0.0)
+        self.cur.pending_space.map(|p| p.0).unwrap_or(0.0) + self.cur.pending_gap
     }
 
     fn place_word(&mut self, text: Rc<str>, width: f32, item: usize, break_before: bool) {
@@ -1384,6 +1445,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let tab = text == "\t";
         let mut break_before = break_before;
         let mut guard = 0;
+        // The rest of a word split at a line end.
+        let mut is_tail = false;
         loop {
             guard += 1;
             if self.done {
@@ -1404,9 +1467,22 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 self.push_text(text, width, item, break_before);
                 return;
             }
+            // Nothing on a line shortened by floats yet and the word does
+            // not fit beside them: the line moves down past them
+            // (CSS 2.1 §9.5).
+            // (Only on the first line: later ones keep their place, as in
+            // browsers.)
+            if self.lines.is_empty() && !is_tail && wraps && policy != BreakPolicy::Anywhere && !self.cur.has_content && self.cur.frags.is_empty() && width <= self.content_w + 0.01 && self.cur.right - self.cur.left < self.content_w - 0.01 {
+                if let Some(ny) = self.bfc.next_y(self.cur.y) {
+                    let (l, r) = self.bfc.inline_available(ny, self.strut_h().max(1.0), self.content_x, self.content_w);
+                    self.cur.y = ny;
+                    self.narrow_line(l, r);
+                    continue;
+                }
+            }
             if self.cur.has_content && policy != BreakPolicy::Anywhere {
                 if break_before {
-                    self.finish_line(false);
+                    self.break_before_open_boxes();
                     break_before = false;
                     continue;
                 }
@@ -1429,7 +1505,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             if head.is_empty() {
                 if self.cur.has_content {
                     if break_before || policy != BreakPolicy::Anywhere {
-                        self.finish_line(false);
+                        self.break_before_open_boxes();
                         break_before = false;
                         continue;
                     }
@@ -1458,6 +1534,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             let font = self.lay.font_for(&style);
             width = self.lay.measurer.width(font, style.font_size, &tail) + style.letter_spacing * tail.chars().count() as f32;
             text = tail;
+            is_tail = true;
             break_before = false;
         }
     }
@@ -1547,8 +1624,17 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     }
 
     fn consume_pending_space(&mut self) {
+        if self.cur.pending_gap > 0.0 {
+            self.cur.x += std::mem::take(&mut self.cur.pending_gap);
+            for o in &mut self.cur.open {
+                o.start_x += std::mem::take(&mut o.pending);
+            }
+        }
         if let Some((sw, sitem)) = self.cur.pending_space.take() {
             if !self.cur.has_content {
+                for o in &mut self.cur.open {
+                    o.pending = 0.0;
+                }
                 return;
             }
             match self.cur.frags.last_mut() {
@@ -1573,6 +1659,14 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
             }
             self.cur.x += sw;
+            for o in &mut self.cur.open {
+                o.start_x += std::mem::take(&mut o.pending);
+            }
+            for bg in &mut self.cur.bg {
+                if std::mem::take(&mut bg.tail_space) {
+                    bg.w += sw;
+                }
+            }
         }
     }
 
@@ -1708,6 +1802,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.x += shift;
         for o in &mut self.cur.open {
             o.start_x += shift;
+            o.origin_x += shift;
         }
         for f in &mut self.cur.frags {
             f.x += shift;
@@ -1723,6 +1818,41 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.lay.layout_float(&mut self.children[c], &cb, y, self.bfc);
     }
 
+    /// End the line at the break opportunity before the word being placed:
+    /// inline boxes opened after the line's last content (with nothing in
+    /// them yet) start the next line, with their start margins, borders
+    /// and padding.
+    fn break_before_open_boxes(&mut self) {
+        let content_end = self.cur.frags.last().map(|f| f.x + f.w).unwrap_or(self.cur.left);
+        let trailing: Vec<usize> = self.cur.open.iter().enumerate().filter(|(_, o)| o.started_here && o.origin_x >= content_end - 0.01).map(|(i, _)| i).collect();
+        if trailing.is_empty() {
+            return self.finish_line(false);
+        }
+        let first = trailing.iter().map(|&i| self.cur.open[i].origin_x).fold(f32::INFINITY, f32::min);
+        let advance = self.cur.x - first;
+        // (Boxes without start edges stay where they opened.)
+        if advance <= 0.01 {
+            return self.finish_line(false);
+        }
+        let saved: Vec<(usize, f32, f32)> = trailing.iter().map(|&i| (i, self.cur.open[i].start_x - first, self.cur.open[i].origin_x - first)).collect();
+        for &i in &trailing {
+            // Hidden from this line's backgrounds (see `carry_over`).
+            self.cur.open[i].start_x = f32::MAX;
+        }
+        self.cur.x = first;
+        self.finish_line(false);
+        let x = self.cur.x;
+        for (i, start, origin) in saved {
+            if let Some(o) = self.cur.open.get_mut(i) {
+                o.start_x = x + start;
+                o.origin_x = x + origin;
+                o.started_here = true;
+                o.pending = 0.0;
+            }
+        }
+        self.cur.x = x + advance;
+    }
+
     /// Move the fragments from `idx` on to a fresh line.
     fn carry_over(&mut self, idx: usize) {
         let carried = self.cur.frags.split_off(idx);
@@ -1730,6 +1860,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         // Trim the x of the line to the end of what stays.
         self.cur.x = self.cur.frags.last().map(|f| f.x + f.w).unwrap_or(self.cur.left);
         self.cur.pending_space = None;
+        self.cur.pending_gap = 0.0;
+        for o in &mut self.cur.open {
+            o.pending = 0.0;
+        }
         // Open inlines that started inside the carried region move with it.
         let mut moved: Vec<usize> = Vec::new();
         for (i, o) in self.cur.open.iter().enumerate() {
@@ -1737,7 +1871,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 moved.push(i);
             }
         }
-        let saved: Vec<(usize, f32)> = moved.iter().map(|&i| (i, self.cur.open[i].start_x)).collect();
+        let saved: Vec<(usize, f32, f32)> = moved.iter().map(|&i| (i, self.cur.open[i].start_x, self.cur.open[i].origin_x)).collect();
         for &i in &moved {
             // Hide from finish_line's bg emission by marking as not started here
             // with a start beyond the line end.
@@ -1745,9 +1879,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
         self.finish_line(false);
         let dx = self.cur.x - carried_start;
-        for (i, sx) in saved {
+        for (i, sx, ox) in saved {
             if let Some(o) = self.cur.open.get_mut(i) {
                 o.start_x = sx + dx;
+                o.origin_x = ox + dx;
                 o.started_here = true;
             }
         }
@@ -2589,7 +2724,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     }
 
     fn finish_line(&mut self, forced: bool) {
-        if !self.cur.has_content && !forced {
+        if !self.cur.has_content && !self.cur.boxed && !forced {
             if self.cur.frags.is_empty() {
                 if !self.line_abs.is_empty() {
                     self.place_line_abs(0.0);
@@ -2629,7 +2764,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         if clamp_hit {
             self.done = true;
         }
-        let align = self.line_align(forced || self.final_flush);
+        let mut align = self.line_align(forced || self.final_flush);
+        // A justified line without content to justify (only empty inline
+        // boxes) is centered (as Blink).
+        if align == TextAlign::Justify && self.cur.frags.is_empty() {
+            align = TextAlign::Center;
+        }
         if align == TextAlign::Justify && !overflows {
             self.justify();
         }
@@ -2652,6 +2792,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     item,
                     left_edge: started_here,
                     right_edge: false,
+                    tail_space: false,
                 });
             }
             self.cur.open[idx].started_here = false;
@@ -3072,7 +3213,7 @@ fn needs_bg(style: &ComputedStyle) -> bool {
         || style.background_image.is_some()
         || !style.background_layers.is_empty()
         || !style.box_shadow.is_empty()
-        || style.outline_width > 0.0
+        || (style.outline_width > 0.0 && style.outline_style.is_visible())
 }
 
 
