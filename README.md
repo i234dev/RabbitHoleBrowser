@@ -32,6 +32,13 @@ median 1.020× ([record](docs/benchmarks/speedometer-2026-11-17-jit-default.md))
 macOS on Apple silicon has no native backend yet and uses the interpreter. See
 the [JIT design and status](docs/jit-design.md).
 
+Version 0.2.53 extends those layers to sticky headers, to several fixed
+groups with content painted between or above them, and keeps them while an
+element has focus (the focus ring is a layer of its own): on a real news
+site the header no longer moves at all while scrolling, where 0.2.52 still
+fell back after its consent dialog. Speedometer 3.1 1.003×
+([record](docs/benchmarks/page-layers-2026-11-28-v0.2.53.md)).
+
 Version 0.2.52 keeps `position: fixed` headers and bars in place while the
 interface scrolls ahead of the page's repaint: they are composited as a
 separate layer (on Windows, both bars of a test page identical in 45 of 45
