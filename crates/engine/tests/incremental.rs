@@ -797,3 +797,271 @@ fn measured_grid_items_reuse_published_layouts() {
     // remaining misses measure items at other widths (min/max-content).
     assert!(hits >= 200, "hits {hits}, misses {misses}");
 }
+
+/// Random mutations against layout-heavy styles (flex and grid with
+/// intrinsic sizes, percentages, min/max-content, aspect ratios, absolute
+/// and sticky boxes, scroll containers, transforms, hover rules that change
+/// geometry), with element and page scrolling between them: after each
+/// step the incremental result must equal a full recomputation.
+/// `RH_FUZZ_LAYOUT_SEEDS` sets the number of seeds (default 4).
+#[test]
+fn randomized_layout_mutations_match_full_recompute() {
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn pick<'a, T>(&mut self, v: &'a [T]) -> &'a T {
+            &v[(self.next() % v.len() as u64) as usize]
+        }
+    }
+    const CSS: &str = r#"
+        body { margin: 0 }
+        .a { display: flex; flex-wrap: wrap; gap: 4px } .a > * { flex: 1 1 0; min-width: 0 }
+        .b { display: flex } .b > * { flex: 0 0 auto } .c { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 6px }
+        .d { display: grid; grid-template-columns: auto 1fr max-content } .e { width: 50%; padding: 2% } .f { width: max-content }
+        .g { width: min-content } .h { width: fit-content; max-width: 70% } .i { aspect-ratio: 16 / 9; width: 30% }
+        .j { position: relative } .k { position: absolute; right: 0; bottom: 0; width: 40%; height: 20px }
+        .l { position: sticky; top: 0; height: 15px } .m { overflow: auto; height: 60px } .n { overflow: hidden; max-height: 40px }
+        .o { transform: translateX(10px) scale(1.1) } .p { display: inline-block; width: 33% } .q { float: left; width: 25% }
+        .r { display: none } .s { white-space: nowrap } .t { margin: 0 auto; width: 60% } .u { height: 100% }
+        .v { display: inline-flex; align-items: center } .w { min-height: 30px } .x { contain: layout } .y { position: fixed; top: 5px; left: 5px; width: 30px; height: 10px }
+        .z { flex: 2 1 120px }
+        .a:hover > * { padding: 3px } .c:hover .p { width: 45% } .j:hover .k { width: 60% } div:hover > .s { white-space: normal }
+        .b:has(.r) { gap: 7px } .m:hover { height: 80px }
+    "#;
+    let classes = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", ""];
+    let tags = ["div", "div", "div", "span", "p", "section"];
+    let styles = ["", "width: 120px", "width: 40%", "padding: 4px 8%", "display: none", "height: 25px", "min-width: max-content", "flex-basis: 30%", "grid-column: span 2", "margin-left: -10px", "font-size: 20px", "position: relative; left: 7px"];
+    let words = ["alpha", "beta gamma", "a much longer run of words that wraps across lines", "", "x", "supercalifragilisticexpialidocious"];
+    let seeds: u64 = std::env::var("RH_FUZZ_LAYOUT_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+    for seed in 1..=seeds {
+        let mut rng = Rng(0x2545f4914f6cdd1d ^ seed.wrapping_mul(0x9e37_79b9_7f4a));
+        let mut html = format!("<html><head><style>{CSS}</style></head><body>");
+        fn tree(rng: &mut Rng, html: &mut String, depth: u32, classes: &[&str], tags: &[&str], words: &[&str]) {
+            let n = 1 + rng.next() % 4;
+            for _ in 0..n {
+                let t = *rng.pick(tags);
+                html.push_str(&format!("<{t} class=\"{} {}\">{}", rng.pick(classes), rng.pick(classes), rng.pick(words)));
+                if depth < 3 && rng.next() % 3 != 0 {
+                    tree(rng, html, depth + 1, classes, tags, words);
+                }
+                html.push_str(&format!("</{t}>"));
+            }
+        }
+        for _ in 0..12 {
+            tree(&mut rng, &mut html, 0, &classes, &tags, &words);
+        }
+        html.push_str("</body></html>");
+        let (engine, mut page) = load(&html);
+        for step in 0..80 {
+            let body = page.doc.body().unwrap();
+            let els: Vec<NodeId> = page.doc.descendants(body).filter(|&n| page.doc.element(n).is_some()).collect();
+            let el = *rng.pick(&els);
+            let what = rng.next() % 9;
+            match what {
+                0 => {
+                    let c = format!("{} {}", rng.pick(&classes), rng.pick(&classes));
+                    page.doc.set_attr(el, "class", Some(&c));
+                }
+                1 => page.doc.set_attr(el, "style", Some(rng.pick(&styles))),
+                2 => {
+                    let t = *rng.pick(&tags);
+                    let n = page.doc.create_element(t, vec![("class".into(), rng.pick(&classes).to_string())]);
+                    let txt = page.doc.create_text(rng.pick(&words));
+                    page.doc.append_child(n, txt);
+                    page.doc.append_child(el, n);
+                }
+                3 => {
+                    if el != body {
+                        page.doc.detach(el);
+                    }
+                }
+                4 => {
+                    if let Some(t) = page.doc.children(el).find(|&c| page.doc.is_text(c)) {
+                        page.doc.set_text(t, rng.pick(&words));
+                    }
+                }
+                5 | 6 => {
+                    engine.set_hover(&mut page, Some(el));
+                }
+                7 => {
+                    // Scroll an element (only scroll containers move).
+                    engine.restyle(&mut page);
+                    let y = (rng.next() % 50) as f32;
+                    engine.set_element_scroll(&mut page, el, 0.0, y);
+                }
+                _ => {
+                    let y = (rng.next() % 400) as f32;
+                    engine.set_page_scroll(&mut page, 0.0, y);
+                }
+            }
+            engine.restyle(&mut page);
+            if let Err(e) = engine.check_incremental(&mut page) {
+                panic!("seed {seed} step {step} (op {what}): {e}");
+            }
+            if let Err(e) = engine.check_layout_idempotent(&mut page) {
+                panic!("seed {seed} step {step} (op {what}): {e}");
+            }
+        }
+    }
+}
+
+/// A scroll container's overflow leaves out absolutely positioned boxes
+/// whose containing block is an ancestor (they are positioned after the
+/// container is laid out, so their old geometry made full and incremental
+/// layouts disagree), and keeps those it contains.
+#[test]
+fn scroll_overflow_ignores_out_of_flow_boxes_contained_by_ancestors() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>
+        body { margin: 0 } .cb { position: relative; width: 400px; height: 200px }
+        .clip { display: inline-flex; width: 32px; height: 32px; overflow: hidden }
+        .label { position: absolute; left: 5px; top: 5px; width: 300px; height: 16px }
+        .own { position: relative } .inner { position: absolute; left: 0; top: 0; width: 200px; height: 10px }
+        </style></head><body>
+        <div class="cb"><span id="pad">text</span><div class="clip" id="clip"><i>x</i><span class="label" id="label">a long label</span></div>
+        <div class="clip own" id="own"><span class="inner">inner</span></div></div>
+        </body></html>"#,
+    );
+    let (clip, own, pad, label) = (id(&page, "clip"), id(&page, "own"), id(&page, "pad"), id(&page, "label"));
+    let scroll_w = |page: &Page, n: NodeId| page.layout.box_of(&page.doc, n).map(|b| b.scroll_width).unwrap();
+    assert!((scroll_w(&page, clip) - 32.0).abs() < 0.5, "not the container's overflow: {}", scroll_w(&page, clip));
+    assert!((scroll_w(&page, own) - 200.0).abs() < 0.5, "its own absolute child overflows: {}", scroll_w(&page, own));
+    for (i, w) in ["x", "longer text", "t"].iter().enumerate() {
+        page.doc.set_attr(pad, "title", Some(&i.to_string()));
+        if let Some(t) = page.doc.children(pad).next() {
+            page.doc.set_text(t, w);
+        }
+        check(&engine, &mut page, "text before the container");
+        page.doc.set_attr(label, "style", Some(&format!("left: {}px", 5 + 40 * i)));
+        check(&engine, &mut page, "label moved");
+        assert!((scroll_w(&page, clip) - 32.0).abs() < 0.5);
+    }
+}
+
+/// Scripts scroll within the CSSOM scrolling area; layout keeps that
+/// offset deterministically (a later relayout must neither clamp it nor
+/// differ from a layout from scratch).
+#[test]
+fn element_scroll_offset_survives_relayout() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>
+        #s { width: 100px; height: 50px; overflow: auto; display: flex; flex-direction: row }
+        #s > div { flex: 0 0 80px; height: 30px; margin-right: -20px }
+        </style></head><body><div id="s"><div>a</div><div>b</div><div>c</div><div id="last">d</div></div><p id="p">p</p></body></html>"#,
+    );
+    let (s, p) = (id(&page, "s"), id(&page, "p"));
+    engine.set_element_scroll(&mut page, s, 10_000.0, 0.0);
+    let (offset, _) = engine.element_scroll(&page, s).unwrap();
+    assert!(offset.0 > 0.0, "scrolled: {offset:?}");
+    check(&engine, &mut page, "after scrolling");
+    page.doc.set_attr(s, "class", Some("x"));
+    page.doc.set_attr(p, "style", Some("width: 50px"));
+    check(&engine, &mut page, "after an unrelated relayout");
+    let (again, _) = engine.element_scroll(&page, s).unwrap();
+    assert_eq!(offset, again, "offset kept");
+}
+
+/// A class change matched by an inner compound of a `:has()` argument
+/// whose subject can be the root must not restyle the whole document
+/// (the root's cached `:has()` result stays known).
+#[test]
+fn has_inner_compound_changes_do_not_restyle_the_document() {
+    let mut html = String::from(
+        r#"<html><head><style>
+        :has(.open .menu) .badge { color: red }
+        .open { padding: 1px }
+        </style></head><body><div id="w"><div id="t"><span class="menu">m</span></div></div>"#,
+    );
+    for i in 0..300 {
+        html.push_str(&format!("<div class=\"item\"><p>Paragraph {i} <span class=\"badge\">b</span></p></div>"));
+    }
+    html.push_str("</body></html>");
+    let (engine, mut page) = load(&html);
+    let t = id(&page, "t");
+    // Flips restyle the subjects' subtrees (the document): results only.
+    for round in 0..4 {
+        page.doc.set_attr(t, "class", Some(if round % 2 == 0 { "open" } else { "" }));
+        check(&engine, &mut page, "inner :has() compound flips");
+    }
+    // With `.open .menu` matched through #t, the same class on an ancestor
+    // flips nothing.
+    page.doc.set_attr(t, "class", Some("open"));
+    check(&engine, &mut page, "inner :has() compound matched");
+    let w = id(&page, "w");
+    let mut costs = Vec::new();
+    for round in 0..4 {
+        let before = page.incr.stats.clone();
+        page.doc.set_attr(w, "class", Some(if round % 2 == 0 { "open x" } else { "x" }));
+        check(&engine, &mut page, "class on an ancestor, :has() unchanged");
+        costs.push(page.incr.stats.elements_restyled - before.elements_restyled);
+    }
+    assert!(costs.iter().skip(1).all(|&c| c < 50), "restyled per change: {costs:?}");
+}
+
+/// Inserting into an element that keeps other content cannot flip its
+/// `:empty`: following siblings related through `:empty + ...` are not
+/// restyled.
+#[test]
+fn insertions_into_non_empty_elements_do_not_restyle_empty_relations() {
+    let mut html = String::from(
+        r#"<html><head><style>
+        div:empty + section { color: red }
+        </style></head><body><div id="d"><b>x</b></div>"#,
+    );
+    for i in 0..300 {
+        html.push_str(&format!("<section><p>Paragraph {i}</p></section>"));
+    }
+    html.push_str("</body></html>");
+    let (engine, mut page) = load(&html);
+    let d = id(&page, "d");
+    let mut costs = Vec::new();
+    for _ in 0..3 {
+        let before = page.incr.stats.clone();
+        let n = page.doc.create_element("i", vec![]);
+        page.doc.append_child(d, n);
+        check(&engine, &mut page, "child added to a non-empty element");
+        costs.push(page.incr.stats.elements_restyled - before.elements_restyled);
+    }
+    assert!(costs.iter().all(|&c| c < 20), "restyled per insertion: {costs:?}");
+    // Emptying and filling it still restyles correctly.
+    let kids: Vec<NodeId> = page.doc.children(d).collect();
+    for k in kids {
+        page.doc.detach(k);
+    }
+    check(&engine, &mut page, "emptied");
+    let t = page.doc.create_text("now");
+    page.doc.append_child(d, t);
+    check(&engine, &mut page, "text makes it non-empty");
+    page.doc.set_text(t, "");
+    check(&engine, &mut page, "empty text: empty again");
+}
+
+/// A table wider than its specified width (its columns need more) keeps
+/// that width when its layout is reused: the cache records the widening.
+#[test]
+fn reused_table_layout_keeps_widening_for_its_columns() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>
+        .box { float: right; width: 10em; border-collapse: collapse; font-size: 88%; padding: 0.2em }
+        .box td { padding: 0.4em 0.6em; border-top: 1px solid }
+        .wide { width: 250px; height: 10px }
+        a:hover { text-decoration: underline; color: red }
+        </style></head><body><section>
+        <table class="box" id="t"><tr><td><div class="wide"></div></td><td>cell</td></tr><tr><td colspan="2">more text</td></tr></table>
+        <p>Text beside the table with <a href="x" id="a">a link</a> and more words.</p>
+        </section></body></html>"#,
+    );
+    let (t, a) = (id(&page, "t"), id(&page, "a"));
+    let w0 = page.rect_of(t).unwrap().w;
+    assert!(w0 > 250.0, "widened for its columns: {w0}");
+    for round in 0..4 {
+        engine.set_hover(&mut page, if round % 2 == 0 { Some(a) } else { None });
+        check(&engine, &mut page, "hover beside a widened table");
+        assert_eq!(page.rect_of(t).unwrap().w, w0);
+    }
+}
