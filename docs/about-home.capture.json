@@ -1,17 +1,17 @@
 {
-  "browser_version": "0.2.51",
-  "source_revision_before_documentation_commit": "c857508ab21f97a7d9a6941bbf186f3b500c01e7",
-  "binary": "CI artifact browser-ubuntu-latest-c857508ab21f97a7d9a6941bbf186f3b500c01e7 (run 46070615542)",
+  "browser_version": "0.2.52",
+  "source_revision_before_documentation_commit": "9690b9284c490e9d2cc5f516eb0fe9d0d5e5a219",
+  "binary": "CI artifact browser-ubuntu-latest-9690b9284c490e9d2cc5f516eb0fe9d0d5e5a219 (run 46132985184)",
   "profile": "ci",
   "jit": "on (default)",
   "viewport_css_px": [
     1100,
     780
   ],
-  "captured_utc": "2026-11-27T22:05:06+00:00",
-  "binary_sha256": "3c9512fcbcd155ee205579207f11d82993db2664158ae9e60ff3884092ea33db",
-  "png_sha256": "1324d654d9cc60684e8ba31e9938bfd8acb2649a668263c4352f8552398072f5",
+  "captured_utc": "2026-11-28T10:21:20+00:00",
+  "binary_sha256": "1da409de5e402e53ac89b9c002c2f7c2d434f5af04598d17d55952aa024dfa1a",
+  "png_sha256": "52a9483086ca9312591831bdce81b111cbfd29a778f1bd6c2b33d02af114f6aa",
   "performance_measurement": false,
   "scope": "Internal about:home screenshot from the browser CLI. Compatibility/performance rows retain their own measurement source and date; this capture is not a fresh benchmark.",
-  "root_visual_review": "v0.2.51 badge; test262 46,017/46,064 dated 2026-11-18; CSS 16,578/19,627, DOM 62,903/65,775 and WPT 1,943,677/2,118,802 dated 2026-11-27 (0.2.50 measurements; 0.2.51 re-ran the full WPT run, CSS reftests and WPT css/selectors, dom and css/cssom without real losses); no clipping of header/table at viewport width."
+  "root_visual_review": "v0.2.52 badge; test262 46,017/46,064 dated 2026-11-18; CSS 16,578/19,627, DOM 62,903/65,775 and WPT 1,943,677/2,118,802 dated 2026-11-27 (0.2.50 measurements; 0.2.52 re-ran CSS reftests and seven WPT directories without losses); no clipping of header/table at viewport width."
 }
