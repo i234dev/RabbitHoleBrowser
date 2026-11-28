@@ -1,5 +1,5 @@
 # WPT reftest baseline: per-directory pass/total, then failing tests.
-dir css/CSS2 5860 6232
+dir css/CSS2 5862 6232
 dir css/compositing 36 60
 dir css/css-align 37 64
 dir css/css-backgrounds 636 718
@@ -10,19 +10,19 @@ dir css/css-color 307 311
 dir css/css-conditional 157 172
 dir css/css-contain 341 435
 dir css/css-display 179 223
-dir css/css-flexbox 886 1027
+dir css/css-flexbox 889 1027
 dir css/css-fonts 267 387
 dir css/css-grid 1488 1763
 dir css/css-images 440 482
 dir css/css-masking 271 384
 dir css/css-nesting 13 17
-dir css/css-overflow 453 719
-dir css/css-position 166 251
+dir css/css-overflow 456 719
+dir css/css-position 168 251
 dir css/css-sizing 421 568
-dir css/css-text 1206 1550
+dir css/css-text 1209 1550
 dir css/css-text-decor 285 339
 dir css/css-transforms 754 794
-dir css/css-ui 916 962
+dir css/css-ui 917 962
 dir css/css-values 120 192
 dir css/css-writing-modes 968 1162
 dir css/filter-effects 282 370
@@ -104,7 +104,6 @@ fail css/CSS2/cascade-import/cascade-import-dynamic-002.xht
 fail css/CSS2/cascade/html-precedence-004.xht
 fail css/CSS2/cascade/specificity-005.xht
 fail css/CSS2/css1/c25-pseudo-elmnt-000.xht
-fail css/CSS2/css1/c414-flt-wrap-001.xht
 fail css/CSS2/css1/c42-ibx-ht-000.xht
 fail css/CSS2/css1/c42-ibx-pad-000.xht
 fail css/CSS2/css1/c43-rpl-ibx-000.xht
@@ -139,7 +138,6 @@ fail css/CSS2/floats-clear/clear-on-child-with-margins.html
 fail css/CSS2/floats-clear/clear-on-parent-with-margins.html
 fail css/CSS2/floats-clear/float-replaced-height-006.xht
 fail css/CSS2/floats-clear/floats-124.xht
-fail css/CSS2/floats-clear/floats-132.xht
 fail css/CSS2/floats-clear/floats-143.xht
 fail css/CSS2/floats-clear/floats-147.xht
 fail css/CSS2/floats-clear/floats-clear-multicol-balancing-000.html
@@ -914,15 +912,12 @@ fail css/css-flexbox/svg-root-as-flex-item-003.html
 fail css/css-flexbox/svg-root-as-flex-item-005.html
 fail css/css-flexbox/table-as-item-change-cell.html
 fail css/css-flexbox/table-as-item-fixed-min-width-3.html
-fail css/css-flexbox/table-as-item-flex-cross-size.html
 fail css/css-flexbox/table-as-item-inflexible-in-column-2.html
 fail css/css-flexbox/table-as-item-inflexible-in-row-2.html
 fail css/css-flexbox/table-as-item-min-content-height-1.tentative.html
 fail css/css-flexbox/table-as-item-min-content-height-2.tentative.html
-fail css/css-flexbox/table-as-item-stretch-cross-size-2.html
 fail css/css-flexbox/table-as-item-stretch-cross-size-4.html
 fail css/css-flexbox/table-as-item-stretch-cross-size-5.html
-fail css/css-flexbox/table-as-item-stretch-cross-size.html
 fail css/css-fonts/cluster-matching-canonical-equivalence-002.html
 fail css/css-fonts/cluster-matching-canonical-equivalence-003.html
 fail css/css-fonts/font-default-04.html
@@ -1585,10 +1580,7 @@ fail css/css-overflow/line-clamp/webkit-line-clamp-027.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-035.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-036.html
 fail css/css-overflow/overflow-auto-scrollbar-gutter-intrinsic-003.html
-fail css/css-overflow/overflow-body-propagation-012.html
-fail css/css-overflow/overflow-body-propagation-014.html
 fail css/css-overflow/overflow-body-propagation-015.html
-fail css/css-overflow/overflow-body-propagation-016.html
 fail css/css-overflow/overflow-clip-margin-018.html
 fail css/css-overflow/overflow-clip-margin-019.html
 fail css/css-overflow/overflow-clip-margin-020.html
@@ -1820,10 +1812,8 @@ fail css/css-position/sticky/position-sticky-table-pixel-rounding.html
 fail css/css-position/sticky/position-sticky-table-td-left.html
 fail css/css-position/sticky/position-sticky-table-td-right.html
 fail css/css-position/sticky/position-sticky-table-tfoot-bottom.html
-fail css/css-position/sticky/position-sticky-table-th-bottom.html
 fail css/css-position/sticky/position-sticky-table-th-left.html
 fail css/css-position/sticky/position-sticky-table-th-right.html
-fail css/css-position/sticky/position-sticky-table-th-top.html
 fail css/css-position/sticky/position-sticky-table-thead-top.html
 fail css/css-position/sticky/position-sticky-table-tr-bottom.html
 fail css/css-position/sticky/position-sticky-table-tr-top.html
@@ -2197,8 +2187,6 @@ fail css/css-text/text-group-align/text-group-align-right-vlr.html
 fail css/css-text/text-group-align/text-group-align-right.html
 fail css/css-text/text-group-align/text-group-align-start-vlr.html
 fail css/css-text/text-group-align/text-group-align-start.html
-fail css/css-text/text-indent/below-float.html
-fail css/css-text/text-indent/below-float2.html
 fail css/css-text/text-indent/below-float3.html
 fail css/css-text/text-indent/text-indent-length-002.html
 fail css/css-text/text-indent/text-indent-with-absolute-pos-child.html
@@ -2241,7 +2229,6 @@ fail css/css-text/white-space/pre-wrap-align-end-002.html
 fail css/css-text/white-space/pre-wrap-align-left-002.html
 fail css/css-text/white-space/pre-wrap-align-right-002.html
 fail css/css-text/white-space/pre-wrap-align-start-002.html
-fail css/css-text/white-space/pre-wrap-float-001.html
 fail css/css-text/white-space/tab-bidi-001.html
 fail css/css-text/white-space/text-wrap-balance-float-001.html
 fail css/css-text/white-space/text-wrap-balance-float-002.html
@@ -2442,7 +2429,6 @@ fail css/css-ui/caret-shape-block-fallback-001.html
 fail css/css-ui/caret-shape-block-zoom.html
 fail css/css-ui/caret-shape-underscore-001.html
 fail css/css-ui/caret-shape-underscore-empty-001.html
-fail css/css-ui/outline-028.html
 fail css/css-ui/outline-color-002.html
 fail css/css-ui/outline-color-003.html
 fail css/css-ui/outline-color-004.html

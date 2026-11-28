@@ -656,3 +656,33 @@ fn inline_box_start_edge_wraps_with_its_content() {
     assert!(boxes(0).is_empty(), "{}", t.dump());
     assert!(boxes(1).iter().any(|r| close(r.x, 0.0)), "{}", t.dump());
 }
+
+#[test]
+fn stretched_table_item_shares_its_height_with_captions() {
+    let fx = Fx::new(
+        "<div id=f><table id=t><caption style='height: 10px'></caption><tr><td id=c></td></tr></table></div>",
+        "body { margin: 0 } #f { display: flex; width: 100px; height: 100px } table { border-spacing: 0; flex-grow: 1 } td { padding: 0 }",
+    );
+    let t = fx.layout();
+    assert!(close(fx.rect(&t, "c").h, 90.0), "{}", t.dump());
+}
+
+#[test]
+fn body_keeps_its_overflow_when_the_root_does_not_propagate_it() {
+    let clips = |css: &str| {
+        let fx = Fx::new("<body><div></div></body>", css);
+        let t = fx.layout();
+        t.root.children.iter().find(|c| c.node == fx.doc.body()).map(|b| b.clips).unwrap()
+    };
+    assert!(clips("html { overflow: hidden } body { overflow: hidden }"));
+    assert!(!clips("body { overflow: hidden }"));
+}
+
+#[test]
+fn word_too_wide_beside_a_float_moves_below_it() {
+    let fx = Fx::new("<div id=c><div id=f></div><span id=w>xxxxxxxx</span></div>", "body { margin: 0 } #c { width: 100px; font: 20px monospace } #f { float: left; width: 30px; height: 10px }");
+    let t = fx.layout();
+    let line = &t.root.children[0].children[0];
+    let text_y = line.children.iter().chain(std::iter::once(line)).flat_map(|b| b.lines.iter()).flat_map(|l| l.fragments.iter()).filter(|f| matches!(f.kind, crate::tree::FragmentKind::Text { .. })).map(|f| (f.rect.x, f.rect.y)).next().unwrap();
+    assert!(text_y.1 >= 10.0 - 0.01 && close(text_y.0, 0.0), "{text_y:?} {}", t.dump());
+}

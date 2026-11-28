@@ -1280,7 +1280,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
         // Anonymous blocks and rows are transparent: a sticky cell moves
         // within its row group (or table).
-        let flow_cb = if b.kind == BoxKind::AnonymousBlock || (b.formatting == Formatting::TableRow && !b.is_positioned()) { self.flow_cb } else { b.content_rect };
+        // (Rows and row groups pass on the table's: sticky cells and rows
+        // stick within the whole table, as in browsers.)
+        let table_part = b.formatting == Formatting::TableRow
+            || matches!(b.style.display, rabbithole_style::Display::TableRowGroup | rabbithole_style::Display::TableHeaderGroup | rabbithole_style::Display::TableFooterGroup);
+        let flow_cb = if b.kind == BoxKind::AnonymousBlock || (table_part && !b.is_positioned()) { self.flow_cb } else { b.content_rect };
         let saved_flow_cb = std::mem::replace(&mut self.flow_cb, flow_cb);
         for c in &b.children {
             if self.hoisted.contains(&(c as *const LayoutBox as usize)) || c.clamped && c.is_positioned() {

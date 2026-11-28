@@ -1438,6 +1438,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let tab = text == "\t";
         let mut break_before = break_before;
         let mut guard = 0;
+        // The rest of a word split at a line end.
+        let mut is_tail = false;
         loop {
             guard += 1;
             if self.done {
@@ -1457,6 +1459,19 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             if fits || hangs || (!wraps && !break_before) || guard > 10_000 {
                 self.push_text(text, width, item, break_before);
                 return;
+            }
+            // Nothing on a line shortened by floats yet and the word does
+            // not fit beside them: the line moves down past them
+            // (CSS 2.1 §9.5).
+            // (Only on the first line: later ones keep their place, as in
+            // browsers.)
+            if self.lines.is_empty() && !is_tail && wraps && policy != BreakPolicy::Anywhere && !self.cur.has_content && self.cur.frags.is_empty() && width <= self.content_w + 0.01 && self.cur.right - self.cur.left < self.content_w - 0.01 {
+                if let Some(ny) = self.bfc.next_y(self.cur.y) {
+                    let (l, r) = self.bfc.inline_available(ny, self.strut_h().max(1.0), self.content_x, self.content_w);
+                    self.cur.y = ny;
+                    self.narrow_line(l, r);
+                    continue;
+                }
             }
             if self.cur.has_content && policy != BreakPolicy::Anywhere {
                 if break_before {
@@ -1512,6 +1527,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             let font = self.lay.font_for(&style);
             width = self.lay.measurer.width(font, style.font_size, &tail) + style.letter_spacing * tail.chars().count() as f32;
             text = tail;
+            is_tail = true;
             break_before = false;
         }
     }

@@ -778,13 +778,30 @@ impl<'a> Layouter<'a> {
     /// Lay out a table wrapper's contents: captions above/below the table.
     pub(crate) fn layout_table_wrapper(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
         let content_y = b.content_rect.y;
+        // A wrapper given a height (a stretched or flexed flex item) passes
+        // what its captions leave to its table (CSS Tables 3 §3.9.2).
+        let table_h = cb.height.map(|h| {
+            let mut captions = 0.0;
+            for c in b.children.iter_mut().filter(|c| c.formatting != Formatting::Table && c.flow.is_in_flow()) {
+                let mut bfc = Bfc::new();
+                self.layout_block(c, cb, 0.0, &mut bfc, WidthMode::Fill);
+                captions += c.rect.h + c.margin.top + c.margin.bottom;
+            }
+            (h - captions).max(0.0)
+        });
         let mut y = content_y;
         for i in 0..b.children.len() {
             let c = &mut b.children[i];
             let mut bfc = Bfc::new();
             if c.formatting == Formatting::Table {
                 let ex = horizontal_extras(&c.style, cb.width);
+                if let Some(h) = table_h {
+                    let pad = crate::block::resolve_edges(&c.style.padding, cb.width);
+                    let pb_v = pad.top + pad.bottom + c.style.border_width.top + c.style.border_width.bottom;
+                    self.forced_content_height = Some((h - pb_v).max(0.0));
+                }
                 self.layout_block(c, cb, y, &mut bfc, WidthMode::Fixed((cb.width - ex).max(0.0)));
+                self.forced_content_height = None;
                 y = c.rect.bottom();
             } else if c.flow.is_in_flow() {
                 let mt = c.style.margin.top.resolve_or_zero(cb.width);

@@ -490,7 +490,9 @@ impl<'a> Builder<'a> {
         // clips its own overflow.)
         let contained_root_or_body = tag == "body"
             && (style.has_containment() || doc.parent(node).and_then(|p| self.ctx.styles.get(p)).is_some_and(|root| root.has_containment()));
+        // (Only the first `<body>` propagates; another one keeps its own.)
         let overflow_propagated = tag == "body"
+            && doc.parent(node).and_then(|p| doc.child_elements(p).find(|&c| doc.tag(c) == Some("body"))) == Some(node)
             && !style.has_containment()
             && doc.parent(node).filter(|&p| doc.tag(p) == Some("html")).and_then(|p| self.ctx.styles.get(p)).is_some_and(|root| !root.overflow_x.clips() && !root.overflow_y.clips() && !root.has_containment());
         b.bfc_root = out_of_flow
@@ -504,7 +506,7 @@ impl<'a> Builder<'a> {
             // A multi-column container (Multicol 1 §2).
             || (style.multicol && !matches!(style.display, Display::Inline | Display::Contents));
         let contained = !matches!(style.display, Display::Inline | Display::Contents) && !matches!(tag, "html" | "body");
-        b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && (!matches!(tag, "html" | "body") || (tag == "body" && contained_root_or_body));
+        b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && (!matches!(tag, "html" | "body") || (tag == "body" && (contained_root_or_body || !overflow_propagated)));
         if contained && (style.contain_paint || style.contain_layout) {
             b.bfc_root = true;
         }
