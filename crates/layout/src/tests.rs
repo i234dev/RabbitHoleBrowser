@@ -1510,3 +1510,15 @@ fn layer_plan_keeps_effects_that_read_the_page_in_one_canvas() {
         assert!(fx.display_list().layer_plan().is_err(), "{css}");
     }
 }
+
+#[test]
+fn layer_plan_gives_up_beyond_its_layer_budget() {
+    let n = crate::LayerPlan::MAX_LAYERS;
+    let sections: String = (0..n).map(|i| format!("<section><h2>{i}</h2><p>text</p></section>")).collect();
+    let fx = Fixture::new(&sections, "body{margin:0} section{height:300px} h2{position:sticky;top:0;height:20px;margin:0} p{position:relative}");
+    // n sticky headings and the scrolling paragraphs between them.
+    assert_eq!(fx.display_list().layer_plan(), Err("too-many-layers"));
+    let few: String = (0..n / 2 - 1).map(|i| format!("<section><h2>{i}</h2><p>text</p></section>")).collect();
+    let fx = Fixture::new(&few, "body{margin:0} section{height:300px} h2{position:sticky;top:0;height:20px;margin:0} p{position:relative}");
+    assert_eq!(fx.display_list().layer_plan().map(|p| p.layers.len()), Ok(n - 2));
+}

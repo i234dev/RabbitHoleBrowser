@@ -285,6 +285,8 @@ impl DisplayList {
             }
         }
         if depth != 0 || fixed != 0 { return Err("unbalanced"); }
+        // Each layer costs a raster and a composite per frame.
+        if layers.len() > LayerPlan::MAX_LAYERS { return Err("too-many-layers"); }
         Ok(LayerPlan { base, layers })
     }
 }
@@ -308,6 +310,10 @@ pub struct LayerPlan {
     pub base: usize,
     /// Every item from `base` on, in paint order.
     pub layers: Vec<(LayerKind, std::ops::Range<usize>)>,
+}
+
+impl LayerPlan {
+    pub const MAX_LAYERS: usize = 16;
 }
 
 /// Where a sticky box's displacement lives in the list.

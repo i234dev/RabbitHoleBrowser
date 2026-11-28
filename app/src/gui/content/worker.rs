@@ -1290,8 +1290,9 @@ impl Worker {
         // UI highlights and carets go above the page's own layers.
         if plan.is_none() {
             self.paint_overlays(&mut frame_canvas, origin);
-        } else if self.inspect.is_some() || self.edit.is_some() || !self.find.query.is_empty() || self.focus.is_some() {
-            let overlays = PageLayer::from_paint(w, h, LayerMotion::Scroll, |c| self.paint_overlays(c, origin));
+        } else if let Some((top, bottom)) = self.overlay_rows(origin, h) {
+            let shifted = (origin.0, origin.1 + top as f32 / s);
+            let overlays = PageLayer::from_rows(w, top, bottom - top, LayerMotion::Scroll, |c| self.paint_overlays(c, shifted));
             if !overlays.is_empty() { layers.push(Arc::new(overlays)); }
         }
         self.cache = Some(PaintCache { fixed_split, fixed_scroll, canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
@@ -1331,6 +1332,24 @@ impl Worker {
             eprintln!("rh_video gui partial={partial_paint} fixed={fixed} present_ms={:.3} raster_ms={:.3} deliver_ms={:.3}",
                       ms(present - start), ms(raster - present), ms(end - raster));
         }
+    }
+
+    /// The canvas rows (device px) [`Worker::paint_overlays`] can draw on.
+    fn overlay_rows(&self, origin: (f32, f32), h: u32) -> Option<(u32, u32)> {
+        let page = self.page.as_ref()?;
+        let s = self.view.scale;
+        let mut rects: Vec<Rect> = Vec::new();
+        rects.extend(self.inspect.and_then(|n| page.rect_of(n)));
+        rects.extend(self.edit.as_ref().and_then(|e| page.rect_of(e.node)));
+        rects.extend(self.focus.and_then(|n| page.rect_of(n)));
+        if !self.find.query.is_empty() {
+            rects.extend(self.find.matches.iter().copied());
+        }
+        let b = rects.into_iter().reduce(|a, b| a.union(&b))?;
+        // The focus ring is stroked outside the element.
+        let y0 = ((b.y - origin.1) * s - 8.0).floor().clamp(0.0, h as f32) as u32;
+        let y1 = ((b.bottom() - origin.1) * s + 8.0).ceil().clamp(0.0, h as f32) as u32;
+        (y1 > y0).then_some((y0, y1))
     }
 
     /// Selection, find highlights, focus ring and caret.

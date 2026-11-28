@@ -339,7 +339,7 @@ impl PageLayer {
 
     /// Like [`PageLayer::from_paint`] for the `h` rows from `top` of a
     /// taller canvas (`paint` draws them at the top of its canvas).
-    fn from_rows(w: u32, top: u32, h: u32, motion: LayerMotion, paint: impl Fn(&mut Canvas)) -> Self {
+    pub fn from_rows(w: u32, top: u32, h: u32, motion: LayerMotion, paint: impl Fn(&mut Canvas)) -> Self {
         if w == 0 || h == 0 {
             return Self { bands: Vec::new(), motion };
         }
