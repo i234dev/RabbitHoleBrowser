@@ -963,6 +963,18 @@ fn current_color_longhand(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The `background-color` part of a `background` shorthand value, for
+/// `currentcolor` tracking: the value itself for a CSS-wide keyword, the
+/// color component of the final layer, or nothing.
+fn background_shorthand_color(value: &[Token]) -> Vec<Token> {
+    if wide_keyword(value).is_some() {
+        return value.to_vec();
+    }
+    let comps = values::components(value);
+    let layers = values::split_commas(&comps);
+    layers.last().and_then(|layer| layer.iter().find(|c| values::parse_color(c).is_some()).map(|c| c.to_vec())).unwrap_or_default()
+}
+
 /// Record (or forget) that `prop`'s value depends on `currentcolor`;
 /// `inherit` takes over the parent's dependency.
 fn track_current_color(style: &mut ComputedStyle, parent: &ComputedStyle, prop: &'static str, value: &[Token]) {
@@ -1205,6 +1217,8 @@ fn apply_declarations(
         apply_property(name, value, &mut style, parent, &ctx);
         if let Some(prop) = current_color_longhand(name) {
             track_current_color(&mut style, parent, prop, value);
+        } else if *name == "background" {
+            track_current_color(&mut style, parent, "background-color", &background_shorthand_color(value));
         }
         if *name == "all" {
             for (n2, v2, b2) in &resolved[i + 1..] {
