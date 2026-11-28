@@ -25,6 +25,7 @@ mod incremental;
 mod inline;
 mod intrinsic;
 mod table;
+mod scroll_anchor;
 mod text;
 mod linebreak;
 mod multicol;
@@ -48,6 +49,7 @@ mod tests_multicol;
 
 pub use damage::{damage as display_list_damage, video_damage as video_display_list_damage, merge_rects as merge_damage};
 pub use incremental::{layout_incremental, take_cache_stats, LayoutDamage};
+pub use scroll_anchor::ScrollAnchor;
 pub use display_list::{DisplayItem, DisplayList, LayerKind, LayerPlan, StickyPatch, HitEntry, HitList, HitScope, HitScopeNode};
 pub use tree::{
     BoxKind, Flow, Formatting, Fragment, FragmentKind, InlineItem, LayoutBox, LayoutTree, LineBox, Marker, ScrollInfo,

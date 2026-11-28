@@ -1011,6 +1011,8 @@ impl Worker {
         let resized = page.viewport != view.viewport;
         if resized || scale_changed {
             self.engine.relayout(page, view.viewport);
+            self.engine.flush_display_list(page);
+            self.adopt_anchor_scroll();
         }
         self.dirty = true;
         if resized {
@@ -1105,6 +1107,23 @@ impl Worker {
         !(top_ok && bottom_ok && visible)
     }
 
+    /// A layout moved the page to keep its scroll anchor in place (CSS
+    /// Scroll Anchoring): follow it and tell the UI. The engine queues the
+    /// `scroll` event.
+    fn adopt_anchor_scroll(&mut self) {
+        let Some(page) = self.page.as_mut() else { return };
+        if !std::mem::take(&mut page.scroll_anchored) {
+            return;
+        }
+        let (x, y) = page.page_scroll;
+        if (x, y) == self.scroll {
+            return;
+        }
+        self.scroll = (x, y);
+        self.dirty = true;
+        self.send(FromContent::ScrollTo { x, y });
+    }
+
     fn scroll_by(&mut self, dx: f32, dy: f32) {
         let (x, y) = self.scroll;
         self.set_scroll(x + dx, y + dy);
@@ -1137,6 +1156,11 @@ impl Worker {
     }
 
     fn paint_frame(&mut self) {
+        // Layout first: scroll anchoring may move the viewport.
+        if let Some(page) = self.page.as_mut() {
+            self.engine.flush_display_list(page);
+        }
+        self.adopt_anchor_scroll();
         let Some(page) = self.page.as_mut() else { return };
         let video_paint = page.video_paint_start();
         self.dirty = false;
@@ -1434,6 +1458,7 @@ impl Worker {
     /// Apply what scripts asked for: repaint, navigation, new tabs,
     /// dialogs, scrolling.
     fn apply_outcome(&mut self, out: ScriptOutcome) {
+        self.adopt_anchor_scroll();
         if out.relayout {
             self.dirty = true;
             if let Some(page) = self.page.as_mut() {

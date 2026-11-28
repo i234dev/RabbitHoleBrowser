@@ -620,7 +620,7 @@ impl Engine {
         self.flush_style(page);
         page.incr.has_containers |= rabbithole_style::take_containers_seen();
         let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
-        let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, .. } = page;
+        let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, script, scroll_anchored, .. } = page;
         // Inputs changed outside the style system: images, background
         // images, scroll offsets, viewport.
         let img_ptr = |v: &Arc<rabbithole_gfx::Image>| Arc::as_ptr(v) as *const u8 as usize;
@@ -706,6 +706,8 @@ impl Engine {
         } else {
             incr.stats.layout_incremental += 1;
         }
+        // Scroll anchoring: pick what the reader sees in the old layout.
+        let anchor = if page_scroll.1 > 0.0 { layout.scroll_anchor(*page_scroll) } else { None };
         let prev = std::mem::replace(layout, rabbithole_layout::LayoutTree::empty());
         let t = std::time::Instant::now();
         *layout = rabbithole_layout::layout_incremental(prev, &ctx, &damage);
@@ -724,6 +726,19 @@ impl Engine {
         incr.dl_dirty = true;
         incr.scroll_dep = None;
         incr.clear_rects();
+        // ...and keep it in place when content above it changed size.
+        if let Some(dy) = anchor.and_then(|a| layout.scroll_anchor_shift(doc, &a)) {
+            let max_y = (layout.height - viewport.height).max(0.0);
+            let y = (page_scroll.1 + dy).clamp(0.0, max_y);
+            if y != page_scroll.1 {
+                if debug_enabled() {
+                    eprintln!("[incr] scroll anchoring: {:.0} -> {y:.0}", page_scroll.1);
+                }
+                page_scroll.1 = y;
+                *scroll_anchored = true;
+                script.scroll_event_pending = true;
+            }
+        }
     }
 
     /// Rebuild the display list if layout or paint inputs changed.

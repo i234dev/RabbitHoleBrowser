@@ -797,3 +797,45 @@ fn measured_grid_items_reuse_published_layouts() {
     // remaining misses measure items at other widths (min/max-content).
     assert!(hits >= 200, "hits {hits}, misses {misses}");
 }
+
+#[test]
+fn scroll_anchoring_keeps_visible_content_in_place() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>
+        body { margin: 0 } div { height: 400px; margin: 0 }
+        .tall { height: 700px }
+        </style></head><body>
+        <div id="top"></div><div id="a"></div><div id="b"></div><div id="c"></div><div id="d"></div>
+        </body></html>"#,
+    );
+    let top = id(&page, "top");
+    let b = id(&page, "b");
+    // Reading #b (800..1200) with the viewport at 850.
+    engine.set_page_scroll(&mut page, 0.0, 850.0);
+    // The box above grows by 300px: the page follows.
+    page.doc.set_attr(top, "class", Some("tall"));
+    engine.restyle(&mut page);
+    assert_eq!(page.page_scroll, (0.0, 1150.0));
+    assert!(std::mem::take(&mut page.scroll_anchored));
+    assert_eq!(page.layout_rect_of(b).map(|r| r.y - page.page_scroll.1), Some(-50.0));
+    // Changes below the viewport do not scroll.
+    let d = id(&page, "d");
+    page.doc.set_attr(d, "class", Some("tall"));
+    engine.restyle(&mut page);
+    assert_eq!(page.page_scroll, (0.0, 1150.0));
+    assert!(!page.scroll_anchored);
+    // At the top of the page nothing is anchored.
+    engine.set_page_scroll(&mut page, 0.0, 0.0);
+    page.doc.set_attr(top, "class", None);
+    engine.restyle(&mut page);
+    assert_eq!(page.page_scroll, (0.0, 0.0));
+    // `overflow-anchor: none` on the root turns it off.
+    engine.set_page_scroll(&mut page, 0.0, 850.0);
+    let html = page.doc.html_element().unwrap();
+    page.doc.set_attr(html, "style", Some("overflow-anchor: none"));
+    engine.restyle(&mut page);
+    page.doc.set_attr(top, "class", Some("tall"));
+    engine.restyle(&mut page);
+    assert_eq!(page.page_scroll, (0.0, 850.0));
+    assert!(!page.scroll_anchored);
+}

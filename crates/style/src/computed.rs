@@ -1967,6 +1967,9 @@ pub struct ComputedStyle {
     pub line_clamp: Option<u32>,
     /// `content-visibility: hidden`: the contents are not rendered.
     pub content_visibility_hidden: bool,
+    /// `overflow-anchor: none`: the box and its contents are never chosen
+    /// as a scroll anchor.
+    pub overflow_anchor_none: bool,
     /// `contain`: paint / layout / size containment.
     pub contain_paint: bool,
     pub contain_layout: bool,
@@ -2274,6 +2277,7 @@ impl ComputedStyle {
             tab_size_length: false,
             line_clamp: None,
             content_visibility_hidden: false,
+            overflow_anchor_none: false,
             contain_paint: false,
             contain_layout: false,
             contain_size: false,

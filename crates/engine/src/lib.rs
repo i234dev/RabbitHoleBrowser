@@ -1213,6 +1213,9 @@ pub struct Page {
     pub sheet_signature: u64,
     /// Scroll position requested by scripts (consumed by the UI).
     pub requested_scroll: Option<(f32, f32)>,
+    /// A layout moved `page_scroll` to keep the scroll anchor in place
+    /// (the embedder follows and clears it).
+    pub scroll_anchored: bool,
     /// Image loading after the first layout (lazy, srcset, scripts).
     pub image_state: images::ImageState,
     /// Hover / pressed-button state for pointer events.
@@ -1484,6 +1487,7 @@ impl Engine {
             has_dynamic_rules,
             script: ScriptState::default(),
             requested_scroll: None,
+            scroll_anchored: false,
             pointer: pointer::PointerState::default(),
             sheet_signature: 0,
             image_state: images::ImageState::default(),
