@@ -1,7 +1,8 @@
 //! Report how a page's viewport-fixed and sticky content can be split from
 //! the scrolling content (the GUI's page layers):
 //! `cargo run -p rabbithole-engine --example fixed_probe -- <url> [width] [height] [scroll...]`
-//! `RH_JS_WAIT` (ms, default 3000) lets scripts settle before probing.
+//! `RH_JS_WAIT` (ms, default 3000) lets scripts settle before probing;
+//! `RH_PROBE_JS` is evaluated after that.
 use rabbithole_engine::layout::{DisplayItem as D, DisplayList};
 use rabbithole_engine::{Engine, Page, Viewport};
 use rabbithole_gfx::Rect;
@@ -123,6 +124,11 @@ fn main() {
     let loaded = engine.loader.load(url, vp).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1) });
     let mut page = engine.build_page(loaded, vp);
     settle(&engine, &mut page, wait);
+    // RH_PROBE_JS: evaluated once the page settled (e.g. to open a dialog).
+    if let Ok(js) = std::env::var("RH_PROBE_JS") {
+        println!("eval {}", engine.eval_in_page(&mut page, &js));
+        settle(&engine, &mut page, 3000);
+    }
     println!("scroll 0");
     describe(&mut page, &engine);
     report(&page.display_list);

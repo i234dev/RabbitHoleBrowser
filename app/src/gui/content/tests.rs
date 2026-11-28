@@ -705,6 +705,99 @@ fn focus_ring_is_painted_above_the_fixed_layer() {
     assert!(wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if motions(f) == ["fixed"])).is_some());
 }
 
+/// A page with a fixed header under a fixed consent overlay that blurs
+/// the page behind it.
+const BACKDROP_PAGE: &str = "<style>*{margin:0}main{height:3000px;background:repeating-linear-gradient(#fff 0 13px,#36c 13px 17px)}\
+    header{position:fixed;top:0;left:0;width:100%;height:40px;background:#e35614;color:white;z-index:1001}\
+    #cmp{position:fixed;inset:0;background:rgba(33,41,52,.75);backdrop-filter:blur(4px);z-index:2147483647;display:flex;align-items:center;justify-content:center}\
+    #ui{width:200px;height:120px;background:white;color:black}</style>\
+    <header>Header</header><main>Text</main><div id=cmp><div id=ui>We value your privacy</div></div>";
+
+#[test]
+fn fixed_backdrop_overlay_stays_in_place_before_the_scroll_repaint() {
+    let (sink, rx) = sink();
+    let h = ContentHandle::spawn(1, 1, config(ViewSize::new(400, 300, 1.25)), sink.clone());
+    h.send(ToContent::SetActive(true));
+    load(&h, BACKDROP_PAGE);
+    let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    assert_eq!(motions(&first), ["fixed"]);
+    // The dialog box, and the header rows the blur cannot reach from the
+    // scrolling page below the header.
+    let dialog = |px: &[u32]| -> Vec<u32> { (113..187).flat_map(|y| px[y * 400 + 75..y * 400 + 325].to_vec()).collect() };
+    let header = |px: &[u32]| px[..32 * 400].to_vec();
+    let reference = shown(&first, 0.0, 400, 300, 1.25);
+    let mut prev = first;
+    for y in [0.25, 3.75, 37.25, 50.5, 81.75, 160.5, 120.25, 30.75, 0.0] {
+        let speculative = shown(&prev, y, 400, 300, 1.25);
+        // The overlay covers the viewport: the snapshot does not move.
+        assert!(speculative == shown(&prev, prev.scroll.1, 400, 300, 1.25), "anticipating scroll {y}");
+        h.send(ToContent::Scroll { x: 0.0, y });
+        let next = frame_at(&rx, y);
+        let repainted = shown(&next, y, 400, 300, 1.25);
+        assert!(dialog(&repainted) == dialog(&reference) && header(&repainted) == header(&reference), "scroll {y}");
+        prev = next;
+    }
+}
+
+#[test]
+fn fixed_backdrop_overlay_matches_a_single_canvas_paint() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    load(&h, BACKDROP_PAGE);
+    let (_, FromContent::Frame(f)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    assert_eq!(motions(&f), ["fixed"]);
+    // (Away from the bottom edge, where the single canvas has more page
+    // below the viewport for the blur to read.)
+    let rows = 560 * 800;
+    assert_eq!(mismatches(&shown(&f, 0.0, 800, 600, 1.0)[..rows], &reference_paint(BACKDROP_PAGE, &f)[..rows]), 0);
+}
+
+#[test]
+fn focus_ring_of_a_fixed_element_stays_with_it() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    let html = "<style>*{margin:0}header{position:fixed;top:0;width:100%;height:40px;background:#781753}main{height:3000px}</style><header><button id=b style='margin:10px 300px'>Go</button></header><main></main>";
+    load(&h, html);
+    wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap();
+    h.send(ToContent::Scroll { x: 0.0, y: 200.0 });
+    let before = frame_at(&rx, 200.0);
+    h.send(ToContent::Eval("document.getElementById('b').focus()".into()));
+    let focused = match wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if f.layers.len() == 2)) {
+        Some((_, FromContent::Frame(f))) => f,
+        _ => panic!("no frame with the focus ring"),
+    };
+    assert_eq!(motions(&focused), ["fixed", "fixed"]);
+    let header = |px: &[u32]| px[..45 * 800].to_vec();
+    let ring = header(&shown(&focused, 200.0, 800, 600, 1.0));
+    // Drawn around the button in the header, and kept there while scrolling.
+    assert!(mismatches(&ring, &header(&shown(&before, 200.0, 800, 600, 1.0))) > 0);
+    assert!(header(&shown(&focused, 262.5, 800, 600, 1.0)) == ring);
+}
+
+#[test]
+fn partial_fixed_backdrop_stays_in_place_and_lets_the_page_scroll_around_it() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    let page = BACKDROP_PAGE.replace("#cmp{position:fixed;inset:0;", "#cmp{position:fixed;left:200px;top:150px;width:400px;height:300px;");
+    load(&h, &page);
+    let (_, FromContent::Frame(first)) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).unwrap() else { unreachable!() };
+    assert_eq!(motions(&first), ["fixed"]);
+    let rows = 560 * 800;
+    assert_eq!(mismatches(&shown(&first, 0.0, 800, 600, 1.0)[..rows], &reference_paint(&page, &first)[..rows]), 0);
+    let overlay = |px: &[u32]| -> Vec<u32> { (150..450).flat_map(|y| px[y * 800 + 200..y * 800 + 600].to_vec()).collect() };
+    let speculative = shown(&first, 33.0, 800, 600, 1.0);
+    // The overlay keeps its snapshot while the page beside it scrolls.
+    assert!(overlay(&speculative) == overlay(&shown(&first, 0.0, 800, 600, 1.0)));
+    assert!(speculative[..40 * 800] == shown(&first, 0.0, 800, 600, 1.0)[..40 * 800]);
+    assert_eq!(speculative[100 * 800 + 10], shown(&first, 0.0, 800, 600, 1.0)[133 * 800 + 10]);
+    h.send(ToContent::Scroll { x: 0.0, y: 33.0 });
+    let next = frame_at(&rx, 33.0);
+    let repainted = shown(&next, 33.0, 800, 600, 1.0);
+    // Outside the overlay and the header, the page moved exactly.
+    let outside = |px: &[u32]| -> Vec<u32> { (40..600).flat_map(|y| px[y * 800..y * 800 + 190].to_vec()).collect() };
+    assert!(outside(&speculative) == outside(&repainted));
+}
+
 #[test]
 fn fixed_bars_keep_their_pixels_through_every_scroll_frame() {
     use rabbithole_engine::gfx::Canvas;
@@ -746,7 +839,7 @@ fn probe_fixed_layer_on_url() {
     h.send(ToContent::SetActive(true));
     h.send(ToContent::Navigate { request: Request::get(url(&target)), push_history: true });
     let report = |label: &str, f: &Frame| eprintln!("[probe] {label} seq={} scroll={:?} origin={:?} layers={:?}", f.seq, f.scroll, f.origin, motions(f));
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(std::env::var("RH_PROBE_WAIT").ok().and_then(|s| s.parse().ok()).unwrap_or(20));
     let mut last = None;
     while let Some((_, m)) = wait_for(&rx, 1, deadline.saturating_duration_since(Instant::now()), is_frame) {
         if let FromContent::Frame(f) = m { report("load", &f); last = Some(f) }
@@ -759,20 +852,43 @@ fn probe_fixed_layer_on_url() {
         f.present(&mut dst, Rect::new(0.0, 0.0, 1280.0, 800.0), (0.0, y), scale);
         dst.data[..(band * scale) as usize * 1280].to_vec()
     };
-    let reference = rows(&last, 0.0);
-    if let Ok(js) = std::env::var("RH_PROBE_EVAL") {
+    // RH_PROBE_EVAL, then RH_PROBE_EVAL2 three seconds later: the
+    // reference is the frame shown once they settled.
+    for (n, var) in ["RH_PROBE_EVAL", "RH_PROBE_EVAL2"].into_iter().enumerate() {
+        let Ok(js) = std::env::var(var) else { continue };
+        if n > 0 { std::thread::sleep(Duration::from_secs(3)); }
         h.send(ToContent::Eval(js));
-        if let Some((_, FromContent::EvalResult(r))) = wait_for(&rx, 1, Duration::from_secs(5), |m| matches!(m, FromContent::EvalResult(_))) {
+        if let Some((_, FromContent::EvalResult(r))) = wait_for(&rx, 1, Duration::from_secs(60), |m| matches!(m, FromContent::EvalResult(_))) {
             eprintln!("[probe] eval {r}");
         }
     }
+    let settle = Instant::now() + Duration::from_secs(std::env::var("RH_PROBE_SETTLE").ok().and_then(|s| s.parse().ok()).unwrap_or(3));
+    while let Some((_, m)) = wait_for(&rx, 1, settle.saturating_duration_since(Instant::now()), is_frame) {
+        if let FromContent::Frame(f) = m { report("settle", &f); last = f }
+    }
+    let reference = rows(&last, 0.0);
+    // RH_PROBE_RECT=x,y,w,h (CSS px of the viewport): compared between
+    // the anticipated and the repainted frame of every step.
+    let rect: Option<Vec<f32>> = std::env::var("RH_PROBE_RECT").ok().map(|r| r.split(',').filter_map(|v| v.parse().ok()).collect());
+    let region = |f: &Frame, y: f32| -> Vec<u32> {
+        let Some(r) = rect.as_ref().filter(|r| r.len() == 4) else { return Vec::new() };
+        let mut dst = rabbithole_engine::gfx::Canvas::new(1280, 800);
+        f.present(&mut dst, Rect::new(0.0, 0.0, 1280.0, 800.0), (0.0, y), scale);
+        let (x0, y0, x1, y1) = ((r[0] * scale) as usize, (r[1] * scale) as usize, ((r[0] + r[2]) * scale).min(1280.0) as usize, ((r[1] + r[3]) * scale).min(800.0) as usize);
+        (y0..y1).flat_map(|row| dst.data[row * 1280 + x0..row * 1280 + x1].to_vec()).collect()
+    };
     for i in 1..=20 {
         let y = i as f32 * 37.5;
         h.send(ToContent::Scroll { x: 0.0, y });
         if let Some((_, FromContent::Frame(f))) = wait_for(&rx, 1, Duration::from_secs(5), |m| matches!(m, FromContent::Frame(f) if f.scroll.1 == y)) {
             report("scroll", &f);
-            eprintln!("[probe]   speculative={} repainted={} (pixels differing from the unscrolled band)",
-                mismatches(&rows(&last, y), &reference), mismatches(&rows(&f, y), &reference));
+            let (a, b) = (region(&last, y), region(&f, y));
+            let width = rect.as_ref().map(|r| ((r[0] + r[2]) * scale).min(1280.0) as usize - (r[0] * scale) as usize).unwrap_or(1);
+            let diff: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+            let rows_hit = (diff.first().map(|i| i / width), diff.last().map(|i| i / width));
+            let cols = (diff.iter().map(|i| i % width).min(), diff.iter().map(|i| i % width).max());
+            eprintln!("[probe]   speculative={} repainted={} (pixels differing from the unscrolled band) band-moved={} region={} rows={rows_hit:?} cols={cols:?}",
+                mismatches(&rows(&last, y), &reference), mismatches(&rows(&f, y), &reference), mismatches(&rows(&last, y), &rows(&f, y)), diff.len());
             last = f;
         }
     }

@@ -1503,7 +1503,7 @@ fn layer_plan_promotes_page_scrolled_sticky_boxes_only() {
 #[test]
 fn layer_plan_keeps_effects_that_read_the_page_in_one_canvas() {
     for css in ["#over{position:relative;z-index:2;height:40px;mix-blend-mode:multiply;background:blue}",
-                "header{backdrop-filter:blur(4px)}"] {
+                "#over{position:relative;z-index:2;height:40px;backdrop-filter:blur(4px)}"] {
         let fx = Fixture::new("<header></header><div id=over></div>",
             &format!("body{{margin:0;height:3000px}} header{{position:fixed;top:0;width:100%;height:20px;z-index:1}} {css}"));
         // (A blended box also isolates the root group, nesting the header.)
@@ -1521,4 +1521,17 @@ fn layer_plan_gives_up_beyond_its_layer_budget() {
     let few: String = (0..n / 2 - 1).map(|i| format!("<section><h2>{i}</h2><p>text</p></section>")).collect();
     let fx = Fixture::new(&few, "body{margin:0} section{height:300px} h2{position:sticky;top:0;height:20px;margin:0} p{position:relative}");
     assert_eq!(fx.display_list().layer_plan().map(|p| p.layers.len()), Ok(n - 2));
+}
+
+#[test]
+fn layer_plan_snapshots_fixed_layers_that_read_the_page() {
+    use crate::LayerKind::{FixedBackdrop, Scroll};
+    let fx = Fixture::new("<header></header><main></main><div id=dialog><p>Consent</p></div><div id=over></div>",
+        "body{margin:0} main{height:3000px} header{position:fixed;top:0;width:100%;height:40px;background:red;z-index:10}\
+         #dialog{position:fixed;inset:0;background:rgba(33,41,52,.75);backdrop-filter:blur(4px);z-index:20}\
+         #over{position:relative;z-index:30;height:20px;background:blue}");
+    let list = fx.display_list();
+    let plan = list.layer_plan().unwrap();
+    // The header and the dialog are adjacent fixed groups: one snapshot.
+    assert_eq!(layer_kinds(&plan), [FixedBackdrop, Scroll]);
 }
